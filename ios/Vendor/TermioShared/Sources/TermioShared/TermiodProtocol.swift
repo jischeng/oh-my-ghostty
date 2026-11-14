@@ -2342,6 +2342,29 @@ public enum Termiod {
             }
         }
 
+        /// Whether a runtime streaming session should encode and forward this
+        /// surface event. Focus reports, passive wheel scrolling on Alt-Screen
+        /// or mouse-tracking TUIs, passive pointer motion/release, and orphan
+        /// key releases must never auto-claim the writer token or shrink an
+        /// external writer's PTY.
+        public func shouldForwardToRuntimeSession(
+            isWriter: Bool,
+            hasPendingInput: Bool
+        ) -> Bool {
+            switch self {
+            case .focus:
+                return false
+            case .wheel where !isWriter && !hasPendingInput:
+                return false
+            case .mouse(let mouse) where !isWriter && mouse.action != .press:
+                return false
+            case .key(let key) where !isWriter && !hasPendingInput && key.action == .release:
+                return false
+            default:
+                return true
+            }
+        }
+
         private static let modifierKeys: Set<String> = [
             "shift_left", "shift_right", "control_left", "control_right", "alt_left", "alt_right",
             "meta_left", "meta_right", "caps_lock", "fn", "fn_lock",

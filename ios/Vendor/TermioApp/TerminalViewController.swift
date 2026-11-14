@@ -65,6 +65,17 @@ final class TerminalViewController: UIViewController {
     /// The PTY's grid, from the session: the viewport of whichever screen a
     /// person is in front of. `nil` until the session says.
     private var sharedGrid: TerminalGrid?
+    /// Whether this iOS attachment currently holds the session's writer token.
+    private var isSessionWriter = false
+    /// Mode-aware viewport and keyboard geometry engine (Primary `Pan-Don't-Resize` +
+    /// Alt-Screen `<= 60pt` candidate-bar size lock + `1:1` writer lock).
+    private var viewportPolicy = MobileTerminalViewportPolicy()
+    private var viewportDebounce: DispatchWorkItem?
+    private var lastDeclaredViewport: RuntimeViewport?
+    private var keyboardTransitionUntil: CFTimeInterval = 0
+    private var lastEvaluatedAlternateScreen = false
+    private var isLeavingScreen = false
+    private var interactiveBackInProgress = false
     /// The live surface's cell size, from the resize delegate. Both the
     /// letterbox and this screen's own viewport are measured with it.
     private var surfaceMetrics: TerminalGridMetrics?
@@ -173,6 +184,8 @@ final class TerminalViewController: UIViewController {
     }
 
     deinit {
+        fitDebounce?.cancel()
+        viewportDebounce?.cancel()
         companion?.stop()
         uploadClient?.stop()
         restylePump?.invalidate()
@@ -245,12 +258,20 @@ final class TerminalViewController: UIViewController {
     }
 
     func setRuntimeRendering(_ showing: Bool) {
+        if showing {
+            isLeavingScreen = false
+            interactiveBackInProgress = false
+        } else {
+            cancelPendingViewportDeclaration()
+        }
         screenIsShowing = showing
         publishRendering()
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        isLeavingScreen = false
+        interactiveBackInProgress = false
         // Swipe-from-left-edge pop stays available with the bar hidden.
         navigationController?.interactivePopGestureRecognizer?.delegate = nil
         // The surface is configured only now, with the view guaranteed to be
@@ -262,9 +283,21 @@ final class TerminalViewController: UIViewController {
             terminalView.configuration = TerminalSurfaceOptions(
                 backend: .inMemory(makeTerminalSession())
             )
-            terminalView.fitToSize()
-            lastFittedSize = terminalView.bounds.size
+            // Mount StreamTerminalView up front for streaming sessions BEFORE
+            // focusInput() so DisplayTerminalView never becomes first responder
+            // first and triggers a double responder/accessory-bar handoff.
+            if let streamSession = companion as? any StreamDeviceSession,
+               streamSession.prefersStreamPlane {
+                setStreaming(true)
+            }
+            if !terminalView.isHidden {
+                terminalView.fitToSize()
+                lastFittedSize = terminalView.bounds.size
+            }
         }
+        // Back on screen before layout/focus so initial passive viewport caching runs cleanly.
+        screenIsShowing = true
+        publishRendering()
         if !drawerOpen { focusInput() }
         // Once per lifetime: a parked terminal re-entering the screen (the
         // container's keep-alive cache) must not open a second connection —
@@ -281,34 +314,29 @@ final class TerminalViewController: UIViewController {
                 if let companion { companion.start() } else { shellSession.start() }
             }
         } else if case .device = backend {
-            // Re-entering a parked session re-sends this phone's viewport: the
-            // device stopped counting it when the screen went away, and this
-            // view's size didn't change, so no layout pass would re-send it.
+            // Re-entering a parked session re-sends this phone's viewport only
+            // if this phone already holds the writer token.
             companion?.reassertGrid()
         }
-        // Back on screen, so back in the running for the session's size.
-        screenIsShowing = true
-        publishRendering()
+        view.setNeedsLayout()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        // Leaving the terminal (popping back to the session list) must take the
-        // keyboard with it — otherwise the surface stays first responder and
-        // the keyboard + key bar linger over the list.
-        inputSurface.resignFirstResponder()
-        // The container parks this screen rather than tearing it down, so the
-        // attachment survives. It stops counting toward the session's size the
-        // moment nobody is looking at it, or a session opened once on the phone
-        // would hold a Mac pane at phone width for as long as it stayed open.
+        // Mark leaving and drop rendering BEFORE resigning first responder so the
+        // synchronous keyboard dismissal frame change never emits a parting Resize.
+        isLeavingScreen = true
+        cancelPendingViewportDeclaration()
         screenIsShowing = false
         publishRendering()
+        inputSurface.resignFirstResponder()
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         layoutDrawer()
         layoutTerminalSurface()
+        guard !terminalView.isHidden else { return }
         // Refit only when the surface's size actually changed, and coalesce
         // the per-frame passes of keyboard animations into one call
         // after the size settles. Every `setSize` can deadlock against the
@@ -369,66 +397,158 @@ final class TerminalViewController: UIViewController {
                 streamView.transform = terminalView.transform
             }
         }
-        // Measure against the actual visible host rectangle above the keyboard
-        // (or the bottom of the screen when the keyboard is hidden) so full-screen
-        // TUIs (Codex, Claude Code) fit completely inside the visible viewport
-        // without sliding top banners off-screen or leaving a blank void.
-        let fullHeight = host.height
-        let screen = hostGrid
-        if case .device = backend, let screen {
-            companion?.setViewport(columns: Int(screen.cols), rows: Int(screen.rows))
-        }
+        let isDevice: Bool = if case .device = backend { true } else { false }
+        let canDeclare = isDevice
+            && screenIsShowing
+            && applicationIsActive
+            && !isLeavingScreen
+            && !interactiveBackInProgress
+        let pixels = cellPixelDimensions
+        let alternate = isAlternateScreen
+        let plan = viewportPolicy.evaluate(.init(
+            hostSize: host.size,
+            containerWidth: view.bounds.width,
+            keyboardOverlap: keyboardOverlap,
+            cellSize: cellSize,
+            cellPixelWidth: pixels?.width,
+            cellPixelHeight: pixels?.height,
+            padding: terminalPadding,
+            sharedGrid: sharedGrid.map { (rows: $0.rows, cols: $0.cols) },
+            caretMaxY: activeCaretRect?.maxY,
+            isAlternateScreen: alternate,
+            isWriter: isSessionWriter,
+            isDeviceSession: isDevice,
+            canDeclareViewport: canDeclare
+        ))
+        submitViewportDeclaration(
+            plan.declaredViewport,
+            isAlternateScreen: alternate,
+            debounce: plan.shouldDebounceDeclaration
+        )
+
         // A frame set under a transform is undefined; always start from identity.
         terminalView.transform = .identity
-        // Even when the estimated viewport matches, pixel rounding can leave
-        // the renderer a column short. Always give the shared grid its slack;
-        // switching back to the full host frame would reintroduce the mismatch.
-        guard case .device = backend,
-              let grid = sharedGrid,
-              let cell = cellSize, grid.cols > 0, grid.rows > 0
-        else {
-            lastAppliedPan = 0
-            terminalView.frame = CGRect(
-                x: 0, y: 0, width: host.width, height: fullHeight)
-            return
+        terminalView.bounds = plan.surfaceBounds
+        terminalView.center = plan.surfaceCenter
+        if plan.surfaceScale != 1 {
+            terminalView.transform = CGAffineTransform(scaleX: plan.surfaceScale, y: plan.surfaceScale)
         }
-        let padding = terminalPadding
-        let width = CGFloat(grid.cols) * cell.width + 2 * padding.width + cell.width / 2
-        let height = CGFloat(grid.rows) * cell.height + 2 * padding.height + cell.height / 2
-        let fit = min(1, host.width / width, fullHeight / height)
-        terminalView.bounds = CGRect(x: 0, y: 0, width: width, height: height)
-        terminalView.transform = CGAffineTransform(scaleX: fit, y: fit)
-        lastAppliedPan = 0
-        terminalView.center = CGPoint(x: host.midX, y: height * fit / 2)
+        lastAppliedPan = plan.verticalPan
+        lastEvaluatedAlternateScreen = alternate
     }
 
-    /// How much of a session this screen could show. The same
-    /// `TerminalGrid.fitting` the Mac pane measures itself with, so the two
-    /// clients declare comparable viewports — the session moves between them and
-    /// a per-platform copy of this arithmetic would drift a column apart. `nil`
-    /// before the surface has reported a cell size, which the device reads as no
-    /// viewport at all rather than as a stand-in.
-    private var keyboardPan: CGFloat { 0 }
+    private func cancelPendingViewportDeclaration() {
+        viewportDebounce?.cancel()
+        viewportDebounce = nil
+        keyboardTransitionUntil = 0
+    }
+
+    private func submitViewportDeclaration(
+        _ viewport: RuntimeViewport?,
+        isAlternateScreen: Bool,
+        debounce: Bool
+    ) {
+        guard let viewport else { return }
+        let remaining = keyboardTransitionUntil - CACurrentMediaTime()
+        if isAlternateScreen, debounce || remaining > 0 {
+            let delay = max(MobileTerminalViewportPolicy.keyboardSettleInterval, remaining)
+            viewportDebounce?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.viewportDebounce = nil
+                self.keyboardTransitionUntil = 0
+                guard self.screenIsShowing,
+                      self.applicationIsActive,
+                      !self.isLeavingScreen,
+                      !self.interactiveBackInProgress else { return }
+                self.sendDeclaredViewport(viewport)
+            }
+            viewportDebounce = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+            return
+        }
+        viewportDebounce?.cancel()
+        viewportDebounce = nil
+        sendDeclaredViewport(viewport)
+    }
+
+    private func sendDeclaredViewport(_ viewport: RuntimeViewport) {
+        guard lastDeclaredViewport != viewport else { return }
+        lastDeclaredViewport = viewport
+        companion?.setViewport(
+            columns: Int(viewport.columns),
+            rows: Int(viewport.rows),
+            pixelWidth: Int(viewport.pixelWidth),
+            pixelHeight: Int(viewport.pixelHeight)
+        )
+    }
+
+    private var isAlternateScreen: Bool {
+        if streamView != nil,
+           let session = companion as? any StreamDeviceSession,
+           let terminal = session.streamTerminal {
+            return terminal.isAlternateScreen
+        }
+        return altScreenSniffer.isAlternate
+    }
+
+    private var activeCaretRect: CGRect? {
+        if let streamView {
+            return streamView.cursorRect
+        }
+        return terminalView.caretRect(for: terminalView.beginningOfDocument)
+    }
 
     /// The pan the surface was last framed with, so output that moves the
-    /// cursor while the keys are up can re-slide without thrash.
+    /// cursor while the keyboard is showing can re-slide without thrash.
     private var lastAppliedPan: CGFloat = 0
 
-    /// Called on every output chunk: if the cursor moved enough to change the
-    /// pan while the keyboard is showing, re-frame the surface.
+    /// Called on every output chunk: re-evaluates layout if the terminal switched
+    /// between primary and alternate screens or if cursor movement under an active
+    /// keyboard changes the vertical pan.
     private func followContentUnderKeyboard() {
+        guard screenIsShowing, !isLeavingScreen else { return }
+        let modeChanged = isAlternateScreen != lastEvaluatedAlternateScreen
+        if modeChanged {
+            layoutTerminalSurface()
+            return
+        }
         guard keyboardOverlap > 0 else { return }
-        guard abs(keyboardPan - lastAppliedPan) > 0.5 else { return }
+        let host = terminalHost.bounds
+        guard host.width > 0, host.height > 0 else { return }
+        var probe = viewportPolicy
+        let preview = probe.evaluate(.init(
+            hostSize: host.size,
+            containerWidth: view.bounds.width,
+            keyboardOverlap: keyboardOverlap,
+            cellSize: cellSize,
+            padding: terminalPadding,
+            sharedGrid: sharedGrid.map { (rows: $0.rows, cols: $0.cols) },
+            caretMaxY: activeCaretRect?.maxY,
+            isAlternateScreen: isAlternateScreen,
+            isWriter: isSessionWriter,
+            isDeviceSession: { if case .device = backend { true } else { false } }(),
+            canDeclareViewport: false
+        ))
+        guard abs(preview.verticalPan - lastAppliedPan) > 0.5 else { return }
         layoutTerminalSurface()
     }
 
-    private var hostGrid: TerminalGrid? {
+    private var cellPixelDimensions: (width: Int, height: Int)? {
+        if let streamPixels = streamView?.cellPixelSize,
+           streamPixels.width > 0, streamPixels.height > 0 {
+            return streamPixels
+        }
+        if let metrics = surfaceMetrics,
+           metrics.cellWidthPixels > 0, metrics.cellHeightPixels > 0 {
+            return (Int(metrics.cellWidthPixels), Int(metrics.cellHeightPixels))
+        }
         guard let cell = cellSize else { return nil }
-        let size = terminalHost.bounds.size
-        let padding = terminalPadding
-        return TerminalGrid.fitting(
-            size, cell: cell,
-            paddingX: padding.width, paddingY: padding.height)
+        let scale = terminalDisplayScale
+        return (
+            max(1, Int((cell.width * scale).rounded())),
+            max(1, Int((cell.height * scale).rounded()))
+        )
     }
 
     private var terminalDisplayScale: CGFloat {
@@ -459,12 +579,16 @@ final class TerminalViewController: UIViewController {
             height: CGFloat(metrics.cellHeightPixels) / scale)
     }
 
-    /// The session's word on the PTY's grid. Not keyed on the write token: the
-    /// screen holding it is letterboxed too whenever the session is sized to
-    /// somebody else's.
-    private func applySharedGrid(_ grid: TerminalGrid) {
-        guard sharedGrid != grid else { return }
+    /// The session's word on the PTY's grid and whether this phone holds the writer token.
+    private func applySharedGrid(_ grid: TerminalGrid, isWriter: Bool) {
+        let gridChanged = sharedGrid != grid
+        let writerChanged = isSessionWriter != isWriter
+        guard gridChanged || writerChanged else { return }
         sharedGrid = grid
+        isSessionWriter = isWriter
+        if writerChanged {
+            refreshOverflowMenu()
+        }
         view.setNeedsLayout()
     }
 
@@ -607,10 +731,18 @@ final class TerminalViewController: UIViewController {
     }
 
     /// The header overflow menu. Copy Path appears only for a companion session,
-    /// where there is a Mac project path to reach; the demo shell has none, so the
-    /// menu comes back empty and the button hides itself.
+    /// and Take Over Size appears while passively viewing a device session so a user
+    /// can explicitly claim writer + resize without injecting a keystroke.
     private func makeOverflowMenu() -> UIMenu {
         var items: [UIMenuElement] = []
+        if case .device = backend, companion != nil, !isSessionWriter {
+            items.append(UIAction(
+                title: localized("Take Over Size"),
+                image: UIImage(systemName: "arrow.up.left.and.arrow.down.right")
+            ) { [weak self] _ in
+                self?.companion?.takeover()
+            })
+        }
         if let path = session.projectPath, !path.isEmpty {
             items.append(UIAction(
                 title: localized("Copy Path"), image: UIImage(systemName: "doc.on.doc")
@@ -619,24 +751,38 @@ final class TerminalViewController: UIViewController {
         return UIMenu(children: items)
     }
 
+    private func refreshOverflowMenu() {
+        guard isViewLoaded else { return }
+        let menu = makeOverflowMenu()
+        overflowButton.menu = menu
+        let hasActions = !menu.children.isEmpty
+        overflowButton.alpha = hasActions ? 1 : 0
+        overflowButton.isUserInteractionEnabled = hasActions
+    }
+
     /// Called by RootContainerViewController when this parked screen slides
     /// back into view. The view was only hidden (never removed from the
     /// window), so `viewDidAppear` does not fire — re-run the parts that must
     /// happen on every return.
     func prepareForReappearance() {
+        isLeavingScreen = false
+        interactiveBackInProgress = false
+        screenIsShowing = true
+        publishRendering()
         if !drawerOpen { focusInput() }
-        // Re-entering a parked session re-sends this phone's grid (applied only
-        // while it holds the write token); the view's size didn't change while
-        // parked, so no layout pass would.
         if case .device = backend { companion?.reassertGrid() }
+        view.setNeedsLayout()
     }
 
     /// Back to the inbox: the screen parks in the container's keep-alive
     /// cache — the session stays live, unlike `close()`.
     private func goBack() {
-        // The container PARKS this screen (the view slides away, no pop), so
-        // viewWillDisappear never fires — drop the keyboard here or it and
-        // the key bar linger over the session list.
+        // Drop rendering BEFORE resigning first responder so dismissing the
+        // keyboard while navigating back never emits a parting Resize frame.
+        isLeavingScreen = true
+        cancelPendingViewportDeclaration()
+        screenIsShowing = false
+        publishRendering()
         inputSurface.resignFirstResponder()
         if let onRequestBack {
             onRequestBack()
@@ -737,7 +883,7 @@ final class TerminalViewController: UIViewController {
             // no scrollback for the viewport to jump through — libghostty's
             // scroll actions are primary-screen no-ops there. Fall back to
             // page keys, which those apps parse for their own history.
-            if altScreenSniffer.isAlternate {
+            if isAlternateScreen {
                 let pageKey = Data((edge == .top ? "\u{1B}[5~" : "\u{1B}[6~").utf8)
                 if streamView != nil { companion?.send(pageKey) } else { terminalView.send(pageKey) }
             } else if let streamView {
@@ -759,7 +905,12 @@ final class TerminalViewController: UIViewController {
         // The transcript types straight into the prompt — no newline, so a
         // dictation never sends a half-formed prompt on its own.
         keyBar.onVoiceTranscript = { [weak self] text in
-            self?.terminalView.send(Data(text.utf8))
+            guard let self else { return }
+            if streamView != nil {
+                companion?.send(Data(text.utf8))
+            } else {
+                terminalView.send(Data(text.utf8))
+            }
         }
         keyBar.onDismissKeyboard = { [weak self] in
             self?.inputSurface.resignFirstResponder()
@@ -810,19 +961,35 @@ final class TerminalViewController: UIViewController {
     }
 
     @objc private func keyboardFrameWillChange(_ note: Notification) {
-        // Parked terminals (the container's keep-alive cache) have no window;
-        // converting the frame there is meaningless, and the constraint gets
-        // refreshed by the next real keyboard event once re-presented.
+        // Parked terminals stay in the container's window (`view.isHidden = true`,
+        // `screenIsShowing == false`); track the raw overlap constraint silently
+        // without arming transition debounce or mutating `viewportPolicy` offscreen.
         guard view.window != nil,
               let endValue = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue
         else { return }
         let endFrame = view.convert(endValue.cgRectValue, from: nil)
         let overlap = max(0, view.bounds.maxY - endFrame.minY)
         guard let constraint = terminalBottomConstraint, constraint.constant != -overlap else { return }
-        keyboardOverlap = overlap
-        constraint.constant = -overlap
+        if !screenIsShowing || isLeavingScreen {
+            keyboardOverlap = overlap
+            constraint.constant = -overlap
+            if overlap == 0 {
+                viewportPolicy.resetLock()
+            }
+            return
+        }
         let duration = note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
         let curve = note.userInfo?[UIResponder.keyboardAnimationCurveUserInfoKey] as? Int ?? 7
+        let locked = viewportPolicy.lockedAltKeyboardOverlap
+        let absorbedByCandidateLock = overlap > 0
+            && locked != nil
+            && abs(overlap - (locked ?? 0)) <= MobileTerminalViewportPolicy.candidateBarLockTolerance
+        if isAlternateScreen, !absorbedByCandidateLock {
+            let settle = max(duration, MobileTerminalViewportPolicy.keyboardSettleInterval)
+            keyboardTransitionUntil = CACurrentMediaTime() + settle
+        }
+        keyboardOverlap = overlap
+        constraint.constant = -overlap
         UIView.animate(
             withDuration: duration, delay: 0,
             options: UIView.AnimationOptions(rawValue: UInt(curve) << 16)
@@ -1045,11 +1212,12 @@ final class TerminalViewController: UIViewController {
             transport.onState = { [weak self] state in
                 self?.companionStateChanged(state)
             }
-            transport.onSharedGrid = { [weak self] grid, _ in
-                self?.applySharedGrid(grid)
+            transport.onSharedGrid = { [weak self] grid, isWriter in
+                self?.applySharedGrid(grid, isWriter: isWriter)
             }
             companion = transport
             companionSession = terminalSession
+            refreshOverflowMenu()
             if let session = transport as? any StreamDeviceSession {
                 session.onStreaming = { [weak self] streaming in self?.setStreaming(streaming) }
                 session.onStreamSignal = { [weak self] signal in self?.receiveStreamSignal(signal) }
@@ -1196,6 +1364,7 @@ final class TerminalViewController: UIViewController {
         view.backgroundColor = Self.backdropColor()
         if let session = companion as? any StreamDeviceSession { applyStreamTheme(to: session) }
         streamView?.setAppearance(streamAppearance())
+        view.setNeedsLayout()
         guard surfaceConfigured else { return }
         controller.setTheme(Self.terminalTheme())
         controller.setTerminalConfiguration(Self.appearanceConfiguration())
@@ -1401,8 +1570,10 @@ final class TerminalViewController: UIViewController {
             let tx = pan.translation(in: ref).x
             switch pan.state {
             case .began:
-                // Drop the keyboard as the drag starts, matching goBack() — but remember to hand
-                // it back if the swipe is cancelled.
+                // Suppress parting viewport declarations before resigning first responder;
+                // if the interactive swipe is cancelled, restore focus and layout cleanly.
+                interactiveBackInProgress = true
+                cancelPendingViewportDeclaration()
                 terminalWasFirstResponderAtBackBegin = inputSurface.isFirstResponder
                 inputSurface.resignFirstResponder()
                 onBackBegan?()
@@ -1418,9 +1589,16 @@ final class TerminalViewController: UIViewController {
                 } else {
                     commit = false
                 }
-                // A non-committed swipe returns to the terminal; restore the keyboard it had.
-                if !commit, terminalWasFirstResponderAtBackBegin {
-                    focusInput()
+                if commit {
+                    isLeavingScreen = true
+                    screenIsShowing = false
+                    publishRendering()
+                } else {
+                    interactiveBackInProgress = false
+                    if terminalWasFirstResponderAtBackBegin {
+                        focusInput()
+                    }
+                    view.setNeedsLayout()
                 }
                 onBackEnded?(vx, commit)
             default:

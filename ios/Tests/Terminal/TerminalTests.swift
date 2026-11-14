@@ -2,6 +2,7 @@ import XCTest
 import CoreText
 import Metal
 import GhosttyVt
+import OMGMobileCore
 import TermioShared
 @testable import OMGTerminal
 
@@ -189,4 +190,203 @@ final class TerminalTests: XCTestCase {
         XCTAssertFalse(Termiod.InputEvent.focus(false).acknowledgesActivity)
     }
 
+    func testStreamTerminalTracksAlternateScreenAcrossSnapshotAndLiveWrites() throws {
+        let terminal = try screen("\u{1b}[?1049hALT-TUI")
+        XCTAssertTrue(terminal.isAlternateScreen)
+        terminal.write(Data("\u{1b}[?1049lPRIMARY".utf8))
+        XCTAssertFalse(terminal.isAlternateScreen)
+        terminal.write(Data("\u{1b}[?1049h".utf8))
+        XCTAssertTrue(terminal.isAlternateScreen)
+    }
+
+    func testIMEStatePreservesChineseCandidateCommitAndClearsBeforePassiveResign() {
+        var ime = TermiodStreamIMEState()
+        XCTAssertFalse(ime.hasMarkedText)
+        XCTAssertFalse(ime.needsPreeditDraw)
+
+        // Typing Pinyin: n -> ni -> nih -> backspace -> ni -> candidate "你好" -> unmarkTextForCommit()
+        ime.setMarkedText("n", selectedRange: NSRange(location: 1, length: 0))
+        XCTAssertTrue(ime.needsPreeditDraw)
+        ime.consumePreeditDraw()
+
+        ime.setMarkedText("ni", selectedRange: NSRange(location: 2, length: 0))
+        ime.setMarkedText("nih", selectedRange: NSRange(location: 3, length: 0))
+        XCTAssertTrue(ime.deleteBackwardInMarkedText())
+        XCTAssertEqual(ime.markedText, "ni")
+        XCTAssertTrue(ime.needsPreeditDraw)
+        ime.consumePreeditDraw()
+
+        // Selecting a Chinese candidate in iOS Pinyin calls setMarkedText("你好") followed by unmarkText():
+        // MUST return "你好" so StreamTerminalView.unmarkText() commits it via insertText("你好")!
+        ime.setMarkedText("你好", selectedRange: NSRange(location: 2, length: 0))
+        let committed = ime.unmarkTextForCommit()
+        XCTAssertEqual(committed, "你好")
+        XCTAssertFalse(ime.hasMarkedText)
+        XCTAssertTrue(ime.needsPreeditDraw)
+        ime.consumePreeditDraw()
+
+        // Passive focus loss (resignFirstResponder) clears marked text BEFORE super.resignFirstResponder()
+        // so any subsequent UIKit unmarkText() callback during teardown commits nil (zero leaked Pinyin!).
+        ime.setMarkedText("nihao", selectedRange: NSRange(location: 5, length: 0))
+        XCTAssertTrue(ime.discardMarkedTextBeforeResign())
+        XCTAssertNil(ime.unmarkTextForCommit())
+        XCTAssertFalse(ime.hasMarkedText)
+    }
+
+    @MainActor
+    func testIncrementalIMEPreeditRendersOverlayWithoutRebuildingTerminalRows() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal device unavailable")
+        }
+        var lines = ""
+        for row in 1...20 {
+            lines += "row-\(row): const value = \(row * 42);\r\n"
+        }
+        lines += "prompt> "
+        let terminal = try screen(lines)
+        let appearance = TermiodStreamRenderer.Appearance(
+            fontFamily: "Menlo",
+            fallbackFamilies: ["PingFang SC"],
+            fontSize: 14,
+            paddingX: 4,
+            paddingY: 4,
+            backgroundOpacity: 1
+        )
+        let renderer = try TermiodStreamRenderer(appearance: appearance, scale: 2.0)
+        let width = renderer.atlas.metrics.width * 80 + 16
+        let height = renderer.atlas.metrics.height * 24 + 16
+
+        func pixels(_ image: CGImage) -> Data {
+            let bpr = image.width * 4
+            var data = [UInt8](repeating: 0, count: bpr * image.height)
+            guard let ctx = CGContext(
+                data: &data,
+                width: image.width,
+                height: image.height,
+                bitsPerComponent: 8,
+                bytesPerRow: bpr,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ) else { return Data(data) }
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+            return Data(data)
+        }
+
+        // Initial forced draw builds all 24 rows once.
+        let baselineImage = try renderer.image(
+            of: terminal,
+            width: width,
+            height: height,
+            focused: false,
+            force: true,
+            preedit: nil
+        )
+        let baselineFullCount = renderer.fullRebuildCount
+        let baselineRowCount = renderer.rowRebuildCount
+        let baselinePreeditCount = renderer.preeditBuildCount
+        XCTAssertEqual(baselineFullCount, 1)
+        XCTAssertEqual(baselineRowCount, 24)
+
+        // Incremental Pinyin preedit updates (`force: false`) must rebuild ZERO terminal rows!
+        let compositionSteps: [String?] = ["n", "ni", "nih", "niha", "nihao", "你好", nil]
+        var composedPixels = Data()
+        var clearedPixels = Data()
+        for step in compositionSteps {
+            let frame = try renderer.image(
+                of: terminal,
+                width: width,
+                height: height,
+                focused: false,
+                force: false,
+                preedit: step
+            )
+            if step == "nihao" {
+                composedPixels = pixels(frame)
+            } else if step == nil {
+                clearedPixels = pixels(frame)
+            }
+        }
+
+        XCTAssertEqual(
+            renderer.fullRebuildCount,
+            baselineFullCount,
+            "Incremental IME preedit must never call builder.invalidate()"
+        )
+        XCTAssertEqual(
+            renderer.rowRebuildCount,
+            baselineRowCount,
+            "Incremental IME preedit must rebuild 0 terminal rows across n->ni->nih->niha->nihao->你好->clear"
+        )
+        XCTAssertEqual(
+            renderer.preeditBuildCount,
+            baselinePreeditCount + UInt64(compositionSteps.count)
+        )
+        let basePixels = pixels(baselineImage)
+        XCTAssertFalse(composedPixels == basePixels, "Preedit overlay must visibly render at cursor")
+        XCTAssertTrue(clearedPixels == basePixels, "Clearing preedit must restore exact baseline frame")
+    }
+
+    func testPassiveViewerWheelOnAltScreenAndMouseTrackingDoesNotClaimWriterOrEnqueueInput() throws {
+        let terminal = try screen("\u{1b}[?1049h\u{1b}[?1007h")
+        XCTAssertTrue(terminal.isAlternateScreen)
+        XCTAssertTrue(terminal.wheelGoesToProgram)
+
+        var gate = RuntimeWriterGate()
+        XCTAssertEqual(gate.didAttach(), [])
+        let viewport = RuntimeViewport(columns: 39, rows: 42, pixelWidth: 702, pixelHeight: 1512)
+        XCTAssertEqual(gate.setViewport(viewport), [])
+
+        let pointer = Termiod.InputEvent.Pointer(x: 24, y: 48, cellWidth: 9, cellHeight: 18)
+        let wheelDown = Termiod.InputEvent.wheel(.init(rows: 3, columns: 0, mods: 0, at: pointer))
+
+        func forward(_ event: Termiod.InputEvent) throws -> [RuntimeWriterGate.Effect] {
+            guard event.shouldForwardToRuntimeSession(
+                isWriter: gate.isWriter,
+                hasPendingInput: !gate.pendingInput.isEmpty
+            ) else {
+                return []
+            }
+            let bytes = try terminal.encodeInput(event)
+            guard !bytes.isEmpty else { return [] }
+            return try gate.enqueueInput(bytes, maximumBytes: 1 << 20).get()
+        }
+
+        // Passive viewer vertical drag on Alt-Screen (?1007h) must not claim writer or enqueue input.
+        XCTAssertEqual(try forward(wheelDown), [])
+        XCTAssertFalse(gate.isWriter)
+        XCTAssertFalse(gate.isClaiming)
+        XCTAssertTrue(gate.pendingInput.isEmpty)
+
+        // Mouse-tracking TUI (?1000h + ?1006h) must likewise drop passive wheel, motion, focus, and orphan key release.
+        terminal.write(Data("\u{1b}[?1000h\u{1b}[?1006h".utf8))
+        XCTAssertTrue(terminal.wheelGoesToProgram)
+        XCTAssertEqual(try forward(wheelDown), [])
+        XCTAssertEqual(try forward(.focus(true)), [])
+        XCTAssertEqual(
+            try forward(.mouse(.init(action: .motion, button: nil, mods: 0, at: pointer, buttonsHeld: false))),
+            []
+        )
+        XCTAssertEqual(
+            try forward(.key(.init(action: .release, key: "j", text: "j"))),
+            []
+        )
+        XCTAssertFalse(gate.isWriter)
+        XCTAssertFalse(gate.isClaiming)
+        XCTAssertTrue(gate.pendingInput.isEmpty)
+
+        // Real key press claims writer; once writer is granted, wheel events forward normally.
+        XCTAssertEqual(try forward(.key(.init(action: .press, key: "j", text: "j"))), [.claimWriter])
+        XCTAssertEqual(
+            gate.writerChanged(true),
+            [.sendInput(Data("j".utf8)), .sendResize(viewport)]
+        )
+
+        let writerWheel = try forward(wheelDown)
+        XCTAssertEqual(writerWheel.count, 1)
+        guard case .sendInput(let wheelBytes) = writerWheel.first else {
+            return XCTFail("Expected .sendInput for active writer wheel event, got \(writerWheel)")
+        }
+        let wheelString = try XCTUnwrap(String(data: wheelBytes, encoding: .utf8))
+        XCTAssertTrue(wheelString.hasPrefix("\u{1b}[<65;"))
+    }
 }

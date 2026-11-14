@@ -116,6 +116,10 @@ protocol DeviceSession: AnyObject {
     /// whether or not this device holds the write token
     /// (`docs/design/20260901-pty-size-is-not-the-write-token.md`).
     func setViewport(columns: Int, rows: Int)
+    /// Declares this screen's cell and backing-pixel dimensions for v2 8-byte `'R'` resize frames.
+    func setViewport(columns: Int, rows: Int, pixelWidth: Int, pixelHeight: Int)
+    /// Explicitly claims the writer token and applies this screen's viewport without sending input bytes.
+    func takeover()
     /// The grid the surface is *actually* laid out at, which is the session's
     /// rather than this screen's whenever this screen is showing a session
     /// bigger than itself. Never a declaration: a screen that told the device
@@ -131,6 +135,14 @@ protocol DeviceSession: AnyObject {
     /// Ask for a fresh screen: a rebuilt surface starts blank and no byte is
     /// coming to repaint it.
     func reassertGrid()
+}
+
+extension DeviceSession {
+    func setViewport(columns: Int, rows: Int, pixelWidth: Int, pixelHeight: Int) {
+        setViewport(columns: columns, rows: rows)
+    }
+
+    func takeover() {}
 }
 
 /// Which backend a peer needs, decided in one place so no screen has to know
@@ -312,6 +324,9 @@ struct DeviceSSHHost: Equatable {
 
 /// The upstream stream surface port, shared by termiod and the omgd adapter.
 protocol StreamDeviceSession: DeviceSession {
+    /// True when the session renders on `StreamTerminalView` so the controller can
+    /// mount it before first-responder activation and avoid a double responder handoff.
+    @MainActor var prefersStreamPlane: Bool { get }
     var onStreaming: ((Bool) -> Void)? { get set }
     var onStreamSignal: ((TermiodStreamTerminal.Signal) -> Void)? { get set }
     var onStreamData: ((Data) -> Void)? { get set }
@@ -319,4 +334,8 @@ protocol StreamDeviceSession: DeviceSession {
     func sendInput(_ event: Termiod.InputEvent)
     func setStreamTheme(_ theme: TermiodStreamTerminal.Theme)
     func setHostAnswers(_ answers: Termiod.HostAnswers)
+}
+
+extension StreamDeviceSession {
+    @MainActor var prefersStreamPlane: Bool { false }
 }

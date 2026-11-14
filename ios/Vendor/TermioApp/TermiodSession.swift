@@ -45,6 +45,8 @@ final class TermiodSession: StreamDeviceSession {
         return streamTerminalLocked
     }
 
+    @MainActor var prefersStreamPlane: Bool { offersStream && !streamRefused }
+
     /// How long a moving screen must hold still before its size goes to the
     /// device, and the shortest gap between two declarations. Every distinct
     /// size is a host-side barrier — quiesce, resize, fresh keyframe to every

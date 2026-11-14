@@ -55,6 +55,9 @@ struct MobileSession: Decodable {
 /// attach-only, acknowledges its native snapshot, and initially observes.
 final class RuntimeConnection {
     static let maximumInput = 1024 * 1024
+    /// Settled debounce (`>= 180ms`) before emitting an 8-byte `'R'` resize frame so
+    /// keyboard and orientation animations never send intermediate PTY sizes.
+    static let resizeCoalesceInterval: TimeInterval = 0.18
     enum State { case connecting, attached, disconnected, closed, failed(String) }
     let endpoint: MobileEndpoint
     private let link: WebSocketLink
@@ -72,8 +75,8 @@ final class RuntimeConnection {
     private var activityAcknowledge = false
     private(set) var latestActivity: RuntimeActivitySnapshot?
     private var latestActivityRevision: UInt64 = 0
-    private var sentViewport: TerminalGrid?
-    private var requestedViewport: TerminalGrid?
+    private var sentViewport: RuntimeViewport?
+    private var requestedViewport: RuntimeViewport?
     private var viewportGeneration: UInt64 = 0
     private var sessionEnded = false
     private(set) var terminal: TermiodStreamTerminal?
@@ -169,27 +172,20 @@ final class RuntimeConnection {
         guard snapshotApplied else { return }
         inner(RuntimeFrame(87, 0, transferSupported ? Data("takeover/1".utf8) : Data()))
     }
-    func resize(_ grid: TerminalGrid) {
-        guard isWriter, snapshotApplied, grid != requestedViewport else { return }
-        requestedViewport = grid
+    func resize(_ viewport: RuntimeViewport) {
+        guard isWriter, snapshotApplied, viewport != requestedViewport else { return }
+        requestedViewport = viewport
         viewportGeneration &+= 1
         let generation = viewportGeneration
-        if sentViewport == nil {
-            sentViewport = grid
-            sendResize(grid)
-            return
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.resizeCoalesceInterval) { [weak self] in
             guard let self, isWriter, snapshotApplied, generation == viewportGeneration,
-                  grid == requestedViewport, grid != sentViewport else { return }
-            sentViewport = grid
-            sendResize(grid)
+                  viewport == requestedViewport, viewport != sentViewport else { return }
+            sentViewport = viewport
+            sendResize(viewport)
         }
     }
-    private func sendResize(_ grid: TerminalGrid) {
-        let cols = min(grid.cols, 500), rows = min(grid.rows, 300)
-        inner(RuntimeFrame(82, 0, Data([UInt8(cols >> 8), UInt8(cols & 255),
-                                      UInt8(rows >> 8), UInt8(rows & 255)])))
+    private func sendResize(_ viewport: RuntimeViewport) {
+        inner(RuntimeFrame.resize(viewport))
     }
     func inputBytes(_ data: Data) {
         guard isWriter, snapshotApplied, data.count <= Self.maximumInput else { return }
@@ -293,15 +289,21 @@ final class RuntimeConnection {
             onActivity?(snapshot)
             onChange?()
         case 82:
-            guard frame.data.count == 4 || frame.data.count == 8 else { throw RuntimeFrame.Failure.invalidSequence }
-            let cols = UInt16(frame.data[0]) << 8 | UInt16(frame.data[1])
-            let rows = UInt16(frame.data[2]) << 8 | UInt16(frame.data[3])
-            try terminal?.resize(rows: rows, cols: cols, reflow: true)
+            guard let viewport = RuntimeFrame.decodeResizePayload(frame.data) else {
+                throw RuntimeFrame.Failure.invalidSequence
+            }
+            try terminal?.resize(
+                rows: viewport.rows,
+                cols: viewport.columns,
+                pixelWidth: viewport.pixelWidth,
+                pixelHeight: viewport.pixelHeight,
+                reflow: true
+            )
             onChange?()
         case 87:
             isWriter = true
-            onChange?()
             onWriterChanged?(true)
+            onChange?()
         case 66:
             isWriter = false
             onWriterChanged?(false)

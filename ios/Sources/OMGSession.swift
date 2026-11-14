@@ -3,6 +3,12 @@ import TermioShared
 import TermioStream
 
 /// The full upstream terminal screen uses this port without knowing omgd's framing.
+///
+/// Attachments start as passive read-only observers (`RuntimeWriterGate`): opening or
+/// foregrounding a session, rotating the phone, or toggling the keyboard while viewing
+/// NEVER sends `takeover/1` or shrinks the desktop terminal. Writer transfer and the
+/// 8-byte pixel `'R'` resize occur ONLY when the user sends input/paste or explicitly
+/// triggers `takeover()`.
 final class OMGSession: StreamDeviceSession {
     static let activityDidChange = Notification.Name("OMGSessionActivityDidChange")
 
@@ -13,22 +19,19 @@ final class OMGSession: StreamDeviceSession {
     var onStreamSignal: ((TermiodStreamTerminal.Signal) -> Void)?
     var onStreamData: ((Data) -> Void)?
     var streamTerminal: TermiodStreamTerminal? { connection?.terminal }
+    @MainActor var prefersStreamPlane: Bool { TermiodStreamRenderer.isAvailable }
 
     private var connection: RuntimeConnection?
     private let routeID: String
     private let targetID: String?
     private let generation: String?
     private(set) var liveActivity: RuntimeActivitySnapshot?
-    private var pending = Data()
-    private var claiming = false
-    private var needsAutoClaim = true
+    private var writerGate = RuntimeWriterGate()
     private var inputRejected = false
-    private var rendering = true
     private var theme: TermiodStreamTerminal.Theme?
     private var terminalIdentity: ObjectIdentifier?
-    private var viewport: TerminalGrid?
     private var lastGrid: TerminalGrid?
-    private var lastWriter = false
+    private var lastWriter: Bool?
 
     init(endpoint: DeviceEndpoint, sessionID: String) {
         routeID = sessionID
@@ -55,7 +58,7 @@ final class OMGSession: StreamDeviceSession {
                 guard let self else { return }
                 self.liveActivity = snapshot
                 if RuntimeActivityAckPolicy.shouldAcknowledgeOnActivity(
-                    rendering: self.rendering,
+                    rendering: self.writerGate.isRendering,
                     snapshot: snapshot
                 ) {
                     connection?.acknowledge()
@@ -69,11 +72,13 @@ final class OMGSession: StreamDeviceSession {
             connection.onSignal = { [weak self] signal in self?.onStreamSignal?(signal) }
             connection.onWriterChanged = { [weak self, weak connection] granted in
                 guard let self, let connection else { return }
+                let effects = self.writerGate.writerChanged(granted)
+                self.apply(effects, on: connection)
                 if granted {
-                    onState?(.connected)
+                    self.inputRejected = false
+                    self.onState?(.connected)
                 } else {
-                    discardPending()
-                    onState?(.readOnly(connection.supportsWriterTransfer
+                    self.onState?(.readOnly(connection.supportsWriterTransfer
                         ? "另一终端正在操作，键入即可接管。"
                         : "此 runtime 不支持输入权交接，请使用新版 runtime 创建的会话。"))
                 }
@@ -83,10 +88,18 @@ final class OMGSession: StreamDeviceSession {
                 switch state {
                 case .attached:
                     onState?(.connected)
-                case .connecting: discardPending(); onState?(.connecting)
-                case .disconnected: discardPending(); onState?(.reconnecting)
-                case .closed: discardPending(); onState?(.closed)
-                case .failed(let reason): discardPending(); onState?(.failed(reason))
+                case .connecting:
+                    writerGate.didDetach()
+                    onState?(.connecting)
+                case .disconnected:
+                    writerGate.didDetach()
+                    onState?(.reconnecting)
+                case .closed:
+                    writerGate.didDetach()
+                    onState?(.closed)
+                case .failed(let reason):
+                    writerGate.didDetach()
+                    onState?(.failed(reason))
                 }
             }
         }
@@ -99,7 +112,7 @@ final class OMGSession: StreamDeviceSession {
     }
 
     func stop() {
-        discardPending()
+        writerGate.didDetach()
         connection?.stop()
     }
 
@@ -109,44 +122,61 @@ final class OMGSession: StreamDeviceSession {
 
     func send(_ data: Data, acknowledgesActivity: Bool) {
         guard let connection, connection.isAttached, !data.isEmpty else { return }
-        guard data.count <= RuntimeConnection.maximumInput,
-              pending.count + data.count <= RuntimeConnection.maximumInput else {
-            discardPending()
-            inputRejected = true
-            onState?(.readOnly("Input exceeds the 1 MiB limit."))
-            return
+        if !writerGate.isAttached {
+            _ = writerGate.didAttach()
         }
         let shouldAcknowledge = RuntimeActivityAckPolicy.shouldAcknowledgeOnInput(
             data,
             acknowledgesActivity: acknowledgesActivity,
             liveActivity: liveActivity
         )
-        if connection.isWriter {
-            if inputRejected { inputRejected = false; onState?(.connected) }
+        switch writerGate.enqueueInput(data, maximumBytes: RuntimeConnection.maximumInput) {
+        case .failure(.inputLimitExceeded):
+            inputRejected = true
+            onState?(.readOnly("Input exceeds the 1 MiB limit."))
+        case .success(let effects):
+            if connection.isWriter, inputRejected {
+                inputRejected = false
+                onState?(.connected)
+            }
             if shouldAcknowledge {
                 connection.acknowledge()
             }
-            connection.inputBytes(data)
-        } else {
-            if shouldAcknowledge {
-                connection.acknowledge()
-            }
-            pending.append(data)
-            if !claiming {
-                claiming = true
-                connection.claim()
-            }
+            apply(effects, on: connection)
         }
     }
 
     func sendInput(_ event: Termiod.InputEvent) {
         guard let terminal = streamTerminal else { return }
-        // Encoding uses the exact VT modes of this attachment. Query/focus
-        // reports are not user input and cannot take the writer token.
-        if case .focus = event { return }
+        // Focus reports, passive wheel scrolling, passive pointer motion/release,
+        // and orphan key releases are not user input and cannot claim the writer token.
+        switch event {
+        case .focus:
+            return
+        case .wheel where !writerGate.isWriter && writerGate.pendingInput.isEmpty:
+            return
+        case .mouse(let mouse) where !writerGate.isWriter && mouse.action != .press:
+            return
+        case .key(let key) where !writerGate.isWriter && writerGate.pendingInput.isEmpty && key.action == .release:
+            return
+        default:
+            break
+        }
+        guard event.shouldForwardToRuntimeSession(
+            isWriter: writerGate.isWriter,
+            hasPendingInput: !writerGate.pendingInput.isEmpty
+        ) else { return }
         if let bytes = try? terminal.encodeInput(event) {
             send(bytes, acknowledgesActivity: event.acknowledgesActivity)
         }
+    }
+
+    func takeover() {
+        guard let connection, connection.isAttached else { return }
+        if !writerGate.isAttached {
+            _ = writerGate.didAttach()
+        }
+        apply(writerGate.requestTakeover(), on: connection)
     }
 
     func sendDeviceReport(_ data: Data) {
@@ -154,16 +184,19 @@ final class OMGSession: StreamDeviceSession {
     }
 
     func setViewport(columns: Int, rows: Int) {
-        let next = TerminalGrid(rows: UInt16(clamping: rows), cols: UInt16(clamping: columns))
-        let viewportChanged = viewport != next
-        viewport = next
-        guard rendering, let connection, connection.isAttached else { return }
-        if connection.isWriter {
-            connection.resize(next)
-        } else if (needsAutoClaim || viewportChanged), !claiming {
-            needsAutoClaim = false
-            claiming = true
-            connection.claim()
+        setViewport(columns: columns, rows: rows, pixelWidth: 0, pixelHeight: 0)
+    }
+
+    func setViewport(columns: Int, rows: Int, pixelWidth: Int, pixelHeight: Int) {
+        let next = RuntimeViewport.clamped(
+            columns: columns,
+            rows: rows,
+            pixelWidth: pixelWidth,
+            pixelHeight: pixelHeight
+        )
+        let effects = writerGate.setViewport(next)
+        if let connection {
+            apply(effects, on: connection)
         }
     }
 
@@ -172,22 +205,22 @@ final class OMGSession: StreamDeviceSession {
     }
 
     func setRendering(_ showing: Bool) {
-        let becameVisible = !rendering && showing
-        rendering = showing
-        if becameVisible {
-            if RuntimeActivityAckPolicy.shouldAcknowledgeOnBecomeVisible(
-                isAttached: connection?.isAttached == true,
-                liveActivity: liveActivity
-            ) {
-                connection?.acknowledge()
-            }
-            needsAutoClaim = true
-            changed()
+        let effects = writerGate.setRendering(showing)
+        guard showing, let connection else { return }
+        if RuntimeActivityAckPolicy.shouldAcknowledgeOnBecomeVisible(
+            isAttached: connection.isAttached,
+            liveActivity: liveActivity
+        ) {
+            connection.acknowledge()
         }
+        apply(effects, on: connection)
+        changed()
     }
 
     func reassertGrid() {
-        needsAutoClaim = true
+        if let connection {
+            apply(writerGate.reassertGrid(), on: connection)
+        }
         changed()
     }
 
@@ -200,17 +233,28 @@ final class OMGSession: StreamDeviceSession {
         // Existing omgd answers probes in its own VT, including while detached.
     }
 
-    private func discardPending() {
-        pending.resetBytes(in: pending.indices)
-        pending.removeAll()
-        claiming = false
+    private func apply(_ effects: [RuntimeWriterGate.Effect], on connection: RuntimeConnection) {
+        for effect in effects {
+            switch effect {
+            case .claimWriter:
+                connection.claim()
+            case .sendInput(let bytes):
+                connection.inputBytes(bytes)
+            case .sendResize(let viewport):
+                connection.resize(viewport)
+            }
+        }
     }
 
     private func changed() {
         guard let connection else { return }
-        if !connection.isAttached {
-            discardPending()
+        guard connection.isAttached else {
+            writerGate.didDetach()
+            lastWriter = nil
             return
+        }
+        if !writerGate.isAttached {
+            _ = writerGate.didAttach()
         }
         if let terminal = streamTerminal {
             let identity = ObjectIdentifier(terminal)
@@ -225,18 +269,6 @@ final class OMGSession: StreamDeviceSession {
                 lastGrid = grid
                 lastWriter = connection.isWriter
                 onSharedGrid?(grid, connection.isWriter)
-            }
-        }
-        if connection.isWriter {
-            needsAutoClaim = false
-            if !pending.isEmpty { connection.inputBytes(pending) }
-            discardPending()
-            if rendering, let viewport { connection.resize(viewport) }
-        } else if rendering, needsAutoClaim {
-            needsAutoClaim = false
-            if !claiming {
-                claiming = true
-                connection.claim()
             }
         }
     }

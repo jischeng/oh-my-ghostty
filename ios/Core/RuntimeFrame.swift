@@ -39,6 +39,44 @@ public struct RuntimeFrame: Equatable {
         return RuntimeFrame(67, 0, payload)
     }
 
+    /// Inner v2 `'R'` (`82`) frame carrying 8-byte big-endian `[cols, rows, px_w, px_h]`.
+    public static func resize(_ viewport: RuntimeViewport) -> RuntimeFrame {
+        var payload = Data(capacity: 8)
+        for field in [viewport.columns, viewport.rows, viewport.pixelWidth, viewport.pixelHeight] {
+            payload.append(UInt8(field >> 8))
+            payload.append(UInt8(field & 0xFF))
+        }
+        return RuntimeFrame(82, 0, payload)
+    }
+
+    /// Decodes an inner `'R'` (`82`) payload (v2 8-byte `[cols, rows, px_w, px_h]` or
+    /// legacy 4-byte `[cols, rows]`). Rejects zero or out-of-range dimensions matching `omgd`.
+    public static func decodeResizePayload(_ data: Data) -> RuntimeViewport? {
+        guard data.count == 4 || data.count == 8 else { return nil }
+        let start = data.startIndex
+        let cols = UInt16(data[start]) << 8 | UInt16(data[start + 1])
+        let rows = UInt16(data[start + 2]) << 8 | UInt16(data[start + 3])
+        guard cols >= 1, cols <= RuntimeViewport.maximumColumns,
+              rows >= 1, rows <= RuntimeViewport.maximumRows else {
+            return nil
+        }
+        if data.count == 8 {
+            let pxW = UInt16(data[start + 4]) << 8 | UInt16(data[start + 5])
+            let pxH = UInt16(data[start + 6]) << 8 | UInt16(data[start + 7])
+            guard pxW <= RuntimeViewport.maximumPixels,
+                  pxH <= RuntimeViewport.maximumPixels else {
+                return nil
+            }
+            return RuntimeViewport.clamped(
+                columns: Int(cols),
+                rows: Int(rows),
+                pixelWidth: Int(pxW),
+                pixelHeight: Int(pxH)
+            )
+        }
+        return RuntimeViewport.clamped(columns: Int(cols), rows: Int(rows), pixelWidth: 0, pixelHeight: 0)
+    }
+
     public enum Failure: Error, Equatable { case oversized, invalidSequence, missingSnapshot }
 
     public struct Decoder {
@@ -455,5 +493,200 @@ public enum RuntimeActivityAckPolicy {
             return (cb & 32) == 0 && (cb & 64) == 0 && (cb & 3) != 3
         }
         return true
+    }
+}
+
+/// Cell and backing-pixel dimensions for an `omgd` v2 `'R'` resize payload.
+public struct RuntimeViewport: Equatable, Sendable {
+    public static let maximumColumns: UInt16 = 500
+    public static let maximumRows: UInt16 = 300
+    public static let maximumPixels: UInt16 = 16_000
+    public static let fallbackCellPixelWidth = 8
+    public static let fallbackCellPixelHeight = 16
+
+    public let columns: UInt16
+    public let rows: UInt16
+    public let pixelWidth: UInt16
+    public let pixelHeight: UInt16
+
+    public init(columns: UInt16, rows: UInt16, pixelWidth: UInt16, pixelHeight: UInt16) {
+        self.columns = min(max(columns, 1), Self.maximumColumns)
+        self.rows = min(max(rows, 1), Self.maximumRows)
+        let defaultPxW = UInt16(min(Int(self.columns) * Self.fallbackCellPixelWidth, Int(Self.maximumPixels)))
+        let defaultPxH = UInt16(min(Int(self.rows) * Self.fallbackCellPixelHeight, Int(Self.maximumPixels)))
+        self.pixelWidth = pixelWidth > 0 ? min(pixelWidth, Self.maximumPixels) : max(1, defaultPxW)
+        self.pixelHeight = pixelHeight > 0 ? min(pixelHeight, Self.maximumPixels) : max(1, defaultPxH)
+    }
+
+    public static func clamped(
+        columns: Int,
+        rows: Int,
+        pixelWidth: Int,
+        pixelHeight: Int
+    ) -> RuntimeViewport? {
+        guard columns > 0, rows > 0 else { return nil }
+        let cols = UInt16(min(max(columns, 1), Int(maximumColumns)))
+        let rws = UInt16(min(max(rows, 1), Int(maximumRows)))
+        let pxW: UInt16
+        let pxH: UInt16
+        if pixelWidth > 0, pixelHeight > 0 {
+            pxW = UInt16(min(max(pixelWidth, 1), Int(maximumPixels)))
+            pxH = UInt16(min(max(pixelHeight, 1), Int(maximumPixels)))
+        } else {
+            pxW = UInt16(min(max(Int(cols) * fallbackCellPixelWidth, 1), Int(maximumPixels)))
+            pxH = UInt16(min(max(Int(rws) * fallbackCellPixelHeight, 1), Int(maximumPixels)))
+        }
+        return RuntimeViewport(columns: cols, rows: rws, pixelWidth: pxW, pixelHeight: pxH)
+    }
+
+    public static func fromCellPixels(
+        columns: Int,
+        rows: Int,
+        cellPixelWidth: Int?,
+        cellPixelHeight: Int?
+    ) -> RuntimeViewport? {
+        guard columns > 0, rows > 0 else { return nil }
+        let cols = min(max(columns, 1), Int(maximumColumns))
+        let rws = min(max(rows, 1), Int(maximumRows))
+        let cellW = max(1, cellPixelWidth ?? fallbackCellPixelWidth)
+        let cellH = max(1, cellPixelHeight ?? fallbackCellPixelHeight)
+        return clamped(
+            columns: cols,
+            rows: rws,
+            pixelWidth: cols * cellW,
+            pixelHeight: rws * cellH
+        )
+    }
+}
+
+/// Passive-viewer isolation and writer-takeover state machine shared by `OMGSession`.
+///
+/// Attaching, foregrounding, rotating, or toggling the keyboard while observing a
+/// session MUST NEVER claim the writer token (`takeover/1`) or emit `'R'` resize
+/// frames. Only intentional user input or an explicit takeover request claims writer,
+/// and only an active writer emits `'R'` resize frames while rendering.
+public struct RuntimeWriterGate: Equatable, Sendable {
+    public enum Effect: Equatable, Sendable {
+        case claimWriter
+        case sendInput(Data)
+        case sendResize(RuntimeViewport)
+    }
+
+    public enum EnqueueError: Error, Equatable, Sendable {
+        case inputLimitExceeded
+    }
+
+    public private(set) var isAttached = false
+    public private(set) var isWriter = false
+    public private(set) var isClaiming = false
+    public private(set) var isRendering = true
+    public private(set) var viewport: RuntimeViewport?
+    public private(set) var pendingInput = Data()
+
+    public init(isRendering: Bool = true) {
+        self.isRendering = isRendering
+    }
+
+    /// Passive attach: never claims writer and never resizes the remote PTY.
+    @discardableResult
+    public mutating func didAttach() -> [Effect] {
+        isAttached = true
+        return []
+    }
+
+    public mutating func didDetach() {
+        isAttached = false
+        isWriter = false
+        isClaiming = false
+        clearPending()
+    }
+
+    /// Foreground/visibility updates: never auto-claims; re-syncs viewport only if already writer.
+    public mutating func setRendering(_ showing: Bool) -> [Effect] {
+        let becameVisible = !isRendering && showing
+        isRendering = showing
+        guard becameVisible, isAttached, isWriter, let viewport else { return [] }
+        return [.sendResize(viewport)]
+    }
+
+    /// Re-asserts this client's viewport only when already holding the writer token.
+    public mutating func reassertGrid() -> [Effect] {
+        guard isAttached, isWriter, isRendering, let viewport else { return [] }
+        return [.sendResize(viewport)]
+    }
+
+    /// Stores the local screen's viewport. Passive viewers cache it locally without
+    /// claiming writer or resizing the desktop terminal.
+    public mutating func setViewport(_ next: RuntimeViewport?) -> [Effect] {
+        viewport = next
+        guard isAttached, isWriter, isRendering, let next else { return [] }
+        return [.sendResize(next)]
+    }
+
+    /// Intentional user input/paste: sends immediately when writer, or queues input and
+    /// issues a single `claimWriter` (`takeover/1`) request when observing.
+    public mutating func enqueueInput(
+        _ data: Data,
+        maximumBytes: Int
+    ) -> Result<[Effect], EnqueueError> {
+        guard isAttached, !data.isEmpty else { return .success([]) }
+        guard data.count <= maximumBytes,
+              pendingInput.count + data.count <= maximumBytes else {
+            clearPending()
+            isClaiming = false
+            return .failure(.inputLimitExceeded)
+        }
+        if isWriter {
+            return .success([.sendInput(data)])
+        }
+        pendingInput.append(data)
+        guard !isClaiming else { return .success([]) }
+        isClaiming = true
+        return .success([.claimWriter])
+    }
+
+    /// Explicit user-initiated takeover without injecting stray bytes into the PTY.
+    public mutating func requestTakeover() -> [Effect] {
+        guard isAttached else { return [] }
+        if isWriter {
+            if isRendering, let viewport {
+                return [.sendResize(viewport)]
+            }
+            return []
+        }
+        guard !isClaiming else { return [] }
+        isClaiming = true
+        return [.claimWriter]
+    }
+
+    /// Handles server `'W'` (`true`) grant or `'B'` (`false`) revocation.
+    public mutating func writerChanged(_ granted: Bool) -> [Effect] {
+        isWriter = granted
+        isClaiming = false
+        guard granted else {
+            clearPending()
+            return []
+        }
+        var effects: [Effect] = []
+        if !pendingInput.isEmpty {
+            effects.append(.sendInput(pendingInput))
+            clearPending()
+        }
+        if isRendering, let viewport {
+            effects.append(.sendResize(viewport))
+        }
+        return effects
+    }
+
+    public mutating func discardPending() {
+        clearPending()
+        isClaiming = false
+    }
+
+    private mutating func clearPending() {
+        if !pendingInput.isEmpty {
+            pendingInput.resetBytes(in: pendingInput.indices)
+            pendingInput.removeAll()
+        }
     }
 }

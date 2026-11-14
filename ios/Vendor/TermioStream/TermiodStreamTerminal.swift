@@ -538,6 +538,7 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
                 try Self.check(ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_MODE, &mode), "ghostty_terminal_set(blink mode)")
             }
             theme = colors
+            changesLocked &+= 1
             return reportsScheme ? Data((colors.dark ? "\u{1b}[?997;1n" : "\u{1b}[?997;2n").utf8) : nil
         }
         if let report { onReply(report) }
@@ -893,6 +894,16 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
             var screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY
             _ = ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &screen)
             return screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE && (try? mode(ghostty_mode_new(1007, false))) == true
+        }
+    }
+
+    /// Whether the active screen buffer is the alternate screen (`?1049h` / `?1047h` / `?47h`),
+    /// including when decoded from an `omgd` native snapshot of an already-running TUI.
+    public var isAlternateScreen: Bool {
+        locked {
+            var screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY
+            _ = ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &screen)
+            return screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE
         }
     }
 
@@ -1620,13 +1631,28 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
     /// applied at this byte (`SidecarCommand::Resize` in `termiod/src/session.rs`).
     /// `reflow` is set when no shell held the terminal, and the screen rewraps;
     /// otherwise this is `resize_for_shell`.
-    public func resize(rows: UInt16, cols: UInt16, reflow: Bool) throws {
+    public func resize(
+        rows: UInt16,
+        cols: UInt16,
+        pixelWidth: UInt16 = 0,
+        pixelHeight: UInt16 = 0,
+        reflow: Bool
+    ) throws {
         try locked {
             changesLocked &+= 1
-            if reflow {
-                try resizeReflowing(rows: rows, cols: cols)
+            let cellW: UInt32
+            let cellH: UInt32
+            if cols > 0, rows > 0, pixelWidth > 0, pixelHeight > 0 {
+                cellW = max(1, UInt32(pixelWidth) / UInt32(cols))
+                cellH = max(1, UInt32(pixelHeight) / UInt32(rows))
             } else {
-                try resizeForShell(rows: rows, cols: cols)
+                cellW = Self.cellWidth
+                cellH = Self.cellHeight
+            }
+            if reflow {
+                try resizeReflowing(rows: rows, cols: cols, cellWidth: cellW, cellHeight: cellH)
+            } else {
+                try resizeForShell(rows: rows, cols: cols, cellWidth: cellW, cellHeight: cellH)
             }
         }
     }
@@ -1737,23 +1763,35 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
     /// OSC 133 marks, blank the prompt the cursor sits in and then reflow, so
     /// the shell's SIGWINCH redraw lands on clean rows; without them, resize
     /// without reflowing, the way the shell's redraw arithmetic assumes.
-    private func resizeForShell(rows: UInt16, cols: UInt16) throws {
+    private func resizeForShell(
+        rows: UInt16,
+        cols: UInt16,
+        cellWidth: UInt32 = TermiodStreamTerminal.cellWidth,
+        cellHeight: UInt32 = TermiodStreamTerminal.cellHeight
+    ) throws {
         guard let promptRow = try currentPromptStart() else {
-            try resizeTruncating(rows: rows, cols: cols)
+            try resizeTruncating(rows: rows, cols: cols, cellWidth: cellWidth, cellHeight: cellHeight)
             return
         }
         writeLocked(Data("\u{1b}7\u{1b}[\(UInt32(promptRow) + 1);1H\u{1b}[J\u{1b}8".utf8))
-        try resizeReflowing(rows: rows, cols: cols)
+        try resizeReflowing(rows: rows, cols: cols, cellWidth: cellWidth, cellHeight: cellHeight)
     }
 
     /// `VtTerminal::resize`: libghostty reflows only while wraparound is on, so
     /// turning it off for the resize is what truncates.
-    private func resizeTruncating(rows: UInt16, cols: UInt16) throws {
+    private func resizeTruncating(
+        rows: UInt16,
+        cols: UInt16,
+        cellWidth: UInt32 = TermiodStreamTerminal.cellWidth,
+        cellHeight: UInt32 = TermiodStreamTerminal.cellHeight
+    ) throws {
         let wraparound = try mode(GHOSTTY_MODE_WRAPAROUND_VALUE)
         if wraparound {
             try setMode(GHOSTTY_MODE_WRAPAROUND_VALUE, false)
         }
-        let resized = Result { try resizeReflowing(rows: rows, cols: cols) }
+        let resized = Result {
+            try resizeReflowing(rows: rows, cols: cols, cellWidth: cellWidth, cellHeight: cellHeight)
+        }
         if wraparound {
             // Restored even when the resize failed: the mode is the program's.
             try setMode(GHOSTTY_MODE_WRAPAROUND_VALUE, true)
@@ -1761,9 +1799,14 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
         try resized.get()
     }
 
-    private func resizeReflowing(rows: UInt16, cols: UInt16) throws {
+    private func resizeReflowing(
+        rows: UInt16,
+        cols: UInt16,
+        cellWidth: UInt32 = TermiodStreamTerminal.cellWidth,
+        cellHeight: UInt32 = TermiodStreamTerminal.cellHeight
+    ) throws {
         try Self.check(
-            ghostty_terminal_resize(terminal, cols, rows, Self.cellWidth, Self.cellHeight),
+            ghostty_terminal_resize(terminal, cols, rows, cellWidth, cellHeight),
             "ghostty_terminal_resize"
         )
     }

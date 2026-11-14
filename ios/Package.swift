@@ -18,6 +18,10 @@ let package = Package(
             resources: [.process("Resources")]
         ),
         .testTarget(name: "OMGMobileCoreTests", dependencies: ["OMGMobileCore"], path: "Tests/Core"),
-        .testTarget(name: "OMGTerminalTests", dependencies: ["OMGTerminal", "GhosttyVt"], path: "Tests/Terminal"),
+        .testTarget(
+            name: "OMGTerminalTests",
+            dependencies: ["OMGTerminal", "OMGMobileCore", "GhosttyVt"],
+            path: "Tests/Terminal"
+        ),
     ]
 )

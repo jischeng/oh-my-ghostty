@@ -207,4 +207,287 @@ final class RuntimeFrameTests: XCTestCase {
         XCTAssertEqual(multiAppSnap.agent, "opencode")
         XCTAssertEqual(multiAppSnap.state, "needsAttention")
     }
+
+    func testResizeFrameEncodes8BytePixelPayloadAndClampsServerBounds() {
+        let viewport = RuntimeViewport(columns: 48, rows: 24, pixelWidth: 1392, pixelHeight: 1440)
+        let frame = RuntimeFrame.resize(viewport)
+        XCTAssertEqual(frame.kind, 82)
+        XCTAssertEqual(frame.sequence, 0)
+        XCTAssertEqual(frame.data.count, 8)
+        XCTAssertEqual(
+            frame.data,
+            Data([0x00, 48, 0x00, 24, 0x05, 0x70, 0x05, 0xA0])
+        )
+        XCTAssertEqual(RuntimeFrame.decodeResizePayload(frame.data), viewport)
+
+        // Legacy 4-byte incoming server echo still decodes cleanly with non-zero fallback pixels.
+        let legacy = RuntimeFrame.decodeResizePayload(Data([0x00, 80, 0x00, 25]))
+        XCTAssertEqual(legacy, RuntimeViewport(columns: 80, rows: 25, pixelWidth: 640, pixelHeight: 400))
+
+        // Oversized values clamp to omgd's server limits (500x300 cells, 16000x16000 pixels); 0 cells rejected.
+        XCTAssertNil(RuntimeViewport.clamped(columns: 0, rows: 24, pixelWidth: 800, pixelHeight: 600))
+        XCTAssertNil(RuntimeFrame.decodeResizePayload(Data([0, 0, 0, 24, 0, 100, 0, 100])))
+        let clamped = RuntimeViewport.clamped(columns: 999, rows: 999, pixelWidth: 50_000, pixelHeight: 40_000)
+        XCTAssertEqual(
+            clamped,
+            RuntimeViewport(columns: 500, rows: 300, pixelWidth: 16_000, pixelHeight: 16_000)
+        )
+    }
+
+    func testPassiveViewerNeverAutoClaimsOrResizesUntilInputOrExplicitTakeover() throws {
+        var gate = RuntimeWriterGate()
+        let portrait = RuntimeViewport(columns: 39, rows: 44, pixelWidth: 1131, pixelHeight: 2640)
+        let landscape = RuntimeViewport(columns: 84, rows: 19, pixelWidth: 2436, pixelHeight: 1140)
+        let keyboard = RuntimeViewport(columns: 39, rows: 21, pixelWidth: 1131, pixelHeight: 1260)
+
+        // Attach, viewport declaration, rotation, keyboard toggle, background/foreground, and reassertGrid
+        // MUST emit zero claimWriter and zero sendResize effects while passively observing.
+        XCTAssertEqual(gate.didAttach(), [])
+        XCTAssertFalse(gate.isWriter)
+        XCTAssertEqual(gate.setViewport(portrait), [])
+        XCTAssertEqual(gate.setViewport(landscape), [])
+        XCTAssertEqual(gate.setViewport(keyboard), [])
+        XCTAssertEqual(gate.setRendering(false), [])
+        XCTAssertEqual(gate.setRendering(true), [])
+        XCTAssertEqual(gate.reassertGrid(), [])
+
+        // Intentional typing claims writer once and coalesces subsequent keystrokes until 'W' arrives.
+        XCTAssertEqual(
+            try gate.enqueueInput(Data("l".utf8), maximumBytes: 1024).get(),
+            [.claimWriter]
+        )
+        XCTAssertEqual(
+            try gate.enqueueInput(Data("s\n".utf8), maximumBytes: 1024).get(),
+            []
+        )
+        XCTAssertTrue(gate.isClaiming)
+
+        // Server grants 'W': flushes pending input and emits the cached 8-byte pixel viewport resize.
+        XCTAssertEqual(
+            gate.writerChanged(true),
+            [.sendInput(Data("ls\n".utf8)), .sendResize(keyboard)]
+        )
+        XCTAssertTrue(gate.isWriter)
+
+        // Desktop reclaims writer ('B'): iPhone returns to passive observer; viewport changes stop resizing again.
+        XCTAssertEqual(gate.writerChanged(false), [])
+        XCTAssertFalse(gate.isWriter)
+        XCTAssertEqual(gate.setViewport(portrait), [])
+
+        // Explicit Take Over Size claims writer without sending stray input bytes.
+        XCTAssertEqual(gate.requestTakeover(), [.claimWriter])
+        XCTAssertEqual(gate.writerChanged(true), [.sendResize(portrait)])
+    }
+
+    func testPrimaryScreenPanDontResizeEmitsZeroResizesAcrossKeyboardAndIME() throws {
+        var policy = MobileTerminalViewportPolicy()
+        let cell = CGSize(width: 9.5, height: 19.0)
+        let padding = CGSize(width: 8, height: 2)
+        // Unoccluded phone terminal area: 390 x 750pt.
+        let hidden = policy.evaluate(.init(
+            hostSize: CGSize(width: 390, height: 750),
+            containerWidth: 390,
+            keyboardOverlap: 0,
+            cellSize: cell,
+            cellPixelWidth: 29,
+            cellPixelHeight: 57,
+            padding: padding,
+            sharedGrid: (rows: 39, cols: 39),
+            caretMaxY: 720,
+            isAlternateScreen: false,
+            isWriter: true
+        ))
+        let baseViewport = try XCTUnwrap(hidden.declaredViewport)
+        XCTAssertEqual(hidden.verticalPan, 0)
+        XCTAssertEqual(hidden.surfaceScale, 1.0)
+        XCTAssertFalse(hidden.shouldDebounceDeclaration)
+
+        // Software keyboard + accessory bar appears (overlap = 380, visible host = 370):
+        // fullHeight remains 370 + 380 = 750 -> declaredViewport MUST NOT CHANGE!
+        let englishKeyboard = policy.evaluate(.init(
+            hostSize: CGSize(width: 390, height: 370),
+            containerWidth: 390,
+            keyboardOverlap: 380,
+            cellSize: cell,
+            cellPixelWidth: 29,
+            cellPixelHeight: 57,
+            padding: padding,
+            sharedGrid: (rows: 39, cols: 39),
+            caretMaxY: 720,
+            isAlternateScreen: false,
+            isWriter: true
+        ))
+        XCTAssertEqual(englishKeyboard.declaredViewport, baseViewport)
+        XCTAssertFalse(englishKeyboard.shouldDebounceDeclaration)
+        XCTAssertGreaterThan(englishKeyboard.verticalPan, 350, "Bottom prompt must pan above keyboard")
+        XCTAssertEqual(englishKeyboard.surfaceScale, 1.0)
+
+        // Chinese Pinyin +44pt candidate bar appears (overlap = 424, visible host = 326):
+        // fullHeight remains 326 + 424 = 750 -> still ZERO PTY resize, local pan absorbs +44pt!
+        let pinyinCandidateBar = policy.evaluate(.init(
+            hostSize: CGSize(width: 390, height: 326),
+            containerWidth: 390,
+            keyboardOverlap: 424,
+            cellSize: cell,
+            cellPixelWidth: 29,
+            cellPixelHeight: 57,
+            padding: padding,
+            sharedGrid: (rows: 39, cols: 39),
+            caretMaxY: 720,
+            isAlternateScreen: false,
+            isWriter: true
+        ))
+        XCTAssertEqual(pinyinCandidateBar.declaredViewport, baseViewport)
+        XCTAssertFalse(pinyinCandidateBar.shouldDebounceDeclaration)
+        XCTAssertGreaterThan(pinyinCandidateBar.verticalPan, englishKeyboard.verticalPan)
+
+        // Cursor near top of screen (row 1, caretMaxY = 30) stays unpanned even with keyboard up.
+        let topPrompt = policy.evaluate(.init(
+            hostSize: CGSize(width: 390, height: 326),
+            containerWidth: 390,
+            keyboardOverlap: 424,
+            cellSize: cell,
+            cellPixelWidth: 29,
+            cellPixelHeight: 57,
+            padding: padding,
+            sharedGrid: (rows: 39, cols: 39),
+            caretMaxY: 30,
+            isAlternateScreen: false,
+            isWriter: true
+        ))
+        XCTAssertEqual(topPrompt.declaredViewport, baseViewport)
+        XCTAssertEqual(topPrompt.verticalPan, 0)
+    }
+
+    func testAlternateScreenCandidateBarSizeLockNoPostageStampBounceAndNoDisappearResize() throws {
+        var policy = MobileTerminalViewportPolicy()
+        let cell = CGSize(width: 9.5, height: 19.0)
+        let padding = CGSize(width: 8, height: 2)
+
+        // 1. Alt-Screen open without keyboard (390 x 750 -> 39 rows).
+        let fullAlt = policy.evaluate(.init(
+            hostSize: CGSize(width: 390, height: 750),
+            containerWidth: 390,
+            keyboardOverlap: 0,
+            cellSize: cell,
+            cellPixelWidth: 29,
+            cellPixelHeight: 57,
+            padding: padding,
+            sharedGrid: (rows: 39, cols: 39),
+            caretMaxY: 700,
+            isAlternateScreen: true,
+            isWriter: true
+        ))
+        XCTAssertEqual(fullAlt.declaredViewport?.rows, 39)
+        XCTAssertEqual(fullAlt.surfaceScale, 1.0)
+
+        // 2. Software keyboard rises (overlap = 356, visible host = 394) BEFORE server echoes new 'R'
+        // (sharedGrid is still 39x39 ~ 750pt tall):
+        // MUST debounce (>= 180ms) AND keep surfaceScale == 1.0 (NO 0.46x postage-stamp bounce!).
+        let preEcho = policy.evaluate(.init(
+            hostSize: CGSize(width: 390, height: 394),
+            containerWidth: 390,
+            keyboardOverlap: 356,
+            cellSize: cell,
+            cellPixelWidth: 29,
+            cellPixelHeight: 57,
+            padding: padding,
+            sharedGrid: (rows: 39, cols: 39),
+            caretMaxY: 700,
+            isAlternateScreen: true,
+            isWriter: true
+        ))
+        let lockedRows = try XCTUnwrap(preEcho.declaredViewport?.rows)
+        XCTAssertEqual(lockedRows, 20)
+        XCTAssertTrue(preEcho.shouldDebounceDeclaration)
+        XCTAssertGreaterThanOrEqual(MobileTerminalViewportPolicy.keyboardSettleInterval, 0.18)
+        XCTAssertEqual(preEcho.surfaceScale, 1.0, "Active writer must never downscale to 0.46x postage stamp")
+
+        // 3. Server echoes 20-row Alt-Screen grid; user switches ABC -> 简体拼音 and types Chinese:
+        // +44pt Pinyin candidate bar (overlap 356 -> 400, host 394 -> 350, delta = 44pt <= 60pt):
+        // Declared rows MUST remain locked at 20 (ZERO SIGWINCH!), absorbed by local verticalPan!
+        let pinyinShow = policy.evaluate(.init(
+            hostSize: CGSize(width: 390, height: 350),
+            containerWidth: 390,
+            keyboardOverlap: 400,
+            cellSize: cell,
+            cellPixelWidth: 29,
+            cellPixelHeight: 57,
+            padding: padding,
+            sharedGrid: (rows: 20, cols: 39),
+            caretMaxY: 375,
+            isAlternateScreen: true,
+            isWriter: true
+        ))
+        XCTAssertEqual(pinyinShow.declaredViewport?.rows, lockedRows)
+        XCTAssertFalse(pinyinShow.shouldDebounceDeclaration)
+        XCTAssertEqual(pinyinShow.surfaceScale, 1.0)
+        XCTAssertGreaterThan(pinyinShow.verticalPan, 0)
+
+        // Candidate committed -> candidate bar hides (overlap 400 -> 356): still locked at 20 rows!
+        let pinyinCommit = policy.evaluate(.init(
+            hostSize: CGSize(width: 390, height: 394),
+            containerWidth: 390,
+            keyboardOverlap: 356,
+            cellSize: cell,
+            cellPixelWidth: 29,
+            cellPixelHeight: 57,
+            padding: padding,
+            sharedGrid: (rows: 20, cols: 39),
+            caretMaxY: 375,
+            isAlternateScreen: true,
+            isWriter: true
+        ))
+        XCTAssertEqual(pinyinCommit.declaredViewport?.rows, lockedRows)
+        XCTAssertFalse(pinyinCommit.shouldDebounceDeclaration)
+
+        // 4. Passive observer (`isWriter == false`) viewing a wide 120x40 Desktop TUI letterboxes cleanly (< 1.0)
+        // against full unoccluded height, with zero scale bounce when keyboard toggles.
+        let passiveKeyboardDown = policy.evaluate(.init(
+            hostSize: CGSize(width: 390, height: 750),
+            containerWidth: 390,
+            keyboardOverlap: 0,
+            cellSize: cell,
+            cellPixelWidth: 29,
+            cellPixelHeight: 57,
+            padding: padding,
+            sharedGrid: (rows: 40, cols: 120),
+            caretMaxY: 400,
+            isAlternateScreen: true,
+            isWriter: false
+        ))
+        let passiveKeyboardUp = policy.evaluate(.init(
+            hostSize: CGSize(width: 390, height: 394),
+            containerWidth: 390,
+            keyboardOverlap: 356,
+            cellSize: cell,
+            cellPixelWidth: 29,
+            cellPixelHeight: 57,
+            padding: padding,
+            sharedGrid: (rows: 40, cols: 120),
+            caretMaxY: 400,
+            isAlternateScreen: true,
+            isWriter: false
+        ))
+        XCTAssertLessThan(passiveKeyboardDown.surfaceScale, 1.0)
+        XCTAssertEqual(passiveKeyboardDown.surfaceScale, passiveKeyboardUp.surfaceScale, accuracy: 0.0001)
+
+        // 5. Navigating back (`viewWillDisappear` / `goBack` -> `canDeclareViewport == false`):
+        // Keyboard dismissal MUST emit nil declaredViewport (zero parting Resize!).
+        let disappearing = policy.evaluate(.init(
+            hostSize: CGSize(width: 390, height: 750),
+            containerWidth: 390,
+            keyboardOverlap: 0,
+            cellSize: cell,
+            cellPixelWidth: 29,
+            cellPixelHeight: 57,
+            padding: padding,
+            sharedGrid: (rows: 20, cols: 39),
+            caretMaxY: 300,
+            isAlternateScreen: true,
+            isWriter: true,
+            canDeclareViewport: false
+        ))
+        XCTAssertNil(disappearing.declaredViewport)
+    }
 }

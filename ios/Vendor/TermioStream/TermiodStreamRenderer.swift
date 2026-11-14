@@ -108,6 +108,10 @@ public final class TermiodStreamRenderer {
     public var background: GhosttyColorRgb { builder.background }
     /// The terminal's scrollbar state as of the last frame prepared.
     public private(set) var scrollbar: TermiodStreamTerminal.Scrollbar?
+    /// Diagnostics counters tracking full-screen invalidations vs incremental row/preedit builds.
+    public var fullRebuildCount: UInt64 { builder.fullRebuildCount }
+    public var rowRebuildCount: UInt64 { builder.rowRebuildCount }
+    public var preeditBuildCount: UInt64 { builder.preeditBuildCount }
 
     /// Draws one frame into `layer` if the terminal changed since the last one,
     /// or `force` asks for it regardless (a resize, focus, or new appearance).
@@ -132,6 +136,7 @@ public final class TermiodStreamRenderer {
         }
         guard encode(into: buffer, texture: drawable.texture) else {
             inFlight.signal()
+            builder.invalidate()
             return false
         }
         buffer.present(drawable)
@@ -154,9 +159,10 @@ public final class TermiodStreamRenderer {
     /// The whole screen drawn into an image of the given pixel size, for
     /// looking at a frame without a window — the renderer's own tests.
     public func image(
-        of terminal: TermiodStreamTerminal, width: Int, height: Int, focused: Bool = true, preedit: String? = nil
+        of terminal: TermiodStreamTerminal, width: Int, height: Int, focused: Bool = true,
+        force: Bool = true, preedit: String? = nil
     ) throws -> CGImage {
-        _ = try prepare(terminal, focused: focused, force: true, preedit: preedit, link: nil)
+        _ = try prepare(terminal, focused: focused, force: force, preedit: preedit, link: nil)
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false
         )
@@ -1098,6 +1104,9 @@ public final class TermiodStreamFrameBuilder {
     /// Panes share an atlas, so another pane can empty it between two builds.
     private weak var builtAtlas: TermiodGlyphAtlas?
     private var builtGeneration = 0
+    public private(set) var fullRebuildCount: UInt64 = 0
+    public private(set) var rowRebuildCount: UInt64 = 0
+    public private(set) var preeditBuildCount: UInt64 = 0
 
     public init() throws {
         guard ghostty_render_state_row_iterator_new(nil, &rowIterator) == GHOSTTY_SUCCESS,
@@ -1229,6 +1238,7 @@ public final class TermiodStreamFrameBuilder {
         _ state: GhosttyRenderState, full: Bool, also extra: Set<Int> = [], colors: GhosttyRenderStateColors,
         atlas: TermiodGlyphAtlas
     ) {
+        if full { fullRebuildCount &+= 1 }
         _ = ghostty_render_state_get(state, GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &rowIterator)
         var y = 0
         while ghostty_render_state_row_iterator_next(rowIterator) {
@@ -1335,6 +1345,7 @@ public final class TermiodStreamFrameBuilder {
     /// underlined, over whatever those cells held. Text wider than the row
     /// shifts left, and keeps its end when it cannot fit at all.
     private func buildPreedit(_ state: PreeditState, atlas: TermiodGlyphAtlas) {
+        preeditBuildCount &+= 1
         preeditRectangles = []
         preeditGlyphs = []
         preeditCells = nil
@@ -1376,6 +1387,7 @@ public final class TermiodStreamFrameBuilder {
     }
 
     private func rebuildRow(_ y: Int, colors: GhosttyRenderStateColors, atlas: TermiodGlyphAtlas) {
+        rowRebuildCount &+= 1
         var rectangles: [TermiodStreamRectangle] = []
         var glyphs: [TermiodStreamGlyph] = []
         var ligatureCells: [LigatureCell] = []
@@ -1799,5 +1811,107 @@ public final class TermiodStreamFrameBuilder {
             width: UInt16(clamping: width), height: UInt16(clamping: height),
             r: cell.r, g: cell.g, b: cell.b, a: cell.a
         )
+    }
+}
+
+/// Incremental IME composition state shared between `StreamTerminalView` and
+/// `OMGTerminalTests`.
+///
+/// Key contracts:
+/// 1. `setMarkedText`, `deleteBackwardInMarkedText`, and `clearMarkedText` set ONLY
+///    `needsPreeditDraw = true` — never invalidating cached terminal rows.
+/// 2. `unmarkTextForCommit()` **preserves and returns** non-empty `markedText` so iOS
+///    Chinese Pinyin candidate selection (`setMarkedText("你好")` -> `unmarkText()`)
+///    commits `"你好"` to the PTY.
+/// 3. `discardMarkedTextBeforeResign()` clears `markedText` explicitly **before**
+///    passive focus loss (`super.resignFirstResponder()`) so UIKit's responder
+///    teardown never leaks uncommitted Pinyin letters into the PTY.
+public struct TermiodStreamIMEState: Equatable, Sendable {
+    public private(set) var markedText: String = ""
+    public private(set) var markedSelection = NSRange(location: 0, length: 0)
+    public private(set) var needsPreeditDraw = false
+
+    public init() {}
+
+    public var hasMarkedText: Bool { !markedText.isEmpty }
+    public var markedUTF16Length: Int { (markedText as NSString).length }
+    public var preeditOverlayText: String? { markedText.isEmpty ? nil : markedText }
+
+    public static func clampRange(_ range: NSRange, utf16Length length: Int) -> NSRange {
+        let safeLength = max(0, length)
+        let location = min(max(range.location, 0), safeLength)
+        let end = min(max(range.location + max(0, range.length), location), safeLength)
+        return NSRange(location: location, length: end - location)
+    }
+
+    public mutating func updateSelectedRange(_ next: NSRange) -> Bool {
+        let clamped = Self.clampRange(next, utf16Length: markedUTF16Length)
+        guard markedSelection != clamped else { return false }
+        markedSelection = clamped
+        return true
+    }
+
+    public mutating func setMarkedText(_ text: String?, selectedRange: NSRange) {
+        let normalized = text ?? ""
+        if markedText != normalized {
+            needsPreeditDraw = true
+        }
+        markedText = normalized
+        markedSelection = Self.clampRange(selectedRange, utf16Length: (normalized as NSString).length)
+    }
+
+    /// Deletes from active marked composition without sending backspace to the PTY or
+    /// forcing a full screen row rebuild. Returns `false` when no composition is active.
+    public mutating func deleteBackwardInMarkedText() -> Bool {
+        guard !markedText.isEmpty else { return false }
+        let mutable = NSMutableString(string: markedText)
+        let clamped = Self.clampRange(markedSelection, utf16Length: mutable.length)
+        if clamped.length > 0 {
+            mutable.deleteCharacters(in: clamped)
+            markedSelection = NSRange(location: clamped.location, length: 0)
+        } else if clamped.location > 0 {
+            let deletion = mutable.rangeOfComposedCharacterSequence(at: clamped.location - 1)
+            mutable.deleteCharacters(in: deletion)
+            markedSelection = NSRange(location: deletion.location, length: 0)
+        }
+        let updated = mutable as String
+        if markedText != updated {
+            needsPreeditDraw = true
+        }
+        markedText = updated
+        if markedText.isEmpty {
+            markedSelection = NSRange(location: 0, length: 0)
+        }
+        return true
+    }
+
+    public mutating func clearMarkedText() {
+        if !markedText.isEmpty {
+            needsPreeditDraw = true
+        }
+        markedText = ""
+        markedSelection = NSRange(location: 0, length: 0)
+    }
+
+    /// UIKit `unmarkText()` contract: clears marked state and returns the committed
+    /// candidate string (if non-empty) so `StreamTerminalView` forwards it via `insertText`.
+    public mutating func unmarkTextForCommit() -> String? {
+        let committed = markedText
+        clearMarkedText()
+        return committed.isEmpty ? nil : committed
+    }
+
+    /// Invoked BEFORE `super.resignFirstResponder()` on passive focus loss so any
+    /// subsequent `unmarkText()` callback during responder teardown sees `""` and
+    /// emits zero bytes to the PTY.
+    @discardableResult
+    public mutating func discardMarkedTextBeforeResign() -> Bool {
+        guard !markedText.isEmpty else { return false }
+        clearMarkedText()
+        return true
+    }
+
+    public mutating func consumePreeditDraw() {
+        needsPreeditDraw = false
     }
 }

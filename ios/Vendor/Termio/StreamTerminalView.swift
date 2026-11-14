@@ -36,9 +36,8 @@ final class StreamTerminalView: UIView, UITextInput {
     fileprivate var needsFullDraw = true
     private var lastViewport: TerminalGrid?
     private var scrollRemainder: CGFloat = 0
-    /// The text an input method is composing, and its selection within it.
-    fileprivate var markedText = ""
-    fileprivate var markedSelection = NSRange(location: 0, length: 0)
+    /// Incremental IME composition state (draws preedit overlay without invalidating cached rows).
+    fileprivate var imeState = TermiodStreamIMEState()
     weak var inputDelegate: UITextInputDelegate?
     /// Hardware keys whose press the program saw, so each gets its release.
     private var heldKeys: [UIKeyboardHIDUsage: Termiod.InputEvent.Key] = [:]
@@ -81,6 +80,9 @@ final class StreamTerminalView: UIView, UITextInput {
     /// Metal or the shaders could not be set up, so this view can draw nothing.
     var hasRenderer: Bool { renderer != nil }
     var cellSize: CGSize? { renderer?.cellSize }
+    var cellPixelSize: (width: Int, height: Int)? {
+        renderer.map { ($0.atlas.metrics.width, $0.atlas.metrics.height) }
+    }
     var appearance: TermiodStreamRenderer.Appearance? { renderer?.appearance }
 
     /// Where the cursor's cell is, in this view's coordinates: what the
@@ -148,11 +150,17 @@ final class StreamTerminalView: UIView, UITextInput {
         let identity = ObjectIdentifier(terminal)
         let replaced = identity != drawnTerminal
         drawnTerminal = identity
+        let force = needsFullDraw || replaced
         do {
-            _ = try renderer.draw(
-                terminal, into: metalLayer, focused: hasKeyboard, force: needsFullDraw || replaced,
-                preedit: markedText.isEmpty ? nil : markedText)
-            needsFullDraw = false
+            let presented = try renderer.draw(
+                terminal, into: metalLayer, focused: hasKeyboard, force: force,
+                preedit: imeState.preeditOverlayText)
+            if presented || !force {
+                needsFullDraw = false
+            }
+            if presented || !imeState.needsPreeditDraw {
+                imeState.consumePreeditDraw()
+            }
         } catch {
             Log.device.error("stream frame failed: \(String(describing: error), privacy: .public)")
         }
@@ -219,12 +227,21 @@ final class StreamTerminalView: UIView, UITextInput {
     }
 
     override func resignFirstResponder() -> Bool {
+        guard canResignFirstResponder else { return false }
+        // Clear uncommitted IME composition BEFORE super.resignFirstResponder() so UIKit
+        // responder teardown does not invoke unmarkText() with raw Pinyin letters and leak
+        // them into the PTY, while keeping unmarkText()'s candidate-commit path intact.
+        if imeState.hasMarkedText {
+            inputDelegate?.textWillChange(self)
+            inputDelegate?.selectionWillChange(self)
+            imeState.discardMarkedTextBeforeResign()
+            inputDelegate?.selectionDidChange(self)
+            inputDelegate?.textDidChange(self)
+        }
         let resigned = super.resignFirstResponder()
         if resigned {
             hasKeyboard = false
             releaseHeldKeys()
-            // Keyboard gone, composition gone: it must not stay drawn.
-            if !markedText.isEmpty { clearMarkedText() }
         }
         return resigned
     }
@@ -245,7 +262,7 @@ final class StreamTerminalView: UIView, UITextInput {
     /// (a composed character, an emoji) is text, as the Mac sends text an
     /// input method commits outside a keystroke.
     func insertText(_ text: String) {
-        let hadMarkedText = !markedText.isEmpty
+        let hadMarkedText = imeState.hasMarkedText
         if hadMarkedText {
             inputDelegate?.textWillChange(self)
             inputDelegate?.selectionWillChange(self)
@@ -274,25 +291,11 @@ final class StreamTerminalView: UIView, UITextInput {
 
     func deleteBackward() {
         // An input method deleting from its own composition: the program has
-        // not seen that text, so nothing is sent.
-        if !markedText.isEmpty {
+        // not seen that text, so nothing is sent and cached rows stay intact.
+        if imeState.hasMarkedText {
             inputDelegate?.textWillChange(self)
             inputDelegate?.selectionWillChange(self)
-            let mutable = NSMutableString(string: markedText)
-            let clamped = clampedSelectedRange(markedSelection, length: mutable.length)
-            if clamped.length > 0 {
-                mutable.deleteCharacters(in: clamped)
-                markedSelection = NSRange(location: clamped.location, length: 0)
-            } else if clamped.location > 0 {
-                let deletion = NSRange(location: clamped.location - 1, length: 1)
-                mutable.deleteCharacters(in: deletion)
-                markedSelection = NSRange(location: deletion.location, length: 0)
-            }
-            markedText = mutable as String
-            if markedText.isEmpty {
-                markedSelection = NSRange(location: 0, length: 0)
-            }
-            needsFullDraw = true
+            _ = imeState.deleteBackwardInMarkedText()
             inputDelegate?.selectionDidChange(self)
             inputDelegate?.textDidChange(self)
             return
@@ -513,34 +516,28 @@ final class StreamTextRange: UITextRange {
 }
 
 extension StreamTerminalView {
-    private var markedLength: Int { (markedText as NSString).length }
+    private var markedLength: Int { imeState.markedUTF16Length }
 
     var textInputView: UIView { self }
 
-    fileprivate func clampedSelectedRange(_ range: NSRange, length: Int) -> NSRange {
-        let location = min(max(range.location, 0), length)
-        let end = min(max(range.location + range.length, location), length)
-        return NSRange(location: location, length: end - location)
-    }
-
     func clearMarkedText() {
-        markedText = ""
-        markedSelection = NSRange(location: 0, length: 0)
-        needsFullDraw = true
+        imeState.clearMarkedText()
     }
 
     var markedTextRange: UITextRange? {
-        markedText.isEmpty ? nil : StreamTextRange(NSRange(location: 0, length: markedLength))
+        imeState.hasMarkedText ? StreamTextRange(NSRange(location: 0, length: markedLength)) : nil
     }
 
     var selectedTextRange: UITextRange? {
-        get { StreamTextRange(clampedSelectedRange(markedSelection, length: markedLength)) }
+        get {
+            StreamTextRange(TermiodStreamIMEState.clampRange(imeState.markedSelection, utf16Length: markedLength))
+        }
         set {
             let next = (newValue as? StreamTextRange)?.range ?? NSRange(location: 0, length: 0)
-            let clamped = clampedSelectedRange(next, length: markedLength)
-            guard markedSelection != clamped else { return }
+            let clamped = TermiodStreamIMEState.clampRange(next, utf16Length: markedLength)
+            guard imeState.markedSelection != clamped else { return }
             inputDelegate?.selectionWillChange(self)
-            markedSelection = clamped
+            _ = imeState.updateSelectedRange(clamped)
             inputDelegate?.selectionDidChange(self)
         }
     }
@@ -553,22 +550,18 @@ extension StreamTerminalView {
     func setMarkedText(_ text: String?, selectedRange: NSRange) {
         inputDelegate?.textWillChange(self)
         inputDelegate?.selectionWillChange(self)
-        let normalized = text ?? ""
-        markedText = normalized
-        markedSelection = clampedSelectedRange(selectedRange, length: (normalized as NSString).length)
-        needsFullDraw = true
+        imeState.setMarkedText(text, selectedRange: selectedRange)
         inputDelegate?.selectionDidChange(self)
         inputDelegate?.textDidChange(self)
     }
 
     func unmarkText() {
-        let committed = markedText
         inputDelegate?.textWillChange(self)
         inputDelegate?.selectionWillChange(self)
-        clearMarkedText()
+        let committed = imeState.unmarkTextForCommit()
         inputDelegate?.selectionDidChange(self)
         inputDelegate?.textDidChange(self)
-        if !committed.isEmpty { insertText(committed) }
+        if let committed, !committed.isEmpty { insertText(committed) }
     }
 
     var beginningOfDocument: UITextPosition { StreamTextPosition(0) }
@@ -577,7 +570,7 @@ extension StreamTerminalView {
     func text(in range: UITextRange) -> String? {
         guard let range = range as? StreamTextRange else { return nil }
         let bounded = NSIntersectionRange(range.range, NSRange(location: 0, length: markedLength))
-        return (markedText as NSString).substring(with: bounded)
+        return (imeState.markedText as NSString).substring(with: bounded)
     }
 
     func replace(_ range: UITextRange, withText text: String) {

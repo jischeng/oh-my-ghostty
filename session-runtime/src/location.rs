@@ -112,6 +112,40 @@ pub fn process_argv(pid: i32) -> Option<Vec<String>> {
     }
 }
 
+pub fn process_path(pid: i32) -> Option<PathBuf> {
+    if pid <= 1 {
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_link(format!("/proc/{pid}/exe"))
+            .ok()
+            .or_else(|| {
+                std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                    .ok()
+                    .map(|s| PathBuf::from(s.trim()))
+            })
+    }
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" {
+            fn omg_process_path(pid: i32, buf: *mut u8, len: usize) -> i32;
+        }
+        let mut buf = vec![0u8; 4096];
+        let count = unsafe { omg_process_path(pid, buf.as_mut_ptr(), buf.len()) };
+        if count <= 0 {
+            return None;
+        }
+        buf.truncate(count as usize);
+        use std::os::unix::ffi::OsStringExt;
+        Some(std::ffi::OsString::from_vec(buf).into())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
 fn extract_cd_prefix(command: &str) -> Option<String> {
     let trimmed = command.trim();
     let rest = trimmed.strip_prefix("cd ")?;

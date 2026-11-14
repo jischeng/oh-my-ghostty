@@ -275,10 +275,8 @@ fn next_activity(socket: &mut UnixStream, label: &str) -> activity::Snapshot {
 
 #[test]
 fn child_fg_pgid_report_env_injection_mouse_safe_ack_and_live_fences() {
-    let dir = std::path::PathBuf::from("/tmp").join(format!(
-        "omg-rta-{}",
-        &record::nonce().unwrap()[..8]
-    ));
+    let dir = std::path::PathBuf::from("/tmp")
+        .join(format!("omg-rta-{}", &record::nonce().unwrap()[..8]));
     fs::create_dir(&dir).unwrap();
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
     let sock_path = dir.join("s.sock");
@@ -371,13 +369,24 @@ while True:
 "#;
 
     let child = Command::new(bin)
-        .args(["serve", sock_path.to_str().unwrap(), "--", "python3", "-u", "-c", script])
+        .args([
+            "serve",
+            sock_path.to_str().unwrap(),
+            "--",
+            "python3",
+            "-u",
+            "-c",
+            script,
+        ])
         .env("ENV_OUT", &env_out)
         .env("OMG_BIN", bin)
         .env("WORK_DIR", &dir)
         .spawn()
         .unwrap();
-    let daemon = Daemon { child, dir: dir.clone() };
+    let daemon = Daemon {
+        child,
+        dir: dir.clone(),
+    };
 
     let (mut client, info, _) = connect_session(&sock_path);
     assert_eq!(info["activity_acknowledge"], true);
@@ -390,8 +399,7 @@ while True:
         assert!(start.elapsed() < Duration::from_secs(3));
         std::thread::sleep(Duration::from_millis(10));
     }
-    let injected: serde_json::Value =
-        serde_json::from_slice(&fs::read(&env_out).unwrap()).unwrap();
+    let injected: serde_json::Value = serde_json::from_slice(&fs::read(&env_out).unwrap()).unwrap();
     assert_eq!(injected["OMG_SESSION_ID"], info["session_id"]);
     assert_eq!(injected["AGY_CLI_OSC7501"], "on");
     assert!(injected["OMG_AGENT_SOCK"]
@@ -515,11 +523,18 @@ while True:
     let restore_bytes = snap_crashed.inline_bytes_with_mode("restore");
     let live_bytes = snap_crashed.inline_bytes_with_mode("live");
     assert!(restore_bytes
-        .windows(b"start=omg-agent-sync;mode=restore\x07\x1b]3008;start=omg-agent-sync;begin\x07".len())
-        .any(|w| w == b"start=omg-agent-sync;mode=restore\x07\x1b]3008;start=omg-agent-sync;begin\x07"));
+        .windows(
+            b"start=omg-agent-sync;mode=restore\x07\x1b]3008;start=omg-agent-sync;begin\x07".len()
+        )
+        .any(|w| w
+            == b"start=omg-agent-sync;mode=restore\x07\x1b]3008;start=omg-agent-sync;begin\x07"));
     assert!(live_bytes
-        .windows(b"start=omg-agent-sync;mode=live\x07\x1b]3008;start=omg-agent-sync;begin\x07".len())
-        .any(|w| w == b"start=omg-agent-sync;mode=live\x07\x1b]3008;start=omg-agent-sync;begin\x07"));
+        .windows(
+            b"start=omg-agent-sync;mode=live\x07\x1b]3008;start=omg-agent-sync;begin\x07".len()
+        )
+        .any(
+            |w| w == b"start=omg-agent-sync;mode=live\x07\x1b]3008;start=omg-agent-sync;begin\x07"
+        ));
 
     let mut outer_vt = Vt::new(80, 24).unwrap();
     outer_vt.write(&restore_bytes);
@@ -539,10 +554,8 @@ fn exec_leader_and_detached_daemon_hooks_avoid_false_error_and_sync_restore_broa
             let _ = fs::remove_dir_all(&self.0);
         }
     }
-    let dir = std::path::PathBuf::from("/tmp").join(format!(
-        "omg-rt2-{}",
-        &record::nonce().unwrap()[..8]
-    ));
+    let dir = std::path::PathBuf::from("/tmp")
+        .join(format!("omg-rt2-{}", &record::nonce().unwrap()[..8]));
     fs::create_dir(&dir).unwrap();
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
     let _guard = DirGuard(dir.clone());
@@ -716,10 +729,8 @@ fn user_keystroke_resets_agent_done_reaper_without_wiping_done_badge() {
     }
     let bin = env!("CARGO_BIN_EXE_omgd");
     let run_case = |input_frame: &[u8]| -> Option<lifecycle::EndReason> {
-        let dir = std::path::PathBuf::from("/tmp").join(format!(
-            "omg-rt3-{}",
-            &record::nonce().unwrap()[..8]
-        ));
+        let dir = std::path::PathBuf::from("/tmp")
+            .join(format!("omg-rt3-{}", &record::nonce().unwrap()[..8]));
         fs::create_dir(&dir).unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
         let _guard = DirGuard(dir.clone());
@@ -854,7 +865,9 @@ fn eighteen_plus_agent_recovery_descriptors_validate_and_format_arguments() {
         assert_eq!(r.arguments().unwrap(), expected);
     }
     // Agents without CLI session-id flags still validate in the unified registry without failing Resume::validate.
-    for non_resumable in ["cursor", "copilot", "droid", "amp", "cline", "kimi", "crush", "aider"] {
+    for non_resumable in [
+        "cursor", "copilot", "droid", "amp", "cline", "kimi", "crush", "aider",
+    ] {
         let r = record::Resume {
             agent: non_resumable.into(),
             conversation_id: "conv-x".into(),
@@ -863,4 +876,239 @@ fn eighteen_plus_agent_recovery_descriptors_validate_and_format_arguments() {
         r.validate().unwrap();
         assert!(r.arguments().is_err());
     }
+}
+
+#[test]
+fn login_wrapper_shell_child_osc133a_fence_and_agent_child_crash_detection() {
+    struct DirGuard(std::path::PathBuf);
+    impl Drop for DirGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let dir = std::path::PathBuf::from("/tmp")
+        .join(format!("omg-login-{}", &record::nonce().unwrap()[..8]));
+    fs::create_dir(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let _guard = DirGuard(dir.clone());
+
+    let sock_path = dir.join("s.sock");
+    let rec_path = dir.join("rec.json");
+    let shell_pid_file = dir.join("shell.pid");
+    let agent_pid_file = dir.join("agent.pid");
+    let login_script = dir.join("login_sim.py");
+    let agent_script = dir.join("agent_job.py");
+    let bin = env!("CARGO_BIN_EXE_omgd");
+
+    fs::write(
+        &login_script,
+        format!(
+            r#"import os, signal, sys
+
+signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+signal.signal(signal.SIGTTIN, signal.SIG_IGN)
+
+shell_bin = "/bin/zsh" if os.path.exists("/bin/zsh") else ("/bin/bash" if os.path.exists("/bin/bash") else "/bin/sh")
+if shell_bin.endswith("zsh"):
+    shell_argv = ["-" + shell_bin, "-f", "-i"]
+elif shell_bin.endswith("bash"):
+    shell_argv = ["-" + shell_bin, "--norc", "--noprofile", "-i"]
+else:
+    shell_argv = ["-" + shell_bin, "-m", "-i"]
+
+pid = os.fork()
+if pid == 0:
+    os.setpgid(0, 0)
+    try:
+        os.tcsetpgrp(0, os.getpid())
+    except OSError:
+        pass
+    signal.signal(signal.SIGTTOU, signal.SIG_DFL)
+    signal.signal(signal.SIGTTIN, signal.SIG_DFL)
+    env = dict(os.environ)
+    env["PS1"] = "PROMPT> "
+    os.execve(shell_bin, shell_argv, env)
+
+try:
+    os.setpgid(pid, pid)
+except OSError:
+    pass
+with open({shell_pid:?}, "w") as f:
+    f.write(str(pid))
+_, status = os.waitpid(pid, 0)
+sys.exit(0)
+"#,
+            shell_pid = shell_pid_file.to_str().unwrap(),
+        ),
+    )
+    .unwrap();
+
+    fs::write(
+        &agent_script,
+        format!(
+            r#"import os, subprocess, time
+with open({agent_pid:?}, "w") as f:
+    f.write(f"{{os.getpid()}} {{os.getpgrp()}}")
+subprocess.run(
+    [{bin:?}, "report", "claude", "working", "conv-login", "/tmp", "--message", "Running"],
+    check=True,
+)
+while True:
+    time.sleep(0.2)
+"#,
+            agent_pid = agent_pid_file.to_str().unwrap(),
+            bin = bin,
+        ),
+    )
+    .unwrap();
+
+    let mut session_rec = record::Record::new(
+        "22222222-3333-4444-5555-666666666666",
+        lifecycle::Policy::default(),
+    )
+    .unwrap();
+    session_rec.save(&rec_path).unwrap();
+
+    let argv = vec![
+        "python3".to_owned(),
+        "-c".to_owned(),
+        format!(
+            "import os, sys; os.execvp(sys.executable, ['login', '-u', {:?}])",
+            login_script.to_str().unwrap()
+        ),
+    ];
+    let sock_clone = sock_path.clone();
+    let rec_clone = rec_path.clone();
+    let daemon = std::thread::spawn(move || {
+        server::serve_managed(
+            &sock_clone,
+            argv,
+            Some(server::ManagedSession {
+                path: rec_clone,
+                record: session_rec,
+                containment_root: None,
+                initial_cwd: None,
+                local_launch: None,
+                presentation: None,
+            }),
+        )
+    });
+
+    for _ in 0..100 {
+        if sock_path.exists() && shell_pid_file.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let shell_pgid: i32 = fs::read_to_string(&shell_pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let leader_pid = record::Record::load(&rec_path).unwrap().pid.unwrap() as i32;
+    assert_ne!(shell_pgid, leader_pid);
+
+    let (mut client, _, _) = connect_session(&sock_path);
+    Frame::new(CLAIM, 0, &[]).send(&mut client).unwrap();
+    until(&mut client, CLAIM);
+    // Let the interactive child shell settle as foreground TPGID.
+    std::thread::sleep(Duration::from_millis(150));
+
+    // (a.1) Stuck `working` emitted in the login shell's own PGID resets to `idle` on `OSC 133;A`.
+    Frame::new(
+        INPUT,
+        0,
+        b"printf '\\033]7501;state=working:app=claude:id=osc133-turn\\007'\n",
+    )
+    .send(&mut client)
+    .unwrap();
+    loop {
+        let snap = next_activity(&mut client, "login_osc133_working");
+        if snap.presentation().is_some_and(|p| p.state == "working") {
+            break;
+        }
+    }
+    Frame::new(INPUT, 0, b"printf '\\033]133;A;cl=line\\007'\n")
+        .send(&mut client)
+        .unwrap();
+    loop {
+        let snap = next_activity(&mut client, "login_osc133_reset_working");
+        if snap.presentation().is_none_or(|p| p.state == "idle") {
+            break;
+        }
+    }
+
+    // (a.2) Stuck `needsAttention` at the login shell PGID also resets to `idle` on `OSC 133;A`.
+    Frame::new(
+        INPUT,
+        0,
+        b"printf '\\033]7501;state=blocked:app=claude:id=osc133-perm:kind=permission\\007'\n",
+    )
+    .send(&mut client)
+    .unwrap();
+    loop {
+        let snap = next_activity(&mut client, "login_osc133_blocked");
+        if snap
+            .presentation()
+            .is_some_and(|p| p.state == "needsAttention")
+        {
+            break;
+        }
+    }
+    Frame::new(INPUT, 0, b"printf '\\033]133;A;cl=line\\007'\n")
+        .send(&mut client)
+        .unwrap();
+    loop {
+        let snap = next_activity(&mut client, "login_osc133_reset_blocked");
+        if snap.presentation().is_none_or(|p| p.state == "idle") {
+            break;
+        }
+    }
+
+    // (b) Agent child job spawned by the login shell binds `r.owner` to the agent child PGID
+    // (neither `login` nor the intermediate shell), so `SIGKILL` of the agent child marks `error`.
+    let launch_cmd = format!("python3 -u {}\n", agent_script.display());
+    Frame::new(INPUT, 0, launch_cmd.as_bytes())
+        .send(&mut client)
+        .unwrap();
+    let working_snap = loop {
+        let snap = next_activity(&mut client, "login_agent_child_working");
+        if snap
+            .presentation()
+            .is_some_and(|p| p.agent == "claude" && p.state == "working")
+        {
+            break snap;
+        }
+    };
+    let ids_raw = fs::read_to_string(&agent_pid_file).unwrap();
+    let mut parts = ids_raw.split_whitespace();
+    let _agent_pid: i32 = parts.next().unwrap().parse().unwrap();
+    let agent_pgid: i32 = parts.next().unwrap().parse().unwrap();
+    assert_ne!(agent_pgid, leader_pid);
+    assert_ne!(agent_pgid, shell_pgid);
+    let expected_record_id = format!("omg-agent-claude-{agent_pgid}");
+    assert!(
+        working_snap
+            .records
+            .iter()
+            .any(|r| r.id == expected_record_id),
+        "expected owner bound to agent child PGID ({expected_record_id}), got {:?}",
+        working_snap.records
+    );
+
+    unsafe {
+        libc::kill(-agent_pgid, libc::SIGKILL);
+    }
+    loop {
+        let snap = next_activity(&mut client, "login_agent_child_sigkill_error");
+        if snap
+            .presentation()
+            .is_some_and(|p| p.agent == "claude" && p.state == "error")
+        {
+            break;
+        }
+    }
+
+    Frame::new(INPUT, 0, b"exit\n").send(&mut client).unwrap();
+    let _ = daemon.join();
 }

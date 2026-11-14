@@ -95,10 +95,9 @@ impl Snapshot {
             "live" => "live",
             _ => "restore",
         };
-        let mut bytes = format!(
-            "\x1b]3008;start={SYNC};mode={tag}\x07\x1b]3008;start={SYNC};begin\x07"
-        )
-        .into_bytes();
+        let mut bytes =
+            format!("\x1b]3008;start={SYNC};mode={tag}\x07\x1b]3008;start={SYNC};begin\x07")
+                .into_bytes();
         for signal in &self.records {
             bytes.extend_from_slice(
                 format!("\x1b]3008;start={};{}\x07", signal.id, signal.metadata).as_bytes(),
@@ -107,10 +106,8 @@ impl Snapshot {
         bytes.extend_from_slice(format!("\x1b]3008;start={SYNC};end\x07").as_bytes());
         if let Some(pending) = &self.pending {
             bytes.extend_from_slice(
-                format!(
-                    "\x1b]3008;start={SYNC};mode={tag}\x07\x1b]3008;start={SYNC};begin\x07"
-                )
-                .as_bytes(),
+                format!("\x1b]3008;start={SYNC};mode={tag}\x07\x1b]3008;start={SYNC};begin\x07")
+                    .as_bytes(),
             );
             for signal in pending {
                 bytes.extend_from_slice(
@@ -210,12 +207,8 @@ impl Snapshot {
             }
         }
         if let Some(t3) = &best_t3 {
-            let shadowed_by_higher_tier = best_t1
-                .as_ref()
-                .is_some_and(|t1| t1.agent == t3.agent)
-                || best_t2
-                    .as_ref()
-                    .is_some_and(|t2| t2.agent == t3.agent);
+            let shadowed_by_higher_tier = best_t1.as_ref().is_some_and(|t1| t1.agent == t3.agent)
+                || best_t2.as_ref().is_some_and(|t2| t2.agent == t3.agent);
             if !shadowed_by_higher_tier && t3.state != "idle" {
                 return Some(t3.clone());
             }
@@ -359,7 +352,11 @@ fn default_message(state: &str, attention: Option<&str>) -> &'static str {
     }
 }
 
-fn rewrite_signal_state(signal: &mut Signal, target_state: &str, new_message: Option<&str>) -> bool {
+fn rewrite_signal_state(
+    signal: &mut Signal,
+    target_state: &str,
+    new_message: Option<&str>,
+) -> bool {
     if signal.id == "omg-program-status" {
         if field(&signal.metadata, ':', "state") == Some(target_state) && new_message.is_none() {
             return false;
@@ -631,6 +628,8 @@ pub struct State {
     pub local: bool,
     pub foreground: Option<i32>,
     pub session_leader: Option<i32>,
+    leader_login: Option<(i32, bool)>,
+    shell_pgid: Option<i32>,
 }
 
 pub fn encode_percent(value: &str) -> String {
@@ -767,9 +766,123 @@ pub fn is_descendant_of(pid: i32, ancestor: i32) -> bool {
     false
 }
 
+fn exe_basename(arg0: &str) -> &str {
+    arg0.rsplit('/')
+        .next()
+        .unwrap_or(arg0)
+        .trim_start_matches('-')
+}
+
+fn is_shell_name(name: &str) -> bool {
+    matches!(
+        name,
+        "sh" | "bash"
+            | "zsh"
+            | "fish"
+            | "dash"
+            | "ksh"
+            | "mksh"
+            | "oksh"
+            | "tcsh"
+            | "csh"
+            | "nu"
+            | "nushell"
+            | "elvish"
+            | "xonsh"
+            | "pwsh"
+    )
+}
+
+pub(crate) fn is_interactive_shell_argv(argv: &[String]) -> bool {
+    let Some(first) = argv.first() else {
+        return false;
+    };
+    if !is_shell_name(exe_basename(first)) {
+        return false;
+    }
+    let mut iter = argv[1..].iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--" || arg == "-" {
+            return iter.next().is_none();
+        }
+        if matches!(arg.as_str(), "--command" | "--commands" | "-c")
+            || arg.starts_with("--command=")
+            || arg.starts_with("--commands=")
+        {
+            return false;
+        }
+        if matches!(
+            arg.as_str(),
+            "--rcfile"
+                | "--init-file"
+                | "--init-command"
+                | "-C"
+                | "-o"
+                | "+o"
+                | "--config"
+                | "--env-config"
+                | "--plugin-config"
+        ) {
+            let _ = iter.next();
+            continue;
+        }
+        if arg.starts_with("--") {
+            continue;
+        }
+        if arg.len() > 1 && arg.starts_with('-') {
+            if arg[1..].contains('c') {
+                return false;
+            }
+            continue;
+        }
+        if arg.len() > 1 && arg.starts_with('+') {
+            continue;
+        }
+        return false;
+    }
+    true
+}
+
+pub(crate) fn is_login_wrapper(pid: i32) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    if crate::location::process_argv(pid)
+        .as_deref()
+        .and_then(|argv| argv.first())
+        .is_some_and(|arg0| exe_basename(arg0) == "login")
+    {
+        return true;
+    }
+    crate::location::process_path(pid)
+        .and_then(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_owned))
+        .is_some_and(|name| exe_basename(&name) == "login")
+}
+
+pub(crate) fn is_login_shell_child(pid: i32, leader: i32) -> bool {
+    if pid <= 1 || leader <= 1 || pid == leader || !is_login_wrapper(leader) {
+        return false;
+    }
+    let Some((ppid, uid, pgid, zombie)) = process_info(pid) else {
+        return false;
+    };
+    if zombie
+        || ppid != leader
+        || pgid != pid
+        || uid != unsafe { libc::geteuid() }
+        || unsafe { libc::getsid(pid) } != leader
+    {
+        return false;
+    }
+    crate::location::process_argv(pid)
+        .as_deref()
+        .is_some_and(is_interactive_shell_argv)
+}
+
 /// Validates a socket `AgentEvent` sender and resolves `(owner_id, is_group, job_pgid)`.
-/// Supports foreground child process groups, interactive shells, direct `exec` launches,
-/// and inherited-capability daemons owned by the same effective UID.
+/// Supports foreground child process groups, interactive shells (including macOS
+/// `/usr/bin/login -> -/bin/zsh`), direct `exec` launches, and inherited-capability
+/// daemons owned by the same effective UID.
 pub fn resolve_event_owner(
     event_pid: i32,
     event_group: i32,
@@ -800,17 +913,20 @@ pub fn resolve_event_owner(
     let in_session = unsafe { libc::getsid(event_pid) } == session_leader;
 
     if in_session {
+        let mut chain = Vec::with_capacity(8);
         let mut current = event_pid;
-        let mut top_child = None;
+        let mut reached_leader = false;
         for _ in 0..32 {
             if current == session_leader {
+                reached_leader = true;
                 break;
             }
+            chain.push(current);
             let Some((ppid, _, _, _)) = process_info(current) else {
                 break;
             };
             if ppid == session_leader {
-                top_child = Some(current);
+                reached_leader = true;
                 break;
             }
             if ppid <= 1 || ppid == current {
@@ -818,23 +934,37 @@ pub fn resolve_event_owner(
             }
             current = ppid;
         }
-        if let Some(p1) = top_child {
-            if p1 != event_pid {
-                let p1_pgid = process_info(p1)
-                    .map(|(_, _, pg, _)| pg)
-                    .unwrap_or(event_group);
-                if p1_pgid > 1
-                    && p1_pgid != session_leader
-                    && fg_pgid > 1
-                    && (fg_pgid == p1_pgid || is_descendant_of(fg_pgid, p1))
-                {
-                    return Some((p1_pgid, true, p1_pgid));
-                }
-                return Some((session_leader, true, session_leader));
-            }
-            let job = if fg_pgid > 1 { fg_pgid } else { session_leader };
-            return Some((session_leader, true, job));
+        chain.reverse();
+
+        let mut shell_root = session_leader;
+        let mut job_idx = 0usize;
+        if reached_leader && !chain.is_empty() && is_login_shell_child(chain[0], session_leader) {
+            shell_root = chain[0];
+            job_idx = 1;
         }
+
+        if reached_leader {
+            if let Some(&p1) = chain.get(job_idx) {
+                if p1 != event_pid {
+                    let p1_pgid = process_info(p1)
+                        .map(|(_, _, pg, _)| pg)
+                        .unwrap_or(event_group);
+                    if p1_pgid > 1
+                        && p1_pgid != session_leader
+                        && p1_pgid != shell_root
+                        && fg_pgid > 1
+                        && (fg_pgid == p1_pgid || is_descendant_of(fg_pgid, p1))
+                    {
+                        return Some((p1_pgid, true, p1_pgid));
+                    }
+                    return Some((shell_root, true, shell_root));
+                }
+                let job = if fg_pgid > 1 { fg_pgid } else { shell_root };
+                return Some((shell_root, true, job));
+            }
+            return Some((shell_root, true, shell_root));
+        }
+
         if fg_pgid > 1 && fg_pgid != session_leader {
             return Some((fg_pgid, true, fg_pgid));
         }
@@ -911,10 +1041,16 @@ fn owner_alive_in_session(pid: i32, group: bool, session: i32, verified_session:
                 if member <= 1 {
                     continue;
                 }
-                let Some((_, _, _, zombie)) = process_info(member) else {
-                    continue;
-                };
-                if !zombie && (verified_session || unsafe { libc::getsid(member) == session }) {
+                if let Some((_, _, _, zombie)) = process_info(member) {
+                    if !zombie && (verified_session || unsafe { libc::getsid(member) == session }) {
+                        return true;
+                    }
+                } else if (verified_session || unsafe { libc::getsid(member) == session })
+                    && (unsafe { libc::kill(member, 0) == 0 }
+                        || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+                {
+                    // Setuid-root wrappers such as `/usr/bin/login` refuse unprivileged
+                    // `PROC_PIDTBSDINFO` while remaining live in `session`.
                     return true;
                 }
             }
@@ -1005,8 +1141,8 @@ fn inherit_native_app(records: &[Record], key: &str, metadata: &str) -> String {
                 let mut unique: Option<String> = None;
                 for r in records {
                     if r.signal.id == "omg-program-status" {
-                        if let Some(app) =
-                            field(&r.signal.metadata, ':', "app").and_then(crate::agents::normalize_id)
+                        if let Some(app) = field(&r.signal.metadata, ':', "app")
+                            .and_then(crate::agents::normalize_id)
                         {
                             match &unique {
                                 None => unique = Some(app),
@@ -1024,8 +1160,8 @@ fn inherit_native_app(records: &[Record], key: &str, metadata: &str) -> String {
         let mut unique: Option<String> = None;
         for r in records {
             if r.signal.id.starts_with("omg-agent-") {
-                if let Some(app) =
-                    field(&r.signal.metadata, ';', "omg_agent").and_then(crate::agents::normalize_id)
+                if let Some(app) = field(&r.signal.metadata, ';', "omg_agent")
+                    .and_then(crate::agents::normalize_id)
                 {
                     match &unique {
                         None => unique = Some(app),
@@ -1134,12 +1270,7 @@ impl State {
             } else {
                 String::new()
             };
-            self.consume_with_verified_owner(
-                true,
-                &id,
-                &meta,
-                Some((owner_id, owner_is_group)),
-            );
+            self.consume_with_verified_owner(true, &id, &meta, Some((owner_id, owner_is_group)));
             return self.revision != before;
         }
         let scope = if local_scope { "local" } else { "remote" };
@@ -1821,6 +1952,50 @@ impl State {
         }
     }
 
+    fn is_leader_login(&mut self, leader: i32) -> bool {
+        if leader <= 1 {
+            return false;
+        }
+        if let Some((cached_pid, cached_val)) = self.leader_login {
+            if cached_pid == leader {
+                return cached_val;
+            }
+        }
+        let is_login = is_login_wrapper(leader);
+        self.leader_login = Some((leader, is_login));
+        if !is_login {
+            self.shell_pgid = None;
+        }
+        is_login
+    }
+
+    fn resolve_shell_pgid(&mut self, leader: i32) -> Option<i32> {
+        if !self.is_leader_login(leader) {
+            return None;
+        }
+        if let Some(spgid) = self.shell_pgid {
+            if owner_alive_in_session(spgid, true, leader, true) {
+                return Some(spgid);
+            }
+            self.shell_pgid = None;
+        }
+        if let Some(fg) = self.foreground {
+            if fg > 1 && fg != leader && is_login_shell_child(fg, leader) {
+                self.shell_pgid = Some(fg);
+                return Some(fg);
+            }
+        }
+        for r in &self.records {
+            if let Some((pid, true)) = r.owner {
+                if pid > 1 && pid != leader && is_login_shell_child(pid, leader) {
+                    self.shell_pgid = Some(pid);
+                    return Some(pid);
+                }
+            }
+        }
+        None
+    }
+
     /// Shell Prompt Return Fence (`OSC 133;A` / `OSC 133;D`):
     /// When the shell emits `OSC 133;A` and the foreground process group is back at
     /// the shell (not a live tracked agent child), clear lingering `working` /
@@ -1833,6 +2008,8 @@ impl State {
                 if !self.is_at_shell_prompt() {
                     return false;
                 }
+                let shell_pgid = self.session_leader.and_then(|l| self.resolve_shell_pgid(l));
+                let session_leader = self.session_leader;
                 let mut changed = false;
                 let next_rev = self.revision.saturating_add(1);
                 for r in &mut self.records {
@@ -1840,8 +2017,10 @@ impl State {
                         continue;
                     }
                     if signal_effective_state(&r.signal) == Some("working") && !r.interrupted {
-                        let owner_still_live = match (r.owner, self.session_leader) {
-                            (Some((pid, group)), Some(leader)) if pid != leader => {
+                        let owner_still_live = match (r.owner, session_leader) {
+                            (Some((pid, group)), Some(leader))
+                                if pid != leader && Some(pid) != shell_pgid =>
+                            {
                                 owner_alive_in_session(pid, group, leader, r.verified_session)
                             }
                             _ => false,
@@ -1871,13 +2050,17 @@ impl State {
                 if !self.is_at_shell_prompt() {
                     return false;
                 }
+                let shell_pgid = self.session_leader.and_then(|l| self.resolve_shell_pgid(l));
+                let session_leader = self.session_leader;
                 let mut changed = false;
                 for r in &mut self.records {
                     if r.remote && self.local {
                         continue;
                     }
-                    let owner_is_live_child = match (r.owner, self.session_leader) {
-                        (Some((pid, group)), Some(leader)) if pid != leader => {
+                    let owner_is_live_child = match (r.owner, session_leader) {
+                        (Some((pid, group)), Some(leader))
+                            if pid != leader && Some(pid) != shell_pgid =>
+                        {
                             owner_alive_in_session(pid, group, leader, r.verified_session)
                         }
                         _ => false,
@@ -1915,10 +2098,13 @@ impl State {
         }
     }
 
-    fn is_at_shell_prompt(&self) -> bool {
+    fn is_at_shell_prompt(&mut self) -> bool {
         match (self.session_leader, self.foreground) {
             (Some(leader), Some(fg)) => {
-                fg == leader || !owner_alive_in_session(fg, true, leader, false)
+                if fg == leader || self.resolve_shell_pgid(leader) == Some(fg) {
+                    return true;
+                }
+                !owner_alive_in_session(fg, true, leader, false)
             }
             (Some(_), None) => true,
             (None, Some(fg)) => unsafe { libc::kill(-fg, 0) != 0 },
@@ -1929,7 +2115,13 @@ impl State {
     /// Runs even without viewers. Never probes remote PIDs on the local host.
     pub fn prune(&mut self, session: i32) -> bool {
         let mut changed = false;
-        let at_shell = self.foreground == Some(session);
+        let effective_leader = self.session_leader.unwrap_or(session);
+        let shell_pgid = (effective_leader > 1)
+            .then(|| self.resolve_shell_pgid(effective_leader))
+            .flatten();
+        let at_shell = self
+            .foreground
+            .is_some_and(|fg| fg == session || fg == effective_leader || Some(fg) == shell_pgid);
         let next_rev = self.revision.saturating_add(1);
         let mut retained = Vec::with_capacity(self.records.len());
 
@@ -2221,7 +2413,10 @@ mod tests {
             Some("fallback"),
             None,
         );
-        assert_eq!(vt.activity().presentation().unwrap().state, "needsAttention");
+        assert_eq!(
+            vt.activity().presentation().unwrap().state,
+            "needsAttention"
+        );
 
         // Resolve the blocked sub-record; remaining `turn1` and `turn1/sub2` stay `working`.
         vt.write(b"\x1b]7501;state=clear:id=turn1/perm\x07");
@@ -2246,28 +2441,72 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(vt.activity().presentation().unwrap().state, "needsAttention");
+        assert_eq!(
+            vt.activity().presentation().unwrap().state,
+            "needsAttention"
+        );
 
         // Sibling PostToolUse `working` on same agent/owner without user input is ignored!
         vt.activity_mut().consume_report(
-            "claude", "working", 500, true, false, Some("conv-1"), Some("/tmp"), None, None, None,
-            None, None, None,
+            "claude",
+            "working",
+            500,
+            true,
+            false,
+            Some("conv-1"),
+            Some("/tmp"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         );
-        assert_eq!(vt.activity().presentation().unwrap().state, "needsAttention");
+        assert_eq!(
+            vt.activity().presentation().unwrap().state,
+            "needsAttention"
+        );
 
         // Mouse motion & focus events do NOT unlock or wipe anything.
-        assert!(!vt.activity_mut().consume_input(b"\x1b[<35;10;20M\x1b[I\x1b[O"));
+        assert!(!vt
+            .activity_mut()
+            .consume_input(b"\x1b[<35;10;20M\x1b[I\x1b[O"));
         vt.activity_mut().consume_report(
-            "claude", "working", 500, true, false, Some("conv-1"), Some("/tmp"), None, None, None,
-            None, None, None,
+            "claude",
+            "working",
+            500,
+            true,
+            false,
+            Some("conv-1"),
+            Some("/tmp"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         );
-        assert_eq!(vt.activity().presentation().unwrap().state, "needsAttention");
+        assert_eq!(
+            vt.activity().presentation().unwrap().state,
+            "needsAttention"
+        );
 
         // Real user keystroke (`y\r`) unlocks `attention_locked`, so next `working` hook transitions!
         assert!(!vt.activity_mut().consume_input(b"y\r"));
         vt.activity_mut().consume_report(
-            "claude", "working", 500, true, false, Some("conv-1"), Some("/tmp"), None, None, None,
-            None, None, None,
+            "claude",
+            "working",
+            500,
+            true,
+            false,
+            Some("conv-1"),
+            Some("/tmp"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         );
         assert_eq!(vt.activity().presentation().unwrap().state, "working");
     }
@@ -2331,7 +2570,10 @@ mod tests {
 
         // Bare Esc in `needsAttention` transitions `needsAttention -> idle`.
         vt.write(b"\x1b]7501;state=blocked:app=claude:kind=question\x07");
-        assert_eq!(vt.activity().presentation().unwrap().state, "needsAttention");
+        assert_eq!(
+            vt.activity().presentation().unwrap().state,
+            "needsAttention"
+        );
         assert!(vt.activity_mut().consume_input(b"\x1b"));
         assert_eq!(vt.activity().presentation().unwrap().state, "idle");
 
@@ -2365,17 +2607,26 @@ mod tests {
             .consume_input_detailed(b"\x1b[?1u\x1b[<35;10;20M\x1b");
         assert!(!out_query.activity_changed);
         assert!(!out_query.user_interaction);
-        assert_eq!(vt.activity().presentation().unwrap().state, "needsAttention");
+        assert_eq!(
+            vt.activity().presentation().unwrap().state,
+            "needsAttention"
+        );
         let out_cont = vt.activity_mut().consume_input_detailed(b"[<35;11;20M");
         assert!(!out_cont.activity_changed);
         assert!(!out_cont.user_interaction);
-        assert_eq!(vt.activity().presentation().unwrap().state, "needsAttention");
+        assert_eq!(
+            vt.activity().presentation().unwrap().state,
+            "needsAttention"
+        );
 
         // 2. Kitty key-release (`:3u`) is ignored, while press (`\x1b[27u` / `\x1b[27;1:1u`) clears `needsAttention`.
         let out_rel = vt.activity_mut().consume_input_detailed(b"\x1b[27;1:3u");
         assert!(!out_rel.activity_changed);
         assert!(!out_rel.user_interaction);
-        assert_eq!(vt.activity().presentation().unwrap().state, "needsAttention");
+        assert_eq!(
+            vt.activity().presentation().unwrap().state,
+            "needsAttention"
+        );
 
         let out_esc = vt.activity_mut().consume_input_detailed(b"\x1b[27;1:1u");
         assert!(out_esc.activity_changed);
@@ -2415,19 +2666,36 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(vt.activity().presentation().unwrap().state, "needsAttention");
-        let out_y = vt.activity_mut().consume_input_detailed(b"\x1b[121u\x1b[13u");
+        assert_eq!(
+            vt.activity().presentation().unwrap().state,
+            "needsAttention"
+        );
+        let out_y = vt
+            .activity_mut()
+            .consume_input_detailed(b"\x1b[121u\x1b[13u");
         assert!(!out_y.activity_changed);
         assert!(out_y.user_interaction);
         vt.activity_mut().consume_report(
-            "claude", "working", 501, true, false, Some("conv-k"), Some("/tmp"), None, None, None,
-            None, None, None,
+            "claude",
+            "working",
+            501,
+            true,
+            false,
+            Some("conv-k"),
+            Some("/tmp"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         );
         assert_eq!(vt.activity().presentation().unwrap().state, "working");
     }
 
     #[test]
-    fn tier3_fallback_surfaces_for_different_agent_after_higher_tier_settles_idle_and_cross_agent_working_supersedes_error() {
+    fn tier3_fallback_surfaces_for_different_agent_after_higher_tier_settles_idle_and_cross_agent_working_supersedes_error(
+    ) {
         let mut vt = Vt::new(80, 24).unwrap();
 
         // Agent A (`claude`, Tier 2) fails with `error`.
@@ -2527,5 +2795,53 @@ mod tests {
         assert_eq!(pres_t3.tier, Tier::Fallback);
         assert_eq!(pres_t3.agent, "crush");
         assert_eq!(pres_t3.state, "working");
+    }
+
+    #[test]
+    fn interactive_shell_argv_distinguishes_login_shells_from_commands_and_direct_agents() {
+        let vec_str = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert!(is_interactive_shell_argv(&vec_str(&["-/bin/zsh"])));
+        assert!(is_interactive_shell_argv(&vec_str(&["/bin/zsh", "-l"])));
+        assert!(is_interactive_shell_argv(&vec_str(&[
+            "-/opt/homebrew/bin/fish",
+            "-C",
+            "source /tmp/ghostty.fish"
+        ])));
+        assert!(is_interactive_shell_argv(&vec_str(&["bash", "--posix"])));
+        assert!(is_interactive_shell_argv(&vec_str(&[
+            "-/bin/bash",
+            "--noprofile",
+            "--norc",
+            "-i"
+        ])));
+        assert!(is_interactive_shell_argv(&vec_str(&[
+            "-/bin/sh", "-m", "-i"
+        ])));
+
+        assert!(!is_interactive_shell_argv(&vec_str(&["-claude"])));
+        assert!(!is_interactive_shell_argv(&vec_str(&[
+            "/usr/local/bin/claude",
+            "--resume",
+            "abc"
+        ])));
+        assert!(!is_interactive_shell_argv(&vec_str(&[
+            "/bin/bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            "exec -l claude"
+        ])));
+        assert!(!is_interactive_shell_argv(&vec_str(&[
+            "-/bin/sh",
+            "-c",
+            "claude; exec -l /bin/zsh"
+        ])));
+        assert!(!is_interactive_shell_argv(&vec_str(&[
+            "/bin/zsh", "-lc", "codex"
+        ])));
+        assert!(!is_interactive_shell_argv(&vec_str(&[
+            "/bin/zsh",
+            "/tmp/run_script.zsh"
+        ])));
     }
 }

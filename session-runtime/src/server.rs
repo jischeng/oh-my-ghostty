@@ -743,9 +743,8 @@ pub fn serve_managed(
                                     event.event.as_deref(),
                                 );
                                 if let Some(m) = &mut managed {
-                                    if let Some(mut resume) = event
-                                        .resume
-                                        .filter(|r| !r.conversation_id.is_empty())
+                                    if let Some(mut resume) =
+                                        event.resume.filter(|r| !r.conversation_id.is_empty())
                                     {
                                         resume.agent = agent_str;
                                         m.record.resume = Some(resume);
@@ -995,8 +994,9 @@ pub fn serve_managed(
         }
         // Never gate this read on the number or speed of attachments.
         if !eof {
+            let raw_fg = unsafe { libc::tcgetpgrp(master) };
+            vt.activity_mut().foreground = (raw_fg > 1).then_some(raw_fg);
             let foreground = foreground_session_group(master, child.id());
-            vt.activity_mut().foreground = foreground.and_then(|pid| i32::try_from(pid).ok());
             if local_mode && foreground != last_foreground {
                 last_foreground = foreground;
                 let ssh = resolve_session_ssh(master, child.id(), &vt, &mut sniffed_remote_cwd);

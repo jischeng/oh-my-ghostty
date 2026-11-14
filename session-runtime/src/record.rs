@@ -37,7 +37,9 @@ impl Resume {
         let spec = crate::agents::resolve(&self.agent)
             .ok_or_else(|| io::Error::other("invalid Agent recovery descriptor"))?;
         if spec.resume_args.is_empty() {
-            return Err(io::Error::other("Agent does not support conversation recovery"));
+            return Err(io::Error::other(
+                "Agent does not support conversation recovery",
+            ));
         }
         let mut argv = Vec::with_capacity(1 + spec.resume_args.len());
         argv.push(spec.command.to_owned());

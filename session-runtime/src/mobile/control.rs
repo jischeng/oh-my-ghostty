@@ -1081,7 +1081,9 @@ fn build_view(config: &Config) -> io::Result<View> {
                 });
                 if facts.is_none()
                     || (facts.as_ref().is_some_and(|f| f.records.is_empty())
-                        && remote_facts.as_ref().is_some_and(|rf| !rf.records.is_empty()))
+                        && remote_facts
+                            .as_ref()
+                            .is_some_and(|rf| !rf.records.is_empty()))
                 {
                     facts = remote_facts;
                 }
@@ -3088,7 +3090,8 @@ mod tests {
 
         // Verify a relay endpoint serving `activity` inside `L` never receives an `H` viewer attach.
         use std::os::unix::net::UnixListener;
-        let dir = PathBuf::from("/tmp").join(format!("omg-lean-{}", &record::nonce().unwrap()[..8]));
+        let dir =
+            PathBuf::from("/tmp").join(format!("omg-lean-{}", &record::nonce().unwrap()[..8]));
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -3104,7 +3107,7 @@ mod tests {
         let relay_sock = dir.join("relay.sock");
         let listener = UnixListener::bind(&relay_sock).unwrap();
         let pane_uuid = "12345678-1234-1234-1234-123456789abc";
-        let attach_attempted = Arc::new( std::sync::atomic::AtomicBool::new(false));
+        let attach_attempted = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let attach_flag = attach_attempted.clone();
 
         let server = std::thread::spawn(move || {

@@ -464,13 +464,8 @@ fn view_loop(
             // Do not splice host metadata into a split CSI/OSC/image sequence.
             if ready && screen.continuation().is_ok_and(|bytes| bytes.is_empty()) {
                 if let Some(mode) = pending_activity.take() {
-                    stdout.write_all(
-                        &screen
-                            .vt
-                            .activity()
-                            .snapshot()
-                            .inline_bytes_with_mode(mode),
-                    )?;
+                    stdout
+                        .write_all(&screen.vt.activity().snapshot().inline_bytes_with_mode(mode))?;
                 }
                 if let Some(password) = pending_password.take() {
                     if password != password_input {

@@ -324,13 +324,25 @@ pub fn store_exists(spec: &AgentSpec, home: &Path, conversation_id: &str) -> boo
         }) => {
             let exact = format!("{conversation_id}{suffix}");
             let wildcard = wildcard_prefix.then(|| format!("_{conversation_id}{suffix}"));
-            search_pattern(&home.join(root), 0, &exact, wildcard.as_deref(), suffix.is_empty())
+            search_pattern(
+                &home.join(root),
+                0,
+                &exact,
+                wildcard.as_deref(),
+                suffix.is_empty(),
+            )
         }
         None => true,
     }
 }
 
-fn search_tree(dir: &Path, depth: usize, needle: &str, substring_jsonl: bool, allow_dir: bool) -> bool {
+fn search_tree(
+    dir: &Path,
+    depth: usize,
+    needle: &str,
+    substring_jsonl: bool,
+    allow_dir: bool,
+) -> bool {
     if depth > 6 {
         return false;
     }

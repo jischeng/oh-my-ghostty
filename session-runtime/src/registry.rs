@@ -701,7 +701,11 @@ impl Registry {
             let mut summary = crate::record::SessionSummary::from(record);
             if record.ended.is_none() {
                 if self.mode == RuntimeMode::Remote {
-                    if self.workers.get(&record.id).is_some_and(|w| !w.is_finished()) {
+                    if self
+                        .workers
+                        .get(&record.id)
+                        .is_some_and(|w| !w.is_finished())
+                    {
                         if let Some(pres) = self.presentations.get(&record.id) {
                             summary.activity = pres.lock().ok().map(|s| s.clone());
                         }

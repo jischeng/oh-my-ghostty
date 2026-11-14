@@ -417,7 +417,11 @@ fn report_cli(args: &[String]) -> io::Result<()> {
         .or_else(|| positional.get(2).copied())
         .unwrap_or("")
         .trim();
-    let conversation = if conversation == "-" { "" } else { conversation };
+    let conversation = if conversation == "-" {
+        ""
+    } else {
+        conversation
+    };
     let fallback_cwd = env::current_dir()
         .ok()
         .and_then(|p| p.into_os_string().into_string().ok())

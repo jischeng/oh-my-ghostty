@@ -62,6 +62,11 @@ int omg_process_args(int pid, unsigned char *buffer, size_t capacity) {
     }
     return (int)size;
 }
+int omg_process_path(int pid, unsigned char *buffer, size_t capacity) {
+    if (pid <= 1 || !buffer || capacity < PROC_PIDPATHINFO_MAXSIZE) return -1;
+    int len = proc_pidpath(pid, buffer, (uint32_t)capacity);
+    return len > 0 ? len : -1;
+}
 int omg_process_bsdinfo(int pid, int *ppid_out, unsigned int *uid_out, int *pgid_out, int *zombie_out) {
     if (pid <= 1) return -1;
     struct proc_bsdinfo info;

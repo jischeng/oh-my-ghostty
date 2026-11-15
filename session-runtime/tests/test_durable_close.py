@@ -95,5 +95,179 @@ class DurableCloseTests(unittest.TestCase):
                 daemon.terminate()
                 daemon.wait(timeout=5)
 
+    def _open_expect_error(self, host_socket, stream_id, request_dict):
+        sock = socket.socket(socket.AF_UNIX)
+        sock.settimeout(5)
+        sock.connect(str(host_socket))
+        try:
+            sock.sendall(encode(b'C', stream_id, json.dumps(request_dict).encode()))
+            while True:
+                kind, sid, data = frame(sock)
+                if sid != stream_id:
+                    continue
+                if kind == b'E':
+                    return data.decode(errors='replace')
+                if kind == b'D' and data[:1] in (b'J', b'S'):
+                    self.fail(f'Closed/exited session must never resurrect, got inner {data[:1]!r}')
+        finally:
+            sock.close()
+
+    def test_closed_normal_exits_and_sibling_tombstone_delete_snapshots_and_never_resurrect(self):
+        import struct
+        with tempfile.TemporaryDirectory(prefix='omg-durable-snap-', dir='/tmp') as directory:
+            root = Path(directory)
+            fake_home = root / 'home'
+            run_root = fake_home / '.omg' / 'run'
+            sib_closed_dir = run_root / 'sib_closed'
+            sib_lost_dir = run_root / 'sib_lost'
+            host_dir = run_root / 'current_host'
+            for d in (sib_closed_dir / 'sessions', sib_lost_dir / 'sessions', host_dir):
+                d.mkdir(parents=True, mode=0o700)
+                d.chmod(0o700)
+            for p in (fake_home, fake_home / '.omg', run_root, sib_closed_dir, sib_lost_dir):
+                p.chmod(0o700)
+
+            policy = dict(
+                detached_ttl_seconds=259200,
+                expires_at=None,
+                close_on_agent_done=False,
+                agent_done_grace_seconds=60,
+                terminate_grace_seconds=1,
+                host_idle_seconds=300,
+                record_retention_seconds=604800,
+            )
+            resurrect_launch = dict(
+                argv=['/bin/sh', '-i'],
+                env={'HOME': str(fake_home), 'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'TERM': 'xterm-256color'},
+                cwd=directory,
+                cols=80,
+                rows=24,
+                pixel_width=640,
+                pixel_height=384,
+            )
+
+            # Seed a sibling conflict BEFORE starting host_dir: sibling A has .closed tombstone
+            # while sibling B has a newer ended="lost" record + fake snapshot.
+            blocked_id = '77777777-7777-7777-7777-777777777777'
+            (sib_closed_dir / 'sessions' / f'{blocked_id}.closed').write_text('')
+            (sib_lost_dir / 'sessions' / f'{blocked_id}.json').write_text(json.dumps(dict(
+                version=1,
+                id=blocked_id,
+                generation='abcd1234',
+                pid=None,
+                created_at=9999999999,
+                updated_at=9999999999,
+                boot_time=10,
+                policy=policy,
+                ended='lost',
+                resume=None,
+            )))
+            (sib_lost_dir / 'sessions' / f'{blocked_id}.snapshot').write_bytes(b'OMGSNAP1\0deadbeef\0payload')
+
+            daemon = subprocess.Popen(
+                [str(BINARY), 'host-local', str(host_dir), '--', '/bin/sh', '-i'],
+                env={**os.environ, 'HOME': str(fake_home), 'SHELL': '/bin/sh'},
+            )
+            pids = []
+            try:
+                host_sock = host_dir / 'host.sock'
+                for _ in range(150):
+                    if host_sock.exists():
+                        break
+                    time.sleep(0.02)
+
+                # 0. Sibling tombstone beats newer sibling lost record.
+                self._open_expect_error(host_sock, 1, dict(
+                    id=blocked_id, policy=policy, create=False, cwd=None, resurrect_launch=resurrect_launch
+                ))
+
+                def start_and_wait_checkpoint(sid, session_policy, stream_id):
+                    s = socket.socket(socket.AF_UNIX)
+                    s.settimeout(8)
+                    s.connect(str(host_sock))
+                    s.sendall(encode(b'C', stream_id, json.dumps(dict(
+                        id=sid,
+                        policy=session_policy,
+                        create=True,
+                        cwd=directory,
+                        launch=dict(resurrect_launch),
+                    )).encode()))
+                    while True:
+                        kind, _, data = frame(s)
+                        if kind != b'D':
+                            continue
+                        inner = data[:1]
+                        if inner == b'J':
+                            pids.append(json.loads(data[13:])['pid'])
+                        elif inner == b'S':
+                            seq = struct.unpack('>Q', data[1:9])[0]
+                            s.sendall(encode(b'D', stream_id, encode(b'A', seq)))
+                            s.sendall(encode(b'D', stream_id, encode(b'W')))
+                        elif inner == b'W':
+                            break
+                    s.sendall(encode(b'D', stream_id, encode(b'I', 0, b'printf "CHECKPOINT_SEED\\n"\n')))
+                    snap = host_dir / 'sessions' / f'{sid}.snapshot'
+                    for _ in range(120):
+                        if snap.exists():
+                            break
+                        time.sleep(0.05)
+                    self.assertTrue(snap.exists(), f'debounced checkpoint should create {snap}')
+                    return s, snap
+
+                # 1. ExplicitClose (b'K') deletes snapshot + writes .closed -> never resurrects.
+                s_close_id = '88888888-8888-8888-8888-888888888888'
+                c1, snap1 = start_and_wait_checkpoint(s_close_id, policy, 2)
+                c1.sendall(encode(b'D', 2, encode(b'K')))
+                for _ in range(100):
+                    if not snap1.exists() and (host_dir / 'sessions' / f'{s_close_id}.closed').exists():
+                        break
+                    time.sleep(0.03)
+                c1.close()
+                self.assertFalse(snap1.exists())
+                self._open_expect_error(host_sock, 3, dict(
+                    id=s_close_id, policy=policy, create=False, cwd=None, resurrect_launch=resurrect_launch
+                ))
+
+                # 2. Same-boot normal ProcessExited deletes snapshot -> never resurrects.
+                s_exit_id = '99999999-9999-9999-9999-999999999999'
+                c2, snap2 = start_and_wait_checkpoint(s_exit_id, policy, 4)
+                c2.sendall(encode(b'D', 4, encode(b'I', 0, b'exit 0\n')))
+                for _ in range(100):
+                    rec2 = json.loads((host_dir / 'sessions' / f'{s_exit_id}.json').read_text())
+                    if rec2.get('ended') == 'process_exited' and not snap2.exists():
+                        break
+                    time.sleep(0.03)
+                c2.close()
+                self.assertEqual(rec2['ended'], 'process_exited')
+                self.assertFalse(snap2.exists())
+                self._open_expect_error(host_sock, 5, dict(
+                    id=s_exit_id, policy=policy, create=False, cwd=None, resurrect_launch=resurrect_launch
+                ))
+
+                # 3. Same-boot DetachedTimeout deletes snapshot -> never resurrects.
+                s_ttl_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+                ttl_policy = dict(policy, detached_ttl_seconds=1)
+                c3, snap3 = start_and_wait_checkpoint(s_ttl_id, ttl_policy, 6)
+                c3.close()
+                rec3 = {}
+                for _ in range(150):
+                    rec3 = json.loads((host_dir / 'sessions' / f'{s_ttl_id}.json').read_text())
+                    if rec3.get('ended') == 'detached_timeout' and not snap3.exists():
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(rec3.get('ended'), 'detached_timeout')
+                self.assertFalse(snap3.exists())
+                self._open_expect_error(host_sock, 7, dict(
+                    id=s_ttl_id, policy=ttl_policy, create=False, cwd=None, resurrect_launch=resurrect_launch
+                ))
+            finally:
+                daemon.terminate()
+                daemon.wait(timeout=5)
+                for pid in pids:
+                    try:
+                        os.killpg(pid, 9)
+                    except ProcessLookupError:
+                        pass
+
 
 if __name__ == '__main__': unittest.main()

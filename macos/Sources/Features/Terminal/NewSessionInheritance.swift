@@ -101,7 +101,9 @@ enum NewSessionInheritance: String, CaseIterable, Identifiable, Sendable {
     ) -> Ghostty.SurfaceConfiguration {
         var result = config ?? .init()
         for key in [SessionRuntimeDescriptor.environmentKey, SessionRuntimeDescriptor.localRuntimeEnvironmentKey,
-                    SessionRuntimeDescriptor.attachExistingEnvironmentKey, "OMG_RUNTIME_SOCKET", "OMG_RUNTIME_PANE_ID"] {
+                    SessionRuntimeDescriptor.attachExistingEnvironmentKey,
+                    SessionRuntimeDescriptor.resurrectWorkingDirectoryEnvironmentKey,
+                    "OMG_RUNTIME_SOCKET", "OMG_RUNTIME_PANE_ID"] {
             result.environmentVariables.removeValue(forKey: key)
         }
         result.workingDirectory = localWorkingDirectory

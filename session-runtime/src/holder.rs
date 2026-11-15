@@ -87,6 +87,8 @@ pub struct HolderRequest {
     pub record_path: PathBuf,
     pub record: Record,
     pub launch: LocalLaunchSpec,
+    #[serde(default)]
+    pub resurrect: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -179,7 +181,18 @@ pub fn run_from_stdin() -> io::Result<()> {
     }
     let request: HolderRequest = serde_json::from_slice(&data)?;
     data.fill(0);
-    request.launch.validate()?;
+    request.launch.validate_with(!request.resurrect)?;
+    if request.resurrect
+        && request
+            .launch
+            .input_base64
+            .as_ref()
+            .is_some_and(|value| !value.is_empty())
+    {
+        return Err(io::Error::other(
+            "local resurrection launch must not carry initial input",
+        ));
+    }
     if !host::valid_id(&request.record.id)
         || request.record.id.is_empty()
         || request.record.generation.is_empty()
@@ -263,6 +276,8 @@ pub fn run_from_stdin() -> io::Result<()> {
     let capability = request.record.holder_capability.clone().unwrap();
     let initial_cwd = request.launch.cwd.as_deref().map(PathBuf::from);
     let argv = request.launch.argv.clone();
+    let shutdown_wake = crate::WakePipe::new()?;
+    let _shutdown_guard = server::ShutdownSignalGuard::install(&shutdown_wake)?;
     let presentation = std::sync::Arc::new(std::sync::Mutex::new(
         crate::activity::State::default().snapshot(),
     ));
@@ -273,6 +288,8 @@ pub fn run_from_stdin() -> io::Result<()> {
         initial_cwd,
         local_launch: Some(request.launch),
         presentation: Some(presentation.clone()),
+        resurrect: request.resurrect,
+        shutdown_wake: Some(shutdown_wake),
     };
     let wake = crate::WakePipe::new()?;
     let actor_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));

@@ -1336,6 +1336,7 @@ async fn serve_relay_session(
                                     cwd: None,
                                     inline_viewer: false,
                                     launch: None,
+                                    resurrect_launch: None,
                                 };
                                 match tokio::net::UnixStream::connect(&relay_socket).await {
                                     Ok(stream) => {

@@ -50,16 +50,77 @@ impl Resume {
     }
     /// Hooks alone don't prove the conversation has been flushed to disk.
     pub fn store_exists(&self) -> bool {
+        self.store_exists_in_home(None)
+    }
+
+    pub fn store_exists_in_home(&self, home: Option<&Path>) -> bool {
         if self.validate().is_err() {
             return false;
         }
         let Some(spec) = crate::agents::resolve(&self.agent) else {
             return false;
         };
-        let Some(home) = std::env::var_os("HOME") else {
-            return false;
+        let resolved_home;
+        let home_dir = match home {
+            Some(path) => path,
+            None => {
+                let Some(env_home) = std::env::var_os("HOME") else {
+                    return false;
+                };
+                resolved_home = PathBuf::from(env_home);
+                &resolved_home
+            }
         };
-        crate::agents::store_exists(spec, &PathBuf::from(home), &self.conversation_id)
+        crate::agents::store_exists(spec, home_dir, &self.conversation_id)
+    }
+}
+
+pub fn current_boot_time() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut mib = [libc::CTL_KERN, libc::KERN_BOOTTIME];
+        let mut tv = libc::timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
+        let mut size = std::mem::size_of::<libc::timeval>();
+        let rc = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                mib.len() as _,
+                (&mut tv as *mut libc::timeval).cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        (rc == 0 && size == std::mem::size_of::<libc::timeval>() && tv.tv_sec > 0)
+            .then_some(tv.tv_sec as u64)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let stat = fs::read_to_string("/proc/stat").ok()?;
+        for line in stat.lines() {
+            if let Some(rest) = line.strip_prefix("btime ") {
+                if let Ok(value) = rest.trim().parse::<u64>() {
+                    if value > 0 {
+                        return Some(value);
+                    }
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
+
+pub fn is_prior_boot(recorded: Option<u64>, current: Option<u64>) -> bool {
+    match (recorded, current) {
+        (Some(rec), Some(cur)) => cur > rec.saturating_add(5),
+        _ => false,
     }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -84,15 +145,20 @@ pub struct Record {
     pub holder_capability: Option<String>,
     #[serde(default)]
     pub inline_viewer: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_time: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_revision: Option<String>,
 }
 impl Record {
     pub fn new(id: &str, policy: Policy) -> io::Result<Self> {
+        let now = unix_time();
         Ok(Self {
             version: 1,
             id: id.into(),
             generation: nonce()?,
-            created_at: unix_time(),
-            updated_at: unix_time(),
+            created_at: now,
+            updated_at: now,
             cwd: None,
             ssh: None,
             pid: None,
@@ -102,6 +168,8 @@ impl Record {
             contained: false,
             holder_capability: None,
             inline_viewer: false,
+            boot_time: current_boot_time(),
+            snapshot_revision: crate::current_snapshot_revision(),
         })
     }
     pub fn load(path: &Path) -> io::Result<Self> {
@@ -266,5 +334,32 @@ mod tests {
         assert!(value.get("holder_capability").is_none());
         assert!(value.get("argv").is_none());
         assert!(value.get("env").is_none());
+    }
+
+    #[test]
+    fn boot_time_detection_and_legacy_record_deserialization() {
+        assert!(current_boot_time().is_some());
+        assert!(!is_prior_boot(None, current_boot_time()));
+        assert!(!is_prior_boot(Some(1_000), None));
+        assert!(!is_prior_boot(Some(1_000), Some(1_000)));
+        assert!(!is_prior_boot(Some(1_000), Some(1_005)));
+        assert!(is_prior_boot(Some(1_000), Some(1_006)));
+
+        let legacy_json = serde_json::json!({
+            "version": 1,
+            "id": "11111111-1111-1111-1111-111111111111",
+            "generation": "gen-1",
+            "created_at": 100,
+            "updated_at": 200,
+            "pid": null,
+            "ended": "lost",
+            "resume": null,
+            "policy": {},
+            "future_unknown_field": true
+        });
+        let record: Record = serde_json::from_value(legacy_json).unwrap();
+        assert_eq!(record.boot_time, None);
+        assert_eq!(record.snapshot_revision, None);
+        assert_eq!(record.ended, Some(EndReason::Lost));
     }
 }

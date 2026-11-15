@@ -718,6 +718,7 @@ fn read_session_activity(
             cwd: None,
             inline_viewer: false,
             launch: None,
+            resurrect_launch: None,
         };
         let Ok(open_bytes) = serde_json::to_vec(&open) else {
             return (None, false);

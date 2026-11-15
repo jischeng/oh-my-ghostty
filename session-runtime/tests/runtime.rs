@@ -780,6 +780,8 @@ while True:
                     initial_cwd: None,
                     local_launch: None,
                     presentation: None,
+                    resurrect: false,
+                    shutdown_wake: None,
                 }),
             )
         });
@@ -990,6 +992,8 @@ while True:
                 initial_cwd: None,
                 local_launch: None,
                 presentation: None,
+                resurrect: false,
+                shutdown_wake: None,
             }),
         )
     });

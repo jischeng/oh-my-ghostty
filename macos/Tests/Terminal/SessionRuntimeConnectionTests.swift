@@ -629,6 +629,7 @@ struct SessionRuntimeConnectionTests {
             SessionRuntimeDescriptor.environmentKey,
             SessionRuntimeDescriptor.localRuntimeEnvironmentKey,
             SessionRuntimeDescriptor.attachExistingEnvironmentKey,
+            SessionRuntimeDescriptor.resurrectWorkingDirectoryEnvironmentKey,
             "OMG_RUNTIME_SOCKET",
             "OMG_RUNTIME_PANE_ID",
         ]
@@ -678,6 +679,24 @@ struct SessionRuntimeConnectionTests {
         #expect(config.environmentVariables[SessionRuntimeDescriptor.attachExistingEnvironmentKey] == "")
         try local.configureAttachExisting(&config)
         #expect(config.environmentVariables[SessionRuntimeDescriptor.attachExistingEnvironmentKey] == "1")
+
+        var attachRestoreConfig = Ghostty.SurfaceConfiguration()
+        attachRestoreConfig.workingDirectory = "/tmp/saved-pane-dir"
+        try local.configureSavedRestore(&attachRestoreConfig, createRuntime: false)
+        #expect(attachRestoreConfig.workingDirectory == nil)
+        #expect(attachRestoreConfig.environmentVariables[SessionRuntimeDescriptor.attachExistingEnvironmentKey] == "1")
+        #expect(attachRestoreConfig.environmentVariables[SessionRuntimeDescriptor.resurrectWorkingDirectoryEnvironmentKey] == "/tmp/saved-pane-dir")
+
+        var fallbackRestoreConfig = Ghostty.SurfaceConfiguration()
+        try local.configureSavedRestore(&fallbackRestoreConfig, createRuntime: false)
+        #expect(fallbackRestoreConfig.workingDirectory == nil)
+        #expect(fallbackRestoreConfig.environmentVariables[SessionRuntimeDescriptor.resurrectWorkingDirectoryEnvironmentKey] == "/tmp/project")
+
+        var sshRestoreConfig = Ghostty.SurfaceConfiguration()
+        sshRestoreConfig.workingDirectory = "/tmp/local-dir"
+        try remote.configureSavedRestore(&sshRestoreConfig, createRuntime: false)
+        #expect(sshRestoreConfig.workingDirectory == nil)
+        #expect(sshRestoreConfig.environmentVariables[SessionRuntimeDescriptor.resurrectWorkingDirectoryEnvironmentKey] == nil)
     }
 
     @MainActor

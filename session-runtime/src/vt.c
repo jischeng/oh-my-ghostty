@@ -88,6 +88,10 @@ typedef struct {
     void *context;
     Context signal;
     void *signal_context;
+    size_t continuation_max_bytes;
+    size_t scrollback_max_bytes;
+    bool has_scrollback_max_lines;
+    size_t scrollback_max_lines;
 } Vt;
 static void context_signal(GhosttyTerminal terminal, void *context, bool ended,
                            GhosttyString id, GhosttyString metadata) {
@@ -105,6 +109,27 @@ static void reply(GhosttyTerminal terminal, void *context, const uint8_t *bytes,
     (void)terminal;
     Vt *vt = context;
     if (vt->reply) vt->reply(vt->context, bytes, len);
+}
+static int apply_vt_options(Vt *vt) {
+    int result = ghostty_terminal_set(
+        vt->terminal, GHOSTTY_TERMINAL_OPT_CONTINUATION_MAX_BYTES, &vt->continuation_max_bytes);
+    if (!result) {
+        result = ghostty_terminal_set(
+            vt->terminal, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &vt->scrollback_max_bytes);
+    }
+    if (!result && vt->has_scrollback_max_lines) {
+        result = ghostty_terminal_set(
+            vt->terminal, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, &vt->scrollback_max_lines);
+    }
+    if (!result) result = ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_USERDATA, vt);
+    if (!result) {
+        result = ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_WRITE_PTY, (const void *)reply);
+    }
+    if (!result && vt->signal) {
+        result = ghostty_terminal_set(
+            vt->terminal, GHOSTTY_TERMINAL_OPT_CONTEXT_SIGNAL, (const void *)context_signal);
+    }
+    return result;
 }
 static int resize_pixels(Vt *vt, unsigned short cols, unsigned short rows,
                          unsigned short pixel_width, unsigned short pixel_height) {
@@ -127,13 +152,13 @@ void *omg_vt_new_with_pixels_scrollback(unsigned short cols, unsigned short rows
     if (resize_pixels(vt, cols, rows, pixel_width, pixel_height) != GHOSTTY_SUCCESS) {
         ghostty_terminal_free(vt->terminal); free(vt); return NULL;
     }
-    size_t continuation = 1024 * 1024;
-    vt->reply = callback; vt->context = context;
-    if (ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_CONTINUATION_MAX_BYTES, &continuation) != GHOSTTY_SUCCESS ||
-        ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &scrollback_max_bytes) != GHOSTTY_SUCCESS ||
-        (scrollback_max_lines && ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, scrollback_max_lines) != GHOSTTY_SUCCESS) ||
-        ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_USERDATA, vt) != GHOSTTY_SUCCESS ||
-        ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_WRITE_PTY, (const void *)reply) != GHOSTTY_SUCCESS) {
+    vt->reply = callback;
+    vt->context = context;
+    vt->continuation_max_bytes = 1024 * 1024;
+    vt->scrollback_max_bytes = scrollback_max_bytes;
+    vt->has_scrollback_max_lines = scrollback_max_lines != NULL;
+    vt->scrollback_max_lines = scrollback_max_lines ? *scrollback_max_lines : 0;
+    if (apply_vt_options(vt) != GHOSTTY_SUCCESS) {
         ghostty_terminal_free(vt->terminal); free(vt); return NULL;
     }
     return vt;
@@ -173,7 +198,7 @@ int omg_vt_restore(Vt *vt, const unsigned char *data, size_t len) {
     int result = ghostty_snapshot_decoder_new_buf(NULL, &decoder, data, len);
     if (result) return result;
     bool retain = true;
-    size_t limit = 1024 * 1024;
+    size_t limit = vt->continuation_max_bytes;
     result = ghostty_snapshot_decoder_set(decoder, GHOSTTY_SNAPSHOT_DECODER_OPT_MAX_CONTINUATION_BYTES, &limit);
     if (!result) result = ghostty_snapshot_decoder_set(decoder, GHOSTTY_SNAPSHOT_DECODER_OPT_RETAIN_CONTINUATION, &retain);
     if (!result) result = ghostty_snapshot_decoder_decode(decoder, &terminal);
@@ -182,19 +207,25 @@ int omg_vt_restore(Vt *vt, const unsigned char *data, size_t len) {
     ghostty_snapshot_decoder_free(decoder);
     if (result || consumed != len) { if (terminal) ghostty_terminal_free(terminal); return result ? result : -1; }
     ghostty_terminal_free(vt->terminal); vt->terminal = terminal;
-    result = ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_USERDATA, vt);
-    if (!result) result = ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_WRITE_PTY, (const void *)reply);
-    if (!result && vt->signal) result = ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_CONTEXT_SIGNAL, (const void *)context_signal);
-    return result;
+    return apply_vt_options(vt);
 }
 int omg_vt_continuation(Vt *vt, unsigned char **data, size_t *len) {
     return ghostty_terminal_continuation_alloc(vt->terminal, NULL, data, len);
 }
 int omg_vt_screen_only(Vt *vt) {
-    size_t zero = 0;
-    int result = ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &zero);
-    if (!result) result = ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, &zero);
+    vt->scrollback_max_bytes = 0;
+    vt->has_scrollback_max_lines = true;
+    vt->scrollback_max_lines = 0;
+    int result = ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &vt->scrollback_max_bytes);
+    if (!result) result = ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, &vt->scrollback_max_lines);
     return result;
+}
+int omg_vt_in_alt_screen(Vt *vt) {
+    GhosttyTerminalScreen screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY;
+    if (ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &screen) != GHOSTTY_SUCCESS) {
+        return 0;
+    }
+    return screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE ? 1 : 0;
 }
 int omg_vt_dynamic_color(Vt *vt, unsigned int index, unsigned char *rgb) {
     const GhosttyTerminalData keys[] = {

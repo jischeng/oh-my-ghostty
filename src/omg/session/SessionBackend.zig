@@ -24,6 +24,7 @@ path: [:0]u8,
 pane_id: ?[]u8 = null,
 is_local: bool = false,
 creating: bool = false,
+pending_resurrect: std.atomic.Value(bool) = .init(false),
 initial_cwd: ?[]u8 = null,
 initial_input: std.ArrayList(u8) = .empty,
 startup_input: std.ArrayList(u8) = .empty,
@@ -66,12 +67,14 @@ pub fn init(alloc: std.mem.Allocator, path: []const u8, pane_id: ?[]const u8, op
     const owned_id = if (pane_id) |id| try alloc.dupe(u8, id) else null;
     errdefer if (owned_id) |id| alloc.free(id);
     const creating = LocalLaunch.createsSession(alloc, pane_id);
+    const pending_resurrect = options.is_local and !creating and LocalLaunch.hasResurrectLaunch(alloc, pane_id);
     return .{
         .alloc = alloc,
         .path = owned_path,
         .pane_id = owned_id,
         .is_local = options.is_local,
         .creating = creating,
+        .pending_resurrect = .init(pending_resurrect),
         .startup_input_enabled = .init(options.is_local and creating),
         .initial_cwd = if (options.working_directory) |cwd| try alloc.dupe(u8, cwd) else null,
     };
@@ -164,7 +167,9 @@ pub fn setSessionAttached(self: *Self, attached: bool) bool {
     if (!self.attachment_enabled.load(.acquire)) return true;
     self.attachment_enabled.store(false, .release);
     _ = self.attachment_epoch.fetchAdd(1, .acq_rel);
-    if (!self.is_local or !self.creating) self.force_attach.store(true, .release);
+    if (!self.is_local or (!self.creating and !self.pending_resurrect.load(.acquire))) {
+        self.force_attach.store(true, .release);
+    }
     self.ready.store(false, .release);
     self.writer_resize_generation.store(0, .release);
     self.snapshot_ready.store(false, .release);
@@ -541,13 +546,16 @@ fn updateProcessInfoForEpoch(self: *Self, value: ProcessMetadata, epoch: u64) !b
 }
 
 fn confirmCreation(self: *Self) !void {
-    if (!self.creating) return;
     if (self.pane_id) |id| {
-        const compact = try LocalLaunch.attachOnly(self.alloc, id);
-        std.crypto.secureZero(u8, id);
-        self.alloc.free(id);
-        self.pane_id = compact;
+        if (LocalLaunch.isOpenRequest(self.alloc, id)) {
+            const compact = try LocalLaunch.attachOnly(self.alloc, id);
+            std.crypto.secureZero(u8, id);
+            self.alloc.free(id);
+            self.pane_id = compact;
+        }
     }
+    self.pending_resurrect.store(false, .release);
+    if (!self.creating) return;
     std.crypto.secureZero(u8, self.initial_input.items);
     self.initial_input.clearAndFree(self.alloc);
     self.creating = false;
@@ -1332,6 +1340,27 @@ test "local session confirms creation without retaining startup secrets" {
     try std.testing.expect(std.mem.indexOf(u8, backend.pane_id.?, "SECRET") == null);
     try std.testing.expect(std.mem.indexOf(u8, backend.pane_id.?, "launch") == null);
     try std.testing.expectEqual(@as(usize, 0), backend.initial_input.items.len);
+}
+
+test "local session confirms resurrect without retaining resurrect launch" {
+    const alloc = std.testing.allocator;
+    var backend = try Self.init(
+        alloc,
+        "/unused",
+        "{\"id\":\"pane\",\"policy\":{},\"create\":false,\"resurrect_launch\":{\"argv\":[\"/bin/zsh\",\"-l\"],\"env\":{\"SECRET\":\"resurrect\"}}}",
+        .{ .is_local = true },
+    );
+    defer backend.deinit();
+    try std.testing.expect(!backend.creating);
+    try std.testing.expect(!backend.acceptsInitialInput());
+    try std.testing.expect(backend.setSessionAttached(false));
+    try std.testing.expect(!backend.force_attach.load(.acquire));
+    try std.testing.expect(backend.setSessionAttached(true));
+    try backend.confirmCreation();
+    try std.testing.expect(backend.setSessionAttached(false));
+    try std.testing.expect(backend.force_attach.load(.acquire));
+    try std.testing.expect(std.mem.indexOf(u8, backend.pane_id.?, "resurrect_launch") == null);
+    try std.testing.expect(std.mem.indexOf(u8, backend.pane_id.?, "SECRET") == null);
 }
 
 test "local session shutdown interrupts a full app mailbox" {

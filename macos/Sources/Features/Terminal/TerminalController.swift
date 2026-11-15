@@ -2522,6 +2522,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                     result.environmentVariables.removeValue(forKey: SessionRuntimeDescriptor.environmentKey)
                     result.environmentVariables.removeValue(forKey: SessionRuntimeDescriptor.localRuntimeEnvironmentKey)
                     result.environmentVariables.removeValue(forKey: SessionRuntimeDescriptor.attachExistingEnvironmentKey)
+                    result.environmentVariables.removeValue(
+                        forKey: SessionRuntimeDescriptor.resurrectWorkingDirectoryEnvironmentKey
+                    )
                     result.environmentVariables.removeValue(forKey: "OMG_RUNTIME_SOCKET")
                     result.environmentVariables.removeValue(forKey: "OMG_RUNTIME_PANE_ID")
                     return result
@@ -2652,7 +2655,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             // arrived, its validated replay still identifies the remote host.
             var result = config ?? .init()
             for key in [SessionRuntimeDescriptor.environmentKey, SessionRuntimeDescriptor.localRuntimeEnvironmentKey,
-                        SessionRuntimeDescriptor.attachExistingEnvironmentKey, "OMG_RUNTIME_SOCKET", "OMG_RUNTIME_PANE_ID"] {
+                        SessionRuntimeDescriptor.attachExistingEnvironmentKey,
+                        SessionRuntimeDescriptor.resurrectWorkingDirectoryEnvironmentKey,
+                        "OMG_RUNTIME_SOCKET", "OMG_RUNTIME_PANE_ID"] {
                 result.environmentVariables.removeValue(forKey: key)
             }
             result.workingDirectory = replay.localWorkingDirectory ?? paneSessionContext(for: source)?.local.workingDirectory
@@ -2667,6 +2672,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 result.environmentVariables.removeValue(forKey: SessionRuntimeDescriptor.environmentKey)
                 result.environmentVariables.removeValue(forKey: SessionRuntimeDescriptor.localRuntimeEnvironmentKey)
                 result.environmentVariables.removeValue(forKey: SessionRuntimeDescriptor.attachExistingEnvironmentKey)
+                result.environmentVariables.removeValue(
+                    forKey: SessionRuntimeDescriptor.resurrectWorkingDirectoryEnvironmentKey
+                )
                 result.environmentVariables.removeValue(forKey: "OMG_RUNTIME_SOCKET")
                 result.environmentVariables.removeValue(forKey: "OMG_RUNTIME_PANE_ID")
                 return Self.injectingSessionID(tabSessionID, into: result)
@@ -2694,6 +2702,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             var result = config ?? .init()
             try next.configure(&result)
             result.environmentVariables[SessionRuntimeDescriptor.attachExistingEnvironmentKey] = ""
+            result.environmentVariables.removeValue(
+                forKey: SessionRuntimeDescriptor.resurrectWorkingDirectoryEnvironmentKey
+            )
             result.environmentVariables.removeValue(forKey: "OMG_RUNTIME_SOCKET")
             result.environmentVariables.removeValue(forKey: "OMG_RUNTIME_PANE_ID")
             if !runtime.isLocal {

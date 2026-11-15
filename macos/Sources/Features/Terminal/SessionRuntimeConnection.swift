@@ -93,6 +93,7 @@ struct SessionRuntimeDescriptor: Codable, Equatable, Sendable {
     static let environmentKey = "OMG_SESSION_RUNTIME_DESCRIPTOR"
     static let localRuntimeEnvironmentKey = "OMG_RUNTIME_LOCAL"
     static let attachExistingEnvironmentKey = "OMG_RUNTIME_ATTACH_EXISTING"
+    static let resurrectWorkingDirectoryEnvironmentKey = "OMG_RUNTIME_RESURRECT_CWD"
     /// Nil identifies a local host runtime. Older archives always contain an SSH connection.
     var connection: GitSSHConnection?
     var revision: String
@@ -130,6 +131,27 @@ struct SessionRuntimeDescriptor: Codable, Equatable, Sendable {
     func configureAttachExisting(_ config: inout Ghostty.SurfaceConfiguration) throws {
         try configure(&config)
         config.environmentVariables[Self.attachExistingEnvironmentKey] = "1"
+    }
+
+    func configureSavedRestore(_ config: inout Ghostty.SurfaceConfiguration, createRuntime: Bool) throws {
+        if createRuntime {
+            try configure(&config)
+            config.environmentVariables.removeValue(forKey: Self.resurrectWorkingDirectoryEnvironmentKey)
+            config.workingDirectory = isLocal
+                ? initialWorkingDirectory ?? config.workingDirectory ?? localWorkingDirectory
+                : nil
+        } else {
+            let savedWorkingDirectory = Self.validWorkingDirectory(
+                config.workingDirectory ?? localWorkingDirectory
+            )
+            try configureAttachExisting(&config)
+            if isLocal, let savedWorkingDirectory {
+                config.environmentVariables[Self.resurrectWorkingDirectoryEnvironmentKey] = savedWorkingDirectory
+            } else {
+                config.environmentVariables.removeValue(forKey: Self.resurrectWorkingDirectoryEnvironmentKey)
+            }
+            config.workingDirectory = nil
+        }
     }
 
     func openRequest(pane: UUID, attachExisting: Bool) throws -> String {

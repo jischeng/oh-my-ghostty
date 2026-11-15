@@ -67,6 +67,21 @@ pub fn createsSession(alloc: std.mem.Allocator, request: ?[]const u8) bool {
     return parsed.value.create;
 }
 
+pub fn isOpenRequest(alloc: std.mem.Allocator, request: ?[]const u8) bool {
+    const bytes = request orelse return false;
+    const parsed = std.json.parseFromSlice(OpenRequest, alloc, bytes, .{ .ignore_unknown_fields = true }) catch return false;
+    parsed.deinit();
+    return true;
+}
+
+pub fn hasResurrectLaunch(alloc: std.mem.Allocator, request: ?[]const u8) bool {
+    const bytes = request orelse return false;
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, bytes, .{}) catch return false;
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+    return parsed.value.object.contains("resurrect_launch");
+}
+
 fn childEnvironmentKey(key: []const u8) bool {
     return !std.mem.startsWith(u8, key, "OMG_RUNTIME_") and
         !std.mem.eql(u8, key, "OMG_SESSION_RUNTIME_DESCRIPTOR") and
@@ -109,6 +124,52 @@ pub fn prepare(
         .create = true,
         .cwd = cwd orelse parsed.value.cwd,
         .launch = .{
+            .argv = argv,
+            .env = Environment{ .map = environment },
+            .cwd = cwd orelse parsed.value.cwd,
+            .cols = grid.columns,
+            .rows = grid.rows,
+            .pixel_width = @min(screen.width, std.math.maxInt(u16)),
+            .pixel_height = @min(screen.height, std.math.maxInt(u16)),
+            .scrollback_max_bytes = scrollback.max_bytes,
+            .scrollback_max_lines = scrollback.max_lines,
+        },
+    }, .{ .emit_null_optional_fields = false });
+}
+
+pub fn prepareResurrect(
+    alloc: std.mem.Allocator,
+    request: []const u8,
+    argv: []const [:0]const u8,
+    environment: *const std.process.Environ.Map,
+    cwd: ?[]const u8,
+    grid: renderer.GridSize,
+    screen: renderer.ScreenSize,
+    configured_scrollback_bytes: ?usize,
+    configured_scrollback_lines: ?usize,
+) ![]u8 {
+    const parsed = try std.json.parseFromSlice(OpenRequest, alloc, request, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    if (parsed.value.create) {
+        return prepare(
+            alloc,
+            request,
+            argv,
+            environment,
+            cwd,
+            grid,
+            screen,
+            configured_scrollback_bytes,
+            configured_scrollback_lines,
+        );
+    }
+    const scrollback = effectiveScrollbackLimits(configured_scrollback_bytes, configured_scrollback_lines);
+    return std.json.Stringify.valueAlloc(alloc, .{
+        .id = parsed.value.id,
+        .policy = parsed.value.policy,
+        .create = false,
+        .cwd = parsed.value.cwd,
+        .resurrect_launch = .{
             .argv = argv,
             .env = Environment{ .map = environment },
             .cwd = cwd orelse parsed.value.cwd,
@@ -269,4 +330,43 @@ test "runtime scrollback preserves stricter Ghostty limits and clamps wider ones
     const wider = effectiveScrollbackLimits(50_000_000, null);
     try std.testing.expectEqual(@as(usize, max_runtime_scrollback_bytes), wider.max_bytes);
     try std.testing.expect(wider.max_lines == null);
+}
+
+test "local session resurrect prepares resurrect_launch without input_base64 and attachOnly clears it" {
+    const alloc = std.testing.allocator;
+    var env = std.process.Environ.Map.init(alloc);
+    defer env.deinit();
+    try env.put("TERM", "xterm-ghostty");
+    try env.put("OMG_RUNTIME_RESURRECT_CWD", "/tmp/saved-pane");
+    try env.put("OMG_RUNTIME_SOCKET", "/tmp/runtime.sock");
+    const request = try prepareResurrect(
+        alloc,
+        "{\"id\":\"pane\",\"policy\":{},\"create\":false}",
+        &.{ "/usr/bin/login", "-flp", "user", "/bin/zsh", "-l" },
+        &env,
+        "/tmp/saved-pane",
+        .{ .columns = 90, .rows = 30 },
+        .{ .width = 720, .height = 480 },
+        2048,
+        50,
+    );
+    defer alloc.free(request);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, request, .{});
+    defer parsed.deinit();
+    try std.testing.expect(!parsed.value.object.get("create").?.bool);
+    try std.testing.expect(!parsed.value.object.contains("launch"));
+    const resurrect = parsed.value.object.get("resurrect_launch").?.object;
+    try std.testing.expectEqualStrings("/tmp/saved-pane", resurrect.get("cwd").?.string);
+    try std.testing.expect(!resurrect.contains("input_base64"));
+    try std.testing.expectEqual(@as(i64, 2048), resurrect.get("scrollback_max_bytes").?.integer);
+    try std.testing.expectEqual(@as(i64, 50), resurrect.get("scrollback_max_lines").?.integer);
+    const child_env = resurrect.get("env").?.object;
+    try std.testing.expectEqualStrings("xterm-ghostty", child_env.get("TERM").?.string);
+    try std.testing.expect(!child_env.contains("OMG_RUNTIME_RESURRECT_CWD"));
+    try std.testing.expect(!child_env.contains("OMG_RUNTIME_SOCKET"));
+
+    const attached = try attachOnly(alloc, request);
+    defer alloc.free(attached);
+    try std.testing.expect(std.mem.indexOf(u8, attached, "resurrect_launch") == null);
+    try std.testing.expect(!createsSession(alloc, attached));
 }

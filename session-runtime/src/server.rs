@@ -7,20 +7,234 @@ use crate::{
 use std::{
     collections::HashSet,
     ffi::{c_void, CStr},
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
+    io::{self, Read, Write},
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::{
-            fs::{MetadataExt, PermissionsExt},
+            fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
             net::{UnixDatagram, UnixListener},
             process::CommandExt,
         },
     },
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 static PTY_SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static SHUTDOWN_SIGNALED: AtomicBool = AtomicBool::new(false);
+static SHUTDOWN_WAKE_FD: AtomicI32 = AtomicI32::new(-1);
+static SNAPSHOT_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+const SNAPSHOT_MAGIC: &[u8] = b"OMGSNAP1\0";
+const SNAPSHOT_DEBOUNCE: Duration = Duration::from_secs(3);
+const SNAPSHOT_MAX_INTERVAL: Duration = Duration::from_secs(30);
+// Exit alternate screen (?1049l) only when actually on the alternate screen so
+// DECRC inside ?1049l never rewinds the primary-screen cursor over saved rows.
+const HYGIENE_RESET: &str = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[>0u\x1b]8;;\x1b\\\x1b[0m";
+
+extern "C" fn handle_shutdown_signal(_sig: libc::c_int) {
+    SHUTDOWN_SIGNALED.store(true, Ordering::SeqCst);
+    let fd = SHUTDOWN_WAKE_FD.load(Ordering::SeqCst);
+    if fd >= 0 {
+        let byte: u8 = 1;
+        unsafe {
+            let _ = libc::write(fd, (&byte as *const u8).cast(), 1);
+        }
+    }
+}
+
+pub fn shutdown_signaled() -> bool {
+    SHUTDOWN_SIGNALED.load(Ordering::SeqCst)
+}
+
+pub struct ShutdownSignalGuard {
+    previous: libc::sigaction,
+}
+
+impl ShutdownSignalGuard {
+    pub(crate) fn install(wake: &crate::WakePipe) -> io::Result<Self> {
+        SHUTDOWN_SIGNALED.store(false, Ordering::SeqCst);
+        SHUTDOWN_WAKE_FD.store(wake.writer_raw_fd(), Ordering::SeqCst);
+        let mut sa: libc::sigaction = unsafe { std::mem::zeroed() };
+        sa.sa_sigaction = handle_shutdown_signal as *const () as usize;
+        sa.sa_flags = 0;
+        unsafe { libc::sigemptyset(&mut sa.sa_mask) };
+        let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
+        if unsafe { libc::sigaction(libc::SIGTERM, &sa, &mut previous) } < 0 {
+            SHUTDOWN_WAKE_FD.store(-1, Ordering::SeqCst);
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self { previous })
+    }
+}
+
+impl Drop for ShutdownSignalGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = libc::sigaction(libc::SIGTERM, &self.previous, std::ptr::null_mut());
+        }
+        SHUTDOWN_WAKE_FD.store(-1, Ordering::SeqCst);
+        SHUTDOWN_SIGNALED.store(false, Ordering::SeqCst);
+    }
+}
+
+pub fn snapshot_path(record_path: &Path) -> PathBuf {
+    record_path.with_extension("snapshot")
+}
+
+pub fn remove_snapshot_files(record_path: &Path) {
+    let _ = fs::remove_file(snapshot_path(record_path));
+}
+
+pub fn encode_snapshot(vt: &Vt, revision: Option<&str>) -> io::Result<Vec<u8>> {
+    let raw = vt.snapshot()?;
+    let rev = revision.unwrap_or("");
+    let total = SNAPSHOT_MAGIC.len() + rev.len() + 1 + raw.len();
+    if total > MAX_FRAME {
+        return Err(io::Error::other("VT snapshot exceeds MAX_FRAME"));
+    }
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(SNAPSHOT_MAGIC);
+    out.extend_from_slice(rev.as_bytes());
+    out.push(0);
+    out.extend_from_slice(&raw);
+    Ok(out)
+}
+
+pub fn save_snapshot_atomic(record_path: &Path, data: &[u8]) -> io::Result<()> {
+    if data.len() > MAX_FRAME {
+        return Err(io::Error::other("VT snapshot exceeds MAX_FRAME"));
+    }
+    let snap = snapshot_path(record_path);
+    let closed = record_path.with_extension("closed");
+    if closed.exists() {
+        let _ = fs::remove_file(&snap);
+        return Ok(());
+    }
+    let seq = SNAPSHOT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = record_path.with_extension(format!("snapshot.tmp.{}.{seq}", std::process::id()));
+    let _ = fs::remove_file(&tmp);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&tmp)?;
+    let write_res = file.write_all(data).and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(err) = write_res {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
+    }
+    if closed.exists() {
+        let _ = fs::remove_file(&tmp);
+        let _ = fs::remove_file(&snap);
+        return Ok(());
+    }
+    if let Err(err) = fs::rename(&tmp, &snap) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
+    }
+    Ok(())
+}
+
+pub fn load_snapshot(record_path: &Path, record_revision: Option<&str>) -> Option<Vec<u8>> {
+    let snap = snapshot_path(record_path);
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&snap)
+        .ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > MAX_FRAME as u64 {
+        return None;
+    }
+    let mut buf = Vec::with_capacity((meta.len() as usize).min(MAX_FRAME));
+    file.take((MAX_FRAME + 1) as u64)
+        .read_to_end(&mut buf)
+        .ok()?;
+    if buf.is_empty() || buf.len() > MAX_FRAME {
+        return None;
+    }
+    let expected_rev = crate::current_snapshot_revision();
+    if let Some(after_magic) = buf.strip_prefix(SNAPSHOT_MAGIC) {
+        let nul = after_magic.iter().position(|&b| b == 0)?;
+        if nul > 128 {
+            return None;
+        }
+        let header_rev = std::str::from_utf8(&after_magic[..nul]).ok()?;
+        let vt_bytes = &after_magic[nul + 1..];
+        if vt_bytes.is_empty() {
+            return None;
+        }
+        if let Some(expected) = expected_rev.as_deref() {
+            let candidate = if header_rev.is_empty() {
+                record_revision.map(crate::canonical_snapshot_revision)
+            } else {
+                Some(crate::canonical_snapshot_revision(header_rev))
+            };
+            if candidate != Some(expected) {
+                return None;
+            }
+        }
+        return Some(vt_bytes.to_vec());
+    }
+    if let Some(expected) = expected_rev.as_deref() {
+        if record_revision.map(crate::canonical_snapshot_revision) != Some(expected) {
+            return None;
+        }
+    }
+    Some(buf)
+}
+
+fn flush_vt_snapshot(
+    vt: &Vt,
+    managed: Option<&ManagedSession>,
+    dirty_rev: u64,
+    last_persisted_rev: &mut u64,
+    last_snapshot_at: &mut Instant,
+) {
+    let Some(m) = managed else {
+        return;
+    };
+    if m.path.with_extension("closed").exists() {
+        remove_snapshot_files(&m.path);
+        return;
+    }
+    let revision = crate::current_snapshot_revision();
+    let encoded = match encode_snapshot(vt, revision.as_deref()) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            *last_snapshot_at = Instant::now();
+            return;
+        }
+    };
+    if save_snapshot_atomic(&m.path, &encoded).is_ok() {
+        *last_persisted_rev = dirty_rev;
+    }
+    *last_snapshot_at = Instant::now();
+}
+
+fn format_local_timestamp() -> String {
+    unsafe {
+        let now = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        if !libc::localtime_r(&now, &mut tm).is_null() {
+            return format!(
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                tm.tm_year + 1900,
+                tm.tm_mon + 1,
+                tm.tm_mday,
+                tm.tm_hour,
+                tm.tm_min,
+                tm.tm_sec
+            );
+        }
+    }
+    unix_time().to_string()
+}
 struct ReplyBuffer {
     bytes: VecDeque<u8>,
     delegated: bool,
@@ -308,6 +522,8 @@ pub struct ManagedSession {
     pub initial_cwd: Option<PathBuf>,
     pub local_launch: Option<LocalLaunchSpec>,
     pub presentation: Option<std::sync::Arc<std::sync::Mutex<crate::activity::Snapshot>>>,
+    pub resurrect: bool,
+    pub shutdown_wake: Option<crate::WakePipe>,
 }
 
 pub fn serve_managed(
@@ -351,6 +567,8 @@ pub fn serve_managed(
     let mut master = -1;
     let mut slave = -1;
     let mut local_launch = managed.as_mut().and_then(|value| value.local_launch.take());
+    let shutdown_wake = managed.as_mut().and_then(|value| value.shutdown_wake.take());
+    let is_resurrect = managed.as_ref().is_some_and(|value| value.resurrect);
     let local_mode = local_launch.is_some();
     let scrollback_max_bytes = local_launch
         .as_ref()
@@ -484,7 +702,11 @@ pub fn serve_managed(
             }
         }
     }
-    if let Some(resume) = managed.as_ref().and_then(|m| m.record.resume.as_ref()) {
+    if let Some(resume) = managed
+        .as_ref()
+        .filter(|m| !m.resurrect)
+        .and_then(|m| m.record.resume.as_ref())
+    {
         command.current_dir(&resume.cwd).env("PWD", &resume.cwd);
     } else if let Some(cwd) = managed
         .as_ref()
@@ -567,6 +789,49 @@ pub fn serve_managed(
         Some(reply),
         (&mut *input as *mut ReplyBuffer).cast(),
     )?;
+    let mut seq = 0u64;
+    let mut output_dirty_rev = 0u64;
+    let mut last_persisted_rev = 0u64;
+    let mut last_output_at = Instant::now();
+    let mut last_snapshot_at = Instant::now();
+    if is_resurrect {
+        if let Some(m) = managed
+            .as_ref()
+            .filter(|m| !m.path.with_extension("closed").exists())
+        {
+            if let Some(snap_bytes) = load_snapshot(&m.path, m.record.snapshot_revision.as_deref())
+            {
+                if vt.restore(&snap_bytes).is_ok() {
+                    if size.ws_xpixel > 0 && size.ws_ypixel > 0 {
+                        let _ = vt.resize_pixels(
+                            size.ws_col,
+                            size.ws_row,
+                            size.ws_xpixel,
+                            size.ws_ypixel,
+                        );
+                    } else {
+                        let _ = vt.resize(size.ws_col, size.ws_row);
+                    }
+                }
+            }
+            let alt_reset = if vt.in_alt_screen() {
+                "\x1b[?1049l"
+            } else {
+                ""
+            };
+            let banner = format!(
+                "{alt_reset}{HYGIENE_RESET}\r\n\x1b[0;2m  ──────  Session resurrected after system restart · {}  ──────\x1b[0m\r\n",
+                format_local_timestamp()
+            );
+            vt.write(banner.as_bytes());
+            input.bytes.clear();
+            input.unclaimed.clear();
+            let _ = vt.activity_mut().take_last_change_sync_restore();
+            seq = seq.saturating_add(banner.len() as u64);
+            output_dirty_rev = 1;
+            last_output_at = Instant::now();
+        }
+    }
     vt.activity_mut().local = local_mode;
     vt.activity_mut().session_leader = Some(child.id() as i32);
     let mut last_broadcast_revision = vt.activity().revision();
@@ -580,10 +845,11 @@ pub fn serve_managed(
     // A first inline viewer can continue at its local shell cursor instead of
     // clearing the screen to paint a newly-created, mostly empty terminal.
     // Stop retaining this bounded prefix once anyone has claimed the PTY.
-    let mut initial_output = Some(Vec::<u8>::new());
-    let mut seq = 0u64;
+    let mut initial_output = (!is_resurrect).then(Vec::<u8>::new);
     let mut lifetime = Lifetime::new(Instant::now());
     let mut end_reason = EndReason::ProcessExited;
+    let mut shutdown_interrupted = false;
+    let mut shutdown_handled = false;
     let mut agent_done = false;
     let mut completed_group = None;
     let mut recovery_checked_at = Instant::now() - Duration::from_secs(5);
@@ -613,14 +879,57 @@ pub fn serve_managed(
         }
     }
     loop {
+        if let Some(wake) = &shutdown_wake {
+            wake.drain();
+        }
         if closing.is_none()
             && managed
                 .as_ref()
                 .is_some_and(|m| m.path.with_extension("closed").exists())
         {
             end_reason = EndReason::ExplicitClose;
+            if let Some(m) = managed.as_ref() {
+                remove_snapshot_files(&m.path);
+            }
             terminate_group(master, child.id(), libc::SIGTERM);
             closing = Some(Instant::now());
+        }
+        if shutdown_signaled() && !shutdown_handled {
+            shutdown_handled = true;
+            let has_closed = managed
+                .as_ref()
+                .is_some_and(|m| m.path.with_extension("closed").exists());
+            if has_closed || end_reason == EndReason::ExplicitClose {
+                end_reason = EndReason::ExplicitClose;
+                if let Some(m) = managed.as_ref() {
+                    remove_snapshot_files(&m.path);
+                }
+            } else if closing.is_none()
+                && !matches!(
+                    end_reason,
+                    EndReason::DetachedTimeout | EndReason::Deadline | EndReason::AgentCompleted
+                )
+            {
+                end_reason = EndReason::Lost;
+                shutdown_interrupted = true;
+                if local_mode {
+                    flush_vt_snapshot(
+                        &vt,
+                        managed.as_ref(),
+                        output_dirty_rev,
+                        &mut last_persisted_rev,
+                        &mut last_snapshot_at,
+                    );
+                }
+                if let Some(m) = &mut managed {
+                    m.record.ended = Some(EndReason::Lost);
+                    let _ = m.record.save(&m.path);
+                }
+                if exited.is_none() {
+                    terminate_group(master, child.id(), libc::SIGTERM);
+                    closing = Some(Instant::now());
+                }
+            }
         }
         if exited.is_none() && cwd_checked.elapsed() >= Duration::from_millis(500) {
             let cur_fg = unsafe { libc::tcgetpgrp(master) };
@@ -948,11 +1257,16 @@ pub fn serve_managed(
                             {
                                 return Err(io::Error::last_os_error());
                             }
+                            output_dirty_rev = output_dirty_rev.wrapping_add(1);
+                            last_output_at = Instant::now();
                         }
                         resizes.push(f.data);
                     }
                     CLOSE if writer == Some(peer.id) && closing.is_none() => {
                         end_reason = EndReason::ExplicitClose;
+                        if let Some(m) = managed.as_ref() {
+                            remove_snapshot_files(&m.path);
+                        }
                         terminate_group(master, child.id(), libc::SIGTERM);
                         closing = Some(Instant::now());
                     }
@@ -1035,6 +1349,10 @@ pub fn serve_managed(
                         },
                         &bytes[..n],
                     );
+                    if n > 0 {
+                        output_dirty_rev = output_dirty_rev.wrapping_add(1);
+                        last_output_at = Instant::now();
+                    }
                     if let Some(prefix) = &mut initial_output {
                         if prefix.len() + visible.len() <= 8 * 1024 {
                             prefix.extend_from_slice(&visible);
@@ -1057,25 +1375,54 @@ pub fn serve_managed(
         // Keep the session leader unreaped during termination escalation. A
         // zombie retains its PID/SID, so foreground jobs can still be validated
         // and killed even if they outlive the shell after SIGTERM.
-        let may_reap = closing.is_none_or(|start: Instant| {
-            start.elapsed() > Duration::from_secs(policy.terminate_grace_seconds)
-        });
+        let grace_duration = if shutdown_interrupted {
+            Duration::from_millis(policy.terminate_grace_seconds.min(1).saturating_mul(800))
+        } else {
+            Duration::from_secs(policy.terminate_grace_seconds)
+        };
+        let may_reap = closing.is_none_or(|start: Instant| start.elapsed() > grace_duration);
         if exited.is_none() && may_reap {
             if closing.is_some() {
                 terminate_group(master, child.id(), libc::SIGKILL);
             }
             if let Some(status) = child.try_wait()? {
                 exited = Some(status.code().unwrap_or(-1));
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::ExitStatusExt;
+                    let signaled_shutdown = matches!(
+                        status.signal(),
+                        Some(sig) if sig == libc::SIGTERM || sig == libc::SIGKILL
+                    );
+                    if closing.is_none()
+                        && signaled_shutdown
+                        && !managed
+                            .as_ref()
+                            .is_some_and(|m| m.path.with_extension("closed").exists())
+                        && !matches!(
+                            end_reason,
+                            EndReason::ExplicitClose
+                                | EndReason::DetachedTimeout
+                                | EndReason::Deadline
+                                | EndReason::AgentCompleted
+                        )
+                    {
+                        end_reason = EndReason::Lost;
+                        shutdown_interrupted = true;
+                    }
+                }
             }
         }
         if let Some(start) = closing {
-            if start.elapsed() > Duration::from_secs(policy.terminate_grace_seconds)
-                && !eof
-                && exited.is_none()
-            {
+            if start.elapsed() > grace_duration && !eof && exited.is_none() {
                 terminate_group(master, child.id(), libc::SIGKILL);
                 // Escaped descendants retaining a slave cannot keep our actor forever.
-                if start.elapsed() > Duration::from_secs(policy.terminate_grace_seconds + 2) {
+                let force_eof_after = if shutdown_interrupted {
+                    grace_duration + Duration::from_millis(200)
+                } else {
+                    grace_duration + Duration::from_secs(2)
+                };
+                if start.elapsed() > force_eof_after {
                     eof = true;
                 }
             }
@@ -1147,6 +1494,17 @@ pub fn serve_managed(
             if let Some(reason) = lifetime.reason(&policy, Instant::now(), unix_time(), can_resume)
             {
                 end_reason = reason;
+                if matches!(
+                    reason,
+                    EndReason::ExplicitClose
+                        | EndReason::DetachedTimeout
+                        | EndReason::Deadline
+                        | EndReason::ProcessExited
+                ) {
+                    if let Some(m) = managed.as_ref() {
+                        remove_snapshot_files(&m.path);
+                    }
+                }
                 if let Some(m) = &mut managed {
                     m.record.ended = Some(reason);
                     m.record.save(&m.path)?;
@@ -1155,13 +1513,32 @@ pub fn serve_managed(
                 closing = Some(Instant::now());
             }
         }
+        if local_mode
+            && closing.is_none()
+            && exited.is_none()
+            && output_dirty_rev != last_persisted_rev
+            && (last_output_at.elapsed() >= SNAPSHOT_DEBOUNCE
+                || last_snapshot_at.elapsed() >= SNAPSHOT_MAX_INTERVAL)
+        {
+            flush_vt_snapshot(
+                &vt,
+                managed.as_ref(),
+                output_dirty_rev,
+                &mut last_persisted_rev,
+                &mut last_snapshot_at,
+            );
+        }
         if exited.is_some() && closing.is_none() {
             closing = Some(Instant::now());
         }
         // Once the owned leader has been reaped, its numeric PID may be reused.
         // Finish draining instead of signaling any process by that stale ID.
-        if exited.is_some() && closing.is_some_and(|start| start.elapsed() > Duration::from_secs(2))
-        {
+        let eof_drain_limit = if shutdown_interrupted {
+            Duration::from_millis(150)
+        } else {
+            Duration::from_secs(2)
+        };
+        if exited.is_some() && closing.is_some_and(|start| start.elapsed() > eof_drain_limit) {
             eof = true;
         }
         if writer.is_some_and(|id| !peers.iter().any(|p| p.id == id)) {
@@ -1182,6 +1559,41 @@ pub fn serve_managed(
                     group.finish()?;
                 }
                 if let Some(m) = &mut managed {
+                    if m.path.with_extension("closed").exists() {
+                        end_reason = EndReason::ExplicitClose;
+                    } else if shutdown_signaled()
+                        && !matches!(
+                            end_reason,
+                            EndReason::ExplicitClose
+                                | EndReason::DetachedTimeout
+                                | EndReason::Deadline
+                                | EndReason::AgentCompleted
+                        )
+                    {
+                        end_reason = EndReason::Lost;
+                        shutdown_interrupted = true;
+                    }
+                    if end_reason == EndReason::Lost && local_mode {
+                        if output_dirty_rev != last_persisted_rev
+                            || !snapshot_path(&m.path).exists()
+                        {
+                            flush_vt_snapshot(
+                                &vt,
+                                Some(m),
+                                output_dirty_rev,
+                                &mut last_persisted_rev,
+                                &mut last_snapshot_at,
+                            );
+                        }
+                    } else if matches!(
+                        end_reason,
+                        EndReason::ExplicitClose
+                            | EndReason::ProcessExited
+                            | EndReason::DetachedTimeout
+                            | EndReason::Deadline
+                    ) {
+                        remove_snapshot_files(&m.path);
+                    }
                     m.record.pid = None;
                     m.record.ended = Some(end_reason);
                     m.record.save(&m.path)?;
@@ -1200,11 +1612,16 @@ pub fn serve_managed(
                 draining = Some(Instant::now());
             }
             let start = draining.as_ref().unwrap();
-            if peers.iter().all(|p| p.queued == 0) || start.elapsed() > Duration::from_secs(2) {
+            let drain_limit = if shutdown_interrupted {
+                Duration::from_millis(150)
+            } else {
+                Duration::from_secs(2)
+            };
+            if peers.iter().all(|p| p.queued == 0) || start.elapsed() > drain_limit {
                 return Ok(());
             }
         }
-        let mut descriptors = Vec::with_capacity(peers.len() + 3);
+        let mut descriptors = Vec::with_capacity(peers.len() + 4);
         if !eof {
             descriptors.push(libc::pollfd {
                 fd: master,
@@ -1224,6 +1641,9 @@ pub fn serve_managed(
             events: libc::POLLIN,
             revents: 0,
         });
+        if let Some(wake) = &shutdown_wake {
+            descriptors.push(wake.poll_fd());
+        }
         for peer in &peers {
             let mut interests = libc::POLLIN;
             if peer_wants_write(peer) {
@@ -1235,11 +1655,19 @@ pub fn serve_managed(
                 revents: 0,
             });
         }
+        let mut poll_timeout_ms: libc::c_int = if shutdown_interrupted { 50 } else { 200 };
+        if local_mode && closing.is_none() && exited.is_none() && output_dirty_rev != last_persisted_rev
+        {
+            let next_snapshot = (last_output_at + SNAPSHOT_DEBOUNCE)
+                .min(last_snapshot_at + SNAPSHOT_MAX_INTERVAL);
+            poll_timeout_ms =
+                poll_timeout_ms.min(deadline_poll_ms(Instant::now(), next_snapshot));
+        }
         let result = unsafe {
             libc::poll(
                 descriptors.as_mut_ptr(),
                 descriptors.len() as libc::nfds_t,
-                200,
+                poll_timeout_ms,
             )
         };
         if result < 0 {
@@ -1433,5 +1861,44 @@ mod tests {
         std::thread::sleep(Duration::from_millis(25));
         let elapsed = runtime_millis(started);
         assert!((20..1000).contains(&elapsed));
+    }
+
+    #[test]
+    fn snapshot_persistence_enforces_mode_symlinks_size_and_closed_tombstone() {
+        let dir = PathBuf::from(format!("/tmp/omg-snap-test-{}", &nonce().unwrap()[..8]));
+        fs::create_dir_all(&dir).unwrap();
+        let record_path = dir.join("11111111-1111-1111-1111-111111111111.json");
+
+        let mut vt = Vt::new(80, 24).unwrap();
+        vt.write(b"\x1b[?1049halt-mode-content\x1b[?1049lmain-screen-line\r\n");
+        let encoded = encode_snapshot(&vt, None).unwrap();
+        save_snapshot_atomic(&record_path, &encoded).unwrap();
+
+        let snap = snapshot_path(&record_path);
+        let mode = fs::symlink_metadata(&snap).unwrap().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        let loaded = load_snapshot(&record_path, None).unwrap();
+        let mut restored = Vt::new(80, 24).unwrap();
+        restored.restore(&loaded).unwrap();
+        restored.write(HYGIENE_RESET.as_bytes());
+        assert!(restored.text().unwrap().contains("main-screen-line"));
+
+        // Refuses symlinked snapshot reads cleanly.
+        let outside = dir.join("outside.snapshot");
+        fs::write(&outside, &encoded).unwrap();
+        fs::remove_file(&snap).unwrap();
+        std::os::unix::fs::symlink(&outside, &snap).unwrap();
+        assert!(load_snapshot(&record_path, None).is_none());
+        fs::remove_file(&snap).unwrap();
+
+        // `.closed` tombstone prevents saving and removes stale snapshot.
+        save_snapshot_atomic(&record_path, &encoded).unwrap();
+        assert!(snap.exists());
+        fs::write(record_path.with_extension("closed"), b"").unwrap();
+        save_snapshot_atomic(&record_path, &encoded).unwrap();
+        assert!(!snap.exists());
+
+        fs::remove_dir_all(dir).unwrap();
     }
 }

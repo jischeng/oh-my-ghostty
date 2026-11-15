@@ -64,6 +64,10 @@ impl EndReason {
             Self::DetachedTimeout | Self::Deadline | Self::AgentCompleted | Self::ProcessExited
         )
     }
+
+    pub fn local_resurrectable(self) -> bool {
+        matches!(self, Self::Lost)
+    }
 }
 pub fn unix_time() -> u64 {
     SystemTime::now()

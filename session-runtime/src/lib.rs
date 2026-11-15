@@ -70,6 +70,7 @@ unsafe extern "C" {
     fn omg_vt_text(vt: *mut c_void, data: *mut *mut u8, len: *mut usize) -> i32;
     fn omg_vt_continuation(vt: *mut c_void, data: *mut *mut u8, len: *mut usize) -> i32;
     fn omg_vt_screen_only(vt: *mut c_void) -> i32;
+    fn omg_vt_in_alt_screen(vt: *mut c_void) -> i32;
     fn omg_vt_dynamic_color(vt: *mut c_void, index: u32, rgb: *mut u8) -> i32;
     fn omg_vt_paint(
         vt: *mut c_void,
@@ -225,6 +226,9 @@ impl Vt {
     pub fn restore(&mut self, data: &[u8]) -> io::Result<()> {
         check(unsafe { omg_vt_restore(self.0, data.as_ptr(), data.len()) })
     }
+    pub fn in_alt_screen(&self) -> bool {
+        unsafe { omg_vt_in_alt_screen(self.0) != 0 }
+    }
     fn bytes(&self, text: bool) -> io::Result<Vec<u8>> {
         let mut p = std::ptr::null_mut();
         let mut len = 0;
@@ -254,11 +258,84 @@ impl Vt {
         check(unsafe { omg_vt_scrollback_limits(self.0, &mut bytes, &mut has_lines, &mut lines) })?;
         Ok((bytes, has_lines.then_some(lines)))
     }
+    #[cfg(test)]
+    fn set_screen_only(&mut self) -> io::Result<()> {
+        check(unsafe { omg_vt_screen_only(self.0) })
+    }
 }
 impl Drop for Vt {
     fn drop(&mut self) {
         unsafe { omg_vt_free(self.0) }
     }
+}
+
+pub fn valid_revision(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+}
+
+pub fn canonical_snapshot_revision(raw: &str) -> &str {
+    match raw.trim() {
+        "9c4d662347abb5857b04" | "28eb8860dee53f323499" | "fa3d1581b35d56a5313b" => {
+            "59c5cc7b4d1fe408faf5"
+        }
+        trimmed => trimmed,
+    }
+}
+
+pub fn current_snapshot_revision() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let text = std::fs::read_to_string(dir.join("snapshot-revision")).ok()?;
+    let trimmed = canonical_snapshot_revision(&text);
+    valid_revision(trimmed).then(|| trimmed.to_owned())
+}
+
+fn is_executable_file(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .is_ok_and(|meta| meta.is_file() && (meta.permissions().mode() & 0o111) != 0)
+}
+
+pub fn user_login_shell() -> String {
+    if let Ok(shell) = std::env::var("SHELL") {
+        if !shell.is_empty() && is_executable_file(std::path::Path::new(&shell)) {
+            return shell;
+        }
+    }
+    let uid = unsafe { libc::geteuid() };
+    let mut pwd = std::mem::MaybeUninit::<libc::passwd>::uninit();
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    let mut buf = vec![0u8; 4096];
+    let status = unsafe {
+        libc::getpwuid_r(
+            uid,
+            pwd.as_mut_ptr(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            &mut result,
+        )
+    };
+    if status == 0 && !result.is_null() {
+        let pwd = unsafe { pwd.assume_init() };
+        if !pwd.pw_shell.is_null() {
+            let shell = unsafe { std::ffi::CStr::from_ptr(pwd.pw_shell) }
+                .to_string_lossy()
+                .into_owned();
+            if !shell.is_empty() && is_executable_file(std::path::Path::new(&shell)) {
+                return shell;
+            }
+        }
+    }
+    for candidate in ["/bin/zsh", "/bin/bash", "/bin/sh"] {
+        if is_executable_file(std::path::Path::new(candidate)) {
+            return candidate.to_owned();
+        }
+    }
+    "/bin/sh".to_owned()
 }
 fn check(code: i32) -> io::Result<()> {
     if code == 0 {
@@ -577,7 +654,8 @@ impl Drop for Peer {
 }
 
 #[derive(Clone)]
-pub(crate) struct WakePipe {
+#[doc(hidden)]
+pub struct WakePipe {
     reader: Arc<UnixStream>,
     writer: Arc<UnixStream>,
 }
@@ -600,6 +678,11 @@ impl WakePipe {
             events: libc::POLLIN,
             revents: 0,
         }
+    }
+
+    pub fn writer_raw_fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd;
+        self.writer.as_raw_fd()
     }
 
     pub fn notify(&self) {
@@ -714,6 +797,51 @@ mod tests {
         )
         .unwrap();
         assert_eq!(disabled.scrollback_limits().unwrap(), (0, Some(0)));
+    }
+
+    #[test]
+    fn vt_restore_preserves_scrollback_and_continuation_limits() {
+        let mut source = Vt::new(80, 24).unwrap();
+        source.write(b"line-before-snapshot\r\n");
+        let snapshot = source.snapshot().unwrap();
+
+        let mut custom = Vt::with_reply_pixels_scrollback(
+            80,
+            24,
+            640,
+            384,
+            ScrollbackLimits {
+                max_bytes: 12_345,
+                max_lines: Some(42),
+            },
+            None,
+            std::ptr::null_mut(),
+        )
+        .unwrap();
+        custom.restore(&snapshot).unwrap();
+        assert_eq!(custom.scrollback_limits().unwrap(), (12_345, Some(42)));
+        assert!(custom.text().unwrap().contains("line-before-snapshot"));
+
+        let mut zero = Vt::with_reply_pixels_scrollback(
+            80,
+            24,
+            640,
+            384,
+            ScrollbackLimits {
+                max_bytes: 0,
+                max_lines: Some(0),
+            },
+            None,
+            std::ptr::null_mut(),
+        )
+        .unwrap();
+        zero.restore(&snapshot).unwrap();
+        assert_eq!(zero.scrollback_limits().unwrap(), (0, Some(0)));
+
+        let mut screen_only = Vt::new(80, 24).unwrap();
+        screen_only.set_screen_only().unwrap();
+        screen_only.restore(&snapshot).unwrap();
+        assert_eq!(screen_only.scrollback_limits().unwrap(), (0, Some(0)));
     }
 
     #[test]
@@ -885,5 +1013,32 @@ mod tests {
         poll_fds(&mut fds, 0).unwrap();
         assert_eq!(fds[0].revents & libc::POLLIN, 0);
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn in_alt_screen_tracks_screen_mode_across_snapshot_restore() {
+        let mut primary = Vt::new(80, 24).unwrap();
+        assert!(!primary.in_alt_screen());
+        primary.write(b"line one\r\nline two\r\n");
+        let snap = primary.snapshot().unwrap();
+        let mut restored = Vt::new(80, 24).unwrap();
+        restored.restore(&snap).unwrap();
+        assert!(!restored.in_alt_screen());
+        restored.write(b"\r\nSession resurrected\r\n");
+        let text = restored.text().unwrap();
+        assert!(text.contains("line one"));
+        assert!(text.contains("line two"));
+        assert!(text.contains("Session resurrected"));
+
+        let mut alt = Vt::new(80, 24).unwrap();
+        alt.write(b"before alt\r\n\x1b[?1049hINSIDE_ALT");
+        assert!(alt.in_alt_screen());
+        let alt_snap = alt.snapshot().unwrap();
+        let mut restored_alt = Vt::new(80, 24).unwrap();
+        restored_alt.restore(&alt_snap).unwrap();
+        assert!(restored_alt.in_alt_screen());
+        restored_alt.write(b"\x1b[?1049l");
+        assert!(!restored_alt.in_alt_screen());
+        assert!(restored_alt.text().unwrap().contains("before alt"));
     }
 }

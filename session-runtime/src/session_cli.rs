@@ -78,13 +78,9 @@ struct Inventory {
 fn digest(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
 }
-fn valid_revision(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
-}
+pub(crate) use omg_session_runtime::{
+    canonical_snapshot_revision, current_snapshot_revision, valid_revision,
+};
 pub(crate) fn current_revision() -> String {
     if let Ok(exe) = env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -99,21 +95,6 @@ pub(crate) fn current_revision() -> String {
         }
     }
     env!("CARGO_PKG_VERSION").to_owned()
-}
-pub(crate) fn canonical_snapshot_revision(raw: &str) -> &str {
-    match raw.trim() {
-        "9c4d662347abb5857b04" | "28eb8860dee53f323499" | "fa3d1581b35d56a5313b" => {
-            "59c5cc7b4d1fe408faf5"
-        }
-        trimmed => trimmed,
-    }
-}
-pub(crate) fn current_snapshot_revision() -> Option<String> {
-    let exe = env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    let text = fs::read_to_string(dir.join("snapshot-revision")).ok()?;
-    let trimmed = canonical_snapshot_revision(&text);
-    valid_revision(trimmed).then(|| trimmed.to_owned())
 }
 pub(crate) fn default_support() -> io::Result<PathBuf> {
     let executable = env::current_exe()?;

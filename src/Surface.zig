@@ -682,39 +682,63 @@ pub fn init(
             const local = std.mem.eql(u8, config.env.map.get("OMG_RUNTIME_LOCAL") orelse "", "1");
             const request = config.env.map.get("OMG_RUNTIME_PANE_ID");
             const launch = @import("omg/session/LocalLaunch.zig");
-            if (local and launch.createsSession(alloc, request)) {
+            if (local and launch.isOpenRequest(alloc, request)) {
+                const creates = launch.createsSession(alloc, request);
+                var launch_exec_config = exec_config;
+                if (!creates) {
+                    launch_exec_config.command = null;
+                    launch_exec_config.working_directory = null;
+                }
                 // Reuse Ghostty's shell/config preparation without starting a
                 // second PTY. Only the daemon may execute this launch request.
-                var prepared = try termio.Exec.init(alloc, exec_config);
+                var prepared = try termio.Exec.init(alloc, launch_exec_config);
                 env_owned = false;
                 defer prepared.deinit();
                 const requested_cwd = launch.requestedWorkingDirectory(alloc, request);
                 defer if (requested_cwd) |value| alloc.free(value);
+                const resurrect_cwd = config.env.map.get("OMG_RUNTIME_RESURRECT_CWD");
                 const cwd = try launch.workingDirectory(alloc, global.io(), &.{
                     prepared.subprocess.cwd,
                     requested_cwd,
+                    resurrect_cwd,
                     prepared.subprocess.env.?.get("HOME"),
                 });
                 defer alloc.free(cwd);
                 try prepared.subprocess.env.?.put("PWD", cwd);
-                const encoded = try launch.prepare(
-                    alloc,
-                    request.?,
-                    prepared.subprocess.args,
-                    &prepared.subprocess.env.?,
-                    cwd,
-                    size.grid(),
-                    size.terminal(),
-                    config.@"scrollback-limit-bytes".optional(),
-                    config.@"scrollback-limit-lines".optional(),
-                );
+                const encoded = if (creates)
+                    try launch.prepare(
+                        alloc,
+                        request.?,
+                        prepared.subprocess.args,
+                        &prepared.subprocess.env.?,
+                        cwd,
+                        size.grid(),
+                        size.terminal(),
+                        config.@"scrollback-limit-bytes".optional(),
+                        config.@"scrollback-limit-lines".optional(),
+                    )
+                else
+                    try launch.prepareResurrect(
+                        alloc,
+                        request.?,
+                        prepared.subprocess.args,
+                        &prepared.subprocess.env.?,
+                        if (resurrect_cwd) |saved|
+                            if (saved.len > 0) saved else cwd
+                        else
+                            cwd,
+                        size.grid(),
+                        size.terminal(),
+                        config.@"scrollback-limit-bytes".optional(),
+                        config.@"scrollback-limit-lines".optional(),
+                    );
                 defer {
                     std.crypto.secureZero(u8, encoded);
                     alloc.free(encoded);
                 }
                 break :session .{ .omg_session = try termio.OmgSession.init(alloc, path, encoded, .{
                     .is_local = true,
-                    .working_directory = cwd,
+                    .working_directory = if (creates) cwd else null,
                 }) };
             }
             const backend = try termio.OmgSession.init(alloc, path, request, .{ .is_local = local });

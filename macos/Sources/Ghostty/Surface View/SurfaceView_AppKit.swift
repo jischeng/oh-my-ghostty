@@ -2416,20 +2416,15 @@ extension Ghostty {
                 )
                 let attachesSavedRuntime = SessionRuntimeRestorationPolicy.attachesSavedRuntime(for: startupMode)
                 if attachesSavedRuntime {
-                    if createRuntime {
-                        try runtime.configure(&config)
-                    } else {
-                        try runtime.configureAttachExisting(&config)
-                    }
-                    // Runtime attach owns the process; don't replay shell/Agent launch commands.
-                    config.workingDirectory = createRuntime && runtime.isLocal
-                        ? runtime.initialWorkingDirectory ?? config.workingDirectory ?? runtime.localWorkingDirectory
-                        : nil
+                    try runtime.configureSavedRestore(&config, createRuntime: createRuntime)
                     self.init(app, baseConfig: config, uuid: uuid)
                 } else {
                     config.environmentVariables.removeValue(forKey: SessionRuntimeDescriptor.environmentKey)
                     config.environmentVariables[SessionRuntimeDescriptor.localRuntimeEnvironmentKey] = ""
                     config.environmentVariables[SessionRuntimeDescriptor.attachExistingEnvironmentKey] = ""
+                    config.environmentVariables.removeValue(
+                        forKey: SessionRuntimeDescriptor.resurrectWorkingDirectoryEnvironmentKey
+                    )
                     config.environmentVariables.removeValue(forKey: "OMG_RUNTIME_SOCKET")
                     config.environmentVariables.removeValue(forKey: "OMG_RUNTIME_PANE_ID")
                     config.workingDirectory = runtime.isLocal

@@ -159,7 +159,7 @@ fn set_peer_status(peer: &mut LocalPeer, attempt: u32) {
     }
 }
 
-fn open_request(peer: &LocalPeer) -> io::Result<(u8, Vec<u8>)> {
+fn open_request(peer: &LocalPeer, allow_local_resurrect: bool) -> io::Result<(u8, Vec<u8>)> {
     let bytes = peer
         .open
         .as_ref()
@@ -171,10 +171,13 @@ fn open_request(peer: &LocalPeer) -> io::Result<(u8, Vec<u8>)> {
     if !request.create {
         request.launch = None;
     }
+    if request.create || peer.snapshot_confirmed || !allow_local_resurrect {
+        request.resurrect_launch = None;
+    }
     Ok((b'C', serde_json::to_vec(&request)?))
 }
 
-fn clear_launch_data(peer: &mut LocalPeer) {
+fn clear_launch_data(peer: &mut LocalPeer, clear_resurrect: bool) {
     let Some(bytes) = peer.open.as_ref() else {
         return;
     };
@@ -183,6 +186,9 @@ fn clear_launch_data(peer: &mut LocalPeer) {
     };
     request.create = false;
     request.launch = None;
+    if clear_resurrect {
+        request.resurrect_launch = None;
+    }
     if let Ok(bytes) = serde_json::to_vec(&request) {
         peer.open = Some(bytes);
     }
@@ -204,6 +210,7 @@ fn begin_open(
     peers: &mut HashMap<u64, LocalPeer>,
     remote_streams: &mut HashMap<u64, u64>,
     next_stream: &mut u64,
+    allow_local_resurrect: bool,
 ) -> io::Result<()> {
     let ids: Vec<_> = peers
         .iter()
@@ -219,7 +226,7 @@ fn begin_open(
     for id in ids {
         let (kind, data) = {
             let peer = peers.get(&id).unwrap();
-            open_request(peer)?
+            open_request(peer, allow_local_resurrect)?
         };
         let stream = *next_stream;
         *next_stream = next_generation(*next_stream);
@@ -339,6 +346,7 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
     let mut strict_open = false;
     let mut durable_close = false;
     let mut local_launch = false;
+    let mut local_resurrect = false;
     let mut inline_viewer = false;
     let mut list_in_flight = false;
     let mut generation_counter = initial_generation;
@@ -384,6 +392,12 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
             remote_streams.clear();
             reset_remote_streams(&mut peers, true);
             list_in_flight = false;
+            capabilities_received = false;
+            strict_open = false;
+            durable_close = false;
+            local_launch = false;
+            local_resurrect = false;
+            inline_viewer = false;
             advance_peer_generations(&mut peers, &mut generation_counter);
             stable_since = None;
             state = State::Reconnecting;
@@ -439,6 +453,7 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
                             strict_open = false;
                             durable_close = false;
                             local_launch = false;
+                            local_resurrect = false;
                             inline_viewer = false;
                             list_in_flight = false;
                             remote.as_mut().unwrap().push(Frame::new(b'P', 0, &[]));
@@ -723,7 +738,7 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
                 .iter_mut()
                 .filter(|(_, p)| !p.control && !p.ended && p.failed)
                 .map(|(id, p)| {
-                    clear_launch_data(p);
+                    clear_launch_data(p, false);
                     p.retry_requested = true;
                     p.writer_requested = false;
                     p.writer_ready = false;
@@ -763,7 +778,7 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
                             ));
                             continue;
                         }
-                        match open_request(peer) {
+                        match open_request(peer, local_launch && local_resurrect) {
                             Ok((kind, data)) => {
                                 let stream = next_stream;
                                 next_stream = next_generation(next_stream);
@@ -804,9 +819,13 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
 
         let remote_frames = if let Some(remote) = remote.as_mut() {
             if capabilities_received && strict_open {
-                if let Err(error) =
-                    begin_open(remote, &mut peers, &mut remote_streams, &mut next_stream)
-                {
+                if let Err(error) = begin_open(
+                    remote,
+                    &mut peers,
+                    &mut remote_streams,
+                    &mut next_stream,
+                    local_launch && local_resurrect,
+                ) {
                     eprintln!("session runtime open failed: {error}");
                 }
             }
@@ -835,6 +854,7 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
                             strict_open = has_capability(&frame.data, "strict-open/1");
                             durable_close = has_capability(&frame.data, "durable-close/1");
                             local_launch = has_capability(&frame.data, "local-launch/1");
+                            local_resurrect = has_capability(&frame.data, "local-resurrect/1");
                             inline_viewer = has_capability(&frame.data, "inline-viewer/1");
                             if first_capabilities {
                                 for peer in peers
@@ -853,7 +873,7 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
                                     if requires_local_launch && !local_launch {
                                         peer.failed = true;
                                         peer.retry_requested = false;
-                                        clear_launch_data(peer);
+                                        clear_launch_data(peer, true);
                                         peer.remote_stream = None;
                                         peer.peer.push(Frame::new(
                                             b'E',
@@ -863,14 +883,14 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
                                     } else if requires_inline && !inline_viewer {
                                         peer.failed = true;
                                         peer.retry_requested = false;
-                                        clear_launch_data(peer);
+                                        clear_launch_data(peer, true);
                                         peer.remote_stream = None;
                                         peer.peer.push(Frame::new(b'E', 0,
                                             b"runtime does not support inline viewers; no session was created"));
                                     } else if !strict_open {
                                         peer.failed = true;
                                         peer.retry_requested = false;
-                                        clear_launch_data(peer);
+                                        clear_launch_data(peer, true);
                                         peer.remote_stream = None;
                                         peer.peer.push(Frame::new(
                                             b'E',
@@ -944,7 +964,7 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
                                     peer.writer_requested = false;
                                     peer.retry_requested = false;
                                     peer.failed = true;
-                                    clear_launch_data(peer);
+                                    clear_launch_data(peer, false);
                                     peer.peer.push(Frame::new(b'E', 0, &frame.data));
                                 }
                             }
@@ -960,7 +980,7 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
                                     }
                                     let was_retrying = peer.retry_requested;
                                     peer.retry_requested = false;
-                                    clear_launch_data(peer);
+                                    clear_launch_data(peer, false);
                                     if !peer.ended && (!peer.failed || was_retrying) {
                                         peer.failed = true;
                                         peer.peer.push(Frame::new(
@@ -1000,7 +1020,7 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
                             SNAPSHOT => {
                                 peer.snapshot_generation = Some(peer.generation);
                                 peer.snapshot_confirmed = true;
-                                clear_launch_data(peer);
+                                clear_launch_data(peer, true);
                                 peer.failed = false;
                                 peer.retry_requested = false;
                                 peer.snapshot_acked = false;
@@ -1029,7 +1049,7 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
                                 peer.writer_ready = false;
                                 peer.retry_requested = false;
                                 peer.failed = true;
-                                clear_launch_data(peer);
+                                clear_launch_data(peer, false);
                             }
                             EXIT => {
                                 peer.ended = true;
@@ -1047,6 +1067,7 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
                                 &mut peers,
                                 &mut remote_streams,
                                 &mut next_stream,
+                                local_launch && local_resurrect,
                             ) {
                                 eprintln!("session runtime open failed: {error}");
                             }
@@ -1075,6 +1096,9 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
                     capabilities_received = false;
                     strict_open = false;
                     durable_close = false;
+                    local_launch = false;
+                    local_resurrect = false;
+                    inline_viewer = false;
                     state = State::Reconnecting;
                     let delay = retry_delay(attempt.max(1));
                     set_status(&mut peers, state, attempt, Some(delay), None);
@@ -1125,6 +1149,9 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
             capabilities_received = false;
             strict_open = false;
             durable_close = false;
+            local_launch = false;
+            local_resurrect = false;
+            inline_viewer = false;
             state = State::Reconnecting;
             let delay = retry_delay(attempt.max(1));
             set_status(&mut peers, state, attempt, Some(delay), None);
@@ -1386,6 +1413,7 @@ mod error_classification_tests {
             create: true,
             cwd: None,
             launch: None,
+            resurrect_launch: None,
             inline_viewer: false,
         };
         Frame::new(b'H', 0, &serde_json::to_vec(&request).unwrap())
@@ -1420,5 +1448,132 @@ mod error_classification_tests {
 
         drop(peer);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resurrect_launch_is_stripped_without_capability_and_preserved_across_manual_retry() {
+        use crate::{lifecycle::Policy, registry::{LocalLaunchSpec, OpenRequest}, Frame, SNAPSHOT};
+        use std::collections::BTreeMap;
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, Mutex,
+        };
+
+        let run_case = |advertise_resurrect: bool, reject_first: bool| -> Vec<bool> {
+            use std::os::unix::fs::DirBuilderExt;
+            let dir = std::path::PathBuf::from(format!(
+                "/tmp/omg-client-resurrect-{}",
+                crate::record::nonce().unwrap()
+            ));
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&dir)
+                .unwrap();
+            let socket_path = dir.join("relay.sock");
+            let requests = Arc::new(Mutex::new(Vec::<bool>::new()));
+            let requests_clone = requests.clone();
+            let reject_once = Arc::new(AtomicBool::new(reject_first));
+            let connector = Arc::new(move |_| {
+                let (client_side, mut server_side) = UnixStream::pair()?;
+                let requests_thread = requests_clone.clone();
+                let reject_once = reject_once.clone();
+                thread::spawn(move || {
+                    let caps: &[u8] = if advertise_resurrect {
+                        b"strict-open/1,durable-close/1,local-launch/1,local-resurrect/1"
+                    } else {
+                        b"strict-open/1,durable-close/1,local-launch/1"
+                    };
+                    Frame::new(b'P', 0, caps).send(&mut server_side).unwrap();
+                    while let Ok(frame) = Frame::read(&mut server_side) {
+                        match frame.kind {
+                            b'P' => {
+                                let _ = Frame::new(b'P', 0, caps).send(&mut server_side);
+                            }
+                            b'C' => {
+                                let req: OpenRequest = serde_json::from_slice(&frame.data).unwrap();
+                                requests_thread
+                                    .lock()
+                                    .unwrap()
+                                    .push(req.resurrect_launch.is_some());
+                                if reject_once.swap(false, Ordering::SeqCst) {
+                                    let _ = Frame::new(b'E', frame.seq, b"temporary failure")
+                                        .send(&mut server_side);
+                                } else {
+                                    let snap = Frame::new(SNAPSHOT, 1, b"snap").encode();
+                                    let _ = Frame::new(b'D', frame.seq, &snap).send(&mut server_side);
+                                }
+                            }
+                            b'Q' => {
+                                let _ = Frame::new(b'Q', frame.seq, &[]).send(&mut server_side);
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+                Ok(RelayTransport {
+                    socket: client_side,
+                    guard: Box::new(()),
+                })
+            });
+
+            let socket_clone = socket_path.clone();
+            thread::spawn(move || {
+                let _ = supervise(&socket_clone, connector, false);
+            });
+
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut peer = loop {
+                match UnixStream::connect(&socket_path) {
+                    Ok(s) => break s,
+                    Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+                    Err(err) => panic!("connect failed: {err}"),
+                }
+            };
+            peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let req = OpenRequest {
+                id: "d2956168-0ade-4c3e-ade4-3bc908d7dfd7".into(),
+                policy: Policy::default(),
+                create: false,
+                cwd: None,
+                launch: None,
+                resurrect_launch: Some(LocalLaunchSpec {
+                    argv: vec!["/bin/sh".into()],
+                    env: BTreeMap::new(),
+                    cwd: None,
+                    cols: 80,
+                    rows: 24,
+                    pixel_width: 640,
+                    pixel_height: 384,
+                    scrollback_max_bytes: None,
+                    scrollback_max_lines: None,
+                    input_base64: None,
+                }),
+                inline_viewer: false,
+            };
+            Frame::new(b'H', 0, &serde_json::to_vec(&req).unwrap())
+                .send(&mut peer)
+                .unwrap();
+            let saw_snapshot;
+            loop {
+                let frame = Frame::read(&mut peer).unwrap();
+                if frame.kind == b'E' {
+                    retry_local(&socket_path, true).unwrap();
+                } else if frame.kind == SNAPSHOT {
+                    saw_snapshot = true;
+                    break;
+                }
+            }
+            assert!(saw_snapshot);
+            drop(peer);
+            let _ = std::fs::remove_dir_all(&dir);
+            let observed = requests.lock().unwrap().clone();
+            observed
+        };
+
+        // Legacy host without local-resurrect/1 receives resurrect_launch == None.
+        assert_eq!(run_case(false, false), vec![false]);
+        // Capable host preserves resurrect_launch across manual retry after b'E'.
+        assert_eq!(run_case(true, true), vec![true, true]);
     }
 }

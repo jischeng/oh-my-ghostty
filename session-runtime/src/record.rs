@@ -307,6 +307,8 @@ pub struct AgentEvent {
     pub event: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_pid: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 #[cfg(test)]
 mod tests {

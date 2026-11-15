@@ -46,17 +46,111 @@ pub fn process_cwd(pid: i32) -> io::Result<PathBuf> {
     }
 }
 
-pub fn session_cwd(master: i32, leader: u32) -> Option<String> {
-    let foreground = unsafe { libc::tcgetpgrp(master) };
-    [foreground, leader as i32]
-        .into_iter()
-        .filter(|p| *p > 1)
-        .find_map(|pid| {
-            process_cwd(pid)
-                .ok()
-                .and_then(|p| p.into_os_string().into_string().ok())
-        })
+fn valid_cwd_string(pid: i32) -> Option<String> {
+    process_cwd(pid)
+        .ok()
+        .and_then(|p| p.into_os_string().into_string().ok())
         .filter(|p| p.starts_with('/') && p.len() <= 4096 && !p.contains('\0'))
+}
+
+pub fn session_cwd(master: i32, leader: u32) -> Option<String> {
+    let leader_i32 = leader as i32;
+    if leader_i32 <= 1 {
+        return None;
+    }
+    let foreground = unsafe { libc::tcgetpgrp(master) };
+    if foreground > 1 && foreground != leader_i32 {
+        if unsafe { libc::getsid(foreground) } == leader_i32 {
+            if let Some(cwd) = valid_cwd_string(foreground) {
+                return Some(cwd);
+            }
+        }
+        // Pipeline or job group whose group-leader PID exited while sibling members
+        // in `foreground` PGID continue running inside `leader`'s session.
+        for member in group_pids(foreground) {
+            if member > 1 && member != foreground && unsafe { libc::getsid(member) } == leader_i32 {
+                if let Some(cwd) = valid_cwd_string(member) {
+                    return Some(cwd);
+                }
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            for member in session_pids(leader_i32) {
+                if member > 1
+                    && member != foreground
+                    && unsafe { libc::getpgid(member) } == foreground
+                    && unsafe { libc::getsid(member) } == leader_i32
+                {
+                    if let Some(cwd) = valid_cwd_string(member) {
+                        return Some(cwd);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(cwd) = valid_cwd_string(leader_i32) {
+        return Some(cwd);
+    }
+    // On macOS, `/usr/bin/login` is setuid-root so `PROC_PIDVNODEPATHINFO` on `leader`
+    // fails with `EPERM`; fall back to the login-shell child or live session members.
+    let members = session_pids(leader_i32);
+    for &member in &members {
+        if member > 1
+            && member != leader_i32
+            && crate::activity::is_login_shell_child(member, leader_i32)
+        {
+            if let Some(cwd) = valid_cwd_string(member) {
+                return Some(cwd);
+            }
+        }
+    }
+    for &member in &members {
+        if member > 1 && member != leader_i32 && unsafe { libc::getsid(member) } == leader_i32 {
+            if let Some(cwd) = valid_cwd_string(member) {
+                return Some(cwd);
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn session_child_pgids(leader: i32) -> Vec<i32> {
+    if leader <= 1 {
+        return Vec::new();
+    }
+    let mut pgids = Vec::new();
+    for pid in session_pids(leader) {
+        if pid <= 1 || unsafe { libc::getsid(pid) } != leader {
+            continue;
+        }
+        let pgid = unsafe { libc::getpgid(pid) };
+        if pgid > 1 && pgid != leader && !pgids.contains(&pgid) {
+            pgids.push(pgid);
+        }
+    }
+    pgids
+}
+
+pub(crate) fn session_has_non_shell_member(leader: i32, shell_pgid: Option<i32>) -> bool {
+    if leader <= 1 {
+        return false;
+    }
+    for pid in session_pids(leader) {
+        if pid <= 1
+            || pid == leader
+            || Some(pid) == shell_pgid
+            || unsafe { libc::getsid(pid) } != leader
+        {
+            continue;
+        }
+        if unsafe { libc::kill(pid, 0) } == 0
+            || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn process_argv(pid: i32) -> Option<Vec<String>> {
@@ -625,5 +719,68 @@ mod tests {
         unsafe {
             libc::close(master);
         }
+    }
+
+    #[test]
+    fn session_cwd_resolves_session_member_and_ignores_foreign_sessions() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!(
+            "omg-loc-cwd-{}",
+            &crate::record::nonce().unwrap()[..8]
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let canonical_dir = fs::canonicalize(&dir).unwrap();
+
+        // A non-existent or foreign-session leader will not resolve a bogus foreground cwd.
+        assert!(session_cwd(-1, 0).is_none());
+
+        let mut master: libc::c_int = -1;
+        let mut slave: libc::c_int = -1;
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        use std::os::{fd::FromRawFd, unix::process::CommandExt};
+        let slave_file = unsafe { std::fs::File::from_raw_fd(slave) };
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg("sleep 5")
+            .current_dir(&canonical_dir)
+            .stdin(slave_file.try_clone().unwrap())
+            .stdout(slave_file.try_clone().unwrap())
+            .stderr(slave_file);
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = cmd.spawn().unwrap();
+        let leader = child.id();
+        for _ in 0..50 {
+            if unsafe { libc::tcgetpgrp(master) } == leader as i32 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let resolved = session_cwd(master, leader).and_then(|p| fs::canonicalize(p).ok());
+        assert_eq!(resolved.as_deref(), Some(canonical_dir.as_path()));
+
+        let _ = child.kill();
+        let _ = child.wait();
+        unsafe {
+            libc::close(master);
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 }

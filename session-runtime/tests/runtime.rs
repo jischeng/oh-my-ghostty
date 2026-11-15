@@ -12,6 +12,7 @@ struct Daemon {
 impl Drop for Daemon {
     fn drop(&mut self) {
         let sessions_dir = self.dir.join("sessions");
+        let _ = fs::set_permissions(&sessions_dir, fs::Permissions::from_mode(0o700));
         let mut session_pids = Vec::new();
         if let Ok(entries) = fs::read_dir(&sessions_dir) {
             for entry in entries.flatten() {
@@ -1383,4 +1384,273 @@ fn local_holder_snapshot_failure_backs_off_without_cpu_spin_and_recovers_plus_or
         pid_gone(session_pid),
         "orphaned PTY leader {session_pid} must terminate with its session-holder"
     );
+}
+
+#[test]
+fn detached_hermes_hook_rejects_cross_pane_bleed_and_unwritable_resume_save_keeps_session_alive() {
+    use sha2::{Digest, Sha256};
+    let dir = std::path::PathBuf::from("/tmp").join(format!(
+        "omg-hermes-guard-{}",
+        &record::nonce().unwrap()[..10]
+    ));
+    let sessions_dir = dir.join("sessions");
+    let hermes_home = dir.join("hermes");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    fs::create_dir_all(hermes_home.join("terminal-sessions")).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&sessions_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let host_child = Command::new(env!("CARGO_BIN_EXE_omgd"))
+        .args(["host-local", dir.to_str().unwrap(), "--", "/bin/sh"])
+        .env("HOME", &dir)
+        .env("SHELL", "/bin/sh")
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let _daemon = Daemon {
+        child: host_child,
+        dir: dir.clone(),
+    };
+    let host_sock = dir.join("host.sock");
+    for _ in 0..300 {
+        if host_sock.exists() && UnixStream::connect(&host_sock).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let id = "56565656-7878-9090-abab-cdcdcdcdcdcd";
+    let mut env_map: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    env_map.insert("HOME".into(), dir.to_string_lossy().into_owned());
+    env_map.insert(
+        "HERMES_HOME".into(),
+        hermes_home.to_string_lossy().into_owned(),
+    );
+    env_map.insert("PATH".into(), "/usr/bin:/bin".into());
+    env_map.insert("SHELL".into(), "/bin/sh".into());
+    env_map.insert("TERM".into(), "xterm-256color".into());
+    let req = serde_json::json!({
+        "id": id,
+        "policy": lifecycle::Policy::default(),
+        "create": true,
+        "cwd": "/tmp",
+        "launch": {
+            "argv": ["/bin/sh", "-i"],
+            "env": env_map,
+            "cwd": "/tmp",
+            "cols": 80,
+            "rows": 24,
+            "pixel_width": 640,
+            "pixel_height": 384,
+        }
+    });
+
+    let mut client = UnixStream::connect(&host_sock).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(8)))
+        .unwrap();
+    Frame::new(b'C', 1, &serde_json::to_vec(&req).unwrap())
+        .send(&mut client)
+        .unwrap();
+
+    loop {
+        let outer = Frame::read(&mut client).unwrap();
+        assert_eq!(outer.kind, b'D');
+        let inner = Frame::read(&mut outer.data.as_slice()).unwrap();
+        match inner.kind {
+            SNAPSHOT => {
+                Frame::new(b'D', 1, &Frame::new(ACK, inner.seq, &[]).encode())
+                    .send(&mut client)
+                    .unwrap();
+                Frame::new(b'D', 1, &Frame::new(CLAIM, 0, &[]).encode())
+                    .send(&mut client)
+                    .unwrap();
+            }
+            CLAIM => break,
+            _ => {}
+        }
+    }
+
+    // Print tty path and OMG_RUNTIME_EVENT_* from inside the PTY session so we can test a detached daemon hook.
+    let env_probe = dir.join("pane_env.txt");
+    let cmd_str = format!(
+        "printf '%s\\n%s\\n%s\\n%s\\n' \"$(tty)\" \"$OMG_RUNTIME_EVENT_SOCKET\" \"$OMG_RUNTIME_EVENT_TOKEN\" \"$OMG_RUNTIME_GENERATION\" > '{}' && printf 'ENV_%s_OK\\n' READY\r",
+        env_probe.display()
+    );
+    Frame::new(b'D', 1, &Frame::new(INPUT, 0, cmd_str.as_bytes()).encode())
+        .send(&mut client)
+        .unwrap();
+    let mut output = Vec::new();
+    while !output
+        .windows(b"ENV_READY_OK".len())
+        .any(|w| w == b"ENV_READY_OK")
+    {
+        let outer = Frame::read(&mut client).unwrap();
+        if outer.kind == b'D' {
+            let inner = Frame::read(&mut outer.data.as_slice()).unwrap();
+            if inner.kind == OUTPUT {
+                output.extend(inner.data);
+            }
+        }
+    }
+    let lines: Vec<String> = fs::read_to_string(&env_probe)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    let tty_path = &lines[0];
+    let evt_sock = &lines[1];
+    let evt_token = &lines[2];
+    let evt_gen = &lines[3];
+    let sanitized_tty: String = tty_path
+        .trim_start_matches('/')
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    // 1) Detached Hermes gateway daemon (spawned outside the PTY session via `setsid`) reporting
+    //    conversation `conv-pane-b` WITHOUT matching breadcrumb on Pane A's TTY MUST be rejected!
+    use std::os::unix::process::CommandExt;
+    let mut bleed_cmd = Command::new(env!("CARGO_BIN_EXE_omgd"));
+    bleed_cmd
+        .args(["report", "hermes", "working", "conv-pane-b", "/tmp"])
+        .env("OMG_RUNTIME_EVENT_SOCKET", evt_sock)
+        .env("OMG_RUNTIME_EVENT_TOKEN", evt_token)
+        .env("OMG_RUNTIME_GENERATION", evt_gen)
+        .env_remove("OMG_REPORT_SESSION_ID")
+        .env("HERMES_HOME", &hermes_home);
+    unsafe {
+        bleed_cmd.pre_exec(|| {
+            let _ = libc::setsid();
+            Ok(())
+        });
+    }
+    let bleed_status = bleed_cmd.status().unwrap();
+    assert!(
+        !bleed_status.success(),
+        "detached Hermes gateway event for another pane's conversation must be rejected"
+    );
+    let rec_path = sessions_dir.join(format!("{id}.json"));
+    assert!(record::Record::load(&rec_path).unwrap().resume.is_none());
+
+    // 2) Explicit mismatched `--session-id` is also rejected even for non-Hermes events.
+    let bad_sid_status = Command::new(env!("CARGO_BIN_EXE_omgd"))
+        .args([
+            "report",
+            "opencode",
+            "working",
+            "conv-opencode-1",
+            "/tmp",
+            "--session-id",
+            "00000000-0000-0000-0000-000000000000",
+        ])
+        .env("OMG_RUNTIME_EVENT_SOCKET", evt_sock)
+        .env("OMG_RUNTIME_EVENT_TOKEN", evt_token)
+        .env("OMG_RUNTIME_GENERATION", evt_gen)
+        .status()
+        .unwrap();
+    assert!(!bad_sid_status.success());
+
+    // 3) Write matching Hermes TTY breadcrumb for `conv-pane-a` -> detached Hermes hook succeeds!
+    fs::write(
+        hermes_home
+            .join("terminal-sessions")
+            .join(format!("tty-{sanitized_tty}")),
+        br#"{"session_id":"conv-pane-a"}"#,
+    )
+    .unwrap();
+    let mut ok_cmd = Command::new(env!("CARGO_BIN_EXE_omgd"));
+    ok_cmd
+        .args(["report", "hermes", "working", "conv-pane-a", "/tmp"])
+        .env("OMG_RUNTIME_EVENT_SOCKET", evt_sock)
+        .env("OMG_RUNTIME_EVENT_TOKEN", evt_token)
+        .env("OMG_RUNTIME_GENERATION", evt_gen)
+        .env_remove("OMG_REPORT_SESSION_ID")
+        .env("HERMES_HOME", &hermes_home);
+    unsafe {
+        ok_cmd.pre_exec(|| {
+            let _ = libc::setsid();
+            Ok(())
+        });
+    }
+    assert!(ok_cmd.status().unwrap().success());
+    assert_eq!(
+        record::Record::load(&rec_path)
+            .unwrap()
+            .resume
+            .as_ref()
+            .map(|r| r.conversation_id.as_str()),
+        Some("conv-pane-a")
+    );
+
+    // 4) Make `sessions/` unwritable (`0o500`) and send an `AgentEvent` `done` with a new `resume`:
+    //    `Record.save` failure must NOT kill the live PTY session!
+    fs::write(
+        hermes_home
+            .join("terminal-sessions")
+            .join(format!("tty-{sanitized_tty}")),
+        br#"{"session_id":"conv-pane-a-2"}"#,
+    )
+    .unwrap();
+    fs::set_permissions(&sessions_dir, fs::Permissions::from_mode(0o500)).unwrap();
+    let mut unwritable_cmd = Command::new(env!("CARGO_BIN_EXE_omgd"));
+    unwritable_cmd
+        .args(["report", "hermes", "done", "conv-pane-a-2", "/tmp"])
+        .env("OMG_RUNTIME_EVENT_SOCKET", evt_sock)
+        .env("OMG_RUNTIME_EVENT_TOKEN", evt_token)
+        .env("OMG_RUNTIME_GENERATION", evt_gen)
+        .env_remove("OMG_REPORT_SESSION_ID")
+        .env("HERMES_HOME", &hermes_home);
+    unsafe {
+        unwritable_cmd.pre_exec(|| {
+            let _ = libc::setsid();
+            Ok(())
+        });
+    }
+    assert!(unwritable_cmd.status().unwrap().success());
+    Frame::new(
+        b'D',
+        1,
+        &Frame::new(INPUT, 0, b"printf 'STILL_ALIVE_%s_ERR\\n' AFTER_SAVE\r").encode(),
+    )
+    .send(&mut client)
+    .unwrap();
+    while !output
+        .windows(b"STILL_ALIVE_AFTER_SAVE_ERR".len())
+        .any(|w| w == b"STILL_ALIVE_AFTER_SAVE_ERR")
+    {
+        let outer = Frame::read(&mut client).unwrap();
+        if outer.kind == b'D' {
+            let inner = Frame::read(&mut outer.data.as_slice()).unwrap();
+            if inner.kind == OUTPUT {
+                output.extend(inner.data);
+            }
+        }
+    }
+    fs::set_permissions(&sessions_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    // Cleanly close the session before `Daemon::drop` cleans up.
+    let sock_hash: String = Sha256::digest(id.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let ctl_path = dir.join(format!("{}.ctl", &sock_hash[..16]));
+    let close_deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        let mut ctrl = UnixStream::connect(&host_sock).unwrap();
+        Frame::new(b'K', 1, id.as_bytes()).send(&mut ctrl).unwrap();
+        let outer = Frame::read(&mut ctrl).unwrap();
+        let inner = Frame::read(&mut outer.data.as_slice()).unwrap();
+        if inner.data == b"closed" && !ctl_path.exists() {
+            break;
+        }
+        assert!(Instant::now() < close_deadline);
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }

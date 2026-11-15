@@ -422,23 +422,54 @@ class AgentRecoveryTests(unittest.TestCase):
             finally:
                 for client in clients:
                     client.close()
+                holder_pids = set()
                 for sid_file in (root / 'sessions').glob('*.json'):
+                    hpid = self._find_holder_pid(root, sid_file.stem)
+                    if hpid and hpid > 1:
+                        holder_pids.add(hpid)
                     try:
                         sid_file.with_suffix('.closed').write_text('')
                     except OSError:
                         pass
+                host.terminate()
+                try:
+                    host.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    host.kill()
+                    host.wait(timeout=5)
                 from test_local_runtime import wait_holders_stopped
                 try:
                     wait_holders_stopped(root)
-                except AssertionError:
+                except (AssertionError, TimeoutError, OSError):
                     pass
-                for pid in pids:
+                for hpid in holder_pids:
                     try:
-                        os.killpg(pid, signal.SIGKILL)
+                        os.kill(hpid, signal.SIGTERM)
                     except ProcessLookupError:
                         pass
-                host.terminate()
-                host.wait(timeout=5)
+                deadline_reap = time.monotonic() + 2
+                while time.monotonic() < deadline_reap:
+                    alive = False
+                    for hpid in holder_pids:
+                        try:
+                            os.kill(hpid, 0)
+                            alive = True
+                        except ProcessLookupError:
+                            pass
+                    if not alive:
+                        break
+                    time.sleep(0.02)
+                for hpid in holder_pids:
+                    try:
+                        os.kill(hpid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                for pid in pids:
+                    for killer in (os.killpg, os.kill):
+                        try:
+                            killer(pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
 
 
 if __name__ == '__main__': unittest.main()

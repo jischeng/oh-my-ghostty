@@ -18,8 +18,11 @@ const MAX_LIST_BYTES: usize = 8 * 1024 * 1024;
 struct HostLock(fs::File);
 impl HostLock {
     fn acquire(directory: &Path) -> io::Result<Self> {
-        use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
-        let file = fs::OpenOptions::new()
+        use std::{
+            io::Write,
+            os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
+        };
+        let mut file = fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
@@ -30,6 +33,9 @@ impl HostLock {
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             return Err(io::Error::other("host daemon already running"));
         }
+        let _ = file.set_len(0);
+        let _ = file.write_all(format!("{}\n", std::process::id()).as_bytes());
+        let _ = file.flush();
         Ok(Self(file))
     }
 }
@@ -88,6 +94,11 @@ fn serve_mode(directory: &Path, command: Vec<String>, local: bool) -> io::Result
     };
     policy.validate()?;
     let _lock = HostLock::acquire(directory)?;
+    if local {
+        if let Some(support) = crate::registry::infer_support_root_from_env_or_exe() {
+            let _ = crate::registry::write_support_root_stamp(directory, &support);
+        }
+    }
     let _ = fs::remove_file(directory.join("host.sock"));
     let root = directory.join("sessions");
     fs::create_dir_all(&root)?;
@@ -115,9 +126,14 @@ fn serve_mode(directory: &Path, command: Vec<String>, local: bool) -> io::Result
     let mut idle_since = Instant::now();
     loop {
         wake.drain();
+        Registry::maintenance_unlocked(&registry, false);
+        if !directory.join("sessions").exists()
+            && active.load(std::sync::atomic::Ordering::SeqCst) == 0
+        {
+            return Ok(());
+        }
         let timeout_ms = {
-            let mut state = registry.lock().unwrap();
-            state.maintenance();
+            let state = registry.lock().unwrap_or_else(|p| p.into_inner());
             if !state.is_empty() || active.load(std::sync::atomic::Ordering::SeqCst) > 0 {
                 idle_since = Instant::now();
                 30_000
@@ -184,7 +200,11 @@ fn host_connection(socket: UnixStream, registry: Arc<Mutex<Registry>>) -> io::Re
             match f.kind {
                 b'P' if f.seq == 0 => {
                     last_heartbeat = Instant::now();
-                    let capabilities = if registry.lock().unwrap().is_local() {
+                    let is_local = registry
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .is_local();
+                    let capabilities = if is_local {
                         b"durable-close/1,strict-open/1,local-launch/1,local-resurrect/1,inline-viewer/1,agent-state/1,holder-presentation/1".as_slice()
                     } else {
                         b"durable-close/1,strict-open/1,inline-viewer/1,agent-state/1".as_slice()
@@ -194,7 +214,7 @@ fn host_connection(socket: UnixStream, registry: Arc<Mutex<Registry>>) -> io::Re
                 b'K' if f.seq != 0 => {
                     let result = std::str::from_utf8(&f.data)
                         .map_err(io::Error::other)
-                        .and_then(|id| registry.lock().unwrap().close(id));
+                        .and_then(|id| Registry::close_unlocked(&registry, id));
                     match result {
                         Ok(done) => transport.push(Frame::new(
                             b'D',
@@ -207,7 +227,7 @@ fn host_connection(socket: UnixStream, registry: Arc<Mutex<Registry>>) -> io::Re
                 }
                 b'L' if f.seq == 0 && f.data.is_empty() => {
                     let response = (|| {
-                        let summary = registry.lock().unwrap().catalogue_summaries()?;
+                        let summary = Registry::catalogue_summaries_unlocked(&registry)?;
                         if summary.len() > MAX_LIST_ENTRIES {
                             return Err(io::Error::other("session catalogue exceeds entry limit"));
                         }
@@ -237,11 +257,12 @@ fn host_connection(socket: UnixStream, registry: Arc<Mutex<Registry>>) -> io::Re
                         generation: String,
                     }
                     let req: Request = serde_json::from_slice(&f.data)?;
-                    match registry
-                        .lock()
-                        .unwrap()
-                        .connect(&req.id, Some(&req.generation))
-                    {
+                    match Registry::connect_unlocked(
+                        &registry,
+                        &req.id,
+                        Some(&req.generation),
+                        false,
+                    ) {
                         Ok(s) => {
                             streams.insert(f.seq, Peer::new(s, f.seq)?);
                         }
@@ -253,7 +274,7 @@ fn host_connection(socket: UnixStream, registry: Arc<Mutex<Registry>>) -> io::Re
                     && streams.len() < MAX_STREAMS =>
                 {
                     let request: crate::registry::OpenRequest = serde_json::from_slice(&f.data)?;
-                    let result = registry.lock().unwrap().open(&request);
+                    let result = Registry::open_unlocked(&registry, &request);
                     match result {
                         Ok(s) => {
                             streams.insert(f.seq, Peer::new(s, f.seq)?);
@@ -267,19 +288,7 @@ fn host_connection(socket: UnixStream, registry: Arc<Mutex<Registry>>) -> io::Re
                 {
                     let result = std::str::from_utf8(&f.data)
                         .map_err(io::Error::other)
-                        .and_then(|id| {
-                            let mut state = registry.lock().unwrap();
-                            if let Some(root) = state.root.parent() {
-                                if let Ok(bytes) = fs::read(root.join("policy.json")) {
-                                    if let Ok(policy) = serde_json::from_slice::<Policy>(&bytes) {
-                                        if policy.validate().is_ok() {
-                                            state.policy = policy;
-                                        }
-                                    }
-                                }
-                            }
-                            state.connect(id, None)
-                        });
+                        .and_then(|id| Registry::connect_unlocked(&registry, id, None, true));
                     match result {
                         Ok(s) => {
                             streams.insert(f.seq, Peer::new(s, f.seq)?);
@@ -366,6 +375,89 @@ mod tests {
 
         drop(client_sock);
         let _ = handle.join().unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn host_connection_heartbeat_is_not_blocked_by_concurrent_stalled_holder_probe() {
+        let nonce = crate::record::nonce().unwrap();
+        let root = std::env::temp_dir().join(format!("omg-host-lockfree-{}", &nonce[..8]));
+        let sessions = root.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&sessions, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let stalled_id = "abababab-abab-abab-abab-abababababab";
+        let mut rec = crate::record::Record::new(stalled_id, Policy::default()).unwrap();
+        rec.pid = Some(99_999);
+        rec.holder_capability = Some("cap-stalled".into());
+        rec.save(&sessions.join(format!("{stalled_id}.json")))
+            .unwrap();
+
+        use sha2::{Digest, Sha256};
+        let key = format!("{:x}", Sha256::digest(stalled_id.as_bytes()));
+        let ctl_path = root.join(format!("{}.ctl", &key[..16]));
+        let ctl_listener = UnixListener::bind(&ctl_path).unwrap();
+        ctl_listener.set_nonblocking(true).unwrap();
+        let stop_ctl = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_ctl_thread = stop_ctl.clone();
+        let held_accept = std::thread::spawn(move || {
+            let mut held = Vec::new();
+            let deadline = Instant::now() + Duration::from_millis(700);
+            while !stop_ctl_thread.load(std::sync::atomic::Ordering::SeqCst)
+                && Instant::now() < deadline
+            {
+                if let Ok((accepted, _)) = ctl_listener.accept() {
+                    held.push(accepted);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            drop(held);
+        });
+
+        let registry = Arc::new(Mutex::new(Registry::new_local(
+            sessions,
+            vec!["/bin/sh".into()],
+            Policy::default(),
+        )));
+
+        let (srv1, mut cli1) = UnixStream::pair().unwrap();
+        let (srv2, mut cli2) = UnixStream::pair().unwrap();
+        cli1.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        cli2.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+
+        let reg1 = registry.clone();
+        let h1 = std::thread::spawn(move || host_connection(srv1, reg1));
+        let h2 = std::thread::spawn(move || host_connection(srv2, registry));
+
+        let attach = serde_json::to_vec(&serde_json::json!({
+            "id": stalled_id,
+            "generation": rec.generation,
+        }))
+        .unwrap();
+        Frame::new(b'U', 1, &attach).send(&mut cli1).unwrap();
+        // Give `h1` 40ms to enter `probe_with_timeout` on `ctl_listener`.
+        std::thread::sleep(Duration::from_millis(40));
+
+        let ping_started = Instant::now();
+        Frame::new(b'P', 0, &[]).send(&mut cli2).unwrap();
+        let reply = Frame::read(&mut cli2).unwrap();
+        let ping_elapsed = ping_started.elapsed();
+        assert_eq!(reply.kind, b'P');
+        assert!(
+            ping_elapsed < Duration::from_millis(250),
+            "heartbeat blocked behind stalled holder probe: {ping_elapsed:?}"
+        );
+
+        let attach_reply = Frame::read(&mut cli1).unwrap();
+        assert_eq!(attach_reply.kind, b'E');
+
+        stop_ctl.store(true, std::sync::atomic::Ordering::SeqCst);
+        drop(cli1);
+        drop(cli2);
+        let _ = held_accept.join();
+        let _ = h1.join();
+        let _ = h2.join();
         let _ = fs::remove_dir_all(root);
     }
 }

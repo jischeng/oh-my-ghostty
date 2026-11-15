@@ -210,6 +210,16 @@ fn ensure_host_with(
     let root = Path::new(directory);
     std::fs::create_dir_all(root)?;
     std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
+    let inferred_support = if local {
+        let sup = omg_session_runtime::registry::infer_support_root_from_exe(executable)
+            .or_else(omg_session_runtime::registry::infer_support_root_from_env_or_exe);
+        if let Some(ref s) = sup {
+            let _ = omg_session_runtime::registry::write_support_root_stamp(root, s);
+        }
+        sup
+    } else {
+        None
+    };
     if let Some(shell) = shell_override {
         let metadata = std::fs::metadata(shell)?;
         if !Path::new(shell).is_absolute()
@@ -287,6 +297,9 @@ fn ensure_host_with(
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log));
+    if let Some(ref sup) = inferred_support {
+        c.env("OMG_APP_SUPPORT", sup);
+    }
     unsafe {
         c.pre_exec(|| {
             if libc::setsid() < 0 {
@@ -320,6 +333,9 @@ fn report_cli(args: &[String]) -> io::Result<()> {
     let mut tier: Option<String> = None;
     let mut event_kind: Option<String> = None;
     let mut owner_pid: Option<i32> = None;
+    let mut target_session_id: Option<String> = env::var("OMG_REPORT_SESSION_ID")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
 
     let mut i = 0;
     while i < args.len() {
@@ -396,6 +412,14 @@ fn report_cli(args: &[String]) -> io::Result<()> {
                         .map_err(|_| io::Error::other("invalid --pid value"))?,
                 );
             }
+            "--session-id" => {
+                i += 1;
+                target_session_id = Some(
+                    args.get(i)
+                        .ok_or_else(|| io::Error::other("missing --session-id value"))?
+                        .clone(),
+                );
+            }
             flag if flag.starts_with("--") => {
                 return Err(io::Error::other(format!("unknown report flag: {flag}")));
             }
@@ -465,6 +489,7 @@ fn report_cli(args: &[String]) -> io::Result<()> {
         tier,
         event: event_kind,
         owner_pid,
+        session_id: target_session_id,
     };
     use std::os::unix::fs::PermissionsExt;
     let suffix = nonce().unwrap_or_else(|_| "0".into());

@@ -149,9 +149,9 @@ pub(crate) fn default_mobile_support() -> io::Result<PathBuf> {
     Ok(mobile_dir)
 }
 
-fn check_runtime_root(root: &Path) -> io::Result<Option<PathBuf>> {
+fn validate_runtime_root_dir(root: &Path) -> io::Result<bool> {
     if !root.exists() {
-        return Ok(None);
+        return Ok(false);
     }
     use std::os::unix::fs::MetadataExt;
     let metadata = fs::symlink_metadata(root)?;
@@ -163,8 +163,111 @@ fn check_runtime_root(root: &Path) -> io::Result<Option<PathBuf>> {
             "Runtime directory must be private and owned by the current user",
         ));
     }
+    Ok(true)
+}
+
+fn runtime_root_has_recoverable_sessions(root: &Path, expected_snapshot: Option<&str>) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let sessions_dir = root.join("sessions");
+    let Ok(meta) = fs::symlink_metadata(&sessions_dir) else {
+        return false;
+    };
+    if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 {
+        return false;
+    }
+    let Ok(entries) = fs::read_dir(&sessions_dir) else {
+        return false;
+    };
+    for entry in entries.take(2048).flatten() {
+        let path = entry.path();
+        if !path.extension().is_some_and(|ext| ext == "json") {
+            continue;
+        }
+        let Ok(record) = omg_session_runtime::record::Record::load(&path) else {
+            continue;
+        };
+        if !omg_session_runtime::host::valid_id(&record.id)
+            || omg_session_runtime::registry::is_local_session_closed(&sessions_dir, &record.id)
+            || !(record.ended.is_none()
+                || record.ended == Some(omg_session_runtime::lifecycle::EndReason::Lost))
+        {
+            continue;
+        }
+        if let (Some(expected), Some(actual)) =
+            (expected_snapshot, record.snapshot_revision.as_deref())
+        {
+            if !actual.trim().is_empty() && canonical_snapshot_revision(actual) != expected {
+                continue;
+            }
+        }
+        return true;
+    }
+    false
+}
+
+fn resolve_local_broker_binary(
+    support: &Path,
+    rev: Option<&str>,
+    allow_current_fallback: bool,
+) -> Option<PathBuf> {
+    if let Some(rev) = rev {
+        let pinned = support
+            .join("session-runtime/versions")
+            .join(rev)
+            .join("omgd");
+        if pinned.is_file() {
+            return Some(pinned);
+        }
+    }
+    if allow_current_fallback {
+        let current = current_revision();
+        let current_installed = support
+            .join("session-runtime/versions")
+            .join(&current)
+            .join("omgd");
+        if current_installed.is_file() {
+            return Some(current_installed);
+        }
+        if let Ok(exe) = env::current_exe() {
+            if exe.file_name().and_then(|s| s.to_str()) == Some("omgd") {
+                return Some(exe);
+            }
+        }
+    }
+    None
+}
+
+fn ensure_runtime_root_socket(
+    support: &Path,
+    rev: Option<&str>,
+    root: &Path,
+    expected_snapshot: Option<&str>,
+) -> io::Result<Option<PathBuf>> {
+    if !validate_runtime_root_dir(root)? {
+        return Ok(None);
+    }
+    let _ = omg_session_runtime::registry::write_support_root_stamp(root, support);
     let socket = root.join("host.sock");
-    Ok(socket.exists().then_some(socket))
+    if socket.exists() {
+        match UnixStream::connect(&socket) {
+            Ok(_) => return Ok(Some(socket)),
+            Err(error) if !omg_session_runtime::holder::listener_is_gone(&error) => {
+                return Ok(Some(socket));
+            }
+            Err(_) => {}
+        }
+    }
+    if runtime_root_has_recoverable_sessions(root, expected_snapshot) {
+        if let Some(binary) = resolve_local_broker_binary(support, rev, true) {
+            if super::ensure_host_with(&root.to_string_lossy(), Some("/bin/sh"), &binary, true)
+                .is_ok()
+                && socket.exists()
+            {
+                return Ok(Some(socket));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Mobile uses the same channel/revision namespaces as the management CLI.
@@ -177,7 +280,12 @@ pub(crate) fn mobile_targets(support: &Path) -> io::Result<Vec<(String, PathBuf)
     let revision = current_revision();
     let expected_snapshot = current_snapshot_revision();
     let current_key = digest(&format!("{}\0{revision}", support.display()));
-    if let Some(socket) = check_runtime_root(&run_root.join(&current_key[..20]))? {
+    if let Some(socket) = ensure_runtime_root_socket(
+        support,
+        Some(&revision),
+        &run_root.join(&current_key[..20]),
+        expected_snapshot.as_deref(),
+    )? {
         if seen.insert(socket.clone()) {
             ordered.push((format!("This Machine · {revision}"), socket));
         }
@@ -211,7 +319,12 @@ pub(crate) fn mobile_targets(support: &Path) -> io::Result<Vec<(String, PathBuf)
             }
             let key = digest(&format!("{}\0{}", support.display(), d.revision));
             let root = run_root.join(&key[..20]);
-            if let Some(socket) = check_runtime_root(&root)? {
+            if let Some(socket) = ensure_runtime_root_socket(
+                support,
+                Some(&d.revision),
+                &root,
+                expected_snapshot.as_deref(),
+            )? {
                 if seen.insert(socket.clone()) {
                     ordered.push((format!("This Machine · {}", d.revision), socket));
                 }
@@ -242,7 +355,12 @@ pub(crate) fn mobile_targets(support: &Path) -> io::Result<Vec<(String, PathBuf)
             }
             let key = digest(&format!("{}\0{rev}", support.display()));
             let root = run_root.join(&key[..20]);
-            if let Some(socket) = check_runtime_root(&root)? {
+            if let Some(socket) = ensure_runtime_root_socket(
+                support,
+                Some(&rev),
+                &root,
+                expected_snapshot.as_deref(),
+            )? {
                 if seen.insert(socket.clone()) {
                     ordered.push((format!("This Machine · {rev}"), socket));
                 }
@@ -261,7 +379,12 @@ pub(crate) fn mobile_targets(support: &Path) -> io::Result<Vec<(String, PathBuf)
             entries.sort_by_key(|e| e.file_name());
             for entry in entries {
                 let candidate = entry.path();
-                if let Ok(Some(socket)) = check_runtime_root(&candidate) {
+                if let Ok(Some(socket)) = ensure_runtime_root_socket(
+                    support,
+                    None,
+                    &candidate,
+                    expected_snapshot.as_deref(),
+                ) {
                     if seen.insert(socket.clone()) {
                         let label = entry.file_name().to_string_lossy().into_owned();
                         ordered.push((format!("This Machine · {label}"), socket));
@@ -670,14 +793,22 @@ impl Descriptor {
                 ));
             }
         }
+        let _ = omg_session_runtime::registry::write_support_root_stamp(&root, support);
         let socket = root.join("host.sock");
         if UnixStream::connect(&socket).is_err() {
             // Re-adopt existing holders with their pinned broker, never create
             // a session or upgrade a live daemon as part of listing.
-            let binary = support
-                .join("session-runtime/versions")
-                .join(&self.revision)
-                .join("omgd");
+            let binary = resolve_local_broker_binary(
+                support,
+                Some(&self.revision),
+                self.revision == current_revision(),
+            )
+            .unwrap_or_else(|| {
+                support
+                    .join("session-runtime/versions")
+                    .join(&self.revision)
+                    .join("omgd")
+            });
             super::ensure_host_with(&root.to_string_lossy(), Some("/bin/sh"), &binary, true)?;
         }
         Ok(Some(RelayTransport {
@@ -821,6 +952,40 @@ pub fn run(arguments: &[String]) -> io::Result<u8> {
         }
         selected.insert(d.identity(&support), d);
     }
+    if host.is_none() && support.exists() {
+        let run_root = home()?.join(".omg/run");
+        let cur_rev = current_revision();
+        let cur_desc = Descriptor {
+            connection: None,
+            revision: cur_rev.clone(),
+        };
+        let cur_key = digest(&format!("{}\0{cur_rev}", support.display()));
+        if run_root.join(&cur_key[..20]).exists() {
+            selected
+                .entry(cur_desc.identity(&support))
+                .or_insert(cur_desc);
+        }
+        if let Ok(entries) = fs::read_dir(support.join("session-runtime/versions")) {
+            let mut dirs: Vec<_> = entries.take(256).filter_map(Result::ok).collect();
+            dirs.sort_by_key(|e| e.file_name());
+            for entry in dirs {
+                let Some(rev) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                if !valid_revision(&rev) {
+                    continue;
+                }
+                let key = digest(&format!("{}\0{rev}", support.display()));
+                if run_root.join(&key[..20]).exists() {
+                    let desc = Descriptor {
+                        connection: None,
+                        revision: rev,
+                    };
+                    selected.entry(desc.identity(&support)).or_insert(desc);
+                }
+            }
+        }
+    }
     let mut inventory = Inventory::default();
     let mut transports = BTreeMap::new();
     for (id, descriptor) in &selected {
@@ -867,7 +1032,13 @@ pub fn run(arguments: &[String]) -> io::Result<u8> {
         let mut pending: Vec<_> = inventory
             .sessions
             .iter()
-            .filter(|e| e.session.ended.is_none())
+            .filter(|e| {
+                e.session.ended.is_none()
+                    || (selected
+                        .get(&e.endpoint_id)
+                        .is_some_and(|d| d.connection.is_none())
+                        && e.session.ended == Some(omg_session_runtime::lifecycle::EndReason::Lost))
+            })
             .collect();
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while !pending.is_empty() {

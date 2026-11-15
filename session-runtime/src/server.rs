@@ -404,17 +404,28 @@ extern "C" fn reply(context: *mut c_void, data: *const u8, len: usize) {
     }
 }
 fn terminate_group(master: i32, leader: u32, signal: i32) {
+    let leader_i32 = leader as i32;
+    if leader_i32 <= 1 {
+        return;
+    }
+    let child_pgids = crate::location::session_child_pgids(leader_i32);
     unsafe {
-        let foreground = libc::tcgetpgrp(master);
-        // Foreground jobs may be a different process group from the login shell.
-        if foreground > 1
-            && foreground != leader as i32
-            && libc::getsid(foreground) == leader as i32
-        {
+        let foreground = if master >= 0 {
+            libc::tcgetpgrp(master)
+        } else {
+            -1
+        };
+        // Foreground jobs and macOS `/usr/bin/login` child shells run in distinct PGIDs.
+        if foreground > 1 && foreground != leader_i32 && libc::getsid(foreground) == leader_i32 {
             libc::kill(-foreground, signal);
         }
-        if libc::getsid(leader as i32) == leader as i32 {
-            libc::kill(-(leader as i32), signal);
+        for pgid in child_pgids {
+            if pgid > 1 && pgid != foreground && pgid != leader_i32 {
+                libc::kill(-pgid, signal);
+            }
+        }
+        if libc::getsid(leader_i32) == leader_i32 {
+            libc::kill(-leader_i32, signal);
         }
     }
 }
@@ -434,6 +445,80 @@ fn terminal_name(fd: i32) -> Option<String> {
     }
     let value = unsafe { CStr::from_ptr(buffer.as_ptr()) }.to_str().ok()?;
     (value.starts_with("/dev/") && value.len() <= 4096).then(|| value.to_string())
+}
+
+fn hermes_breadcrumb_matches_tty(hermes_home: &Path, tty: &str, expected_sid: &str) -> bool {
+    let trimmed = tty.trim_matches('/');
+    if trimmed.is_empty() || expected_sid.is_empty() {
+        return false;
+    }
+    let sanitized: String = trimmed
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(120)
+        .collect();
+    let path = hermes_home
+        .join("terminal-sessions")
+        .join(format!("tty-{sanitized}"));
+    let Ok(file) = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)
+    else {
+        return false;
+    };
+    let Ok(meta) = file.metadata() else {
+        return false;
+    };
+    if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.len() > 16 * 1024 {
+        return false;
+    }
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    if file.take(16 * 1024 + 1).read_to_end(&mut bytes).is_err() || bytes.len() > 16 * 1024 {
+        return false;
+    }
+    let Ok(crumb) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    crumb["session_id"].as_str() == Some(expected_sid)
+}
+
+fn detached_hermes_event_authorized(
+    event_pid: i32,
+    explicit_owner_pid: Option<i32>,
+    session_leader: i32,
+    tty_name: Option<&str>,
+    conv_id: Option<&str>,
+    pane_hermes_home: Option<&Path>,
+) -> bool {
+    if explicit_owner_pid.is_some() || unsafe { libc::getsid(event_pid) } == session_leader {
+        return true;
+    }
+    let (Some(tty), Some(expected_sid)) = (tty_name, conv_id) else {
+        return false;
+    };
+    let Some(hermes_home) = pane_hermes_home
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            std::env::var_os("HERMES_HOME")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|v| !v.is_empty())
+                .map(|h| PathBuf::from(h).join(".hermes"))
+        })
+    else {
+        return false;
+    };
+    hermes_breadcrumb_matches_tty(&hermes_home, tty, expected_sid)
 }
 
 fn password_input(master: i32) -> bool {
@@ -510,25 +595,27 @@ fn queue_snapshot(peer: &mut Peer, seq: u64, snapshot: io::Result<Vec<u8>>) -> b
     }
 }
 
-struct ChildGuard(Child);
+struct ChildGuard {
+    child: Child,
+    master: i32,
+}
 impl std::ops::Deref for ChildGuard {
     type Target = Child;
     fn deref(&self) -> &Child {
-        &self.0
+        &self.child
     }
 }
 impl std::ops::DerefMut for ChildGuard {
     fn deref_mut(&mut self) -> &mut Child {
-        &mut self.0
+        &mut self.child
     }
 }
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        if !matches!(self.0.try_wait(), Ok(Some(_))) {
-            unsafe {
-                libc::kill(-(self.0.id() as i32), libc::SIGKILL);
-            }
-            let _ = self.0.wait();
+        if !matches!(self.child.try_wait(), Ok(Some(_))) {
+            terminate_group(self.master, self.child.id(), libc::SIGKILL);
+            let _ = self.child.kill();
+            let _ = self.child.wait();
         }
     }
 }
@@ -888,15 +975,36 @@ pub fn serve_managed(
             Ok(())
         });
     }
-    let mut child = ChildGuard(command.spawn()?);
+    let mut child = ChildGuard {
+        child: command.spawn()?,
+        master,
+    };
     let started_at = Instant::now();
+    let pane_hermes_home = local_launch.as_ref().and_then(|launch| {
+        launch
+            .env
+            .get("HERMES_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                launch
+                    .env
+                    .get("HOME")
+                    .filter(|v| !v.is_empty())
+                    .map(|h| PathBuf::from(h).join(".hermes"))
+            })
+    });
     drop(command);
     drop(argv);
     drop(local_launch);
     drop(membership);
+    let record_snapshot_revision = managed
+        .as_ref()
+        .and_then(|m| m.record.snapshot_revision.clone());
     if let Some(m) = &mut managed {
         m.record.pid = Some(child.id());
         m.record.ended = None;
+        m.record.snapshot_revision = crate::current_snapshot_revision();
         m.record.save(&m.path)?;
     }
     // Release the parent's slave handles so child exit produces EOF on the master.
@@ -930,8 +1038,7 @@ pub fn serve_managed(
             .as_ref()
             .filter(|m| !m.path.with_extension("closed").exists())
         {
-            if let Some(snap_bytes) = load_snapshot(&m.path, m.record.snapshot_revision.as_deref())
-            {
+            if let Some(snap_bytes) = load_snapshot(&m.path, record_snapshot_revision.as_deref()) {
                 if vt.restore(&snap_bytes).is_ok() {
                     if size.ws_xpixel > 0 && size.ws_ypixel > 0 {
                         let _ = vt.resize_pixels(
@@ -1004,9 +1111,12 @@ pub fn serve_managed(
     let mut password_checked = Instant::now();
     if let Some(session) = &mut managed {
         if session.record.cwd != last_cwd || session.record.ssh != last_ssh {
-            session.record.cwd = last_cwd.clone();
-            session.record.ssh = last_ssh.clone();
-            session.record.save(&session.path)?;
+            let mut updated = session.record.clone();
+            updated.cwd = last_cwd.clone();
+            updated.ssh = last_ssh.clone();
+            if updated.save(&session.path).is_ok() {
+                session.record = updated;
+            }
         }
     }
     loop {
@@ -1159,8 +1269,15 @@ pub fn serve_managed(
                             .agent
                             .as_deref()
                             .or_else(|| event.resume.as_ref().map(|r| r.agent.as_str()));
+                        let session_id_ok = event
+                            .session_id
+                            .as_deref()
+                            .is_none_or(|target| target == id);
                         let fg_pgid = unsafe { libc::tcgetpgrp(master) };
-                        if event.token == token && event.generation == generation && resume_check_ok
+                        if event.token == token
+                            && event.generation == generation
+                            && resume_check_ok
+                            && session_id_ok
                         {
                             if let (
                                 Some(state_str),
@@ -1182,41 +1299,68 @@ pub fn serve_managed(
                                     .as_ref()
                                     .map(|r| r.conversation_id.as_str())
                                     .filter(|s| !s.is_empty());
-                                let report_cwd = event
-                                    .cwd
-                                    .as_deref()
-                                    .or_else(|| event.resume.as_ref().map(|r| r.cwd.as_str()));
-                                vt.activity_mut().foreground = (fg_pgid > 1).then_some(fg_pgid);
-                                vt.activity_mut().consume_report(
-                                    &agent_str,
-                                    state_str,
-                                    owner_id,
-                                    owner_is_group,
-                                    local_mode,
-                                    conv_id,
-                                    report_cwd,
-                                    event.context_id.as_deref(),
-                                    event.attention.as_deref(),
-                                    event.phase.as_deref(),
-                                    event.message.as_deref(),
-                                    event.tier.as_deref(),
-                                    event.event.as_deref(),
-                                );
-                                if let Some(m) = &mut managed {
-                                    if let Some(mut resume) =
-                                        event.resume.filter(|r| !r.conversation_id.is_empty())
-                                    {
-                                        resume.agent = agent_str;
-                                        m.record.resume = Some(resume);
-                                        // Persist first: a completion must never destroy its own recovery data.
-                                        m.record.save(&m.path)?;
+                                let hermes_ok = agent_str != "hermes"
+                                    || detached_hermes_event_authorized(
+                                        event.pid,
+                                        event.owner_pid,
+                                        child.id() as i32,
+                                        tty_name.as_deref(),
+                                        conv_id,
+                                        pane_hermes_home.as_deref(),
+                                    );
+                                if hermes_ok {
+                                    let report_cwd = event
+                                        .cwd
+                                        .as_deref()
+                                        .or_else(|| event.resume.as_ref().map(|r| r.cwd.as_str()));
+                                    vt.activity_mut().foreground = (fg_pgid > 1).then_some(fg_pgid);
+                                    vt.activity_mut().consume_report(
+                                        &agent_str,
+                                        state_str,
+                                        owner_id,
+                                        owner_is_group,
+                                        local_mode,
+                                        conv_id,
+                                        report_cwd,
+                                        event.context_id.as_deref(),
+                                        event.attention.as_deref(),
+                                        event.phase.as_deref(),
+                                        event.message.as_deref(),
+                                        event.tier.as_deref(),
+                                        event.event.as_deref(),
+                                    );
+                                    if let Some(m) = &mut managed {
+                                        let mut resume_persisted = true;
+                                        if let Some(mut resume) =
+                                            event.resume.filter(|r| !r.conversation_id.is_empty())
+                                        {
+                                            resume.agent = agent_str;
+                                            if record_slot_disposition(m, orphaned)
+                                                == RecordSlotDisposition::Owned
+                                            {
+                                                let mut updated = m.record.clone();
+                                                updated.resume = Some(resume.clone());
+                                                if updated.save(&m.path).is_ok() {
+                                                    m.record = updated;
+                                                } else {
+                                                    resume_persisted = false;
+                                                }
+                                            } else {
+                                                resume_persisted = false;
+                                            }
+                                            if m.record.resume.is_none() {
+                                                m.record.resume = Some(resume);
+                                            }
+                                        }
+                                        // Only arm `close_on_agent_done` if recovery data persisted.
+                                        agent_done = state_str == "done" && resume_persisted;
+                                        completed_group = agent_done.then_some(job_pgid);
+                                        recovery_checked_at =
+                                            Instant::now() - Duration::from_secs(5);
+                                        lifetime.activity(agent_done, Instant::now());
                                     }
-                                    agent_done = state_str == "done";
-                                    completed_group = agent_done.then_some(job_pgid);
-                                    recovery_checked_at = Instant::now() - Duration::from_secs(5);
-                                    lifetime.activity(agent_done, Instant::now());
+                                    accepted = true;
                                 }
-                                accepted = true;
                             }
                         }
                     }
@@ -2260,6 +2404,38 @@ mod tests {
         let text = check_vt.text().unwrap();
         assert!(text.contains("NEWER_GENERATION_SNAPSHOT"));
         assert!(!text.contains("STALE_GENERATION_SNAPSHOT"));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn detached_hermes_breadcrumb_requires_matching_tty_session_id() {
+        let dir = std::env::temp_dir().join(format!(
+            "omg-hermes-bc-{}",
+            &crate::record::nonce().unwrap()[..8]
+        ));
+        let sessions = dir.join("terminal-sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let tty = "/dev/ttys999";
+
+        // Missing breadcrumb -> rejected.
+        assert!(!hermes_breadcrumb_matches_tty(&dir, tty, "conv-a"));
+
+        // Mismatched conversation ID -> rejected.
+        fs::write(
+            sessions.join("tty-dev-ttys999"),
+            br#"{"session_id":"conv-b"}"#,
+        )
+        .unwrap();
+        assert!(!hermes_breadcrumb_matches_tty(&dir, tty, "conv-a"));
+
+        // Matching conversation ID -> authorized.
+        fs::write(
+            sessions.join("tty-dev-ttys999"),
+            br#"{"session_id":"conv-a"}"#,
+        )
+        .unwrap();
+        assert!(hermes_breadcrumb_matches_tty(&dir, tty, "conv-a"));
 
         fs::remove_dir_all(&dir).unwrap();
     }

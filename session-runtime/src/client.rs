@@ -696,7 +696,7 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
                             peer.snapshot_acked = true;
                         } else if frame.kind == crate::ACKNOWLEDGE {
                             if frame.seq != peer.generation
-                                || !frame.data.is_empty()
+                                || !(frame.data.is_empty() || frame.data.len() == 8)
                                 || state != State::Online
                                 || peer.remote_stream.is_none()
                                 || !peer.snapshot_acked
@@ -1452,7 +1452,11 @@ mod error_classification_tests {
 
     #[test]
     fn resurrect_launch_is_stripped_without_capability_and_preserved_across_manual_retry() {
-        use crate::{lifecycle::Policy, registry::{LocalLaunchSpec, OpenRequest}, Frame, SNAPSHOT};
+        use crate::{
+            lifecycle::Policy,
+            registry::{LocalLaunchSpec, OpenRequest},
+            Frame, SNAPSHOT,
+        };
         use std::collections::BTreeMap;
         use std::sync::{
             atomic::{AtomicBool, Ordering},
@@ -1501,7 +1505,8 @@ mod error_classification_tests {
                                         .send(&mut server_side);
                                 } else {
                                     let snap = Frame::new(SNAPSHOT, 1, b"snap").encode();
-                                    let _ = Frame::new(b'D', frame.seq, &snap).send(&mut server_side);
+                                    let _ =
+                                        Frame::new(b'D', frame.seq, &snap).send(&mut server_side);
                                 }
                             }
                             b'Q' => {
@@ -1575,5 +1580,119 @@ mod error_classification_tests {
         assert_eq!(run_case(false, false), vec![false]);
         // Capable host preserves resurrect_launch across manual retry after b'E'.
         assert_eq!(run_case(true, true), vec![true, true]);
+    }
+
+    #[test]
+    fn supervise_forwards_watermarked_8byte_acknowledge_and_drops_invalid_payload_len() {
+        use crate::{lifecycle::Policy, registry::OpenRequest, Frame, ACK, ACKNOWLEDGE, SNAPSHOT};
+        use std::os::unix::fs::DirBuilderExt;
+        use std::sync::{Arc, Mutex};
+
+        let dir = std::path::PathBuf::from(format!(
+            "/tmp/omg-client-ack-{}",
+            crate::record::nonce().unwrap()
+        ));
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .unwrap();
+        let socket_path = dir.join("relay.sock");
+        let forwarded_acks = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let forwarded_clone = forwarded_acks.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        let connector = Arc::new(move |_| {
+            let (client_side, mut server_side) = UnixStream::pair()?;
+            let forwarded_thread = forwarded_clone.clone();
+            let done_tx = done_tx.clone();
+            thread::spawn(move || {
+                let caps = b"strict-open/1,durable-close/1,agent-state/1";
+                Frame::new(b'P', 0, caps).send(&mut server_side).unwrap();
+                while let Ok(frame) = Frame::read(&mut server_side) {
+                    match frame.kind {
+                        b'P' => {
+                            let _ = Frame::new(b'P', 0, caps).send(&mut server_side);
+                        }
+                        b'C' => {
+                            let snap = Frame::new(SNAPSHOT, 7, b"snap").encode();
+                            let _ = Frame::new(b'D', frame.seq, &snap).send(&mut server_side);
+                        }
+                        b'D' => {
+                            if let Ok(inner) = Frame::read(&mut frame.data.as_slice()) {
+                                if inner.kind == ACKNOWLEDGE {
+                                    forwarded_thread.lock().unwrap().push(inner.data.clone());
+                                    if forwarded_thread.lock().unwrap().len() == 2 {
+                                        let _ = done_tx.send(());
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            });
+            Ok(RelayTransport {
+                socket: client_side,
+                guard: Box::new(()),
+            })
+        });
+
+        let socket_clone = socket_path.clone();
+        thread::spawn(move || {
+            let _ = supervise(&socket_clone, connector, false);
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut peer = loop {
+            match UnixStream::connect(&socket_path) {
+                Ok(s) => break s,
+                Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+                Err(err) => panic!("connect failed: {err}"),
+            }
+        };
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let req = OpenRequest {
+            id: "d2956168-0ade-4c3e-ade4-3bc908d7dfd8".into(),
+            policy: Policy::default(),
+            create: false,
+            cwd: None,
+            launch: None,
+            resurrect_launch: None,
+            inline_viewer: false,
+        };
+        Frame::new(b'H', 0, &serde_json::to_vec(&req).unwrap())
+            .send(&mut peer)
+            .unwrap();
+        let mut peer_gen = 0u64;
+        let snap_seq = loop {
+            let frame = Frame::read(&mut peer).unwrap();
+            if frame.kind == b'T' {
+                peer_gen = frame.seq;
+            } else if frame.kind == SNAPSHOT {
+                break frame.seq;
+            }
+        };
+        assert_ne!(peer_gen, 0);
+        Frame::new(ACK, snap_seq, &peer_gen.to_be_bytes())
+            .send(&mut peer)
+            .unwrap();
+        // Malformed 4-byte ACKNOWLEDGE must be dropped.
+        Frame::new(ACKNOWLEDGE, peer_gen, &[1, 2, 3, 4])
+            .send(&mut peer)
+            .unwrap();
+        // 8-byte watermarked ACKNOWLEDGE and legacy 0-byte ACKNOWLEDGE must forward.
+        Frame::new(ACKNOWLEDGE, peer_gen, &42u64.to_be_bytes())
+            .send(&mut peer)
+            .unwrap();
+        Frame::new(ACKNOWLEDGE, peer_gen, &[])
+            .send(&mut peer)
+            .unwrap();
+
+        done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let observed = forwarded_acks.lock().unwrap().clone();
+        assert_eq!(observed, vec![42u64.to_be_bytes().to_vec(), Vec::new()]);
+        drop(peer);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

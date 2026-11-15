@@ -699,11 +699,27 @@ fn inventory(endpoint: &Endpoint) -> io::Result<(Vec<record::SessionSummary>, bo
         }
     }
 }
+fn acknowledge_watermark(
+    snapshot: Option<&activity::Snapshot>,
+    ack_limit: Option<Option<u64>>,
+) -> Option<u64> {
+    let max_rev = ack_limit?;
+    match snapshot {
+        Some(snap) => {
+            if !snap.clone().acknowledge() {
+                return None;
+            }
+            Some(max_rev.map_or(snap.revision, |cap| cap.min(snap.revision)))
+        }
+        None => max_rev,
+    }
+}
+
 fn read_session_activity(
     endpoint: &Endpoint,
     session_id: &str,
     generation: &str,
-    send_acknowledge: bool,
+    ack_limit: Option<Option<u64>>,
 ) -> (Option<activity::Snapshot>, bool) {
     if endpoint.relay.is_some() {
         let Ok(mut stream) = UnixStream::connect(&endpoint.socket) else {
@@ -754,14 +770,21 @@ fn read_session_activity(
             }
         }
         let mut sent_ack = false;
-        if send_acknowledge && can_ack && peer_gen != 0 {
-            if let Some(seq) = snapshot_seq {
+        if can_ack && peer_gen != 0 {
+            if let (Some(seq), Some(target_rev)) = (
+                snapshot_seq,
+                acknowledge_watermark(snapshot.as_ref(), ack_limit),
+            ) {
                 sent_ack = Frame::new(omg_session_runtime::ACK, seq, &peer_gen.to_be_bytes())
                     .send(&mut stream)
                     .is_ok()
-                    && Frame::new(omg_session_runtime::ACKNOWLEDGE, peer_gen, &[])
-                        .send(&mut stream)
-                        .is_ok();
+                    && Frame::new(
+                        omg_session_runtime::ACKNOWLEDGE,
+                        peer_gen,
+                        &target_rev.to_be_bytes(),
+                    )
+                    .send(&mut stream)
+                    .is_ok();
             }
         }
         return (snapshot, sent_ack);
@@ -801,14 +824,21 @@ fn read_session_activity(
         }
     }
     let mut sent_ack = false;
-    if send_acknowledge && can_ack {
-        if let Some(seq) = snapshot_seq {
+    if can_ack {
+        if let (Some(seq), Some(target_rev)) = (
+            snapshot_seq,
+            acknowledge_watermark(snapshot.as_ref(), ack_limit),
+        ) {
             sent_ack = Frame::new(omg_session_runtime::ACK, seq, &[])
                 .send(&mut stream)
                 .is_ok()
-                && Frame::new(omg_session_runtime::ACKNOWLEDGE, 0, &[])
-                    .send(&mut stream)
-                    .is_ok();
+                && Frame::new(
+                    omg_session_runtime::ACKNOWLEDGE,
+                    0,
+                    &target_rev.to_be_bytes(),
+                )
+                .send(&mut stream)
+                .is_ok();
         }
     }
     (snapshot, sent_ack)
@@ -885,7 +915,7 @@ impl State {
                 }
             }
         }
-        let (fetched, _) = read_session_activity(endpoint, session_id, generation, false);
+        let (fetched, _) = read_session_activity(endpoint, session_id, generation, None);
         let mut guard = self.snapshots.lock().unwrap_or_else(|p| p.into_inner());
         if guard.len() >= 1024 {
             guard.retain(|_, (when, _)| when.elapsed() < Duration::from_secs(10));
@@ -1013,6 +1043,7 @@ fn build_view(config: &Config) -> io::Result<View> {
     experience::append_projects(config, &desktop, preferred.as_ref(), &mut projects)?;
     let inline_relays = resolve_inline_relays(config, &desktop.inline_owners);
     let mut seen_sessions = std::collections::BTreeSet::new();
+    let mut session_created_at: HashMap<String, u64> = HashMap::new();
     for (endpoint, sessions, supports_presentation) in endpoints {
         let is_relay = endpoint.relay.is_some();
         let endpoint_is_remote = is_relay
@@ -1049,12 +1080,13 @@ fn build_view(config: &Config) -> io::Result<View> {
             let is_paused = !is_relay && session.ended == Some(EndReason::Lost);
             let record = if !is_relay {
                 let sessions_dir = endpoint.socket.parent().unwrap().join("sessions");
-                let record_path = sessions_dir.join(format!("{}.json", session.id));
-                record::Record::load(&record_path).ok().filter(|r| {
-                    r.generation == session.generation
-                        && r.pid == session.pid
-                        && (r.ended.is_none() || r.ended == Some(EndReason::Lost))
-                })
+                omg_session_runtime::registry::find_local_record(&sessions_dir, &session.id)
+                    .map(|(_, r)| r)
+                    .filter(|r| {
+                        r.generation == session.generation
+                            && r.pid == session.pid
+                            && (r.ended.is_none() || r.ended == Some(EndReason::Lost))
+                    })
             } else {
                 None
             };
@@ -1391,8 +1423,10 @@ fn build_view(config: &Config) -> io::Result<View> {
             }
             let is_background = !is_paused && config.support.is_some() && owner.is_none();
             let mobile_created = saved.is_some();
+            let route_id = format!("{}/{}/{}", endpoint.id, session.id, session.generation);
+            session_created_at.insert(route_id.clone(), session.created_at);
             let mut session_json = json!({
-                "id":format!("{}/{}/{}",endpoint.id,session.id,session.generation),"title":title,"agent":agent,
+                "id":route_id,"title":title,"agent":agent,
                 "status":state,"subtitle":subtitle,"branch":branch,
                 "background":is_background,"mobileCreated":mobile_created,
             });
@@ -1421,10 +1455,20 @@ fn build_view(config: &Config) -> io::Result<View> {
     drop(ack_guard);
     for (_, value) in projects.values_mut() {
         if let Some(sessions) = value["sessions"].as_array_mut() {
-            sessions.sort_by_key(|s| {
-                let bg = s["background"].as_bool().unwrap_or(false);
-                let mobile = s["mobileCreated"].as_bool().unwrap_or(false);
-                bg && !mobile
+            sessions.sort_by(|a, b| {
+                let key = |s: &Value| {
+                    let bg = s["background"].as_bool().unwrap_or(false);
+                    let mobile = s["mobileCreated"].as_bool().unwrap_or(false);
+                    let id_str = s["id"].as_str().unwrap_or("");
+                    let created = session_created_at.get(id_str).copied().unwrap_or(0);
+                    (bg && !mobile, created)
+                };
+                key(a).cmp(&key(b)).then_with(|| {
+                    a["id"]
+                        .as_str()
+                        .unwrap_or("")
+                        .cmp(b["id"].as_str().unwrap_or(""))
+                })
             });
         }
     }
@@ -1615,25 +1659,37 @@ fn request_control(config: &Config, request: &Value) -> io::Result<Value> {
         let Ok((endpoint, id, generation)) = route(config, text(request, "session")?) else {
             return Ok(Value::Null);
         };
+        let requested_max_rev = request
+            .get("maxRevision")
+            .or_else(|| request.get("max_revision"))
+            .and_then(Value::as_u64);
         let mut pre_snap: Option<activity::Snapshot> = None;
         if endpoint.relay.is_none() {
             let sessions_dir = endpoint.socket.parent().unwrap().join("sessions");
-            let record_path = sessions_dir.join(format!("{id}.json"));
-            if let Some(rec) = record::Record::load(&record_path).ok().filter(|r| {
-                r.generation == generation
-                    && (r.ended.is_none() || r.ended == Some(EndReason::Lost))
-            }) {
-                let sock = endpoint
-                    .socket
-                    .parent()
-                    .unwrap()
-                    .join(format!("{}.sock", &hash(&id)[..16]));
-                if let Ok(snap) = holder::presentation(&sock, &rec) {
-                    pre_snap = Some(snap);
+            if let Some((record_path, rec)) =
+                omg_session_runtime::registry::find_local_record(&sessions_dir, &id).filter(
+                    |(_, r)| {
+                        r.generation == generation
+                            && (r.ended.is_none() || r.ended == Some(EndReason::Lost))
+                    },
+                )
+            {
+                if let Some(state_dir) = record_path.parent().and_then(Path::parent) {
+                    let sock = state_dir.join(format!("{}.sock", &hash(&id)[..16]));
+                    if let Ok(snap) = holder::presentation(&sock, &rec) {
+                        pre_snap = Some(snap);
+                    }
                 }
             }
         }
-        let (snap, mut sent_ack) = read_session_activity(&endpoint, &id, &generation, true);
+        let local_ack_cap = requested_max_rev.or_else(|| {
+            pre_snap
+                .as_ref()
+                .filter(|s| (**s).clone().acknowledge())
+                .map(|s| s.revision)
+        });
+        let (snap, mut sent_ack) =
+            read_session_activity(&endpoint, &id, &generation, Some(local_ack_cap));
         let mut candidate = snap.or(pre_snap);
         if endpoint.relay.is_none() {
             let desktop_meta = desktop(config);
@@ -1649,7 +1705,7 @@ fn request_control(config: &Config, request: &Value) -> io::Result<Value> {
                         &remote.endpoint,
                         &remote.session_id,
                         &remote.generation,
-                        true,
+                        Some(requested_max_rev),
                     );
                     config
                         .control
@@ -1669,7 +1725,8 @@ fn request_control(config: &Config, request: &Value) -> io::Result<Value> {
                         State::save_acknowledged(config, map);
                     }
                 } else if let Some(mut probe) = candidate {
-                    let rev = probe.revision;
+                    let rev =
+                        requested_max_rev.map_or(probe.revision, |cap| cap.min(probe.revision));
                     if probe.acknowledge() {
                         map.insert(
                             id.clone(),
@@ -2187,6 +2244,7 @@ fn ensure_local_broker(binary: &Path, support: &Path, revision: &str) -> io::Res
         .mode(0o700)
         .create(&root)?;
     super::private(&root, true)?;
+    let _ = omg_session_runtime::registry::write_support_root_stamp(&root, support);
     let socket = root.join("host.sock");
     let running = match UnixStream::connect(&socket) {
         Ok(_) => true,
@@ -2214,6 +2272,7 @@ fn ensure_local_broker(binary: &Path, support: &Path, revision: &str) -> io::Res
             child
                 .args(&command[1..])
                 .env("TERM", "xterm-256color")
+                .env("OMG_APP_SUPPORT", support)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(log);

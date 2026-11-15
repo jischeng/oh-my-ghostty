@@ -301,9 +301,55 @@ impl Drop for Fixture {
             let _ = child.kill();
             let _ = child.wait();
         }
-        let mut all_stopped = Self::drain_state_dir_sessions(&self.dir);
-        for extra in &self.cleanup_dirs {
-            all_stopped &= Self::drain_state_dir_sessions(extra);
+        let mut state_dirs = vec![self.dir.clone()];
+        for root in std::iter::once(&self.dir).chain(self.cleanup_dirs.iter()) {
+            if root != &self.dir {
+                state_dirs.push(root.clone());
+            }
+            for run_parent in [root.join(".omg/run"), root.join("home/.omg/run")] {
+                if let Ok(entries) = fs::read_dir(&run_parent) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if p.is_dir() {
+                            state_dirs.push(p);
+                        }
+                    }
+                }
+            }
+        }
+        for state_dir in &state_dirs {
+            let mut broker_pid = ctl_peer_pid(&state_dir.join("host.sock"));
+            if broker_pid.is_none() {
+                let lock_path = state_dir.join("host.lock");
+                if let Ok(file) = fs::OpenOptions::new().read(true).open(&lock_path) {
+                    use std::os::fd::AsRawFd;
+                    let locked =
+                        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) }
+                            != 0;
+                    if !locked {
+                        unsafe {
+                            libc::flock(file.as_raw_fd(), libc::LOCK_UN);
+                        }
+                    } else if let Ok(text) = fs::read_to_string(&lock_path) {
+                        broker_pid = text.trim().parse::<u32>().ok().filter(|&p| p > 1);
+                    }
+                }
+            }
+            if let Some(pid) = broker_pid.filter(|&p| p > 1) {
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGTERM);
+                }
+                if !wait_pid_gone(pid, Duration::from_secs(2)) {
+                    unsafe {
+                        libc::kill(pid as i32, libc::SIGKILL);
+                    }
+                    let _ = wait_pid_gone(pid, Duration::from_secs(1));
+                }
+            }
+        }
+        let mut all_stopped = true;
+        for state_dir in &state_dirs {
+            all_stopped &= Self::drain_state_dir_sessions(state_dir);
         }
         if all_stopped {
             let _ = fs::remove_dir_all(&self.dir);
@@ -1300,4 +1346,258 @@ fn dropping_fixture_with_resurrected_holder_without_explicit_close_leaves_zero_o
         pid_is_gone(session_pid),
         "resurrected PTY leader {session_pid} must be terminated by Fixture::drop"
     );
+}
+
+#[test]
+fn idle_exited_broker_paused_session_auto_starts_host_local_and_watermarked_ack_preserves_newer_activity(
+) {
+    let base = std::path::PathBuf::from("/tmp").join(format!(
+        "omg-ma-{}",
+        &omg_session_runtime::record::nonce().unwrap()[..10]
+    ));
+    let support = base.join("OMG Dev");
+    let rev = env!("CARGO_PKG_VERSION");
+    let key_input = format!("{}\0{rev}", support.display());
+    let key_hex: String = Sha256::digest(key_input.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let runtime_root = base.join(".omg/run").join(&key_hex[..20]);
+    let sessions_dir = runtime_root.join("sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    fs::create_dir_all(support.join("session-runtime")).unwrap();
+    for p in [
+        &base,
+        &base.join(".omg"),
+        &base.join(".omg/run"),
+        &runtime_root,
+        &sessions_dir,
+    ] {
+        fs::set_permissions(p, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    fs::write(
+        support.join("session-runtime/endpoints.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "version": 1,
+            "endpoints": [{"descriptor": {"revision": rev}}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // Persist a post-reboot / idle-exited `Lost` session WITHOUT starting `host-local`!
+    let paused_id = "88888888-9999-aaaa-bbbb-cccccccccccc";
+    let mut paused_rec = omg_session_runtime::record::Record::new(
+        paused_id,
+        omg_session_runtime::lifecycle::Policy::default(),
+    )
+    .unwrap();
+    let paused_gen = paused_rec.generation.clone();
+    paused_rec.ended = Some(omg_session_runtime::lifecycle::EndReason::Lost);
+    paused_rec.cwd = Some("/tmp".into());
+    paused_rec
+        .save(&sessions_dir.join(format!("{paused_id}.json")))
+        .unwrap();
+    fs::write(sessions_dir.join(format!("{paused_id}.snapshot")), b"SNAP").unwrap();
+    assert!(!runtime_root.join("host.sock").exists());
+
+    let mut fixture = Fixture::new(runtime_root.clone());
+    fixture.cleanup_dirs.push(base.clone());
+
+    let token_path = base.join("pair.token");
+    let mut gateway = Command::new(env!("CARGO_BIN_EXE_omgd"))
+        .args(["mobile", "--listen", "127.0.0.1:0", "--app-support"])
+        .arg(&support)
+        .arg("--token-file")
+        .arg(&token_path)
+        .arg("--no-qr")
+        .env("HOME", &base)
+        .env("SHELL", "/bin/sh")
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr = gateway.stderr.take().unwrap();
+    fixture.children.push(gateway);
+    let (send_address, recv_address) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if let Some(value) = line.strip_prefix("OMG mobile listening on ws://") {
+                let _ = send_address.send(value.trim_end_matches("/catalogue").to_owned());
+            }
+        }
+    });
+    let addr = recv_address.recv_timeout(Duration::from_secs(8)).unwrap();
+    let token_raw = fs::read_to_string(&token_path).unwrap();
+    let token = token_raw.trim();
+
+    // `mobile_targets` must auto-start `host-local` for `runtime_root` and expose the paused session!
+    let mut ctrl = connect(&addr, "/control", token).unwrap();
+    let roster = json_reply(&mut ctrl, "roster");
+    assert!(
+        runtime_root.join("host.sock").exists(),
+        "mobile_targets must start host-local when recoverable paused sessions exist"
+    );
+    let all_rows: Vec<&serde_json::Value> = roster["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|p| p["sessions"].as_array().unwrap().iter())
+        .collect();
+    assert!(
+        all_rows.iter().any(|s| {
+            s["id"]
+                .as_str()
+                .is_some_and(|sid| sid.ends_with(&format!("/{paused_id}/{paused_gen}")))
+                && s["paused"] == true
+        }),
+        "paused session must appear in /control roster without pre-spawned host-local"
+    );
+
+    // Start a live terminal session and verify watermarked `acknowledge` (`maxRevision: 0`)
+    // does NOT wipe a newer `done` state!
+    ctrl.send(Message::Text(
+        serde_json::json!({"t": "startTerminal"}).to_string().into(),
+    ))
+    .unwrap();
+    let started = json_reply(&mut ctrl, "started");
+    let live_route = started["session"].as_str().unwrap().to_owned();
+    let parts: Vec<&str> = live_route.split('/').collect();
+    let ep_id = parts[0];
+    let live_id = parts[1].to_owned();
+    let live_gen = parts[2].to_owned();
+    fixture.owned.push((live_id.clone(), live_gen.clone()));
+
+    let mut ws = connect(&addr, &format!("/ws/{ep_id}"), token).unwrap();
+    let open = serde_json::json!({"id": live_id, "generation": live_gen, "replay": false});
+    ws.send(Message::Binary(
+        Frame::new(b'U', 1, &serde_json::to_vec(&open).unwrap())
+            .encode()
+            .into(),
+    ))
+    .unwrap();
+    let mut pending = Vec::new();
+    loop {
+        let wrapped = receive(&mut ws, &mut pending, b'D');
+        let inner = Frame::read(&mut wrapped.data.as_slice()).unwrap();
+        if inner.kind == b'S' {
+            ws.send(Message::Binary(
+                Frame::new(b'D', 1, &Frame::new(b'A', inner.seq, &[]).encode())
+                    .encode()
+                    .into(),
+            ))
+            .unwrap();
+            ws.send(Message::Binary(
+                Frame::new(b'D', 1, &Frame::new(b'W', 0, &[]).encode())
+                    .encode()
+                    .into(),
+            ))
+            .unwrap();
+        } else if inner.kind == b'W' {
+            break;
+        }
+    }
+    ws.send(Message::Binary(
+        Frame::new(
+            b'D',
+            1,
+            &Frame::new(
+                b'I',
+                0,
+                b"printf '\\033]7501;state=done:app=pi:id=fixture\\007'\r",
+            )
+            .encode(),
+        )
+        .encode()
+        .into(),
+    ))
+    .unwrap();
+
+    loop {
+        let r = json_reply(&mut ctrl, "roster");
+        if r["projects"].as_array().unwrap().iter().any(|p| {
+            p["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["id"] == live_route && s["status"] == "done")
+        }) {
+            break;
+        }
+    }
+
+    // Acknowledge with stale watermark `maxRevision: 0` -> newer `done` (revision >= 1) is preserved!
+    ctrl.send(Message::Text(
+        serde_json::json!({"t": "acknowledge", "session": live_route, "maxRevision": 0})
+            .to_string()
+            .into(),
+    ))
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+    let summaries =
+        omg_session_runtime::client::list_local(&runtime_root.join("host.sock")).unwrap();
+    let live_summary = summaries.iter().find(|s| s.id == live_id).unwrap();
+    assert_eq!(
+        live_summary
+            .activity
+            .as_ref()
+            .and_then(|a| a.presentation())
+            .map(|p| p.state),
+        Some("done"),
+        "stale maxRevision: 0 must not wipe newer done presentation"
+    );
+    // Now acknowledge without a stale cap -> `done` transitions to `idle`!
+    ctrl.send(Message::Text(
+        serde_json::json!({"t": "acknowledge", "session": live_route})
+            .to_string()
+            .into(),
+    ))
+    .unwrap();
+    loop {
+        let r = json_reply(&mut ctrl, "roster");
+        if r["projects"].as_array().unwrap().iter().any(|p| {
+            p["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["id"] == live_route && s["status"] == "idle")
+        }) {
+            break;
+        }
+    }
+
+    let _ = ws.close(None);
+    let _ = ctrl.close(None);
+
+    // `omgd sessions close --all --yes --local` must also close local `Lost` sessions
+    // cleanly (`ended -> ExplicitClose` and `.snapshot` deleted).
+    let close_all = Command::new(env!("CARGO_BIN_EXE_omgd"))
+        .args([
+            "sessions",
+            "close",
+            "--all",
+            "--yes",
+            "--local",
+            "--app-support",
+        ])
+        .arg(&support)
+        .env("HOME", &base)
+        .env("SHELL", "/bin/sh")
+        .output()
+        .unwrap();
+    assert!(
+        close_all.status.success(),
+        "sessions close --all failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&close_all.stdout),
+        String::from_utf8_lossy(&close_all.stderr)
+    );
+    assert_eq!(
+        omg_session_runtime::record::Record::load(&sessions_dir.join(format!("{paused_id}.json")))
+            .unwrap()
+            .ended,
+        Some(omg_session_runtime::lifecycle::EndReason::ExplicitClose)
+    );
+    assert!(!sessions_dir.join(format!("{paused_id}.snapshot")).exists());
+
+    drop(fixture);
+    assert!(!base.exists());
 }

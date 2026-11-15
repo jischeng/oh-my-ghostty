@@ -462,6 +462,7 @@ struct Record {
     verified_session: bool,
     attention_locked: bool,
     interrupted: bool,
+    saw_active_job: bool,
     terminal_revision: u64,
 }
 
@@ -843,6 +844,15 @@ pub(crate) fn is_interactive_shell_argv(argv: &[String]) -> bool {
     true
 }
 
+pub(crate) fn is_interactive_shell_pid(pid: i32) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    crate::location::process_argv(pid)
+        .as_deref()
+        .is_some_and(is_interactive_shell_argv)
+}
+
 pub(crate) fn is_login_wrapper(pid: i32) -> bool {
     if pid <= 1 {
         return false;
@@ -1042,10 +1052,10 @@ fn owner_alive_in_session(pid: i32, group: bool, session: i32, verified_session:
                     continue;
                 }
                 if let Some((_, _, _, zombie)) = process_info(member) {
-                    if !zombie && (verified_session || unsafe { libc::getsid(member) == session }) {
+                    if !zombie && unsafe { libc::getsid(member) == session } {
                         return true;
                     }
-                } else if (verified_session || unsafe { libc::getsid(member) == session })
+                } else if unsafe { libc::getsid(member) == session }
                     && (unsafe { libc::kill(member, 0) == 0 }
                         || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
                 {
@@ -1061,7 +1071,7 @@ fn owner_alive_in_session(pid: i32, group: bool, session: i32, verified_session:
     #[cfg(target_os = "linux")]
     {
         if let Some((_, _, _, zombie)) = process_info(pid) {
-            if !zombie && (verified_session || unsafe { libc::getsid(pid) == session }) {
+            if !zombie && unsafe { libc::getsid(pid) == session } {
                 return true;
             }
         }
@@ -1075,10 +1085,7 @@ fn owner_alive_in_session(pid: i32, group: bool, session: i32, verified_session:
                     continue;
                 };
                 if let Some((_, _, pgid, zombie)) = process_info(member) {
-                    if !zombie
-                        && pgid == pid
-                        && (verified_session || unsafe { libc::getsid(member) == session })
-                    {
+                    if !zombie && pgid == pid && unsafe { libc::getsid(member) == session } {
                         return true;
                     }
                 }
@@ -1087,11 +1094,7 @@ fn owner_alive_in_session(pid: i32, group: bool, session: i32, verified_session:
         }
     }
 
-    if verified_session {
-        true
-    } else {
-        unsafe { libc::getsid(pid) == session }
-    }
+    unsafe { libc::getsid(pid) == session }
 }
 
 fn inherit_native_app(records: &[Record], key: &str, metadata: &str) -> String {
@@ -1527,6 +1530,15 @@ impl State {
         let local_flag = self.local;
         let self_remote = self.remote;
         let foreground = self.foreground;
+        let shell_pgid = session_leader
+            .filter(|&l| l > 1)
+            .and_then(|l| self.resolve_shell_pgid(l));
+        let in_child_fg_now = match (session_leader, foreground) {
+            (Some(leader), Some(fg)) if leader > 1 => {
+                fg > 1 && fg != leader && Some(fg) != shell_pgid
+            }
+            _ => false,
+        };
 
         let records = self.pending.as_mut().unwrap_or(&mut self.records);
 
@@ -1694,6 +1706,7 @@ impl State {
             verified_session,
             attention_locked,
             interrupted: false,
+            saw_active_job: in_child_fg_now,
             terminal_revision,
         });
         self.revision = next_revision;
@@ -1974,7 +1987,9 @@ impl State {
             return None;
         }
         if let Some(spgid) = self.shell_pgid {
-            if owner_alive_in_session(spgid, true, leader, true) {
+            if owner_alive_in_session(spgid, true, leader, false)
+                && is_login_shell_child(spgid, leader)
+            {
                 return Some(spgid);
             }
             self.shell_pgid = None;
@@ -2122,6 +2137,10 @@ impl State {
         let at_shell = self
             .foreground
             .is_some_and(|fg| fg == session || fg == effective_leader || Some(fg) == shell_pgid);
+        let in_child_fg = self.foreground.is_some_and(|fg| {
+            fg > 1 && fg != session && fg != effective_leader && Some(fg) != shell_pgid
+        });
+        let mut bare_interactive_shell_checked: Option<bool> = None;
         let next_rev = self.revision.saturating_add(1);
         let mut retained = Vec::with_capacity(self.records.len());
 
@@ -2129,6 +2148,39 @@ impl State {
             match r.owner {
                 Some((pid, group)) => {
                     if owner_alive_in_session(pid, group, session, r.verified_session) {
+                        let owned_by_shell_root =
+                            pid == session || pid == effective_leader || Some(pid) == shell_pgid;
+                        if !(r.remote && self.local)
+                            && owned_by_shell_root
+                            && matches!(
+                                signal_effective_state(&r.signal),
+                                Some("working" | "needsAttention")
+                            )
+                        {
+                            if in_child_fg {
+                                r.saw_active_job = true;
+                            } else if at_shell {
+                                let is_bare_shell = *bare_interactive_shell_checked
+                                    .get_or_insert_with(|| {
+                                        (Some(pid) == shell_pgid || is_interactive_shell_pid(pid))
+                                            && !crate::location::session_has_non_shell_member(
+                                                effective_leader,
+                                                shell_pgid,
+                                            )
+                                    });
+                                if !is_bare_shell {
+                                    r.saw_active_job = true;
+                                } else if r.saw_active_job
+                                    && rewrite_signal_state(&mut r.signal, "idle", None)
+                                {
+                                    r.attention_locked = false;
+                                    r.owner = None;
+                                    r.verified_session = false;
+                                    r.saw_active_job = false;
+                                    changed = true;
+                                }
+                            }
+                        }
                         retained.push(r);
                     } else if r.verified_session {
                         let st = signal_effective_state(&r.signal);
@@ -2843,5 +2895,178 @@ mod tests {
             "/bin/zsh",
             "/tmp/run_script.zsh"
         ])));
+    }
+
+    #[test]
+    fn owner_alive_in_session_enforces_session_id_on_groups_and_prune_clears_bare_shell_working() {
+        let self_pid = std::process::id() as i32;
+        let self_pgid = unsafe { libc::getpgrp() };
+        let self_sid = unsafe { libc::getsid(0) };
+        let foreign_sid = if self_sid == 999_999 {
+            999_998
+        } else {
+            999_999
+        };
+        if self_pgid > 1 && self_sid > 1 {
+            assert!(owner_alive_in_session(self_pgid, true, self_sid, true));
+            assert!(!owner_alive_in_session(self_pgid, true, foreign_sid, true));
+        }
+        assert!(owner_alive_in_session(self_pid, false, foreign_sid, true));
+        assert!(!owner_alive_in_session(self_pid, false, foreign_sid, false));
+
+        // Spawn an interactive `/bin/sh -i` PTY session without OSC 133 shell integration
+        // and verify a shell-owned `working` record expires once returned from a child job.
+        let mut master: libc::c_int = -1;
+        let mut slave: libc::c_int = -1;
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        use std::os::{fd::FromRawFd, unix::process::CommandExt};
+        let slave_file = unsafe { std::fs::File::from_raw_fd(slave) };
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.arg("-i")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", "/tmp")
+            .env("PS1", "$ ")
+            .env("TERM", "dumb")
+            .stdin(slave_file.try_clone().unwrap())
+            .stdout(slave_file.try_clone().unwrap())
+            .stderr(slave_file);
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = cmd.spawn().unwrap();
+        drop(cmd);
+        unsafe {
+            libc::fcntl(master, libc::F_SETFL, libc::O_NONBLOCK);
+        }
+        struct PtyGuard {
+            child: std::process::Child,
+            master: libc::c_int,
+        }
+        impl Drop for PtyGuard {
+            fn drop(&mut self) {
+                let leader = self.child.id() as i32;
+                if leader > 1 {
+                    unsafe {
+                        libc::kill(-leader, libc::SIGKILL);
+                    }
+                }
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                if self.master >= 0 {
+                    unsafe {
+                        libc::close(self.master);
+                    }
+                }
+            }
+        }
+        let guard = PtyGuard { child, master };
+        let leader = guard.child.id() as i32;
+        let drain_master = || {
+            let mut sink = [0u8; 1024];
+            while unsafe { libc::read(guard.master, sink.as_mut_ptr().cast(), sink.len()) } > 0 {}
+        };
+        for _ in 0..50 {
+            drain_master();
+            if unsafe { libc::tcgetpgrp(guard.master) } == leader {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let mut vt = crate::Vt::new(80, 24).unwrap();
+        {
+            let tracker = vt.activity_mut();
+            tracker.local = true;
+            tracker.session_leader = Some(leader);
+            tracker.foreground = Some(leader);
+        }
+        // 1) Bare shell OSC 7501 `working` and `blocked` (`needsAttention`) with NO active
+        //    child job must NOT decay to `idle` across repeated `prune()` calls even past >2s!
+        vt.write(b"\x1b]7501;state=working:app=codex:id=fixture\x07");
+        assert_eq!(vt.activity().presentation().unwrap().state, "working");
+        assert!(!vt.activity_mut().prune(leader));
+        std::thread::sleep(std::time::Duration::from_millis(2100));
+        assert!(!vt.activity_mut().prune(leader));
+        assert_eq!(vt.activity().presentation().unwrap().state, "working");
+
+        vt.write(b"\x1b]7501;state=blocked:app=claude:id=fixture:kind=permission\x07");
+        assert_eq!(
+            vt.activity().presentation().unwrap().state,
+            "needsAttention"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!vt.activity_mut().prune(leader));
+        assert_eq!(
+            vt.activity().presentation().unwrap().state,
+            "needsAttention"
+        );
+
+        // 2) Once a non-shell child member runs in the session and exits back to bare `/bin/sh -i`,
+        //    `prune()` observes `saw_active_job` and clears `needsAttention` to `idle`.
+        let cmd_bytes = b"/bin/sleep 0.3\n";
+        assert_eq!(
+            unsafe { libc::write(guard.master, cmd_bytes.as_ptr().cast(), cmd_bytes.len(),) },
+            cmd_bytes.len() as isize
+        );
+        let observed_non_shell = (0..40).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            drain_master();
+            let fg = unsafe { libc::tcgetpgrp(guard.master) };
+            vt.activity_mut().foreground = (fg > 1).then_some(fg);
+            let _ = vt.activity_mut().prune(leader);
+            fg != leader || crate::location::session_has_non_shell_member(leader, None)
+        });
+        assert!(observed_non_shell);
+        let cleared_after_exit = (0..60).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            drain_master();
+            let fg = unsafe { libc::tcgetpgrp(guard.master) };
+            vt.activity_mut().foreground = (fg > 1).then_some(fg);
+            let _ = vt.activity_mut().prune(leader);
+            vt.activity().presentation().unwrap().state == "idle"
+        });
+        assert!(cleared_after_exit);
+
+        // 3) Entering a child foreground PGID and returning to bare `/bin/sh -i` also clears `working`.
+        let tracker = vt.activity_mut();
+        tracker.consume_report(
+            "claude",
+            "working",
+            leader,
+            true,
+            true,
+            None,
+            Some("/tmp"),
+            None,
+            None,
+            None,
+            Some("Thinking"),
+            None,
+            None,
+        );
+        assert_eq!(tracker.presentation().unwrap().state, "working");
+        tracker.foreground = Some(leader + 10_000);
+        let _ = tracker.prune(leader);
+        tracker.foreground = Some(leader);
+        assert!(tracker.prune(leader));
+        assert_eq!(tracker.presentation().unwrap().state, "idle");
+
+        drop(guard);
     }
 }

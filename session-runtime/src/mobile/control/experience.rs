@@ -444,10 +444,25 @@ pub(super) fn host_display_name(host: &str) -> String {
     host.to_owned()
 }
 
+fn validate_ssh_destination(destination: String) -> io::Result<String> {
+    if destination.is_empty()
+        || destination.starts_with('-')
+        || destination
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(io::Error::other("Invalid SSH destination"));
+    }
+    Ok(destination)
+}
+
 pub(super) fn resolve_remote_ssh(config: &Config, host: &str) -> io::Result<(String, Vec<String>)> {
     if let Ok(target) = serde_json::from_str::<omg_session_runtime::location::SshTarget>(host) {
         if !target.destination.is_empty() {
-            return Ok((target.destination, target.options));
+            return Ok((
+                validate_ssh_destination(target.destination)?,
+                target.options,
+            ));
         }
     }
     if let Some(alias) = host.strip_prefix("ssh:") {
@@ -455,9 +470,9 @@ pub(super) fn resolve_remote_ssh(config: &Config, host: &str) -> io::Result<(Str
             .into_iter()
             .find(|h| h.alias == alias)
         {
-            return Ok((saved.alias, saved.options));
+            return Ok((validate_ssh_destination(saved.alias)?, saved.options));
         }
-        return Ok((alias.to_owned(), Vec::new()));
+        return Ok((validate_ssh_destination(alias.to_owned())?, Vec::new()));
     }
     if let Ok(remote) = helper(config, json!({"operation":"sshCommand","host":host})) {
         if let Ok(destination) = text(&remote, "destination") {
@@ -467,16 +482,16 @@ pub(super) fn resolve_remote_ssh(config: &Config, host: &str) -> io::Result<(Str
                 .flatten()
                 .filter_map(|v| v.as_str().map(str::to_owned))
                 .collect::<Vec<_>>();
-            return Ok((destination.to_owned(), options));
+            return Ok((validate_ssh_destination(destination.to_owned())?, options));
         }
     }
     if let Some(saved) = load_remembered_ssh_hosts(config)
         .into_iter()
         .find(|h| h.alias == host)
     {
-        return Ok((saved.alias, saved.options));
+        return Ok((validate_ssh_destination(saved.alias)?, saved.options));
     }
-    Ok((host.to_owned(), Vec::new()))
+    Ok((validate_ssh_destination(host.to_owned())?, Vec::new()))
 }
 
 fn remote_python(config: &Config, host: &str, payload: &Value) -> io::Result<Value> {
@@ -506,6 +521,7 @@ fn remote_python(config: &Config, host: &str, payload: &Value) -> io::Result<Val
             "ControlPersist=120s",
         ])
         .args(&options)
+        .arg("--")
         .arg(&destination)
         .arg(&remote_cmd)
         .stdin(Stdio::piped())
@@ -1035,5 +1051,37 @@ mod tests {
             "com.jischeng.omg.debug.workspace"
         );
         assert_eq!(support_bundle_domain(None), "com.jischeng.omg.debug");
+    }
+
+    #[test]
+    fn resolve_remote_ssh_rejects_option_injection_and_whitespace_destinations() {
+        let directory =
+            std::env::temp_dir().join(format!("omg-mobile-sshval-{}", record::nonce().unwrap()));
+        fs::create_dir(&directory).unwrap();
+        let config = Config {
+            endpoints: vec![],
+            support: Some(directory.clone()),
+            token: "token".into(),
+            origin: None,
+            control: Default::default(),
+        };
+        for bad in [
+            "",
+            "-oProxyCommand=sh",
+            "ssh:-oLocalCommand=id",
+            "user@host -oProxyCommand=sh",
+            "user@host\tbad",
+            "user@host\nbad",
+        ] {
+            assert!(
+                resolve_remote_ssh(&config, bad).is_err(),
+                "expected invalid SSH destination {bad:?} to be rejected"
+            );
+        }
+        assert_eq!(
+            resolve_remote_ssh(&config, "deploy@example.com").unwrap().0,
+            "deploy@example.com"
+        );
+        let _ = fs::remove_dir_all(directory);
     }
 }

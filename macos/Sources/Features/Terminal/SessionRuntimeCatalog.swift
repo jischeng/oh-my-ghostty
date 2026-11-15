@@ -56,7 +56,20 @@ struct SessionRuntimeCatalogSession: Decodable, Equatable, Identifiable, Sendabl
             SessionRuntimeDescriptor.validWorkingDirectory(resume?.cwd)
     }
     var isAttachable: Bool { ended == nil && paneID != nil }
-    func statusLabel(using strings: SessionRuntimeLibraryStrings) -> String {
+    var isPausedLocalCandidate: Bool { ended == "lost" && paneID != nil }
+    func isAttachable(isLocalEndpoint: Bool) -> Bool {
+        paneID != nil && (ended == nil || (isLocalEndpoint && ended == "lost"))
+    }
+    func isClosable(isLocalEndpoint: Bool) -> Bool {
+        paneID != nil && (ended == nil || (isLocalEndpoint && ended == "lost"))
+    }
+    func statusLabel(
+        using strings: SessionRuntimeLibraryStrings,
+        isLocalEndpoint: Bool = false
+    ) -> String {
+        if isLocalEndpoint && ended == "lost" {
+            return strings.t("Paused (Resumable)", "已暂停（可恢复）")
+        }
         if let ended {
             let reason = strings.endReason(ended)
             return strings.t("Ended (\(reason))", "已结束（\(reason)）")
@@ -237,16 +250,10 @@ final class SessionRuntimeCatalog: ObservableObject {
 
     private func persist(_ values: [SessionRuntimeCatalogEndpoint]) throws {
         guard let url else { return }
-        try FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(),
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
         let archive = Archive(version: 1, endpoints: values)
         let data = try JSONEncoder().encode(archive)
         guard data.count <= 4 * 1024 * 1024 else { throw CocoaError(.fileWriteOutOfSpace) }
-        try data.write(to: url, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        try OMGPrivateFileWriter.writeAtomically(data, to: url)
     }
 }
 
@@ -454,7 +461,7 @@ final class SessionRuntimeLibraryModel: ObservableObject {
               loadState == .loaded,
               selectedSessionID == session.id,
               sessions.contains(session),
-              session.ended == nil else { return }
+              session.isClosable(isLocalEndpoint: endpoint.descriptor.isLocal) else { return }
         let targetDescriptor = endpoint.descriptor.isLocal
             ? SessionRuntimeCatalog.resolveLocalRevisionDescriptor(forPaneID: pane, fallback: endpoint.descriptor)
             : endpoint.descriptor

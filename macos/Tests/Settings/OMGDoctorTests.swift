@@ -72,9 +72,10 @@ struct OMGDoctorTests {
         try "rev-doctor-test\n".write(to: runtimeDir.appendingPathComponent("revision"), atomically: true, encoding: .utf8)
 
         let sessionsDir = home.appendingPathComponent(".omg/run/stateA/sessions")
-        try Data("{\"exited\":false}".utf8).write(to: sessionsDir.appendingPathComponent("active.json"))
-        try Data("{\"exited\":true}".utf8).write(to: sessionsDir.appendingPathComponent("exited.json"))
-        try Data("{\"exited\":false}".utf8).write(to: sessionsDir.appendingPathComponent("closed.json"))
+        try Data("{\"ended\":null}".utf8).write(to: sessionsDir.appendingPathComponent("active.json"))
+        try Data("{\"ended\":\"exited\"}".utf8).write(to: sessionsDir.appendingPathComponent("exited.json"))
+        try Data("{\"ended\":\"lost\"}".utf8).write(to: sessionsDir.appendingPathComponent("lost.json"))
+        try Data("{\"ended\":null}".utf8).write(to: sessionsDir.appendingPathComponent("closed.json"))
         try Data().write(to: sessionsDir.appendingPathComponent("closed.closed"))
 
         // Create one secure 0600 backup and one insecure 0644 backup.
@@ -119,7 +120,7 @@ struct OMGDoctorTests {
         #expect(doctor.report.runtimeSSH.omgdAvailable)
         #expect(doctor.report.runtimeSSH.omgdRevision == "rev-doctor-test")
         #expect(doctor.report.runtimeSSH.activeRuntimeSessions == 1)
-        #expect(doctor.report.runtimeSSH.totalRuntimeSessionRecords == 3)
+        #expect(doctor.report.runtimeSSH.totalRuntimeSessionRecords == 4)
         #expect(!doctor.report.runtimeSSH.sshControlDirectoryHealthy)
         #expect(doctor.report.runtimeSSH.status == .warning)
 
@@ -515,5 +516,72 @@ struct OMGDoctorTests {
         #expect(check.certificateSHA1 == expectedSHA1)
         #expect(check.leafCertificateDER == derData)
         #expect(check.needsTrustAction)
+    }
+
+    @Test func doctorInitDefersExpensiveTrustAndDiskInspectionToAsyncRefresh() async throws {
+        final class InspectionProbe: @unchecked Sendable {
+            private let lock = NSLock()
+            var trustCalls = 0
+            var memoryCalls = 0
+            var trustRanOffMainThread = false
+
+            func recordTrust() -> OMGDoctorSignerTrustCheck {
+                lock.lock()
+                trustCalls += 1
+                trustRanOffMainThread = !Thread.isMainThread
+                lock.unlock()
+                return OMGDoctorSignerTrustCheck(
+                    status: .healthy,
+                    mode: .selfSignedAdminTrusted,
+                    bundleIdentifier: "com.jischeng.omg",
+                    teamIdentifier: nil,
+                    certificateCommonName: "OMG Release Signing",
+                    certificateSHA1: "9B2E176C03E5458E6FDAF73392CD9D79203972C6",
+                    isSelfSignedLeaf: true,
+                    trustedInAdminDomain: true,
+                    trustedInUserDomain: false,
+                    isCodeSigningTrusted: true,
+                    isNonCodeSigningBlocked: true,
+                    hasUnscopedTrust: false,
+                    leafCertificateDER: nil
+                )
+            }
+
+            func recordMemory() -> UInt64 {
+                lock.lock()
+                memoryCalls += 1
+                lock.unlock()
+                return 128 * 1_048_576
+            }
+        }
+
+        let probe = InspectionProbe()
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-doctor-defer-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let doctor = OMGDoctorService(
+            dependencies: .init(
+                hasGlobalKeybinds: { false },
+                isAccessibilityTrusted: { true },
+                isEventTapEnabled: { false },
+                resourcesURL: nil,
+                homeDirectory: dir,
+                sshControlDirectoryPath: dir.appendingPathComponent("no-ssh").path,
+                surfaceCounter: { .init(visible: 1, occluded: 0) },
+                residentMemoryProvider: { probe.recordMemory() },
+                inspectSignerTrust: { probe.recordTrust() }
+            )
+        )
+
+        // Synchronous `init` on `@MainActor` must not invoke SecTrust or disk/memory probes.
+        #expect(probe.trustCalls == 0)
+        #expect(probe.memoryCalls == 0)
+
+        await doctor.refresh()
+        #expect(probe.trustCalls == 1)
+        #expect(probe.memoryCalls == 1)
+        #expect(probe.trustRanOffMainThread)
     }
 }

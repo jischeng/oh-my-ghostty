@@ -7,6 +7,9 @@ struct SessionRuntimeOverviewEntry: Decodable, Identifiable {
     let revision: String
     let session: SessionRuntimeCatalogSession
     var id: String { endpointID + ":" + session.id }
+    var isLocalEndpoint: Bool { host == "This Mac" }
+    var isAttachable: Bool { session.isAttachable(isLocalEndpoint: isLocalEndpoint) }
+    var isClosable: Bool { session.isClosable(isLocalEndpoint: isLocalEndpoint) }
     enum CodingKeys: String, CodingKey { case host, revision; case endpointID = "endpoint_id" }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -34,7 +37,8 @@ final class SessionRuntimeOverviewModel: ObservableObject {
     private var generation = 0
     private let operation: Operation
     var runningCount: Int { report.sessions.filter { $0.session.ended == nil }.count }
-    var canCloseAll: Bool { !busy && error == nil && report.errors.isEmpty && runningCount > 0 }
+    var closableCount: Int { report.sessions.filter(\.isClosable).count }
+    var canCloseAll: Bool { !busy && error == nil && report.errors.isEmpty && closableCount > 0 }
     init(operation: Operation? = nil) { self.operation = operation ?? Self.runCLI }
     func refresh() { run(close: false) }
     func closeAll() { guard canCloseAll else { return }; run(close: true) }
@@ -171,7 +175,8 @@ private final class OverviewController: NSViewController, NSTableViewDataSource,
         table.reloadData()
         close.isEnabled = model.canCloseAll
         refresh.isEnabled = !model.busy
-        open.isEnabled = !model.busy && model.report.sessions.indices.contains(table.selectedRow)
+        open.isEnabled = !model.busy && model.report.sessions.indices.contains(table.selectedRow) &&
+            model.report.sessions[table.selectedRow].isAttachable
         let failures = model.report.errors.map { "\($0.host): \($0.message)" }
         status.stringValue = model.busy ? strings.t("Loading…", "正在查询…") :
             model.error ?? (!failures.isEmpty ? strings.t("Some hosts are unavailable. No bulk close is available.", "部分主机无法查询，暂不能全部关闭。") :
@@ -185,7 +190,11 @@ private final class OverviewController: NSViewController, NSTableViewDataSource,
         switch column?.identifier.rawValue {
         case "host": return entry.host == "This Mac" ? strings.t("This Mac", "本机") : entry.host
         case "id": return String(session.id.prefix(8))
-        case "state": return session.statusLabel(using: .init(language: OhMyGhosttySettings.shared.language))
+        case "state":
+            return session.statusLabel(
+                using: .init(language: OhMyGhosttySettings.shared.language),
+                isLocalEndpoint: entry.isLocalEndpoint
+            )
         case "agent": return session.agentLabel ?? "—"
         case "pid": return session.pid.map(String.init) ?? "—"
         case "cwd": return session.workingDirectory ?? "—"
@@ -194,7 +203,7 @@ private final class OverviewController: NSViewController, NSTableViewDataSource,
     }
     func tableViewSelectionDidChange(_ notification: Notification) {
         open.isEnabled = !model.busy && model.report.sessions.indices.contains(table.selectedRow) &&
-            model.report.sessions[table.selectedRow].session.isAttachable
+            model.report.sessions[table.selectedRow].isAttachable
     }
     private func openSelected() {
         guard model.report.sessions.indices.contains(table.selectedRow) else { return }

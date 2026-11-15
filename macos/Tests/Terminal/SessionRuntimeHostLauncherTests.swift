@@ -43,7 +43,36 @@ struct SessionRuntimeHostLauncherTests {
         #expect(parsed == .init(command: ["/tmp/omgd", "mobile", "serve"]))
     }
 
-    @Test func spawnForegroundChildStaysInCallerSessionWithoutSetsid() throws {
+    @Test func spawnForegroundChildStaysInCallerSessionAndResetsBlockedSignals() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-fg-mask-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let maskOut = dir.appendingPathComponent("sigmask.txt")
+
+        var blockSet = sigset_t()
+        var oldSet = sigset_t()
+        sigemptyset(&blockSet)
+        sigaddset(&blockSet, SIGTERM)
+        #expect(pthread_sigmask(SIG_BLOCK, &blockSet, &oldSet) == 0)
+
+        let probePid: pid_t
+        do {
+            probePid = try SessionRuntimeHostLauncher.spawnForegroundChild(.init(command: [
+                "/usr/bin/python3",
+                "-c",
+                "import pathlib, signal, sys; blocked = signal.SIGTERM in signal.pthread_sigmask(signal.SIG_BLOCK, []); pathlib.Path(sys.argv[1]).write_text('blocked' if blocked else 'clear')",
+                maskOut.path,
+            ]))
+            _ = pthread_sigmask(SIG_SETMASK, &oldSet, nil)
+        } catch {
+            _ = pthread_sigmask(SIG_SETMASK, &oldSet, nil)
+            throw error
+        }
+        var probeStatus: Int32 = 0
+        while waitpid(probePid, &probeStatus, 0) < 0 && errno == EINTR {}
+        #expect(try String(contentsOf: maskOut, encoding: .utf8) == "clear")
+
         let pid = try SessionRuntimeHostLauncher.spawnForegroundChild(.init(
             command: ["/bin/sleep", "30"]
         ))
@@ -57,7 +86,7 @@ struct SessionRuntimeHostLauncherTests {
         #expect(getsid(pid) != pid)
     }
 
-    @Test func foregroundWrapperPreservesExitCodeAndForwardsSigtermWhenAppHosted() throws {
+    @Test func foregroundWrapperPreservesExitCodeForwardsSigtermAndReapsChildOnParentKillWhenAppHosted() throws {
         guard Bundle.main.bundleURL.pathExtension == "app",
               let bundleID = Bundle.main.bundleIdentifier,
               bundleID.hasPrefix("com.jischeng.omg"),
@@ -95,6 +124,39 @@ struct SessionRuntimeHostLauncherTests {
         wrapper.terminate()
         wrapper.waitUntilExit()
         #expect(FileManager.default.fileExists(atPath: termMarker.path))
+
+        // Simulate host crash (`SIGKILL` of parent process) -> foreground wrapper detects parent exit and terminates child.
+        let orphanChildPIDFile = dir.appendingPathComponent("orphan-child.pid")
+        let orphanTermMarker = dir.appendingPathComponent("orphan-child-term")
+        let parentSpawner = Process()
+        parentSpawner.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        parentSpawner.arguments = [
+            "-c",
+            """
+            import os, pathlib, signal, subprocess, sys, time
+            exe, flag, pid_file, marker = sys.argv[1:5]
+            p = subprocess.Popen([
+                exe, flag, "--", "/bin/sh", "-c",
+                f'trap "touch \\"{marker}\\"; exit 0" TERM; echo $$ > "{pid_file}"; while :; do sleep 0.05; done'
+            ])
+            deadline = time.time() + 5.0
+            while not pathlib.Path(pid_file).exists() and time.time() < deadline:
+                time.sleep(0.02)
+            os.kill(os.getpid(), signal.SIGKILL)
+            """,
+            executableURL.path,
+            SessionRuntimeHostLauncher.foregroundActionFlag,
+            orphanChildPIDFile.path,
+            orphanTermMarker.path,
+        ]
+        try parentSpawner.run()
+        parentSpawner.waitUntilExit()
+
+        let orphanDeadline = Date().addingTimeInterval(5)
+        while !FileManager.default.fileExists(atPath: orphanTermMarker.path), Date() < orphanDeadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        #expect(FileManager.default.fileExists(atPath: orphanTermMarker.path))
     }
 
     @Test func applyingHostBundleEnvironmentPopulatesHostBundleMetadata() {

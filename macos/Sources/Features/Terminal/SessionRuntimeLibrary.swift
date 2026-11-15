@@ -249,7 +249,7 @@ enum SessionRuntimeLibrary {
     ) throws -> TerminalController? {
         let parentWindow = parent ?? TerminalController.preferredParent?.window
         let parentController = parentWindow?.windowController as? TerminalController
-        guard session.isAttachable, let paneID = session.paneID else {
+        guard session.isAttachable(isLocalEndpoint: descriptor.isLocal), let paneID = session.paneID else {
             throw NSError(
                 domain: "OMGSessionRuntime",
                 code: 10,
@@ -274,8 +274,15 @@ enum SessionRuntimeLibrary {
         }
         var config = Ghostty.SurfaceConfiguration()
         try attachedDescriptor.configureAttachExisting(&config)
-        config.workingDirectory = inlineOwner?.localDescriptor?.launchWorkingDirectory
+        let targetWorkingDirectory = inlineOwner?.localDescriptor?.launchWorkingDirectory
             ?? session.workingDirectory ?? descriptor.launchWorkingDirectory
+        config.workingDirectory = targetWorkingDirectory
+        if attachedDescriptor.isLocal,
+           let savedWorkingDirectory = SessionRuntimeDescriptor.validWorkingDirectory(targetWorkingDirectory) {
+            config.environmentVariables[
+                SessionRuntimeDescriptor.resurrectWorkingDirectoryEnvironmentKey
+            ] = savedWorkingDirectory
+        }
         let surface = Ghostty.SurfaceView(nativeApp, baseConfig: config, uuid: attachedPane)
         let tree = SplitTree<Ghostty.SurfaceView>(view: surface)
         if let controller = TerminalController.newTab(
@@ -604,10 +611,13 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
         openButton.title = strings.openExisting
         endButton.title = strings.endSession
         let selectedSession = model.sessions.first { $0.id == model.selectedSessionID }
+        let isLocalEndpoint = model.selectedEndpoint?.descriptor.isLocal == true
         let canActOnSession: Bool
         if case .loaded = model.loadState { canActOnSession = true } else { canActOnSession = false }
-        openButton.isEnabled = canActOnSession && selectedSession?.isAttachable == true
-        endButton.isEnabled = canActOnSession && selectedSession?.ended == nil && selectedSession != nil
+        openButton.isEnabled = canActOnSession &&
+            selectedSession?.isAttachable(isLocalEndpoint: isLocalEndpoint) == true
+        endButton.isEnabled = canActOnSession &&
+            selectedSession?.isClosable(isLocalEndpoint: isLocalEndpoint) == true
 
         var statusText = ""
         var isError = false
@@ -759,16 +769,28 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
     }
 
     private func makeSessionStatusCell(session: SessionRuntimeCatalogSession) -> NSView {
+        let isLocalEndpoint = model.selectedEndpoint?.descriptor.isLocal == true
+        let isResumableLocal = isLocalEndpoint && session.ended == "lost"
+        let isActiveOrResumable = session.ended == nil || isResumableLocal
         let cell = NSTableCellView()
         let dot = NSView()
         dot.wantsLayer = true
         dot.layer?.cornerRadius = 3.5
-        dot.layer?.backgroundColor = (session.ended == nil ? NSColor.systemGreen : NSColor.tertiaryLabelColor).cgColor
+        let dotColor: NSColor = if session.ended == nil {
+            .systemGreen
+        } else if isResumableLocal {
+            .systemOrange
+        } else {
+            .tertiaryLabelColor
+        }
+        dot.layer?.backgroundColor = dotColor.cgColor
         dot.translatesAutoresizingMaskIntoConstraints = false
 
-        let label = NSTextField(labelWithString: session.statusLabel(using: strings))
-        label.font = .systemFont(ofSize: 12, weight: session.ended == nil ? .medium : .regular)
-        label.textColor = session.ended == nil ? .labelColor : .secondaryLabelColor
+        let label = NSTextField(
+            labelWithString: session.statusLabel(using: strings, isLocalEndpoint: isLocalEndpoint)
+        )
+        label.font = .systemFont(ofSize: 12, weight: isActiveOrResumable ? .medium : .regular)
+        label.textColor = isActiveOrResumable ? .labelColor : .secondaryLabelColor
         label.lineBreakMode = .byTruncatingTail
 
         let row = NSStackView(views: [dot, label])
@@ -819,7 +841,7 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
     @objc private func endSelectedSession() {
         guard let endpoint = model.selectedEndpoint,
               let session = model.sessions.first(where: { $0.id == model.selectedSessionID }),
-              session.ended == nil else { return }
+              session.isClosable(isLocalEndpoint: endpoint.descriptor.isLocal) else { return }
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = strings.endConfirmationTitle
@@ -1253,10 +1275,11 @@ final class SessionRuntimeBackgroundStore: ObservableObject {
                     guard let data = try? Data(contentsOf: entry),
                           data.count <= 65_536,
                           let session = try? decoder.decode(SessionRuntimeCatalogSession.self, from: data),
-                          session.ended == nil,
-                          session.isAttachable,
-                          let pid = session.pid, pid > 0,
-                          kill(pid_t(pid), 0) == 0 else { continue }
+                          session.isAttachable(isLocalEndpoint: true) else { continue }
+                    let isLiveLocal = session.ended == nil &&
+                        session.pid.map { $0 > 0 && kill(pid_t($0), 0) == 0 } == true
+                    let isPausedLocal = session.ended == "lost"
+                    guard isLiveLocal || isPausedLocal else { continue }
                     let key = "\(session.id.lowercased()):\(session.generation)"
                     guard seenSessions.insert(key).inserted else { continue }
                     let meta = mobileMap[session.id].flatMap { $0.generation == session.generation ? $0 : nil }
@@ -1736,7 +1759,9 @@ final class SessionRuntimeBackgroundPopover: NSViewController {
         let openPanes = SessionRuntimeLibrary.openPaneIDs(forWindowOf: controller)
         let homePath = FileManager.default.homeDirectoryForCurrentUser.path
         return libraryModel.sessions.compactMap { session in
-            guard session.isAttachable, let paneID = session.paneID, !openPanes.contains(paneID) else {
+            guard session.isAttachable(isLocalEndpoint: endpoint.descriptor.isLocal),
+                  let paneID = session.paneID,
+                  !openPanes.contains(paneID) else {
                 return nil
             }
             let cwd = session.workingDirectory

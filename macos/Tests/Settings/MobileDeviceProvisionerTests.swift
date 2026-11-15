@@ -325,4 +325,321 @@ struct MobileDeviceProvisionerTests {
             Issue.record("Expected valid status, got \(provisioner.expiryStatus)")
         }
     }
+
+    @Test func locateInstallScriptRestrictsToDevModeVerifiedRepoRootAndIgnoresCurrentDirectory() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-prov-script-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let fakeRepo = root.appendingPathComponent("repo", isDirectory: true)
+        let iosScripts = fakeRepo.appendingPathComponent("ios/scripts", isDirectory: true)
+        let xcodeproj = fakeRepo.appendingPathComponent("macos/Ghostty.xcodeproj", isDirectory: true)
+        try FileManager.default.createDirectory(at: iosScripts, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.createDirectory(at: xcodeproj, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fakeRepo.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fakeRepo.appendingPathComponent("ios").path)
+        try Data("// zig\n".utf8).write(to: fakeRepo.appendingPathComponent("build.zig"))
+        try Data("name: OMGMobile\n".utf8).write(to: fakeRepo.appendingPathComponent("ios/project.yml"))
+        try Data("// pbxproj\n".utf8).write(to: xcodeproj.appendingPathComponent("project.pbxproj"))
+        let scriptURL = iosScripts.appendingPathComponent("install-to-iphone.sh")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: scriptURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
+
+        let env = ["OMG_IOS_SOURCE_DIR": fakeRepo.appendingPathComponent("ios").path]
+        let unrelatedBundle = root.appendingPathComponent("Apps/OMG Dev.app", isDirectory: true)
+
+        // 1. Release builds (`isDevelopment == false`) never invoke source-tree install script even if env is set.
+        #expect(MobileDeviceProvisioner.locateInstallScript(
+            isDevelopment: false,
+            environment: env,
+            bundleURL: unrelatedBundle
+        ) == nil)
+
+        // 2. Dev builds accept verified owned repo root via `OMG_IOS_SOURCE_DIR` or ancestor of `bundleURL`.
+        #expect(MobileDeviceProvisioner.locateInstallScript(
+            isDevelopment: true,
+            environment: env,
+            bundleURL: unrelatedBundle
+        )?.standardizedFileURL == scriptURL.standardizedFileURL)
+        let nestedDebugBundle = fakeRepo.appendingPathComponent("macos/build/Debug/OMG Dev.app", isDirectory: true)
+        #expect(MobileDeviceProvisioner.locateInstallScript(
+            isDevelopment: true,
+            environment: [:],
+            bundleURL: nestedDebugBundle
+        )?.standardizedFileURL == scriptURL.standardizedFileURL)
+
+        // 3. Unrelated CWD with `ios/scripts/install-to-iphone.sh` is ignored when neither env nor bundleURL points to it.
+        let previousCWD = FileManager.default.currentDirectoryPath
+        defer { _ = FileManager.default.changeCurrentDirectoryPath(previousCWD) }
+        _ = FileManager.default.changeCurrentDirectoryPath(fakeRepo.path)
+        #expect(MobileDeviceProvisioner.locateInstallScript(
+            isDevelopment: true,
+            environment: [:],
+            bundleURL: unrelatedBundle
+        ) == nil)
+
+        // 4. World-writable script or symlinked script or wrong UID is rejected.
+        #expect(MobileDeviceProvisioner.locateInstallScript(
+            isDevelopment: true,
+            environment: env,
+            bundleURL: unrelatedBundle,
+            expectedUID: getuid() &+ 1
+        ) == nil)
+        try FileManager.default.setAttributes([.posixPermissions: 0o777], ofItemAtPath: scriptURL.path)
+        #expect(MobileDeviceProvisioner.locateInstallScript(
+            isDevelopment: true,
+            environment: env,
+            bundleURL: unrelatedBundle
+        ) == nil)
+        try FileManager.default.removeItem(at: scriptURL)
+        let outsideScript = root.appendingPathComponent("outside.sh")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: outsideScript)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: outsideScript.path)
+        try FileManager.default.createSymbolicLink(at: scriptURL, withDestinationURL: outsideScript)
+        #expect(MobileDeviceProvisioner.locateInstallScript(
+            isDevelopment: true,
+            environment: env,
+            bundleURL: unrelatedBundle
+        ) == nil)
+    }
+
+    @Test func releaseDownloadURLVersionAndProvisioningInputsRejectUntrustedAndInjectedValues() throws {
+        // Trusted GitHub release IPA download & redirect targets:
+        #expect(MobileDeviceProvisioner.isTrustedAltStoreFeedURL(
+            try #require(URL(string: "https://github.com/jischeng/oh-my-ghostty/releases/latest/download/altstore-source.json"))
+        ))
+        #expect(!MobileDeviceProvisioner.isTrustedAltStoreFeedURL(
+            try #require(URL(string: "https://evil.example.com/jischeng/oh-my-ghostty/releases/latest/download/altstore-source.json"))
+        ))
+        #expect(MobileDeviceProvisioner.isTrustedReleaseDownloadURL(
+            try #require(URL(string: "https://github.com/jischeng/oh-my-ghostty/releases/download/v0.13.0/OMG-Mobile.ipa"))
+        ))
+        #expect(!MobileDeviceProvisioner.isTrustedReleaseDownloadURL(
+            try #require(URL(string: "http://github.com/jischeng/oh-my-ghostty/releases/download/v0.13.0/OMG-Mobile.ipa"))
+        ))
+        #expect(!MobileDeviceProvisioner.isTrustedReleaseDownloadURL(
+            try #require(URL(string: "https://github.com/other-owner/repo/releases/download/v1.0.0/OMG-Mobile.ipa"))
+        ))
+        #expect(!MobileDeviceProvisioner.isTrustedReleaseDownloadURL(
+            try #require(URL(string: "https://evil.example.com/OMG-Mobile.ipa"))
+        ))
+        #expect(MobileDeviceProvisioner.isTrustedRedirectTargetURL(
+            try #require(URL(string: "https://objects.githubusercontent.com/github-production-release-asset/123?X-Amz-Signature=abc"))
+        ))
+        #expect(MobileDeviceProvisioner.isTrustedRedirectTargetURL(
+            try #require(URL(string: "https://release-assets.githubusercontent.com/github-production-release-asset/123"))
+        ))
+        #expect(!MobileDeviceProvisioner.isTrustedRedirectTargetURL(
+            try #require(URL(string: "https://attacker.example.net/payload.ipa"))
+        ))
+
+        // Version tokens & cached IPA path traversal prevention:
+        let cacheDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-ipa-cache-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: cacheDir) }
+
+        let safeIPA = try MobileDeviceProvisioner.validatedCachedIPAURL(
+            cacheDir: cacheDir,
+            version: "0.13.0",
+            buildVersion: "42"
+        )
+        #expect(safeIPA.lastPathComponent == "OMG-Mobile-0.13.0-b42.ipa")
+        for badVersion in ["../escape", "0.13.0/../../x", ".leading-dot", "bad space", ""] {
+            #expect(!MobileDeviceProvisioner.isSafeVersionToken(badVersion))
+            #expect(throws: (any Error).self) {
+                _ = try MobileDeviceProvisioner.validatedCachedIPAURL(
+                    cacheDir: cacheDir,
+                    version: badVersion,
+                    buildVersion: "1"
+                )
+            }
+        }
+
+        // Provisioning pbxproj / xcodebuild argument validation:
+        try MobileDeviceProvisioner.validateProvisioningInputs(
+            teamID: "5K863NP6ZU",
+            bundleID: "com.jischeng.omg.mobile.5k863np6zu",
+            deviceUDID: "00008120-000631D42E44201E"
+        )
+        #expect(throws: (any Error).self) {
+            try MobileDeviceProvisioner.validateProvisioningInputs(
+                teamID: "5K86\"; shellScript = \"id\"; //",
+                bundleID: "com.jischeng.omg.mobile",
+                deviceUDID: "00008120-000631D42E44201E"
+            )
+        }
+        #expect(throws: (any Error).self) {
+            try MobileDeviceProvisioner.validateProvisioningInputs(
+                teamID: "5K863NP6ZU",
+                bundleID: "com.jischeng\"; CODE_SIGNING_ALLOWED = NO; //",
+                deviceUDID: "00008120-000631D42E44201E"
+            )
+        }
+        #expect(throws: (any Error).self) {
+            try MobileDeviceProvisioner.validateProvisioningInputs(
+                teamID: "5K863NP6ZU",
+                bundleID: "com.jischeng.omg.mobile",
+                deviceUDID: "00008120,arch=arm64;rm"
+            )
+        }
+    }
+
+    @Test func runSubprocessDrainsLargeStdoutAndStderrWithoutDeadlockAndHonorsTimeoutAndCancel() async throws {
+        // 1. Concurrent >128 KB writes on BOTH stdout and stderr must not deadlock on OS pipe buffers.
+        let largeOut = await MobileDeviceProvisioner.runSubprocess(
+            executable: "/usr/bin/python3",
+            arguments: [
+                "-c",
+                "import sys; sys.stdout.buffer.write(b'O' * 200000); sys.stdout.flush(); sys.stderr.buffer.write(b'E' * 200000); sys.stderr.flush()",
+            ],
+            timeoutSeconds: 10
+        )
+        #expect(largeOut.status == 0)
+        #expect(largeOut.stdout.count == 200_000)
+        #expect(largeOut.stderr.count == 200_000)
+
+        // 2. Timeout terminates a hung subprocess promptly.
+        let t0 = Date()
+        let timedOut = await MobileDeviceProvisioner.runSubprocess(
+            executable: "/bin/sleep",
+            arguments: ["30"],
+            timeoutSeconds: 0.15
+        )
+        #expect(timedOut.status == -1)
+        #expect(Date().timeIntervalSince(t0) < 3.0)
+
+        // 3. Task cancellation terminates an active subprocess promptly.
+        let c0 = Date()
+        let task = Task.detached {
+            await MobileDeviceProvisioner.runSubprocess(
+                executable: "/bin/sleep",
+                arguments: ["30"],
+                timeoutSeconds: 30
+            )
+        }
+        try await Task.sleep(for: .milliseconds(80))
+        task.cancel()
+        let cancelled = await task.value
+        #expect(cancelled.status == -1)
+        #expect(Date().timeIntervalSince(c0) < 3.0)
+    }
+
+    @Test func freshAppleIDFallbackBundleCollisionWildcardEntitlementsAndAutoRefreshMonitorGateWork() async throws {
+        // 1. `candidateIdentitySHA1s` ignores non-dev identities & revoked certs (0 `openssl` spawns when empty).
+        let emptySecOutput = """
+          0 valid identities found
+        """
+        #expect(MobileDeviceProvisioner.candidateIdentitySHA1s(from: emptySecOutput).isEmpty)
+
+        let mixedSecOutput = """
+          1) AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA "OMG Release Signing"
+          2) BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB "Apple Development: revoked@example.com" (CSSMERR_TP_CERT_REVOKED)
+          3) 0123456789ABCDEF0123456789ABCDEF01234567 "Apple Development: valid@example.com (9Z8Y7X6W5V)"
+        """
+        #expect(MobileDeviceProvisioner.candidateIdentitySHA1s(from: mixedSecOutput) == [
+            "0123456789ABCDEF0123456789ABCDEF01234567",
+        ])
+
+        // 2. `parseXcodeProvisioningTeamID` extracts team ID from `IDEProvisioningTeams` (preferring paid over free).
+        let defaultsOut = """
+        {
+            "dev@example.com" =     (
+                        {
+                    isFreeProvisioningTeam = 1;
+                    teamID = FREE123456;
+                    teamName = "Personal Team";
+                },
+                        {
+                    isFreeProvisioningTeam = 0;
+                    teamID = PAID987654;
+                    teamName = "Paid Corp";
+                }
+            );
+        }
+        """
+        #expect(MobileDeviceProvisioner.parseXcodeProvisioningTeamID(defaultsOutput: defaultsOut) == "PAID987654")
+        let freeOnlyOut = "{ acct = ( { isFreeProvisioningTeam = 1; teamID = \"FREE123456\"; } ); }"
+        #expect(MobileDeviceProvisioner.parseXcodeProvisioningTeamID(defaultsOutput: freeOnlyOut) == "FREE123456")
+
+        // 3. Bundle ID collision fallback triggers only for fresh default bundle ID when portal rejects registration.
+        #expect(MobileDeviceProvisioner.shouldFallbackToTeamScopedBundleID(
+            errorText: "The app ID 'com.jischeng.omg.mobile' cannot be registered to your development team.",
+            currentBundleID: "com.jischeng.omg.mobile",
+            installedBundleID: nil
+        ))
+        #expect(!MobileDeviceProvisioner.shouldFallbackToTeamScopedBundleID(
+            errorText: "The app ID 'com.jischeng.omg.mobile' cannot be registered to your development team.",
+            currentBundleID: "com.jischeng.omg.mobile",
+            installedBundleID: "com.jischeng.omg.mobile"
+        ))
+
+        // 4. Wildcard profile entitlements rewrite `TEAM.*` to concrete `TEAM.<bundleID>` before codesigning.
+        let wildcardPlist = try PropertyListSerialization.data(fromPropertyList: [
+            "UUID": "WILDCARD-1",
+            "TeamIdentifier": ["FREE123456"],
+            "ExpirationDate": Date().addingTimeInterval(5 * 86400),
+            "ProvisionedDevices": ["UDID-1"],
+            "DeveloperCertificates": [Data("cert".utf8)],
+            "Entitlements": [
+                "application-identifier": "FREE123456.*",
+                "get-task-allow": true,
+            ],
+        ], format: .xml, options: 0)
+        let wildcardProfile = try #require(MobileDeviceProvisioner.parseProvisioningProfile(
+            plistData: wildcardPlist,
+            path: URL(fileURLWithPath: "/tmp/wildcard.mobileprovision")
+        ))
+        #expect(wildcardProfile.isWildcard)
+        let rewrittenData = try MobileDeviceProvisioner.resolvedEntitlementsData(
+            for: wildcardProfile,
+            bundleID: "com.jischeng.omg.mobile.free123456"
+        )
+        let rewritten = try #require(PropertyListSerialization.propertyList(
+            from: rewrittenData,
+            options: [],
+            format: nil
+        ) as? [String: Any])
+        #expect(rewritten["application-identifier"] as? String == "FREE123456.com.jischeng.omg.mobile.free123456")
+
+        // 5. Fresh Apple ID with 0 signing certs still populates `activeTeamID` via `IDEProvisioningTeams`,
+        //    and `startAutoRefreshMonitor()` stays idle until `autoRefreshEnabled` is opted in.
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-prov-fresh-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        var opensslInvocations = 0
+        let provisioner = MobileDeviceProvisioner(
+            supportDirectory: dir,
+            profileDirectories: [],
+            commandRunner: { executable, args in
+                if executable == "/usr/bin/openssl" {
+                    opensslInvocations += 1
+                }
+                if executable == "/usr/bin/security", args.first == "find-identity" {
+                    return .init(status: 0, stdout: Data("  0 valid identities found\n".utf8), stderr: Data())
+                }
+                if executable == "/usr/bin/defaults" {
+                    return .init(status: 0, stdout: Data(freeOnlyOut.utf8), stderr: Data())
+                }
+                return .init(status: 0, stdout: Data(), stderr: Data())
+            },
+            allowMonitorInTests: true
+        )
+        defer { provisioner.stopAutoRefreshMonitor() }
+
+        #expect(!provisioner.autoRefreshEnabled)
+        provisioner.startAutoRefreshMonitor()
+        #expect(!provisioner.isAutoRefreshMonitorRunning)
+
+        provisioner.setAutoRefreshEnabled(true)
+        #expect(provisioner.isAutoRefreshMonitorRunning)
+        provisioner.setAutoRefreshEnabled(false)
+        #expect(!provisioner.isAutoRefreshMonitorRunning)
+
+        await provisioner.scanDevices(silent: true)
+        #expect(opensslInvocations == 0)
+        #expect(provisioner.activeTeamID == "FREE123456")
+    }
 }

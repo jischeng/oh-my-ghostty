@@ -13,6 +13,22 @@ repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
 build_root="$repo_root/.release-build/$omg_version"
 artifacts="$build_root/artifacts"
+prev_altstore_dir=""
+mount_base=""
+_strtmp=""
+cleanup() {
+  if [[ -n "$mount_base" ]]; then
+    hdiutil detach "$mount_base/mnt" -force >/dev/null 2>&1 || true
+    rm -rf "$mount_base"
+  fi
+  if [[ -n "$prev_altstore_dir" ]]; then
+    rm -rf "$prev_altstore_dir"
+  fi
+  if [[ -n "$_strtmp" ]]; then
+    rm -f "$_strtmp"
+  fi
+}
+trap cleanup EXIT
 signing_mode=$(bash dist/macos/signing-python.sh policy)
 [[ "$signing_mode" == self-signed || "$signing_mode" == developer-id ]] || {
   echo "public releases require persistent self-signed or Developer ID signing" >&2; exit 1;
@@ -96,7 +112,6 @@ done
 
 if [[ -x "$repo_root/ios/scripts/package-release.sh" ]]; then
   prev_altstore_dir=$(mktemp -d "${TMPDIR:-/tmp}/omg-prev-altstore.XXXXXX")
-  trap 'rm -rf "$prev_altstore_dir"' EXIT
   prev_altstore_arg=()
   if gh release download "$PREVIOUS_TAG" \
     -R jischeng/oh-my-ghostty \
@@ -106,6 +121,8 @@ if [[ -x "$repo_root/ios/scripts/package-release.sh" ]]; then
     prev_altstore_arg=(--previous-source "$prev_altstore_dir/altstore-source.json")
   fi
   "$repo_root/ios/scripts/package-release.sh" "$omg_version" "$artifacts" "${prev_altstore_arg[@]}"
+  rm -rf "$prev_altstore_dir"
+  prev_altstore_dir=""
 fi
 (cd "$artifacts" && shasum -a 256 *.dmg OMG-Mobile-* altstore-source.json > SHA256SUMS.txt)
 
@@ -215,7 +232,6 @@ print(
 PY
 
 mount_base=$(mktemp -d /tmp/omg-release.XXXXXX)
-trap 'hdiutil detach "$mount_base/mnt" -force >/dev/null 2>&1 || true; rm -rf "$mount_base"' EXIT
 mkdir "$mount_base/mnt"
 for arch in arm64 x86_64 universal; do
   dmg="$artifacts/OMG-$omg_version-macos-$arch.dmg"

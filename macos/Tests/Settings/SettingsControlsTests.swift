@@ -192,6 +192,7 @@ struct SettingsControlsTests {
 
         allowSwitch.state = .on
         _ = allowSwitch.sendAction(allowSwitch.action, to: allowSwitch.target)
+        try await waitForAppKit { FileManager.default.fileExists(atPath: marker.path) }
         #expect(FileManager.default.fileExists(atPath: marker.path))
         #expect(allowSwitch.isEnabled)
 
@@ -411,5 +412,109 @@ struct SettingsControlsTests {
         let directSpec = unbundled.gatewayLaunchSpecification(listenAddress: "192.168.1.10:18792")
         #expect(directSpec.executableURL == omgd)
         #expect(directSpec.arguments.first == "mobile")
+    }
+
+    @Test func mobileAccessOrphanReaperBoundsHungStopAndSerializesNetworkModeRestart() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-mobile-reap-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let lockURL = dir.appendingPathComponent("mobile-gateway.lock")
+        FileManager.default.createFile(atPath: lockURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        let flockFn: (Int32, Int32) -> Int32 = flock
+        let lockFD = Darwin.open(lockURL.path, O_RDWR)
+        #expect(lockFD >= 0)
+        #expect(flockFn(lockFD, LOCK_EX | LOCK_NB) == 0)
+
+        // 1. Unlaunchable executable (broken interpreter) must not crash or throw.
+        let brokenExec = dir.appendingPathComponent("broken-omgd")
+        try Data("#!/nonexistent/interpreter\n".utf8).write(to: brokenExec)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: brokenExec.path)
+        MobileAccessController.stopOrphanedGatewayOffMain(executable: brokenExec, support: dir, timeout: 0.1)
+
+        // 2. Hung `mobile stop` child is bounded by timeout and reaped cleanly.
+        let hungExec = dir.appendingPathComponent("hung-omgd")
+        try Data("#!/bin/sh\ntrap '' TERM\nsleep 30\n".utf8).write(to: hungExec)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hungExec.path)
+        let started = Date()
+        MobileAccessController.stopOrphanedGatewayOffMain(executable: hungExec, support: dir, timeout: 0.1)
+        #expect(Date().timeIntervalSince(started) < 2.0)
+
+        _ = flockFn(lockFD, LOCK_UN)
+        Darwin.close(lockFD)
+
+        // 3. `setNetworkMode` waits for the previous gateway process to finish exiting before spawning replacement.
+        let eventLog = dir.appendingPathComponent("events.log")
+        let gatewayScript = dir.appendingPathComponent("serial-omgd")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "mobile" ] && [ "$2" = "serve" ]; then
+            listen="$4"
+            echo "start:$listen" >> "\(eventLog.path)"
+            trap 'sleep 0.2; echo "stop:$listen" >> "\(eventLog.path)"; exit 0' TERM
+            while :; do sleep 0.05; done
+        fi
+        exit 0
+        """
+        try Data(script.utf8).write(to: gatewayScript)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: gatewayScript.path)
+
+        let controller = MobileAccessController(
+            executable: gatewayScript,
+            support: dir,
+            port: 18796,
+            addressProvider: { "192.168.1.20" },
+            tailscaleAddressProvider: { "100.64.0.9" },
+            orphanStopTimeout: 2.0
+        )
+        defer { controller.stop() }
+
+        controller.start()
+        try await waitForAppKit {
+            controller.state == .running &&
+                ((try? String(contentsOf: eventLog, encoding: .utf8))?.contains("start:192.168.1.20:18796") == true)
+        }
+
+        controller.setNetworkMode(.tailscale)
+        try await waitForAppKit {
+            controller.state == .running &&
+                ((try? String(contentsOf: eventLog, encoding: .utf8))?.contains("start:100.64.0.9:18796") == true)
+        }
+
+        let lines = try String(contentsOf: eventLog, encoding: .utf8)
+            .split(separator: "\n")
+            .map(String.init)
+        #expect(lines == [
+            "start:192.168.1.20:18796",
+            "stop:192.168.1.20:18796",
+            "start:100.64.0.9:18796",
+        ])
+    }
+
+    @Test func globalEventTapUsesActivationObserversInsteadOfTimerWhileAwaitingAccessibility() {
+        let tap = GlobalEventTap.shared
+        tap.disable()
+        defer { tap.disable() }
+
+        var trusted = false
+        tap.enable(isTrustedProvider: { trusted })
+        #expect(tap.hasConfiguredGlobalKeybinds)
+        #expect(tap.isWaitingForPermission)
+        #expect(!tap.isTapEnabled)
+
+        // Activation while still untrusted keeps observers registered without creating a tap.
+        NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        #expect(tap.isWaitingForPermission)
+
+        // Once trust is granted, app activation tears down the pending permission observers immediately.
+        trusted = true
+        NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        #expect(!tap.isWaitingForPermission)
+
+        tap.disable()
+        #expect(!tap.hasConfiguredGlobalKeybinds)
+        #expect(!tap.isWaitingForPermission)
+        #expect(!tap.isTapEnabled)
     }
 }

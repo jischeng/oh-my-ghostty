@@ -393,7 +393,7 @@ struct QuickTerminalFirstClassTests {
         let sessionFile = sessionsDir.appendingPathComponent(
             "\(QuickTerminalRuntimeSupport.dedicatedPaneID.uuidString.lowercased()).json"
         )
-        try Data("{\"exited\":false}".utf8).write(to: sessionFile)
+        try Data("{\"ended\":null}".utf8).write(to: sessionFile)
 
         var reattachConfig = Ghostty.SurfaceConfiguration()
         let secondPane = QuickTerminalRuntimeSupport.prepareInitialConfiguration(
@@ -403,6 +403,25 @@ struct QuickTerminalFirstClassTests {
         )
         #expect(secondPane == QuickTerminalRuntimeSupport.dedicatedPaneID)
         #expect(reattachConfig.environmentVariables[SessionRuntimeDescriptor.attachExistingEnvironmentKey] == "1")
+
+        // Post-reboot `"lost"` local session remains attachable for resurrection, whereas `"exited"` starts fresh.
+        try Data("{\"ended\":\"lost\"}".utf8).write(to: sessionFile)
+        var lostConfig = Ghostty.SurfaceConfiguration()
+        _ = QuickTerminalRuntimeSupport.prepareInitialConfiguration(
+            &lostConfig,
+            settings: settings,
+            environment: env
+        )
+        #expect(lostConfig.environmentVariables[SessionRuntimeDescriptor.attachExistingEnvironmentKey] == "1")
+
+        try Data("{\"ended\":\"exited\"}".utf8).write(to: sessionFile)
+        var exitedConfig = Ghostty.SurfaceConfiguration()
+        _ = QuickTerminalRuntimeSupport.prepareInitialConfiguration(
+            &exitedConfig,
+            settings: settings,
+            environment: env
+        )
+        #expect(exitedConfig.environmentVariables[SessionRuntimeDescriptor.attachExistingEnvironmentKey] != "1")
     }
 
     @Test func quickTerminalGeometryClampsStrictlyWithinVisibleFrameWithoutMutatingDock() throws {

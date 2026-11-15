@@ -60,6 +60,10 @@ final class MobileAccessController: ObservableObject {
     private let addressProvider: () -> String?
     private let tailscaleAddressProvider: () -> String?
     private var process: Process?
+    private var stoppingProcess: Process?
+    private var startTask: Task<Void, Never>?
+    private var launchGeneration: UInt64 = 0
+    private let orphanStopTimeout: TimeInterval
     private var log: FileHandle?
     private var intentionalStop = false
     private var terminationObserver: NSObjectProtocol?
@@ -97,7 +101,8 @@ final class MobileAccessController: ObservableObject {
         port: Int = OMGApplicationEnvironment.defaultMobileGatewayPort(),
         addressProvider: @escaping () -> String? = MobileAccessController.lanIPv4Address,
         tailscaleAddressProvider: @escaping () -> String? = MobileAccessController.tailscaleIPv4Address,
-        hostExecutable: URL? = nil
+        hostExecutable: URL? = nil,
+        orphanStopTimeout: TimeInterval = 2.0
     ) {
         self.executable = executable ?? Bundle.main.resourceURL!
             .appendingPathComponent("session-runtime/omgd")
@@ -106,6 +111,7 @@ final class MobileAccessController: ObservableObject {
         self.port = port
         self.addressProvider = addressProvider
         self.tailscaleAddressProvider = tailscaleAddressProvider
+        self.orphanStopTimeout = orphanStopTimeout
         tokenFile = support.appendingPathComponent("mobile-pair.token")
         gatewayRecordFile = support.appendingPathComponent("mobile-gateway.json")
         enabledFile = support.appendingPathComponent("mobile-enabled.txt")
@@ -137,6 +143,7 @@ final class MobileAccessController: ObservableObject {
         if let terminationObserver {
             NotificationCenter.default.removeObserver(terminationObserver)
         }
+        startTask?.cancel()
         gatewayStateSource?.cancel()
         process?.terminate()
     }
@@ -171,7 +178,17 @@ final class MobileAccessController: ObservableObject {
     func resumeIfEnabled() {
         guard !state.isRunning, state != .starting else { return }
         guard isEnabledPreference else {
-            stopOrphanedGatewayIfNeeded()
+            guard process == nil else { return }
+            let executable = self.executable
+            let support = self.support
+            let timeout = self.orphanStopTimeout
+            Task.detached(priority: .utility) {
+                Self.stopOrphanedGatewayOffMain(
+                    executable: executable,
+                    support: support,
+                    timeout: timeout
+                )
+            }
             return
         }
         start()
@@ -179,8 +196,43 @@ final class MobileAccessController: ObservableObject {
 
     /// Reaps a `mobile serve` process left behind in this profile's support
     /// directory if the previous app instance exited without `willTerminate`.
-    func stopOrphanedGatewayIfNeeded() {
+    func stopOrphanedGatewayIfNeeded() async {
         guard process == nil else { return }
+        let executable = self.executable
+        let support = self.support
+        let timeout = self.orphanStopTimeout
+        await Task.detached(priority: .utility) {
+            Self.stopOrphanedGatewayOffMain(
+                executable: executable,
+                support: support,
+                timeout: timeout
+            )
+        }.value
+    }
+
+    nonisolated static func waitForProcessExitBounded(_ proc: Process, timeout: TimeInterval) {
+        let deadline = Date().addingTimeInterval(max(0.05, timeout))
+        while proc.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        if proc.isRunning {
+            let pid = proc.processIdentifier
+            proc.terminate()
+            let graceDeadline = Date().addingTimeInterval(0.2)
+            while proc.isRunning && Date() < graceDeadline {
+                Thread.sleep(forTimeInterval: 0.02)
+            }
+            if proc.isRunning, pid > 1 {
+                _ = Darwin.kill(pid, SIGKILL)
+            }
+        }
+    }
+
+    nonisolated static func stopOrphanedGatewayOffMain(
+        executable: URL,
+        support: URL,
+        timeout: TimeInterval = 2.0
+    ) {
         let lockPath = support.appendingPathComponent("mobile-gateway.lock").path
         let fd = Darwin.open(lockPath, O_RDWR | O_NOFOLLOW)
         guard fd >= 0 else { return }
@@ -196,8 +248,8 @@ final class MobileAccessController: ObservableObject {
         stopper.arguments = ["mobile", "stop", "--app-support", support.path]
         stopper.standardOutput = FileHandle.nullDevice
         stopper.standardError = FileHandle.nullDevice
-        try? stopper.run()
-        stopper.waitUntilExit()
+        guard (try? stopper.run()) != nil else { return }
+        waitForProcessExitBounded(stopper, timeout: timeout)
     }
 
     func refreshAddresses() {
@@ -220,12 +272,7 @@ final class MobileAccessController: ObservableObject {
         if mode == .lan {
             try? FileManager.default.removeItem(at: networkModeFile)
         } else {
-            try? FileManager.default.createDirectory(
-                at: support, withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-            try? Data(mode.rawValue.utf8).write(to: networkModeFile, options: .atomic)
-            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: networkModeFile.path)
+            try? OMGPrivateFileWriter.writeAtomically(Data(mode.rawValue.utf8), to: networkModeFile)
         }
         let previousAddress = address
         refreshAddresses()
@@ -240,12 +287,7 @@ final class MobileAccessController: ObservableObject {
     private func saveEnabledPreference(_ enabled: Bool) {
         isEnabledPreference = enabled
         if enabled {
-            try? FileManager.default.createDirectory(
-                at: support, withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-            try? Data("1\n".utf8).write(to: enabledFile, options: .atomic)
-            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: enabledFile.path)
+            try? OMGPrivateFileWriter.writeAtomically(Data("1\n".utf8), to: enabledFile)
         } else {
             try? FileManager.default.removeItem(at: enabledFile)
         }
@@ -267,69 +309,102 @@ final class MobileAccessController: ObservableObject {
             state = .failed(reason)
             return
         }
-        do {
-            try FileManager.default.createDirectory(
-                at: support, withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-            stopOrphanedGatewayIfNeeded()
-            let logURL = support.appendingPathComponent("mobile-gateway.log")
-            if !FileManager.default.fileExists(atPath: logURL.path) {
-                FileManager.default.createFile(
-                    atPath: logURL.path, contents: nil,
-                    attributes: [.posixPermissions: 0o600]
+        startTask?.cancel()
+        launchGeneration &+= 1
+        let generation = launchGeneration
+        let previousProcess = stoppingProcess
+        stoppingProcess = nil
+        let executable = self.executable
+        let support = self.support
+        let timeout = self.orphanStopTimeout
+
+        intentionalStop = false
+        errorMessage = nil
+        invitation = nil
+        state = .starting
+
+        startTask = Task { @MainActor [weak self] in
+            await Task.detached(priority: .userInitiated) {
+                if let previousProcess, previousProcess.isRunning {
+                    Self.waitForProcessExitBounded(previousProcess, timeout: timeout)
+                }
+                Self.stopOrphanedGatewayOffMain(
+                    executable: executable,
+                    support: support,
+                    timeout: timeout
                 )
+            }.value
+
+            guard let self,
+                  !Task.isCancelled,
+                  self.launchGeneration == generation,
+                  !self.intentionalStop else {
+                return
             }
-            let handle = try FileHandle(forWritingTo: logURL)
-            try handle.seekToEnd()
-            let spec = gatewayLaunchSpecification(listenAddress: listenAddress)
-            let process = Process()
-            process.executableURL = spec.executableURL
-            process.arguments = spec.arguments
-            process.environment = SessionRuntimeHostLauncher.applyingHostBundleEnvironment(ProcessInfo.processInfo.environment)
-            process.standardOutput = handle
-            process.standardError = handle
-            process.terminationHandler = { [weak self, weak process] finished in
-                DispatchQueue.main.async {
-                    guard let self, let process, self.process === process else { return }
-                    self.process = nil
-                    try? handle.close()
-                    self.log = nil
-                    self.stopGatewayStateMonitor()
-                    self.connectedDevices = 0
-                    if self.intentionalStop {
-                        self.state = .stopped
-                    } else {
-                        let reason = finished.terminationStatus == 0
-                            ? "The mobile gateway stopped."
-                            : "The mobile gateway exited with status \(finished.terminationStatus). Check that port \(self.port) is available."
-                        self.errorMessage = reason
-                        self.state = .failed(reason)
+
+            do {
+                try FileManager.default.createDirectory(
+                    at: self.support, withIntermediateDirectories: true,
+                    attributes: [.posixPermissions: 0o700]
+                )
+                let logURL = self.support.appendingPathComponent("mobile-gateway.log")
+                let logFD = Darwin.open(
+                    logURL.path,
+                    O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC,
+                    mode_t(0o600)
+                )
+                guard logFD >= 0 else {
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
+                _ = Darwin.fchmod(logFD, mode_t(0o600))
+                let handle = FileHandle(fileDescriptor: logFD, closeOnDealloc: true)
+                let spec = self.gatewayLaunchSpecification(listenAddress: listenAddress)
+                let process = Process()
+                process.executableURL = spec.executableURL
+                process.arguments = spec.arguments
+                process.environment = SessionRuntimeHostLauncher.applyingHostBundleEnvironment(
+                    ProcessInfo.processInfo.environment
+                )
+                process.standardOutput = handle
+                process.standardError = handle
+                process.terminationHandler = { [weak self, weak process] finished in
+                    DispatchQueue.main.async {
+                        guard let self, let process, self.process === process else { return }
+                        self.process = nil
+                        try? handle.close()
+                        self.log = nil
+                        self.stopGatewayStateMonitor()
+                        self.connectedDevices = 0
+                        if self.intentionalStop {
+                            self.state = .stopped
+                        } else {
+                            let reason = finished.terminationStatus == 0
+                                ? "The mobile gateway stopped."
+                                : "The mobile gateway exited with status \(finished.terminationStatus). Check that port \(self.port) is available."
+                            self.errorMessage = reason
+                            self.state = .failed(reason)
+                        }
                     }
                 }
+                self.process = process
+                self.log = handle
+                self.startGatewayStateMonitor()
+                try process.run()
+                Task { [weak self, weak process] in
+                    try? await Task.sleep(for: .milliseconds(450))
+                    guard let self, let process, self.process === process, process.isRunning else { return }
+                    self.state = .running
+                    self.refreshConnectedDevices()
+                    await self.refreshInvitation()
+                }
+            } catch {
+                self.stopGatewayStateMonitor()
+                self.connectedDevices = 0
+                self.errorMessage = error.localizedDescription
+                self.state = .failed(error.localizedDescription)
+                try? self.log?.close()
+                self.log = nil
             }
-            intentionalStop = false
-            errorMessage = nil
-            invitation = nil
-            self.process = process
-            log = handle
-            state = .starting
-            startGatewayStateMonitor()
-            try process.run()
-            Task { [weak self, weak process] in
-                try? await Task.sleep(for: .milliseconds(450))
-                guard let self, let process, self.process === process, process.isRunning else { return }
-                self.state = .running
-                self.refreshConnectedDevices()
-                await self.refreshInvitation()
-            }
-        } catch {
-            stopGatewayStateMonitor()
-            connectedDevices = 0
-            errorMessage = error.localizedDescription
-            state = .failed(error.localizedDescription)
-            try? log?.close()
-            log = nil
         }
     }
 
@@ -337,10 +412,18 @@ final class MobileAccessController: ObservableObject {
         if persist {
             saveEnabledPreference(false)
         }
+        launchGeneration &+= 1
+        startTask?.cancel()
+        startTask = nil
         intentionalStop = true
         stopGatewayStateMonitor()
-        process?.terminate()
-        process = nil
+        if let running = process {
+            if running.isRunning {
+                running.terminate()
+                stoppingProcess = running
+            }
+            process = nil
+        }
         try? log?.close()
         log = nil
         invitation = nil
@@ -465,12 +548,7 @@ final class MobileAccessController: ObservableObject {
             return false
         }
         do {
-            try FileManager.default.createDirectory(
-                at: support, withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-            try Data(normalized.utf8).write(to: publicURLFile, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: publicURLFile.path)
+            try OMGPrivateFileWriter.writeAtomically(Data(normalized.utf8), to: publicURLFile)
             publicURL = normalized
             errorMessage = nil
             if let current = invitation {

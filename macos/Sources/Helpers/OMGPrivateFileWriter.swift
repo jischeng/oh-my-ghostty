@@ -22,12 +22,21 @@ enum OMGPrivateFileWriter {
         }
     }
 
-    static func writeAtomically(_ data: Data, to fileURL: URL) throws {
+    private static func isSymbolicLink(at path: String) -> Bool {
+        var st = stat()
+        guard Darwin.lstat(path, &st) == 0 else { return false }
+        return (st.st_mode & S_IFMT) == S_IFLNK
+    }
+
+    static func writeAtomically(
+        _ data: Data,
+        to fileURL: URL,
+        permissions: mode_t = 0o600
+    ) throws {
         let manager = FileManager.default
         let directory = fileURL.deletingLastPathComponent()
-        for candidate in [directory, fileURL] where manager.fileExists(atPath: candidate.path) {
-            let values = try candidate.resourceValues(forKeys: [.isSymbolicLinkKey])
-            guard values.isSymbolicLink != true else {
+        for candidate in [directory, fileURL] {
+            guard !isSymbolicLink(at: candidate.path) else {
                 throw WriteError.unsafePath
             }
         }
@@ -37,6 +46,9 @@ enum OMGPrivateFileWriter {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
+        guard !isSymbolicLink(at: directory.path), !isSymbolicLink(at: fileURL.path) else {
+            throw WriteError.unsafePath
+        }
         let canonicalDirectory = directory.resolvingSymlinksInPath().path
         if canonicalDirectory != "/",
            canonicalDirectory != "/tmp",
@@ -49,10 +61,11 @@ enum OMGPrivateFileWriter {
         )
         defer { try? manager.removeItem(at: temporary) }
 
+        let safeMode = permissions & 0o777
         let fd = Darwin.open(
             temporary.path,
             O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
-            mode_t(0o600)
+            safeMode
         )
         guard fd >= 0 else {
             throw WriteError.createFailed
@@ -75,13 +88,16 @@ enum OMGPrivateFileWriter {
                     offset += count
                 }
             }
-            _ = Darwin.fchmod(fd, mode_t(0o600))
+            _ = Darwin.fchmod(fd, safeMode)
             Darwin.close(fd)
         } catch {
             Darwin.close(fd)
             throw error
         }
 
+        guard !isSymbolicLink(at: fileURL.path) else {
+            throw WriteError.unsafePath
+        }
         guard Darwin.rename(temporary.path, fileURL.path) == 0 else {
             throw WriteError.renameFailed(errno)
         }
@@ -90,8 +106,9 @@ enum OMGPrivateFileWriter {
     static func tightenPermissionsIfPresent(at fileURL: URL) {
         let manager = FileManager.default
         let directory = fileURL.deletingLastPathComponent()
-        if manager.fileExists(atPath: directory.path),
-           (try? directory.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true {
+        var dirStat = stat()
+        if Darwin.lstat(directory.path, &dirStat) == 0,
+           (dirStat.st_mode & S_IFMT) == S_IFDIR {
             let canonicalDirectory = directory.resolvingSymlinksInPath().path
             if canonicalDirectory != "/",
                canonicalDirectory != "/tmp",
@@ -99,8 +116,9 @@ enum OMGPrivateFileWriter {
                 try? manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
             }
         }
-        if manager.fileExists(atPath: fileURL.path),
-           (try? fileURL.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true {
+        var fileStat = stat()
+        if Darwin.lstat(fileURL.path, &fileStat) == 0,
+           (fileStat.st_mode & S_IFMT) == S_IFREG {
             try? manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
         }
     }

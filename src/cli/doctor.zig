@@ -950,6 +950,9 @@ fn jsonIndicatesExited(alloc: Allocator, raw: []const u8) bool {
     const parsed = std.json.parseFromSlice(std.json.Value, alloc, raw, .{}) catch return false;
     defer parsed.deinit();
     if (parsed.value != .object) return false;
+    if (parsed.value.object.get("ended")) |ended_val| {
+        if (ended_val != .null) return true;
+    }
     if (parsed.value.object.get("exited")) |exited_val| {
         if (exited_val == .bool) return exited_val.bool;
     }
@@ -1065,7 +1068,7 @@ test "doctor reports TCC warning and audits sessions, backups, and portable sett
         defer f.close(testing.io);
         var buf: [128]u8 = undefined;
         var w = f.writer(testing.io, &buf);
-        try w.interface.writeAll("{\"exited\":false}\n");
+        try w.interface.writeAll("{\"id\":\"live\",\"ended\":null}\n");
         try w.interface.flush();
     }
     {
@@ -1073,7 +1076,15 @@ test "doctor reports TCC warning and audits sessions, backups, and portable sett
         defer f.close(testing.io);
         var buf: [128]u8 = undefined;
         var w = f.writer(testing.io, &buf);
-        try w.interface.writeAll("{\"exited\":true}\n");
+        try w.interface.writeAll("{\"id\":\"done\",\"ended\":\"exited\",\"exit_code\":0}\n");
+        try w.interface.flush();
+    }
+    {
+        var f = try tmp.dir.createFile(testing.io, ".omg/run/state1/sessions/lost.json", .{});
+        defer f.close(testing.io);
+        var buf: [128]u8 = undefined;
+        var w = f.writer(testing.io, &buf);
+        try w.interface.writeAll("{\"id\":\"lost\",\"ended\":\"lost\"}\n");
         try w.interface.flush();
     }
 
@@ -1123,7 +1134,7 @@ test "doctor reports TCC warning and audits sessions, backups, and portable sett
     try testing.expect(report.runtime_ssh.omgd_bundled);
     try testing.expectEqualStrings("rev-step6", report.runtime_ssh.omgd_revision.?);
     try testing.expectEqual(@as(usize, 1), report.runtime_ssh.active_sessions);
-    try testing.expectEqual(@as(usize, 2), report.runtime_ssh.total_session_records);
+    try testing.expectEqual(@as(usize, 3), report.runtime_ssh.total_session_records);
     try testing.expect(report.runtime_ssh.ssh_control_dir_private);
     try testing.expectEqual(@as(usize, 1), report.agent_backups.backup_files);
     try testing.expectEqual(@as(usize, 0), report.agent_backups.insecure_backups);
@@ -1139,6 +1150,17 @@ test "doctor reports TCC warning and audits sessions, backups, and portable sett
     defer parsed.deinit();
     try testing.expectEqual(HealthStatus.warning, parsed.value.status);
     try testing.expectEqual(@as(usize, 1), parsed.value.runtime_ssh.active_sessions);
+}
+
+test "doctor jsonIndicatesExited handles omgd ended schema and legacy exited fallback" {
+    const alloc = std.testing.allocator;
+    try std.testing.expect(!jsonIndicatesExited(alloc, "{\"id\":\"a\",\"ended\":null}"));
+    try std.testing.expect(!jsonIndicatesExited(alloc, "{\"id\":\"b\"}"));
+    try std.testing.expect(jsonIndicatesExited(alloc, "{\"id\":\"c\",\"ended\":\"exited\",\"exit_code\":0}"));
+    try std.testing.expect(jsonIndicatesExited(alloc, "{\"id\":\"d\",\"ended\":\"closed\"}"));
+    try std.testing.expect(jsonIndicatesExited(alloc, "{\"id\":\"e\",\"ended\":\"lost\"}"));
+    try std.testing.expect(jsonIndicatesExited(alloc, "{\"exited\":true}"));
+    try std.testing.expect(!jsonIndicatesExited(alloc, "{\"exited\":false}"));
 }
 
 const PosixLstatResult = union(enum) {

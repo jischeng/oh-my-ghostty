@@ -129,10 +129,17 @@ final class MobileDeviceProvisioner: ObservableObject {
     private let runCommand: CommandRunner
     private let autoRefreshFile: URL
     private let attemptsFile: URL
+    private let allowMonitorInTests: Bool
+    private var xcodeFallbackTeamID: String?
     private var monitorStarted = false
+    private var initialCheckWorkItem: DispatchWorkItem?
     private var monitorTimer: Timer?
     private var wakeObserver: NSObjectProtocol?
     private var activeTask: Task<Void, Never>?
+
+    var isAutoRefreshMonitorRunning: Bool {
+        monitorStarted
+    }
 
     var selectedDevice: PairedDevice? {
         if let udid = selectedDeviceUDID,
@@ -150,7 +157,8 @@ final class MobileDeviceProvisioner: ObservableObject {
     init(
         supportDirectory: URL? = nil,
         profileDirectories: [URL]? = nil,
-        commandRunner: CommandRunner? = nil
+        commandRunner: CommandRunner? = nil,
+        allowMonitorInTests: Bool = false
     ) {
         let resolvedSupport = supportDirectory ?? OMGApplicationEnvironment.applicationSupportURL()
         self.supportDirectory = resolvedSupport
@@ -163,10 +171,12 @@ final class MobileDeviceProvisioner: ObservableObject {
                 .appendingPathComponent("Library/MobileDevice/Provisioning Profiles"),
         ]
         self.runCommand = commandRunner ?? Self.defaultRunCommand
+        self.allowMonitorInTests = allowMonitorInTests
         self.autoRefreshEnabled = Self.loadBoolFlag(at: self.autoRefreshFile, defaultValue: false)
     }
 
     deinit {
+        initialCheckWorkItem?.cancel()
         monitorTimer?.invalidate()
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
@@ -181,19 +191,26 @@ final class MobileDeviceProvisioner: ObservableObject {
         autoRefreshEnabled = enabled
         Self.saveBoolFlag(enabled, at: autoRefreshFile)
         if enabled {
+            startAutoRefreshMonitor()
             Task { await checkAutoRefreshIfNeeded() }
+        } else {
+            stopAutoRefreshMonitor()
         }
     }
 
     func startAutoRefreshMonitor() {
-        guard !monitorStarted, !OMGApplicationEnvironment.isRunningTests else { return }
+        guard autoRefreshEnabled,
+              !monitorStarted,
+              allowMonitorInTests || !OMGApplicationEnvironment.isRunningTests else { return }
         monitorStarted = true
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+        let workItem = DispatchWorkItem { [weak self] in
             Task { @MainActor [weak self] in
                 await self?.checkAutoRefreshIfNeeded()
             }
         }
+        initialCheckWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: workItem)
 
         monitorTimer = Timer.scheduledTimer(
             withTimeInterval: Self.autoRefreshCheckIntervalSeconds,
@@ -212,6 +229,18 @@ final class MobileDeviceProvisioner: ObservableObject {
                 await self?.checkAutoRefreshIfNeeded()
             }
         }
+    }
+
+    func stopAutoRefreshMonitor() {
+        initialCheckWorkItem?.cancel()
+        initialCheckWorkItem = nil
+        monitorTimer?.invalidate()
+        monitorTimer = nil
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+            self.wakeObserver = nil
+        }
+        monitorStarted = false
     }
 
     func checkAutoRefreshIfNeeded(now: Date = Date()) async {
@@ -299,6 +328,11 @@ final class MobileDeviceProvisioner: ObservableObject {
 
         let loadedIdentities = await loadSigningIdentities()
         let loadedProfiles = await loadProvisioningProfiles()
+        if Self.preferredTeamID(from: loadedIdentities) == nil {
+            xcodeFallbackTeamID = await loadFallbackXcodeTeamID()
+        } else {
+            xcodeFallbackTeamID = nil
+        }
 
         devices = discovered
         if let current = selectedDeviceUDID,
@@ -400,7 +434,7 @@ final class MobileDeviceProvisioner: ObservableObject {
 
     private func recomputeStatus(now: Date = Date()) {
         let device = selectedDevice
-        let team = activeTeamID ?? Self.preferredTeamID(from: identities)
+        let team = Self.preferredTeamID(from: identities) ?? xcodeFallbackTeamID ?? activeTeamID
         activeTeamID = team
         let bundle = Self.resolveTargetBundleID(
             explicit: nil,
@@ -411,8 +445,14 @@ final class MobileDeviceProvisioner: ObservableObject {
         )
         activeBundleID = bundle
 
-        guard let team, !identities.isEmpty else {
+        guard let team, !team.isEmpty else {
             expiryStatus = .missing(reason: "Add an Apple ID & Apple Development cert in Xcode → Settings → Accounts.")
+            return
+        }
+        if identities.isEmpty {
+            expiryStatus = .missing(
+                reason: "No local Apple Development certificate yet; click Install / Refresh to create one automatically."
+            )
             return
         }
         guard let device else {
@@ -431,16 +471,27 @@ final class MobileDeviceProvisioner: ObservableObject {
         expiryStatus = Self.computeExpiryStatus(profile: matched, now: now)
     }
 
+    private func loadFallbackXcodeTeamID() async -> String? {
+        let out = await runCommand("/usr/bin/defaults", ["read", "com.apple.dt.Xcode", "IDEProvisioningTeams"])
+        guard out.status == 0, let text = String(data: out.stdout, encoding: .utf8) else { return nil }
+        return Self.parseXcodeProvisioningTeamID(defaultsOutput: text)
+    }
+
     private func loadSigningIdentities() async -> [SigningIdentity] {
         let identOut = await runCommand("/usr/bin/security", ["find-identity", "-v", "-p", "codesigning"])
         guard identOut.status == 0,
               let identText = String(data: identOut.stdout, encoding: .utf8) else {
             return []
         }
+        let candidateSHA1s = Self.candidateIdentitySHA1s(from: identText)
+        guard !candidateSHA1s.isEmpty else {
+            return []
+        }
         let certOut = await runCommand("/usr/bin/security", ["find-certificate", "-a", "-Z", "-p"])
         var subjects: [String: String] = [:]
         if certOut.status == 0, let pemText = String(data: certOut.stdout, encoding: .utf8) {
-            for (sha1, pem) in Self.splitPEMBlocksWithSHA1(pemText) {
+            for (sha1, pem) in Self.splitPEMBlocksWithSHA1(pemText)
+                where candidateSHA1s.contains(sha1) && subjects[sha1] == nil {
                 let subj = await runOpenSSLSubject(pem: pem)
                 if !subj.isEmpty {
                     subjects[sha1] = subj
@@ -451,28 +502,14 @@ final class MobileDeviceProvisioner: ObservableObject {
     }
 
     private func runOpenSSLSubject(pem: String) async -> String {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .utility).async {
-                let proc = Process()
-                proc.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
-                proc.arguments = ["x509", "-noout", "-subject"]
-                let inPipe = Pipe()
-                let outPipe = Pipe()
-                proc.standardInput = inPipe
-                proc.standardOutput = outPipe
-                proc.standardError = Pipe()
-                do {
-                    try proc.run()
-                    inPipe.fileHandleForWriting.write(Data(pem.utf8))
-                    try? inPipe.fileHandleForWriting.close()
-                    proc.waitUntilExit()
-                    let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-                    continuation.resume(returning: String(data: data, encoding: .utf8) ?? "")
-                } catch {
-                    continuation.resume(returning: "")
-                }
-            }
-        }
+        let output = await Self.runSubprocess(
+            executable: "/usr/bin/openssl",
+            arguments: ["x509", "-noout", "-subject"],
+            stdinData: Data(pem.utf8),
+            timeoutSeconds: 10
+        )
+        guard output.status == 0 else { return "" }
+        return String(data: output.stdout, encoding: .utf8) ?? ""
     }
 
     private func loadProvisioningProfiles() async -> [ProvisioningProfileInfo] {
@@ -497,14 +534,26 @@ final class MobileDeviceProvisioner: ObservableObject {
 
     private func ensureVerifiedReleaseIPA() async throws -> URL {
         let cacheDir = supportDirectory.appendingPathComponent("mobile-ipa-cache", isDirectory: true)
-        try FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+        var cacheStat = stat()
+        if Darwin.lstat(cacheDir.path, &cacheStat) == 0, (cacheStat.st_mode & S_IFMT) == S_IFLNK {
+            throw OMGPrivateFileWriter.WriteError.unsafePath
+        }
+        try FileManager.default.createDirectory(
+            at: cacheDir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
 
-        guard let feedURL = URL(string: Self.altStoreSourceURL) else {
+        guard let feedURL = URL(string: Self.altStoreSourceURL),
+              Self.isTrustedAltStoreFeedURL(feedURL) else {
             throw NSError(domain: "MobileDeviceProvisioner", code: 1, userInfo: [
                 NSLocalizedDescriptionKey: "Invalid AltStore feed URL.",
             ])
         }
-        let (feedData, feedResponse) = try await URLSession.shared.data(from: feedURL)
+        let urlSession = Self.makeTrustedReleaseURLSession()
+        defer { urlSession.finishTasksAndInvalidate() }
+
+        let (feedData, feedResponse) = try await urlSession.data(from: feedURL)
         if let http = feedResponse as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
             throw NSError(domain: "MobileDeviceProvisioner", code: http.statusCode, userInfo: [
                 NSLocalizedDescriptionKey: "Unable to download altstore-source.json (HTTP \(http.statusCode)).",
@@ -512,27 +561,39 @@ final class MobileDeviceProvisioner: ObservableObject {
         }
         let feed = try JSONDecoder().decode(AltStoreSourceFeed.self, from: feedData)
         guard let latest = feed.apps.first?.versions.first,
-              let downloadURL = URL(string: latest.downloadURL) else {
+              let downloadURL = URL(string: latest.downloadURL),
+              Self.isTrustedReleaseDownloadURL(downloadURL),
+              latest.size > 0,
+              Self.isValidSHA256Hex(latest.sha256) else {
             throw NSError(domain: "MobileDeviceProvisioner", code: 2, userInfo: [
-                NSLocalizedDescriptionKey: "No OMG Mobile release version found in altstore-source.json.",
+                NSLocalizedDescriptionKey: "No verified OMG Mobile release version found in altstore-source.json.",
             ])
         }
 
-        let cachedIPA = cacheDir.appendingPathComponent("OMG-Mobile-\(latest.version)-b\(latest.buildVersion).ipa")
+        let cachedIPA = try Self.validatedCachedIPAURL(
+            cacheDir: cacheDir,
+            version: latest.version,
+            buildVersion: latest.buildVersion
+        )
         if FileManager.default.fileExists(atPath: cachedIPA.path),
            Self.verifyFile(cachedIPA, expectedSize: latest.size, expectedSHA256: latest.sha256) {
             return cachedIPA
         }
 
-        let (downloadedTmp, _) = try await URLSession.shared.download(from: downloadURL)
+        let (downloadedTmp, downloadResponse) = try await urlSession.download(from: downloadURL)
         defer { try? FileManager.default.removeItem(at: downloadedTmp) }
+        if let http = downloadResponse as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            throw NSError(domain: "MobileDeviceProvisioner", code: http.statusCode, userInfo: [
+                NSLocalizedDescriptionKey: "Unable to download OMG Mobile IPA (HTTP \(http.statusCode)).",
+            ])
+        }
         guard Self.verifyFile(downloadedTmp, expectedSize: latest.size, expectedSHA256: latest.sha256) else {
             throw NSError(domain: "MobileDeviceProvisioner", code: 3, userInfo: [
                 NSLocalizedDescriptionKey: "Downloaded IPA failed SHA-256 or byte-size verification.",
             ])
         }
-        try? FileManager.default.removeItem(at: cachedIPA)
-        try FileManager.default.moveItem(at: downloadedTmp, to: cachedIPA)
+        let downloadedData = try Data(contentsOf: downloadedTmp, options: .mappedIfSafe)
+        try OMGPrivateFileWriter.writeAtomically(downloadedData, to: cachedIPA)
         return cachedIPA
     }
 
@@ -542,20 +603,28 @@ final class MobileDeviceProvisioner: ObservableObject {
         forcePortalRefresh: Bool,
         noLaunch: Bool
     ) async throws {
-        guard let team = activeTeamID ?? Self.preferredTeamID(from: identities), !team.isEmpty else {
+        var resolvedTeam = activeTeamID
+            ?? Self.preferredTeamID(from: identities)
+            ?? xcodeFallbackTeamID
+        if resolvedTeam == nil || resolvedTeam?.isEmpty == true {
+            resolvedTeam = await loadFallbackXcodeTeamID()
+        }
+        guard let team = resolvedTeam, !team.isEmpty else {
             throw NSError(domain: "MobileDeviceProvisioner", code: 4, userInfo: [
-                NSLocalizedDescriptionKey: "Missing Apple Development signing certificate in Keychain.",
+                NSLocalizedDescriptionKey: "Missing Apple ID / Development Team in Xcode → Settings → Accounts.",
             ])
         }
-        let bundle = Self.resolveTargetBundleID(
+        activeTeamID = team
+        var bundle = Self.resolveTargetBundleID(
             explicit: nil,
             installedBundleID: device.installedBundleID,
             profiles: profiles,
             teamID: team,
             deviceUDID: device.udid
         )
-        let certSHA1s = Set(identities.filter { $0.teamID.isEmpty || $0.teamID == team }.map(\.sha1))
-        var profile = forcePortalRefresh ? nil : Self.selectValidProfile(
+        activeBundleID = bundle
+        var certSHA1s = Set(identities.filter { $0.teamID.isEmpty || $0.teamID == team }.map(\.sha1))
+        var profile = (forcePortalRefresh || certSHA1s.isEmpty) ? nil : Self.selectValidProfile(
             profiles: profiles,
             teamID: team,
             bundleID: bundle,
@@ -566,13 +635,34 @@ final class MobileDeviceProvisioner: ObservableObject {
 
         if profile == nil {
             operationState = .installing(step: "Renewing 7-day provisioning profile…")
-            try await renewProvisioningProfileViaStub(
-                teamID: team,
-                bundleID: bundle,
-                deviceUDID: device.udid
-            )
+            do {
+                try await renewProvisioningProfileViaStub(
+                    teamID: team,
+                    bundleID: bundle,
+                    deviceUDID: device.udid
+                )
+            } catch {
+                if Self.shouldFallbackToTeamScopedBundleID(
+                    errorText: error.localizedDescription,
+                    currentBundleID: bundle,
+                    installedBundleID: device.installedBundleID
+                ) {
+                    bundle = "\(Self.defaultBundleID).\(team.lowercased())"
+                    activeBundleID = bundle
+                    try await renewProvisioningProfileViaStub(
+                        teamID: team,
+                        bundleID: bundle,
+                        deviceUDID: device.udid
+                    )
+                } else {
+                    throw error
+                }
+            }
+            let updatedIdentities = await loadSigningIdentities()
             let updatedProfiles = await loadProvisioningProfiles()
+            identities = updatedIdentities
             profiles = updatedProfiles
+            certSHA1s = Set(updatedIdentities.filter { $0.teamID.isEmpty || $0.teamID == team }.map(\.sha1))
             profile = Self.selectValidProfile(
                 profiles: updatedProfiles,
                 teamID: team,
@@ -618,7 +708,8 @@ final class MobileDeviceProvisioner: ObservableObject {
         try FileManager.default.copyItem(at: activeProfile.path, to: embeddedProfile)
 
         let entitlementsURL = workDir.appendingPathComponent("entitlements.plist")
-        try activeProfile.entitlementsData.write(to: entitlementsURL)
+        let resolvedEntitlements = try Self.resolvedEntitlementsData(for: activeProfile, bundleID: bundle)
+        try OMGPrivateFileWriter.writeAtomically(resolvedEntitlements, to: entitlementsURL)
 
         for nested in Self.nestedSignableTargets(in: appURL) {
             let res = await runCommand(
@@ -666,6 +757,7 @@ final class MobileDeviceProvisioner: ObservableObject {
     }
 
     private func renewProvisioningProfileViaStub(teamID: String, bundleID: String, deviceUDID: String) async throws {
+        try Self.validateProvisioningInputs(teamID: teamID, bundleID: bundleID, deviceUDID: deviceUDID)
         let stubDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("omg-prov-stub-\(UUID().uuidString)", isDirectory: true)
         let projDir = stubDir.appendingPathComponent("StubApp.xcodeproj", isDirectory: true)
@@ -880,6 +972,210 @@ final class MobileDeviceProvisioner: ObservableObject {
             certificateSHA1s: certSHA1s,
             entitlementsData: entData
         )
+    }
+
+    static func candidateIdentitySHA1s(from securityOutput: String) -> Set<String> {
+        var sha1s: Set<String> = []
+        for rawLine in securityOutput.split(separator: "\n") {
+            let line = String(rawLine)
+            guard !line.contains("CSSMERR_"), !line.contains("REVOKED") else { continue }
+            guard line.contains("Apple Development") || line.contains("iPhone Developer") else { continue }
+            guard let sha1Range = line.range(of: #"\b[0-9A-Fa-f]{40}\b"#, options: .regularExpression) else {
+                continue
+            }
+            sha1s.insert(String(line[sha1Range]).uppercased())
+        }
+        return sha1s
+    }
+
+    static func parseXcodeProvisioningTeamID(defaultsOutput: String) -> String? {
+        // Prefer non-free team if Xcode lists multiple provisioning teams, else take first valid 10-char team ID.
+        var paidTeams: [String] = []
+        var allTeams: [String] = []
+        let blocks = defaultsOutput.components(separatedBy: "{")
+        for block in blocks {
+            guard let range = block.range(
+                of: #"teamID\s*=\s*"?([A-Z0-9]{10})"?\s*;"#,
+                options: .regularExpression
+            ) else { continue }
+            let fragment = String(block[range])
+            guard let idRange = fragment.range(of: #"[A-Z0-9]{10}"#, options: .regularExpression) else {
+                continue
+            }
+            let team = String(fragment[idRange])
+            if !allTeams.contains(team) {
+                allTeams.append(team)
+            }
+            if block.range(of: #"isFreeProvisioningTeam\s*=\s*0\s*;"#, options: .regularExpression) != nil,
+               !paidTeams.contains(team) {
+                paidTeams.append(team)
+            }
+        }
+        return paidTeams.first ?? allTeams.first
+    }
+
+    static func shouldFallbackToTeamScopedBundleID(
+        errorText: String,
+        currentBundleID: String,
+        installedBundleID: String?
+    ) -> Bool {
+        guard installedBundleID == nil, currentBundleID == defaultBundleID else { return false }
+        let markers = [
+            "cannot be registered",
+            "is not available",
+            "already registered",
+            "Failed to register bundle identifier",
+            "No profiles for '\(defaultBundleID)'",
+        ]
+        return markers.contains { errorText.localizedCaseInsensitiveContains($0) }
+    }
+
+    static func resolvedEntitlementsData(for profile: ProvisioningProfileInfo, bundleID: String) throws -> Data {
+        guard var entitlements = try PropertyListSerialization.propertyList(
+            from: profile.entitlementsData,
+            options: [.mutableContainers],
+            format: nil
+        ) as? [String: Any] else {
+            return profile.entitlementsData
+        }
+        let currentAppID = entitlements["application-identifier"] as? String ?? ""
+        if profile.isWildcard || currentAppID.hasSuffix(".*") {
+            entitlements["application-identifier"] = "\(profile.teamID).\(bundleID)"
+            return try PropertyListSerialization.data(
+                fromPropertyList: entitlements,
+                format: .xml,
+                options: 0
+            )
+        }
+        return profile.entitlementsData
+    }
+
+    nonisolated static func isSafeVersionToken(_ token: String) -> Bool {
+        guard !token.contains("..") else { return false }
+        return token.range(of: #"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$"#, options: .regularExpression) != nil
+    }
+
+    nonisolated static func isValidSHA256Hex(_ hex: String) -> Bool {
+        hex.range(of: #"^[0-9A-Fa-f]{64}$"#, options: .regularExpression) != nil
+    }
+
+    nonisolated static func isTrustedAltStoreFeedURL(_ url: URL) -> Bool {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme?.lowercased() == "https",
+              components.user == nil,
+              components.password == nil,
+              components.query == nil,
+              components.fragment == nil,
+              components.host?.lowercased() == "github.com",
+              !components.path.contains("..") else {
+            return false
+        }
+        return components.path == "/jischeng/oh-my-ghostty/releases/latest/download/altstore-source.json"
+            || (components.path.hasPrefix("/jischeng/oh-my-ghostty/releases/download/") &&
+                components.path.hasSuffix("/altstore-source.json"))
+    }
+
+    nonisolated static func isTrustedReleaseDownloadURL(_ url: URL) -> Bool {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme?.lowercased() == "https",
+              components.user == nil,
+              components.password == nil,
+              components.fragment == nil,
+              let host = components.host?.lowercased(),
+              !components.path.contains("..") else {
+            return false
+        }
+        if host == "github.com" {
+            return components.query == nil &&
+                components.path.hasPrefix("/jischeng/oh-my-ghostty/releases/download/") &&
+                components.path.hasSuffix(".ipa")
+        }
+        return false
+    }
+
+    nonisolated static func isTrustedRedirectTargetURL(_ url: URL) -> Bool {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme?.lowercased() == "https",
+              components.user == nil,
+              components.password == nil,
+              components.fragment == nil,
+              let host = components.host?.lowercased(),
+              !components.path.contains("..") else {
+            return false
+        }
+        if host == "github.com" {
+            return components.path.hasPrefix("/jischeng/oh-my-ghostty/releases/")
+        }
+        return host == "objects.githubusercontent.com" || host == "release-assets.githubusercontent.com"
+    }
+
+    nonisolated static func validatedCachedIPAURL(
+        cacheDir: URL,
+        version: String,
+        buildVersion: String
+    ) throws -> URL {
+        guard isSafeVersionToken(version), isSafeVersionToken(buildVersion) else {
+            throw NSError(domain: "MobileDeviceProvisioner", code: 12, userInfo: [
+                NSLocalizedDescriptionKey: "Invalid version metadata in altstore-source.json.",
+            ])
+        }
+        let fileName = "OMG-Mobile-\(version)-b\(buildVersion).ipa"
+        let candidate = cacheDir.appendingPathComponent(fileName, isDirectory: false)
+        guard candidate.standardizedFileURL.deletingLastPathComponent() == cacheDir.standardizedFileURL else {
+            throw OMGPrivateFileWriter.WriteError.unsafePath
+        }
+        var st = stat()
+        if Darwin.lstat(candidate.path, &st) == 0, (st.st_mode & S_IFMT) == S_IFLNK {
+            throw OMGPrivateFileWriter.WriteError.unsafePath
+        }
+        return candidate
+    }
+
+    nonisolated static func validateProvisioningInputs(
+        teamID: String,
+        bundleID: String,
+        deviceUDID: String
+    ) throws {
+        guard teamID.range(of: #"^[A-Z0-9]{10}$"#, options: .regularExpression) != nil else {
+            throw NSError(domain: "MobileDeviceProvisioner", code: 13, userInfo: [
+                NSLocalizedDescriptionKey: "Invalid Apple Developer Team ID.",
+            ])
+        }
+        guard bundleID.count <= 155,
+              bundleID.range(of: #"^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$"#, options: .regularExpression) != nil else {
+            throw NSError(domain: "MobileDeviceProvisioner", code: 14, userInfo: [
+                NSLocalizedDescriptionKey: "Invalid iOS bundle identifier.",
+            ])
+        }
+        guard deviceUDID.range(of: #"^[A-Za-z0-9-]{4,64}$"#, options: .regularExpression) != nil else {
+            throw NSError(domain: "MobileDeviceProvisioner", code: 15, userInfo: [
+                NSLocalizedDescriptionKey: "Invalid paired device UDID.",
+            ])
+        }
+    }
+
+    private final class TrustedReleaseRedirectDelegate: NSObject, URLSessionTaskDelegate, Sendable {
+        func urlSession(
+            _ session: URLSession,
+            task: URLSessionTask,
+            willPerformHTTPRedirection response: HTTPURLResponse,
+            newRequest request: URLRequest,
+            completionHandler: @escaping (URLRequest?) -> Void
+        ) {
+            guard let nextURL = request.url,
+                  MobileDeviceProvisioner.isTrustedRedirectTargetURL(nextURL) else {
+                completionHandler(nil)
+                return
+            }
+            completionHandler(request)
+        }
+    }
+
+    private static func makeTrustedReleaseURLSession() -> URLSession {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 300
+        return URLSession(configuration: config, delegate: TrustedReleaseRedirectDelegate(), delegateQueue: nil)
     }
 
     static func parseCodesigningIdentities(
@@ -1099,20 +1395,83 @@ final class MobileDeviceProvisioner: ObservableObject {
         return results.sorted { $0.path.count > $1.path.count }
     }
 
-    private static func locateInstallScript() -> URL? {
-        var candidates: [URL] = []
-        if let envDir = ProcessInfo.processInfo.environment["OMG_IOS_SOURCE_DIR"] {
-            candidates.append(URL(fileURLWithPath: envDir).appendingPathComponent("scripts/install-to-iphone.sh"))
+    nonisolated static func locateInstallScript(
+        isDevelopment: Bool = OMGApplicationEnvironment.isDevelopment,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        bundleURL: URL = Bundle.main.bundleURL,
+        expectedUID: uid_t = getuid()
+    ) -> URL? {
+        guard isDevelopment else { return nil }
+        var candidateRepoRoots: [URL] = []
+        if let envDir = environment["OMG_IOS_SOURCE_DIR"], !envDir.isEmpty {
+            let iosURL = URL(fileURLWithPath: envDir, isDirectory: true)
+            candidateRepoRoots.append(iosURL.deletingLastPathComponent())
         }
-        let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        candidates.append(cwd.appendingPathComponent("ios/scripts/install-to-iphone.sh"))
 
-        var cursor = Bundle.main.bundleURL
+        var cursor = bundleURL
         for _ in 0..<8 {
-            candidates.append(cursor.appendingPathComponent("ios/scripts/install-to-iphone.sh"))
+            candidateRepoRoots.append(cursor)
             cursor.deleteLastPathComponent()
         }
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
+
+        var seen = Set<String>()
+        for repoRoot in candidateRepoRoots {
+            let standardized = repoRoot.standardizedFileURL
+            guard seen.insert(standardized.path).inserted else { continue }
+            guard isVerifiedDevelopmentRepoRoot(standardized, expectedUID: expectedUID) else { continue }
+            let script = standardized.appendingPathComponent("ios/scripts/install-to-iphone.sh")
+            if isSafeOwnedRegularExecutable(script, expectedUID: expectedUID) {
+                return script
+            }
+        }
+        return nil
+    }
+
+    nonisolated private static func isVerifiedDevelopmentRepoRoot(_ repoRoot: URL, expectedUID: uid_t) -> Bool {
+        var rootStat = stat()
+        guard Darwin.lstat(repoRoot.path, &rootStat) == 0,
+              (rootStat.st_mode & S_IFMT) == S_IFDIR,
+              rootStat.st_uid == expectedUID,
+              (rootStat.st_mode & 0o022) == 0 else {
+            return false
+        }
+        let iosDir = repoRoot.appendingPathComponent("ios")
+        let scriptsDir = repoRoot.appendingPathComponent("ios/scripts")
+        for dir in [iosDir, scriptsDir] {
+            var dirStat = stat()
+            guard Darwin.lstat(dir.path, &dirStat) == 0,
+                  (dirStat.st_mode & S_IFMT) == S_IFDIR,
+                  dirStat.st_uid == expectedUID,
+                  (dirStat.st_mode & 0o022) == 0 else {
+                return false
+            }
+        }
+        let requiredFiles = [
+            repoRoot.appendingPathComponent("build.zig"),
+            repoRoot.appendingPathComponent("ios/project.yml"),
+            repoRoot.appendingPathComponent("macos/Ghostty.xcodeproj/project.pbxproj"),
+        ]
+        for marker in requiredFiles {
+            var markerStat = stat()
+            guard Darwin.lstat(marker.path, &markerStat) == 0,
+                  (markerStat.st_mode & S_IFMT) == S_IFREG,
+                  markerStat.st_uid == expectedUID else {
+                return false
+            }
+        }
+        return true
+    }
+
+    nonisolated private static func isSafeOwnedRegularExecutable(_ url: URL, expectedUID: uid_t) -> Bool {
+        var st = stat()
+        guard Darwin.lstat(url.path, &st) == 0,
+              (st.st_mode & S_IFMT) == S_IFREG,
+              st.st_uid == expectedUID,
+              (st.st_mode & 0o022) == 0,
+              FileManager.default.isExecutableFile(atPath: url.path) else {
+            return false
+        }
+        return true
     }
 
     private static func conciseErrorSnippet(from text: String) -> String {
@@ -1136,11 +1495,7 @@ final class MobileDeviceProvisioner: ObservableObject {
     }
 
     private static func saveBoolFlag(_ enabled: Bool, at url: URL) {
-        try? FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try? Data((enabled ? "1\n" : "0\n").utf8).write(to: url, options: .atomic)
+        try? OMGPrivateFileWriter.writeAtomically(Data((enabled ? "1\n" : "0\n").utf8), to: url)
     }
 
     private func loadLastAttemptDate(for udid: String) -> Date? {
@@ -1159,43 +1514,171 @@ final class MobileDeviceProvisioner: ObservableObject {
             map = existing.lastAttemptByUDID
         }
         map[udid] = date.timeIntervalSince1970
-        try? FileManager.default.createDirectory(
-            at: attemptsFile.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
         if let encoded = try? JSONEncoder().encode(AttemptHistory(lastAttemptByUDID: map)) {
-            try? encoded.write(to: attemptsFile, options: .atomic)
+            try? OMGPrivateFileWriter.writeAtomically(encoded, to: attemptsFile)
+        }
+    }
+
+    private final class SubprocessController: @unchecked Sendable {
+        private let lock = NSLock()
+        private var process: Process?
+        private var aborted = false
+
+        func attach(_ proc: Process) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            if aborted {
+                return false
+            }
+            process = proc
+            return true
+        }
+
+        var wasAborted: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return aborted
+        }
+
+        func abort() {
+            let proc: Process? = {
+                lock.lock()
+                defer { lock.unlock() }
+                aborted = true
+                return process
+            }()
+            guard let proc, proc.isRunning else { return }
+            let pid = proc.processIdentifier
+            proc.terminate()
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.5) {
+                if proc.isRunning, pid > 1 {
+                    _ = Darwin.kill(pid, SIGKILL)
+                }
+            }
+        }
+    }
+
+    nonisolated static func runSubprocess(
+        executable: String,
+        arguments: [String],
+        stdinData: Data? = nil,
+        timeoutSeconds: TimeInterval = 300
+    ) async -> CommandOutput {
+        let controller = SubprocessController()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .utility).async {
+                    if controller.wasAborted {
+                        continuation.resume(returning: CommandOutput(
+                            status: -1,
+                            stdout: Data(),
+                            stderr: Data("Cancelled".utf8)
+                        ))
+                        return
+                    }
+
+                    let proc = Process()
+                    proc.executableURL = URL(fileURLWithPath: executable)
+                    proc.arguments = arguments
+                    let outPipe = Pipe()
+                    let errPipe = Pipe()
+                    proc.standardOutput = outPipe
+                    proc.standardError = errPipe
+
+                    var inPipe: Pipe?
+                    if stdinData != nil {
+                        let pipe = Pipe()
+                        proc.standardInput = pipe
+                        inPipe = pipe
+                    } else {
+                        proc.standardInput = FileHandle.nullDevice
+                    }
+
+                    guard controller.attach(proc) else {
+                        continuation.resume(returning: CommandOutput(
+                            status: -1,
+                            stdout: Data(),
+                            stderr: Data("Cancelled".utf8)
+                        ))
+                        return
+                    }
+
+                    let watchdog = DispatchWorkItem {
+                        controller.abort()
+                    }
+                    DispatchQueue.global(qos: .utility).asyncAfter(
+                        deadline: .now() + max(0.05, timeoutSeconds),
+                        execute: watchdog
+                    )
+
+                    do {
+                        try proc.run()
+                        if controller.wasAborted {
+                            controller.abort()
+                        }
+
+                        if let stdinData, let inPipe {
+                            DispatchQueue.global(qos: .utility).async {
+                                try? inPipe.fileHandleForWriting.write(contentsOf: stdinData)
+                                try? inPipe.fileHandleForWriting.close()
+                            }
+                        }
+
+                        let group = DispatchGroup()
+                        let dataLock = NSLock()
+                        var outData = Data()
+                        var errData = Data()
+
+                        group.enter()
+                        DispatchQueue.global(qos: .utility).async {
+                            let bytes = outPipe.fileHandleForReading.readDataToEndOfFile()
+                            dataLock.lock()
+                            outData = bytes
+                            dataLock.unlock()
+                            group.leave()
+                        }
+
+                        group.enter()
+                        DispatchQueue.global(qos: .utility).async {
+                            let bytes = errPipe.fileHandleForReading.readDataToEndOfFile()
+                            dataLock.lock()
+                            errData = bytes
+                            dataLock.unlock()
+                            group.leave()
+                        }
+
+                        proc.waitUntilExit()
+                        watchdog.cancel()
+                        group.wait()
+
+                        dataLock.lock()
+                        let finalOut = outData
+                        let finalErr = errData
+                        dataLock.unlock()
+
+                        let status: Int32 = controller.wasAborted ? -1 : proc.terminationStatus
+                        continuation.resume(returning: CommandOutput(
+                            status: status,
+                            stdout: finalOut,
+                            stderr: finalErr
+                        ))
+                    } catch {
+                        watchdog.cancel()
+                        try? inPipe?.fileHandleForWriting.close()
+                        continuation.resume(returning: CommandOutput(
+                            status: -1,
+                            stdout: Data(),
+                            stderr: Data(error.localizedDescription.utf8)
+                        ))
+                    }
+                }
+            }
+        } onCancel: {
+            controller.abort()
         }
     }
 
     private static let defaultRunCommand: CommandRunner = { executable, arguments in
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .utility).async {
-                let proc = Process()
-                proc.executableURL = URL(fileURLWithPath: executable)
-                proc.arguments = arguments
-                let outPipe = Pipe()
-                let errPipe = Pipe()
-                proc.standardOutput = outPipe
-                proc.standardError = errPipe
-                do {
-                    try proc.run()
-                    let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-                    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                    proc.waitUntilExit()
-                    continuation.resume(returning: CommandOutput(
-                        status: proc.terminationStatus,
-                        stdout: outData,
-                        stderr: errData
-                    ))
-                } catch {
-                    continuation.resume(returning: CommandOutput(
-                        status: -1,
-                        stdout: Data(),
-                        stderr: Data(error.localizedDescription.utf8)
-                    ))
-                }
-            }
-        }
+        await runSubprocess(executable: executable, arguments: arguments, timeoutSeconds: 300)
     }
 }

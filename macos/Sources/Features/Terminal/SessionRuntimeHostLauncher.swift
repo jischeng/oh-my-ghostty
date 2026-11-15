@@ -81,11 +81,22 @@ enum SessionRuntimeHostLauncher {
         }
         defer { _ = posix_spawnattr_destroy(&attr) }
 
-        if detached {
-            let flagsCode = posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID))
-            guard flagsCode == 0 else {
-                throw POSIXError(POSIXErrorCode(rawValue: flagsCode) ?? .EINVAL)
-            }
+        var emptyMask = sigset_t()
+        sigemptyset(&emptyMask)
+        _ = posix_spawnattr_setsigmask(&attr, &emptyMask)
+
+        var defaultSignals = sigset_t()
+        sigemptyset(&defaultSignals)
+        sigaddset(&defaultSignals, SIGTERM)
+        sigaddset(&defaultSignals, SIGINT)
+        sigaddset(&defaultSignals, SIGHUP)
+        _ = posix_spawnattr_setsigdefault(&attr, &defaultSignals)
+
+        let spawnFlags = Int16(POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF) |
+            (detached ? Int16(POSIX_SPAWN_SETSID) : 0)
+        let flagsCode = posix_spawnattr_setflags(&attr, spawnFlags)
+        guard flagsCode == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: flagsCode) ?? .EINVAL)
         }
 
         let previousHup = detached ? signal(SIGHUP, SIG_IGN) : nil
@@ -145,44 +156,90 @@ enum SessionRuntimeHostLauncher {
         try spawnChild(command: invocation.command, detached: false)
     }
 
+    static func runForegroundLifecycle(
+        _ foreground: ForegroundInvocation,
+        initialParentPID: pid_t = getppid()
+    ) -> Int32 {
+        var blockMask = sigset_t()
+        var previousMask = sigset_t()
+        sigemptyset(&blockMask)
+        sigaddset(&blockMask, SIGTERM)
+        sigaddset(&blockMask, SIGINT)
+        sigaddset(&blockMask, SIGHUP)
+        _ = pthread_sigmask(SIG_BLOCK, &blockMask, &previousMask)
+
+        let childPid: pid_t
+        do {
+            childPid = try spawnForegroundChild(foreground)
+        } catch {
+            _ = pthread_sigmask(SIG_SETMASK, &previousMask, nil)
+            let message = "OMG foreground runtime wrapper failed: \(error)\n"
+            _ = message.withCString { Darwin.write(STDERR_FILENO, $0, strlen($0)) }
+            return 1
+        }
+
+        foregroundChildPID = childPid
+        var action = sigaction()
+        action.__sigaction_u.__sa_handler = forwardSignalToForegroundChild
+        sigemptyset(&action.sa_mask)
+        action.sa_flags = 0
+        for sig in [SIGTERM, SIGINT, SIGHUP] {
+            _ = sigaction(sig, &action, nil)
+        }
+
+        let terminateOrphanedChild: @Sendable () -> Void = {
+            let pid = foregroundChildPID
+            guard pid > 0 else { return }
+            _ = kill(pid, SIGTERM)
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0) {
+                let remaining = foregroundChildPID
+                if remaining == pid, remaining > 0 {
+                    _ = kill(remaining, SIGKILL)
+                }
+            }
+        }
+
+        var parentSource: DispatchSourceProcess?
+        if initialParentPID > 1 {
+            let source = DispatchSource.makeProcessSource(
+                identifier: initialParentPID,
+                eventMask: .exit,
+                queue: DispatchQueue.global(qos: .utility)
+            )
+            source.setEventHandler(handler: terminateOrphanedChild)
+            source.resume()
+            parentSource = source
+            if getppid() != initialParentPID {
+                terminateOrphanedChild()
+            }
+        }
+
+        _ = pthread_sigmask(SIG_SETMASK, &previousMask, nil)
+
+        var status: Int32 = 0
+        while waitpid(childPid, &status, 0) < 0 {
+            if errno != EINTR { break }
+        }
+        foregroundChildPID = 0
+        parentSource?.cancel()
+
+        let signalNumber = status & 0x7f
+        if signalNumber == 0 {
+            return (status >> 8) & 0xff
+        }
+        if signalNumber != 0x7f {
+            return 128 + signalNumber
+        }
+        return 1
+    }
+
     static func runIfRequested(arguments: [String] = CommandLine.arguments) {
         if let foreground = parseForeground(arguments: arguments) {
+            let parentPID = getppid()
             unsetenv(hostLaunchdLabelEnvironmentKey)
             unsetenv(hostBundlePathEnvironmentKey)
             unsetenv(hostBundleIDEnvironmentKey)
-
-            let childPid: pid_t
-            do {
-                childPid = try spawnForegroundChild(foreground)
-            } catch {
-                let message = "OMG foreground runtime wrapper failed: \(error)\n"
-                _ = message.withCString { Darwin.write(STDERR_FILENO, $0, strlen($0)) }
-                _exit(1)
-            }
-
-            foregroundChildPID = childPid
-            var action = sigaction()
-            action.__sigaction_u.__sa_handler = forwardSignalToForegroundChild
-            sigemptyset(&action.sa_mask)
-            action.sa_flags = 0
-            for sig in [SIGTERM, SIGINT, SIGHUP] {
-                _ = sigaction(sig, &action, nil)
-            }
-
-            var status: Int32 = 0
-            while waitpid(childPid, &status, 0) < 0 {
-                if errno != EINTR { break }
-            }
-            foregroundChildPID = 0
-
-            let signalNumber = status & 0x7f
-            if signalNumber == 0 {
-                _exit((status >> 8) & 0xff)
-            }
-            if signalNumber != 0x7f {
-                _exit(128 + signalNumber)
-            }
-            _exit(1)
+            _exit(runForegroundLifecycle(foreground, initialParentPID: parentPID))
         }
 
         guard let invocation = parse(arguments: arguments) else { return }

@@ -319,6 +319,49 @@ struct SessionRuntimeCatalogTests {
         #expect(model.endpoints[1].descriptor.connection?.destination == "cloud")
     }
 
+    @MainActor
+    @Test func localLostSessionRemainsAttachableAndClosableWhileRemoteLostStaysEnded() async throws {
+        let english = SessionRuntimeLibraryStrings(language: .english)
+        let chinese = SessionRuntimeLibraryStrings(language: .simplifiedChinese)
+        let localDescriptor = SessionRuntimeDescriptor(connection: nil, revision: "rev-local", policy: .init())
+        let remoteDescriptor = try endpoint("remote-host")
+        let lost = try session(id: UUID().uuidString, updatedAt: 5, ended: "lost")
+
+        #expect(lost.isPausedLocalCandidate)
+        #expect(lost.isAttachable(isLocalEndpoint: true))
+        #expect(lost.isClosable(isLocalEndpoint: true))
+        #expect(!lost.isAttachable(isLocalEndpoint: false))
+        #expect(!lost.isClosable(isLocalEndpoint: false))
+        #expect(lost.statusLabel(using: english, isLocalEndpoint: true) == "Paused (Resumable)")
+        #expect(lost.statusLabel(using: chinese, isLocalEndpoint: true) == "已暂停（可恢复）")
+        #expect(lost.statusLabel(using: english, isLocalEndpoint: false) == "Ended (lost)")
+        #expect(lost.statusLabel(using: chinese, isLocalEndpoint: false) == "已结束（会话已丢失）")
+
+        // Remote `"lost"` session still refuses reattachment.
+        #expect(throws: (any Error).self) {
+            try SessionRuntimeLibrary.openExisting(lost, descriptor: remoteDescriptor, controllers: [])
+        }
+
+        // Local `"lost"` session can be ended cleanly from Session Library.
+        let catalog = SessionRuntimeCatalog(url: nil)
+        catalog.remember(localDescriptor)
+        let queue = SessionRuntimeCloseQueue(url: nil)
+        let model = SessionRuntimeLibraryModel(
+            catalog: catalog,
+            closeQueue: queue,
+            loader: { _ in [lost] }
+        )
+        model.selectedEndpointID = localDescriptor.identity
+        for _ in 0..<20 where model.loadState != .loaded {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        model.selectSession(lost)
+        try model.end(lost)
+        #expect(queue.requests.count == 1)
+        #expect(queue.requests.first?.pane == lost.paneID)
+        #expect(queue.requests.first?.descriptor == localDescriptor)
+    }
+
     private func endpoint(_ destination: String) throws -> SessionRuntimeDescriptor {
         SessionRuntimeDescriptor(
             connection: try GitSSHConnection(destination: destination),

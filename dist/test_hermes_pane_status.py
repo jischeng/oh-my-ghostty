@@ -258,7 +258,9 @@ class HermesPaneStatusTests(unittest.TestCase):
         self.assertEqual(decoded[self.tty]["conversation"], self.sid)
         self.assertIn("print(json.dumps(snapshots(), sort_keys=True))", SOURCE)
 
-    def test_reporter_prefers_runtime_socket_and_falls_back_on_failure(self):
+    def test_reporter_always_writes_status_file_and_gates_runtime_socket_by_controlling_tty(self):
+        import pty
+
         capture = self.home / "runtime-args.json"
         helper = self.home / "omg-runtime-mock"
         helper.write_text(
@@ -268,36 +270,94 @@ class HermesPaneStatusTests(unittest.TestCase):
             "sys.exit(int(os.environ.get('OMG_TEST_EXIT', '0')))\n"
         )
         helper.chmod(0o700)
-        status_dir = self.home / ".config/oh-my-ghostty/agent-status/hermes"
 
-        env = dict(os.environ, OMG_RUNTIME_BIN=str(helper), OMG_TEST_CAPTURE=str(capture), OMG_TEST_EXIT="0")
+        pane_a_sid = "local-" + "a" * 64
+        pane_b_sid = "local-" + "b" * 64
+        pane_b_tty = "/dev/pts/8"
+        self.crumb(self.tty, pane_a_sid)
+        self.crumb(pane_b_tty, pane_b_sid)
+
+        env = dict(
+            os.environ,
+            OMG_RUNTIME_BIN=str(helper),
+            OMG_SESSION_ID="pane-a-session",
+            OMG_RUNTIME_EVENT_SOCKET="/tmp/pane-a.sock",
+            OMG_TEST_CAPTURE=str(capture),
+            OMG_TEST_EXIT="0",
+        )
+
+        # 1. Detached gateway daemon (no controlling TTY) inherits Pane A's OMG_RUNTIME_BIN
+        #    while handling Pane B's turn: must NOT spoof Pane A's socket, and MUST write
+        #    Pane B's status file so probe(pane_b_tty) sees "working".
         res = subprocess.run(
             [sys.executable, "-c", body("reporter"), "working"],
-            input=json.dumps({"session_id": self.sid, "cwd": "/work/project"}),
-            text=True, capture_output=True, env=env, timeout=5,
+            input=json.dumps({"session_id": pane_b_sid, "cwd": "/work/project-b"}),
+            text=True, capture_output=True, env=env, start_new_session=True, timeout=5,
         )
         self.assertEqual(res.returncode, 0, res.stderr)
-        args = json.loads(capture.read_text())
-        self.assertEqual(args, ["report", "hermes", "working", self.sid, "/work/project", "--event", "prompt"])
-        self.assertFalse(status_dir.exists())
+        self.assertFalse(capture.exists(), "Detached gateway must not report to inherited runtime socket")
+        pane_a_tty = self.tty
+        self.assertEqual(self.probe(tty=pane_a_tty)["state"], "idle")
+        self.assertEqual(self.probe(tty=pane_b_tty)["state"], "working")
 
-        for invalid_sid in ("-leading-dash", "ns:conv", "nested/conv", "~tilde"):
+        # 2. Gateway attached to Pane A's real PTY: Pane A's own sid matches controlling TTY
+        #    breadcrumb -> BOTH writes status file AND reports to Pane A's runtime socket;
+        #    Pane B's sid mismatches Pane A's PTY breadcrumb -> writes Pane B status file ONLY!
+        master_fd, slave_fd = pty.openpty()
+        try:
+            real_tty = os.ttyname(slave_fd)
+            self.crumb(real_tty, pane_a_sid)
+
             res = subprocess.run(
-                [sys.executable, "-c", body("reporter"), "done"],
-                input=json.dumps({"session_id": invalid_sid, "cwd": "/work/project"}),
-                text=True, capture_output=True, env=env, timeout=5,
+                [sys.executable, "-c", body("reporter"), "working"],
+                input=json.dumps({"session_id": pane_a_sid, "cwd": "/work/project-a"}),
+                stdout=slave_fd, stderr=subprocess.PIPE,
+                text=True, env=env, timeout=5,
             )
             self.assertEqual(res.returncode, 0, res.stderr)
-            self.assertEqual(json.loads(capture.read_text()), ["report", "hermes", "done", "-", "/work/project"])
+            self.assertTrue(capture.exists())
+            self.assertEqual(
+                json.loads(capture.read_text()),
+                ["report", "hermes", "working", pane_a_sid, "/work/project-a", "--event", "prompt"],
+            )
+            self.assertEqual(self.probe(tty=pane_a_tty)["state"], "working")
 
-        env["OMG_TEST_EXIT"] = "1"
-        res = subprocess.run(
-            [sys.executable, "-c", body("reporter"), "done"],
-            input=json.dumps({"session_id": self.sid, "cwd": "/work/project"}),
-            text=True, capture_output=True, env=env, timeout=5,
-        )
-        self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertEqual(self.probe()["state"], "done")
+            capture.unlink()
+            res = subprocess.run(
+                [sys.executable, "-c", body("reporter"), "done"],
+                input=json.dumps({"session_id": pane_b_sid, "cwd": "/work/project-b"}),
+                stdout=slave_fd, stderr=subprocess.PIPE,
+                text=True, env=env, timeout=5,
+            )
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertFalse(capture.exists(), "Mismatched PTY breadcrumb must not report to Pane A socket")
+            self.assertEqual(self.probe(tty=pane_a_tty)["state"], "working")
+            self.assertEqual(self.probe(tty=pane_b_tty)["state"], "done")
+
+            # 3. Invalid session IDs are rejected without calling runtime socket or writing status files.
+            for invalid_sid in ("-leading-dash", "ns:conv", "nested/conv", "~tilde"):
+                res = subprocess.run(
+                    [sys.executable, "-c", body("reporter"), "done"],
+                    input=json.dumps({"session_id": invalid_sid, "cwd": "/work/project"}),
+                    stdout=slave_fd, stderr=subprocess.PIPE,
+                    text=True, env=env, timeout=5,
+                )
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertFalse(capture.exists())
+
+            # 4. Non-zero runtime helper exit still leaves the status file updated.
+            env["OMG_TEST_EXIT"] = "1"
+            res = subprocess.run(
+                [sys.executable, "-c", body("reporter"), "done"],
+                input=json.dumps({"session_id": pane_a_sid, "cwd": "/work/project-a"}),
+                stdout=slave_fd, stderr=subprocess.PIPE,
+                text=True, env=env, timeout=5,
+            )
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertEqual(self.probe(tty=pane_a_tty)["state"], "done")
+        finally:
+            os.close(slave_fd)
+            os.close(master_fd)
 
 
 if __name__ == "__main__":

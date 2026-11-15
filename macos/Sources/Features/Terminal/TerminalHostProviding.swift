@@ -245,6 +245,9 @@ enum QuickTerminalRuntimeSupport {
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return false
         }
+        if let ended = json["ended"], !(ended is NSNull) {
+            return (ended as? String) == "lost"
+        }
         if let exited = json["exited"] as? Bool, exited {
             return false
         }

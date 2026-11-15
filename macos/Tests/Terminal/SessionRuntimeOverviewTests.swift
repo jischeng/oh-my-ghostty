@@ -62,4 +62,39 @@ struct SessionRuntimeOverviewTests {
         let destinations = SessionRuntimeBackgroundStore.activeSSHDestinations(forLeaderPIDs: [currentPID])
         #expect(destinations[currentPID] == nil)
     }
+
+    @Test func localLostSessionsAreAttachableAndClosableInOverviewModel() async throws {
+        let decoded = try JSONDecoder().decode(SessionRuntimeOverviewReport.self, from: Data("""
+        {"sessions":[
+          {"endpoint_id":"local","host":"This Mac","revision":"rev",
+           "id":"22222222-2222-4222-8222-222222222222","generation":"gen1",
+           "created_at":1,"updated_at":2,"pid":null,"ended":"lost","resume":null,"cwd":"/tmp/project"},
+          {"endpoint_id":"remote","host":"cloud","revision":"rev",
+           "id":"33333333-3333-4333-8333-333333333333","generation":"gen2",
+           "created_at":1,"updated_at":2,"pid":null,"ended":"lost","resume":null,"cwd":"/tmp/remote"}
+        ],"errors":[],"closed":0}
+        """.utf8))
+
+        #expect(decoded.sessions.count == 2)
+        #expect(decoded.sessions[0].isLocalEndpoint)
+        #expect(decoded.sessions[0].isAttachable)
+        #expect(decoded.sessions[0].isClosable)
+        #expect(!decoded.sessions[1].isLocalEndpoint)
+        #expect(!decoded.sessions[1].isAttachable)
+        #expect(!decoded.sessions[1].isClosable)
+
+        var closeCount = 0
+        let model = SessionRuntimeOverviewModel { close in
+            if close { closeCount += 1 }
+            return decoded
+        }
+        model.refresh()
+        try await waitForAppKit { !model.busy }
+        #expect(model.runningCount == 0)
+        #expect(model.closableCount == 1)
+        #expect(model.canCloseAll)
+        model.closeAll()
+        try await waitForAppKit { !model.busy }
+        #expect(closeCount == 1)
+    }
 }

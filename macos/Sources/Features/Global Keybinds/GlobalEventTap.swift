@@ -23,8 +23,13 @@ class GlobalEventTap {
     // created.
     fileprivate var eventTap: CFMachPort?
 
-    // Polls Accessibility permission before enabling the global event tap.
-    private var enableTimer: Timer?
+    // Observers active only while waiting for Accessibility permission to be granted.
+    private var activationObserver: NSObjectProtocol?
+    private var workspaceDeactivationObserver: NSObjectProtocol?
+
+    var isWaitingForPermission: Bool {
+        activationObserver != nil || workspaceDeactivationObserver != nil
+    }
 
     // Whether the active Ghostty configuration defines one or more global keybindings.
     private(set) var hasConfiguredGlobalKeybinds = false
@@ -85,26 +90,29 @@ class GlobalEventTap {
 
     // Enable the global event tap. This is safe to call if it is already enabled or
     // waiting for Accessibility permission.
-    func enable() {
+    func enable(isTrustedProvider: @escaping () -> Bool = GlobalEventTap.isAccessibilityTrusted) {
         let changed = !hasConfiguredGlobalKeybinds
         hasConfiguredGlobalKeybinds = true
-        // If we already have a tap or we're already checking on a timer, do nothing.
-        guard eventTap == nil, enableTimer == nil else {
+        guard eventTap == nil else {
             if changed { notifyStateDidChange() }
             return
         }
 
         // Creating a CGEventTap without Accessibility permission leaks a Mach port
         // inside CoreGraphics on each failed attempt. Request permission once and
-        // poll the non-leaking trust check instead of retrying tap creation.
-        if AXIsProcessTrusted() {
+        // re-check on app/workspace activation transitions instead of a 1 Hz timer.
+        if isTrustedProvider() {
+            removePendingPermissionObservers()
             _ = tryEnable()
             notifyStateDidChange()
             return
         }
 
-        // Ask macOS to prompt for Accessibility access. Approval happens
-        // asynchronously, so ignore the current result and poll below.
+        guard !isWaitingForPermission else {
+            if changed { notifyStateDidChange() }
+            return
+        }
+
         Self.logger.warning(
             "Global keybindings are configured, but Accessibility permission is missing; open OMG Doctor to grant access."
         )
@@ -115,30 +123,49 @@ class GlobalEventTap {
             _ = AXIsProcessTrustedWithOptions(options)
         }
 
-        // Check in a timer
-        enableTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            guard let self, AXIsProcessTrusted() else { return }
-
-            // Stop polling before attempting creation. If creation fails for a
+        let checkTrust: () -> Void = { [weak self] in
+            guard let self, isTrustedProvider() else { return }
+            // Remove observers before attempting creation. If creation fails for a
             // reason other than permissions, we must not retry it indefinitely.
-            self.enableTimer?.invalidate()
-            self.enableTimer = nil
+            self.removePendingPermissionObservers()
             _ = self.tryEnable()
             self.notifyStateDidChange()
+        }
+
+        activationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            checkTrust()
+        }
+        workspaceDeactivationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didDeactivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            checkTrust()
         }
         notifyStateDidChange()
     }
 
+    private func removePendingPermissionObservers() {
+        if let activationObserver {
+            NotificationCenter.default.removeObserver(activationObserver)
+            self.activationObserver = nil
+        }
+        if let workspaceDeactivationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(workspaceDeactivationObserver)
+            self.workspaceDeactivationObserver = nil
+        }
+    }
+
     // Disable the global event tap. This is safe to call if it is already disabled.
     func disable() {
-        let hadState = hasConfiguredGlobalKeybinds || enableTimer != nil || eventTap != nil
+        let hadState = hasConfiguredGlobalKeybinds || isWaitingForPermission || eventTap != nil
         hasConfiguredGlobalKeybinds = false
 
-        // Stop our enable timer if it is on
-        if let enableTimer {
-            enableTimer.invalidate()
-            self.enableTimer = nil
-        }
+        removePendingPermissionObservers()
 
         // Stop our event tap
         if let eventTap {
@@ -175,11 +202,7 @@ class GlobalEventTap {
         // Store our event tap
         self.eventTap = eventTap
 
-        // If we have an enable timer we always want to disable it
-        if let enableTimer {
-            enableTimer.invalidate()
-            self.enableTimer = nil
-        }
+        removePendingPermissionObservers()
 
         // Attach our event tap to the main run loop. Note if you don't do this then
         // the event tap will block every

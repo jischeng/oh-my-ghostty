@@ -1858,16 +1858,99 @@ struct AgentStatusPluginTests {
             #expect(content == target.initialContent)
             let perms = try (FileManager.default.attributesOfItem(atPath: bakURL.path)[.posixPermissions] as? NSNumber)?.intValue
             #expect((perms ?? 0) & 0o777 == 0o600)
+
+            let snapshotURL = home.appendingPathComponent(target.relPath + ".omg-backup")
+            #expect(FileManager.default.fileExists(atPath: snapshotURL.path), "Missing .omg-backup for \(target.relPath)")
+            let snapshotPerms = try (FileManager.default.attributesOfItem(atPath: snapshotURL.path)[.posixPermissions] as? NSNumber)?.intValue
+            #expect((snapshotPerms ?? 0) & 0o777 == 0o600)
         }
 
         let codexConfigBak = codexConfig.appendingPathExtension("omg.bak")
         #expect(try String(contentsOf: codexConfigBak, encoding: .utf8) == "[features]\nother = true\n")
         let codexPerms = try (FileManager.default.attributesOfItem(atPath: codexConfigBak.path)[.posixPermissions] as? NSNumber)?.intValue
         #expect((codexPerms ?? 0) & 0o777 == 0o600)
+        let codexSnapshot = home.appendingPathComponent(".codex/config.toml.omg-backup")
+        let codexSnapshotPerms = try (FileManager.default.attributesOfItem(atPath: codexSnapshot.path)[.posixPermissions] as? NSNumber)?.intValue
+        #expect((codexSnapshotPerms ?? 0) & 0o777 == 0o600)
 
         let audit = installer.backupAudit()
-        #expect(audit.backupCount == targets.count + 1)
+        #expect(audit.backupCount == (targets.count + 1) * 2)
         #expect(audit.insecureBackupCount == 0)
+    }
+
+    @Test func privateFileWriterAndHookInstallerRejectDanglingSymlinksAndAuditOmgBackupFiles() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-symlink-guard-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        let missingTarget = home.appendingPathComponent("nonexistent/outside-secret.json")
+        let danglingFile = home.appendingPathComponent("dangling-settings.json")
+        try FileManager.default.createSymbolicLink(at: danglingFile, withDestinationURL: missingTarget)
+        #expect(throws: OMGPrivateFileWriter.WriteError.self) {
+            try OMGPrivateFileWriter.writeAtomically(Data("{}".utf8), to: danglingFile)
+        }
+        #expect(!FileManager.default.fileExists(atPath: missingTarget.path))
+
+        let danglingDir = home.appendingPathComponent("dangling-dir")
+        try FileManager.default.createSymbolicLink(
+            at: danglingDir,
+            withDestinationURL: home.appendingPathComponent("missing-dir")
+        )
+        #expect(throws: OMGPrivateFileWriter.WriteError.self) {
+            try OMGPrivateFileWriter.writeAtomically(
+                Data("{}".utf8),
+                to: danglingDir.appendingPathComponent("secret.json")
+            )
+        }
+
+        // Dangling symlink on agent hook config or `.omg-backup` must be rejected by installer.
+        let claudeDir = home.appendingPathComponent(".claude", isDirectory: true)
+        try FileManager.default.createDirectory(at: claudeDir, withIntermediateDirectories: true)
+        let claudeSettings = claudeDir.appendingPathComponent("settings.json")
+        try FileManager.default.createSymbolicLink(at: claudeSettings, withDestinationURL: missingTarget)
+        let installer = AgentHookInstaller(homeURL: home)
+        #expect(throws: (any Error).self) {
+            try installer.install(.claude)
+        }
+
+        try FileManager.default.removeItem(at: claudeSettings)
+        try Data("{\"theme\":\"dark\"}\n".utf8).write(to: claudeSettings)
+        let claudeOmgBackup = home.appendingPathComponent(".claude/settings.json.omg-backup")
+        try FileManager.default.createSymbolicLink(at: claudeOmgBackup, withDestinationURL: missingTarget)
+        #expect(throws: (any Error).self) {
+            try installer.install(.claude)
+        }
+        try FileManager.default.removeItem(at: claudeOmgBackup)
+
+        // Dangling symlink on Hermes YAML config or executable hook script is rejected, and backupAudit checks hermes-hook.sh backups.
+        let hermesConfigDir = home.appendingPathComponent(".hermes", isDirectory: true)
+        try FileManager.default.createDirectory(at: hermesConfigDir, withIntermediateDirectories: true)
+        let hermesConfig = hermesConfigDir.appendingPathComponent("config.yaml")
+        try FileManager.default.createSymbolicLink(at: hermesConfig, withDestinationURL: missingTarget)
+        #expect(throws: (any Error).self) {
+            try installer.install(.hermes)
+        }
+        try FileManager.default.removeItem(at: hermesConfig)
+
+        let hermesHookDir = home.appendingPathComponent(".config/oh-my-ghostty/agent-status", isDirectory: true)
+        try FileManager.default.createDirectory(at: hermesHookDir, withIntermediateDirectories: true)
+        let hermesScript = hermesHookDir.appendingPathComponent("hermes-hook.sh")
+        try FileManager.default.createSymbolicLink(at: hermesScript, withDestinationURL: missingTarget)
+        #expect(throws: (any Error).self) {
+            try installer.install(.hermes)
+        }
+        try FileManager.default.removeItem(at: hermesScript)
+        try installer.install(.hermes)
+        let scriptMode = try (FileManager.default.attributesOfItem(atPath: hermesScript.path)[.posixPermissions] as? NSNumber)?.intValue
+        #expect((scriptMode ?? 0) & 0o777 == 0o700)
+
+        let hermesScriptBackup = home.appendingPathComponent(".config/oh-my-ghostty/agent-status/hermes-hook.sh.omg-backup")
+        try Data("#!/bin/sh\n".utf8).write(to: hermesScriptBackup)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: hermesScriptBackup.path)
+        let audit = installer.backupAudit()
+        #expect(audit.backupCount >= 1)
+        #expect(audit.insecureBackupCount == 1)
     }
 
     @Test func reducerPreservesAttentionOverSiblingWorkingAndClearsPriorCompletionOnNewTurn() throws {

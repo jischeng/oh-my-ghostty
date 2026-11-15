@@ -42,6 +42,7 @@ ready: std.atomic.Value(bool) = .init(false),
 snapshot_ready: std.atomic.Value(bool) = .init(false),
 writer_transfer: std.atomic.Value(bool) = .init(false),
 activity_acknowledge: std.atomic.Value(bool) = .init(false),
+activity_revision: std.atomic.Value(u64) = .init(0),
 takeover_pending: bool = false,
 takeover_input: std.ArrayList(u8) = .empty,
 generation: std.atomic.Value(u64) = .init(0),
@@ -139,6 +140,7 @@ fn closeSocket(self: *Self) void {
     self.writer_resize_generation.store(0, .release);
     self.snapshot_ready.store(false, .release);
     self.activity_acknowledge.store(false, .release);
+    self.activity_revision.store(0, .release);
     self.clearTakeoverInputLocked();
     self.disableStartupInputLocked();
     self.clearProcessInfo();
@@ -174,6 +176,7 @@ pub fn setSessionAttached(self: *Self, attached: bool) bool {
     self.writer_resize_generation.store(0, .release);
     self.snapshot_ready.store(false, .release);
     self.activity_acknowledge.store(false, .release);
+    self.activity_revision.store(0, .release);
     self.clearTakeoverInputLocked();
     self.disableStartupInputLocked();
     self.clearProcessInfo();
@@ -190,7 +193,9 @@ pub fn acknowledgeActivity(self: *Self) void {
         self.close_requested.load(.acquire) or
         !self.snapshot_ready.load(.acquire) or
         !self.activity_acknowledge.load(.acquire)) return;
-    self.sendFrameLocked('C', self.generation.load(.acquire), &.{}) catch {};
+    var payload: [8]u8 = undefined;
+    std.mem.writeInt(u64, &payload, self.activity_revision.load(.acquire), .big);
+    self.sendFrameLocked('C', self.generation.load(.acquire), &payload) catch {};
 }
 
 fn attachmentIsCurrent(self: *Self, epoch: u64) bool {
@@ -468,6 +473,7 @@ fn updateStatusGeneration(self: *Self, generation: u64, expected_epoch: ?u64) !v
     if (previous != 0 and previous != generation) self.disableStartupInputLocked();
     self.ready.store(false, .release);
     self.snapshot_ready.store(false, .release);
+    self.activity_revision.store(0, .release);
     self.clearTakeoverInputLocked();
     self.generation.store(generation, .release);
 }
@@ -851,6 +857,7 @@ fn readLoop(self: *Self, io: *HostIO, epoch: u64, attached: *bool, connected_onc
                     self.ready.store(false, .release);
                     self.writer_resize_generation.store(0, .release);
                     self.snapshot_ready.store(false, .release);
+                    self.activity_revision.store(0, .release);
                     self.clearTakeoverInputLocked();
                 }
                 try self.restore(io, bytes);
@@ -945,6 +952,7 @@ fn readLoop(self: *Self, io: *HostIO, epoch: u64, attached: *bool, connected_onc
                 try self.publishFailure(io, bytes, true);
                 sequence = null;
                 activity_hydrated = false;
+                self.activity_revision.store(0, .release);
             },
             'X' => {
                 const code = std.fmt.parseInt(i32, bytes, 10) catch -1;
@@ -1009,6 +1017,7 @@ fn publishActivitySnapshot(self: *Self, io: *HostIO, bytes: []const u8, is_resto
         try self.publishContext(io, "omg-agent-sync", "begin");
         for (records) |signal| try self.publishContext(io, signal.id, signal.metadata);
     }
+    self.activity_revision.store(parsed.value.revision, .release);
 }
 
 fn publishContext(self: *Self, io: *HostIO, id: []const u8, metadata: []const u8) !void {
@@ -1693,11 +1702,24 @@ test "acknowledgeActivity sends C only when negotiated and snapshot is ready" {
 
     backend.activity_acknowledge.store(true, .release);
     backend.acknowledgeActivity();
-    var frame: [13]u8 = undefined;
-    try readTestBytes(sockets[1], &frame);
-    try std.testing.expectEqual(@as(u8, 'C'), frame[0]);
-    try std.testing.expectEqual(@as(u64, 7), std.mem.readInt(u64, frame[1..9], .big));
-    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, frame[9..13], .big));
+    var zero_frame: [21]u8 = undefined;
+    try readTestBytes(sockets[1], &zero_frame);
+    try std.testing.expectEqual(@as(u8, 'C'), zero_frame[0]);
+    try std.testing.expectEqual(@as(u64, 7), std.mem.readInt(u64, zero_frame[1..9], .big));
+    try std.testing.expectEqual(@as(u32, 8), std.mem.readInt(u32, zero_frame[9..13], .big));
+    try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, zero_frame[13..21], .big));
+
+    backend.activity_revision.store(42, .release);
+    backend.acknowledgeActivity();
+    var watermark_frame: [21]u8 = undefined;
+    try readTestBytes(sockets[1], &watermark_frame);
+    try std.testing.expectEqual(@as(u8, 'C'), watermark_frame[0]);
+    try std.testing.expectEqual(@as(u64, 7), std.mem.readInt(u64, watermark_frame[1..9], .big));
+    try std.testing.expectEqual(@as(u32, 8), std.mem.readInt(u32, watermark_frame[9..13], .big));
+    try std.testing.expectEqual(@as(u64, 42), std.mem.readInt(u64, watermark_frame[13..21], .big));
+
+    try backend.updateStatusGeneration(8, null);
+    try std.testing.expectEqual(@as(u64, 0), backend.activity_revision.load(.acquire));
 }
 
 test "session activity sync tags restore vs live mode including sync_restore snapshots" {

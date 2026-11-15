@@ -330,10 +330,7 @@ final class OMGDoctorService: ObservableObject {
 
     init(dependencies: Dependencies = .init()) {
         self.dependencies = dependencies
-        self.report = Self.buildSynchronousReport(
-            dependencies: dependencies,
-            lspMetrics: .init(activeServers: 0, idleServers: 0)
-        )
+        self.report = Self.buildInitialPlaceholderReport(dependencies: dependencies)
         tapObserver = NotificationCenter.default.publisher(for: GlobalEventTap.stateDidChangeNotification)
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
@@ -345,8 +342,72 @@ final class OMGDoctorService: ObservableObject {
     }
 
     func refresh() async {
+        let hasGlobal = dependencies.hasGlobalKeybinds()
+        let trusted = dependencies.isAccessibilityTrusted()
+        let tapActive = dependencies.isEventTapEnabled()
+        let accessibility = OMGDoctorAccessibilityCheck(
+            status: (hasGlobal && !trusted) ? .warning : .healthy,
+            hasGlobalKeybinds: hasGlobal,
+            isTrusted: trusted,
+            isEventTapEnabled: tapActive
+        )
+        let webMetrics = dependencies.workspaceStore.resourceMetrics
+        let surfaceCounts = dependencies.surfaceCounter()
+        let localSnapshot = dependencies.agentManager.snapshots[AgentIntegrationManager.localID]
+        let detectedCLICount = localSnapshot?.cli.values.filter { $0.path != nil || $0.version != nil }.count ?? 0
+        let cachedHookCounts: (installed: Int, outdated: Int)? = {
+            guard let snapshot = localSnapshot, !snapshot.hooks.isEmpty else { return nil }
+            var installed = 0
+            var outdated = 0
+            for state in snapshot.hooks.values {
+                if state.isInstalled { installed += 1 }
+                if state == .updateAvailable { outdated += 1 }
+            }
+            return (installed, outdated)
+        }()
+        let inspectSignerTrust = dependencies.inspectSignerTrust
+        let residentMemoryProvider = dependencies.residentMemoryProvider
+        let resourcesURL = dependencies.resourcesURL
+        let homeDirectory = dependencies.homeDirectory
+        let sshControlDirectoryPath = dependencies.sshControlDirectoryPath
+        let expectedUID = dependencies.expectedUID
+
         let lspMetrics = await dependencies.lspManager.resourceMetrics()
-        report = Self.buildSynchronousReport(dependencies: dependencies, lspMetrics: lspMetrics)
+        let background = await Task.detached(priority: .utility) {
+            let signerTrust = inspectSignerTrust()
+            let runtimeSSH = Self.inspectRuntimeAndSSH(
+                resourcesURL: resourcesURL,
+                homeDirectory: homeDirectory,
+                sshControlDirectoryPath: sshControlDirectoryPath,
+                expectedUID: expectedUID
+            )
+            let agentBackups = Self.inspectAgentsAndBackups(
+                homeDirectory: homeDirectory,
+                detectedCLICount: detectedCLICount,
+                cachedHookCounts: cachedHookCounts
+            )
+            let residentMemoryBytes = residentMemoryProvider()
+            return (signerTrust, runtimeSSH, agentBackups, residentMemoryBytes)
+        }.value
+
+        let resources = OMGDoctorResourceCheck(
+            status: .healthy,
+            residentMemoryBytes: background.3,
+            activeWebViews: webMetrics.activeWebViews,
+            reclaimableWebViews: webMetrics.idleReclaimableWebViews,
+            activeLSPServers: lspMetrics.activeServers,
+            idleLSPServers: lspMetrics.idleServers,
+            visibleSurfaces: surfaceCounts.visible,
+            occludedSurfaces: surfaceCounts.occluded
+        )
+
+        report = OMGDoctorReport(
+            accessibility: accessibility,
+            signerTrust: background.0,
+            runtimeSSH: background.1,
+            agentBackups: background.2,
+            resources: resources
+        )
     }
 
     @discardableResult
@@ -396,9 +457,8 @@ final class OMGDoctorService: ObservableObject {
         return result
     }
 
-    private static func buildSynchronousReport(
-        dependencies: Dependencies,
-        lspMetrics: EditorLSPManager.ResourceMetrics
+    private static func buildInitialPlaceholderReport(
+        dependencies: Dependencies
     ) -> OMGDoctorReport {
         let hasGlobal = dependencies.hasGlobalKeybinds()
         let trusted = dependencies.isAccessibilityTrusted()
@@ -409,24 +469,52 @@ final class OMGDoctorService: ObservableObject {
             isTrusted: trusted,
             isEventTapEnabled: tapActive
         )
-
-        let signerTrust = dependencies.inspectSignerTrust()
-        let runtimeSSH = inspectRuntimeAndSSH(dependencies: dependencies)
-        let agentBackups = inspectAgentsAndBackups(dependencies: dependencies)
-
+        let signerTrust = OMGDoctorSignerTrustCheck(
+            status: .healthy,
+            mode: .adHocOrDevelopment,
+            bundleIdentifier: Bundle.main.bundleIdentifier,
+            teamIdentifier: nil,
+            certificateCommonName: nil,
+            certificateSHA1: nil,
+            isSelfSignedLeaf: false,
+            trustedInAdminDomain: false,
+            trustedInUserDomain: false,
+            isCodeSigningTrusted: false,
+            isNonCodeSigningBlocked: true,
+            hasUnscopedTrust: false,
+            leafCertificateDER: nil
+        )
+        let runtimeSSH = OMGDoctorRuntimeSSHCheck(
+            status: .healthy,
+            omgdAvailable: false,
+            omgdRevision: nil,
+            activeRuntimeSessions: 0,
+            totalRuntimeSessionRecords: 0,
+            sshControlDirectoryPath: dependencies.sshControlDirectoryPath,
+            sshControlDirectoryExists: false,
+            sshControlDirectoryHealthy: true,
+            activeSSHSockets: 0
+        )
+        let agentBackups = OMGDoctorAgentBackupCheck(
+            status: .healthy,
+            detectedCLICount: 0,
+            installedHookCount: 0,
+            outdatedHookCount: 0,
+            backupFileCount: 0,
+            insecureBackupCount: 0
+        )
         let webMetrics = dependencies.workspaceStore.resourceMetrics
         let surfaceCounts = dependencies.surfaceCounter()
         let resources = OMGDoctorResourceCheck(
             status: .healthy,
-            residentMemoryBytes: dependencies.residentMemoryProvider(),
+            residentMemoryBytes: 0,
             activeWebViews: webMetrics.activeWebViews,
             reclaimableWebViews: webMetrics.idleReclaimableWebViews,
-            activeLSPServers: lspMetrics.activeServers,
-            idleLSPServers: lspMetrics.idleServers,
+            activeLSPServers: 0,
+            idleLSPServers: 0,
             visibleSurfaces: surfaceCounts.visible,
             occludedSurfaces: surfaceCounts.occluded
         )
-
         return OMGDoctorReport(
             accessibility: accessibility,
             signerTrust: signerTrust,
@@ -436,10 +524,15 @@ final class OMGDoctorService: ObservableObject {
         )
     }
 
-    private static func inspectRuntimeAndSSH(dependencies: Dependencies) -> OMGDoctorRuntimeSSHCheck {
+    nonisolated private static func inspectRuntimeAndSSH(
+        resourcesURL: URL?,
+        homeDirectory: URL,
+        sshControlDirectoryPath: String,
+        expectedUID: uid_t
+    ) -> OMGDoctorRuntimeSSHCheck {
         var omgdAvailable = false
         var omgdRevision: String?
-        if let resourcesURL = dependencies.resourcesURL {
+        if let resourcesURL {
             let runtimeDir = resourcesURL.appendingPathComponent("session-runtime", isDirectory: true)
             let helper = runtimeDir.appendingPathComponent("omgd")
             if FileManager.default.isExecutableFile(atPath: helper.path) {
@@ -454,7 +547,7 @@ final class OMGDoctorService: ObservableObject {
             }
         }
 
-        let runRoot = dependencies.homeDirectory.appendingPathComponent(".omg/run", isDirectory: true)
+        let runRoot = homeDirectory.appendingPathComponent(".omg/run", isDirectory: true)
         var activeSessions = 0
         var totalRecords = 0
         if let stateDirs = try? FileManager.default.contentsOfDirectory(
@@ -478,6 +571,7 @@ final class OMGDoctorService: ObservableObject {
                     }
                     if let data = try? Data(contentsOf: file),
                        let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       obj["ended"] == nil || obj["ended"] is NSNull,
                        (obj["exited"] as? Bool) != true {
                         activeSessions += 1
                     }
@@ -485,7 +579,7 @@ final class OMGDoctorService: ObservableObject {
             }
         }
 
-        let sshPath = dependencies.sshControlDirectoryPath
+        let sshPath = sshControlDirectoryPath
         var info = stat()
         var sshExists = false
         var sshHealthy = true
@@ -494,7 +588,7 @@ final class OMGDoctorService: ObservableObject {
             sshExists = true
             let isDir = (info.st_mode & S_IFMT) == S_IFDIR
             let isPrivate = (info.st_mode & 0o777) == 0o700
-            let ownedByUser = info.st_uid == dependencies.expectedUID
+            let ownedByUser = info.st_uid == expectedUID
             sshHealthy = isDir && isPrivate && ownedByUser
             if isDir, let entries = try? FileManager.default.contentsOfDirectory(atPath: sshPath) {
                 for entry in entries where !entry.hasPrefix(".") {
@@ -520,24 +614,19 @@ final class OMGDoctorService: ObservableObject {
         )
     }
 
-    private static func inspectAgentsAndBackups(dependencies: Dependencies) -> OMGDoctorAgentBackupCheck {
-        let installer = AgentHookInstaller(homeURL: dependencies.homeDirectory)
+    nonisolated private static func inspectAgentsAndBackups(
+        homeDirectory: URL,
+        detectedCLICount: Int,
+        cachedHookCounts: (installed: Int, outdated: Int)?
+    ) -> OMGDoctorAgentBackupCheck {
+        let installer = AgentHookInstaller(homeURL: homeDirectory)
         let audit = installer.backupAudit()
-
-        let localSnapshot = dependencies.agentManager.snapshots[AgentIntegrationManager.localID]
-        let detectedCLICount = localSnapshot?.cli.values.filter { $0.path != nil || $0.version != nil }.count ?? 0
 
         var installedHooks = 0
         var outdatedHooks = 0
-        if let snapshot = localSnapshot, !snapshot.hooks.isEmpty {
-            for state in snapshot.hooks.values {
-                if state.isInstalled {
-                    installedHooks += 1
-                }
-                if state == .updateAvailable {
-                    outdatedHooks += 1
-                }
-            }
+        if let cachedHookCounts {
+            installedHooks = cachedHookCounts.installed
+            outdatedHooks = cachedHookCounts.outdated
         } else {
             for agent in SupportedAgent.allCases {
                 let state = installer.installationState(agent)

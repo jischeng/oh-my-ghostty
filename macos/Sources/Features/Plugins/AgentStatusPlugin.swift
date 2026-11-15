@@ -66,48 +66,87 @@ enum HermesPaneStatus {
 import hashlib, json, os, re, stat, subprocess, sys, tempfile, time
 from pathlib import Path
 
-def report():
-    state = sys.argv[1] if len(sys.argv) == 2 else ""
-    if state not in {"idle", "working", "done", "error", "needsAttention", "end"}:
-        return
-    payload = json.loads(sys.stdin.read(65537))
-    sid = payload.get("session_id")
-    if isinstance(sid, str) and sid.startswith("test-"):
-        return
-    runtime_bin = os.environ.get("OMG_RUNTIME_BIN")
-    if runtime_bin:
-        cwd = payload.get("cwd")
-        if not isinstance(cwd, str) or not cwd.startswith("/"):
-            try: cwd = os.getcwd()
-            except OSError: cwd = "/"
-        report_sid = (
-            sid if isinstance(sid, str) and re.fullmatch(r"[A-Za-z0-9._][A-Za-z0-9._-]{0,127}", sid) else "-"
-        )
-        cmd = [runtime_bin, "report", "hermes", state, report_sid, cwd]
-        if state == "working":
-            cmd.extend(["--event", "prompt"])
+def controlling_tty():
+    for fd in (0, 1, 2):
         try:
-            res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
-            if res.returncode == 0:
-                return
-        except (OSError, subprocess.SubprocessError):
+            tty = os.ttyname(fd)
+            if re.fullmatch(r"/dev/(?:ttys[0-9]+|pts/[0-9]+)", tty):
+                return tty
+        except OSError:
             pass
-    if not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9._][A-Za-z0-9._-]{0,127}", sid):
-        return
+    try:
+        raw = subprocess.run(
+            ["ps", "-o", "tty=", "-p", str(os.getpid())],
+            capture_output=True, text=True, timeout=1,
+        ).stdout.strip()
+        if re.fullmatch(r"(?:ttys[0-9]+|pts/[0-9]+)", raw):
+            return "/dev/" + raw
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+def owns_controlling_tty(sid):
+    if not os.environ.get("OMG_SESSION_ID") or not os.environ.get("OMG_RUNTIME_EVENT_SOCKET"):
+        return False
+    tty = controlling_tty()
+    if not tty:
+        return False
+    home = Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
+    key = "tty-" + re.sub(r"[^A-Za-z0-9._-]", "-", tty.strip("/"))[:120]
+    crumb_path = home / "terminal-sessions" / key
+    try:
+        info = crumb_path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > 4096:
+            return False
+        with crumb_path.open() as stream:
+            crumb = json.load(stream)
+    except (OSError, ValueError, TypeError):
+        return False
+    return isinstance(crumb, dict) and crumb.get("session_id") == sid
+
+def write_status_file(sid, state):
     directory = Path.home() / ".config/oh-my-ghostty/agent-status/hermes"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     if directory.is_symlink() or directory.stat().st_uid != os.getuid():
         return
     directory.chmod(0o700)
     key = hashlib.sha256(sid.encode()).hexdigest()
+    target = directory / (key + ".json")
+    if target.is_symlink():
+        return
     fd, temporary = tempfile.mkstemp(prefix=".event-", dir=directory)
     try:
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w") as stream:
             json.dump({"session_id": sid, "state": state, "time": time.time()}, stream)
-        os.replace(temporary, directory / (key + ".json"))
+        os.replace(temporary, target)
     finally:
         if os.path.exists(temporary): os.unlink(temporary)
+
+def report():
+    state = sys.argv[1] if len(sys.argv) == 2 else ""
+    if state not in {"idle", "working", "done", "error", "needsAttention", "end"}:
+        return
+    payload = json.loads(sys.stdin.read(65537))
+    sid = payload.get("session_id")
+    if not isinstance(sid, str) or sid.startswith("test-"):
+        return
+    if not re.fullmatch(r"[A-Za-z0-9._][A-Za-z0-9._-]{0,127}", sid):
+        return
+    write_status_file(sid, state)
+    runtime_bin = os.environ.get("OMG_RUNTIME_BIN")
+    if runtime_bin and owns_controlling_tty(sid):
+        cwd = payload.get("cwd")
+        if not isinstance(cwd, str) or not cwd.startswith("/"):
+            try: cwd = os.getcwd()
+            except OSError: cwd = "/"
+        cmd = [runtime_bin, "report", "hermes", state, sid, cwd]
+        if state == "working":
+            cmd.extend(["--event", "prompt"])
+        try:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+        except (OSError, subprocess.SubprocessError):
+            pass
 
 try:
     report()
@@ -536,8 +575,15 @@ ACTION = "\#(action.rawValue)"
 SELECTED = json.loads(base64.b64decode("\#(selectionData.base64EncodedString())"))
 
 
+def ensure_not_symlink(path):
+    if path.is_symlink() or path.parent.is_symlink():
+        raise ValueError("refusing symbolic link: " + str(path))
+
+
 def write_private_backup(source, destination):
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    ensure_not_symlink(source)
+    ensure_not_symlink(destination)
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     payload = source.read_bytes()
     descriptor, temporary = tempfile.mkstemp(prefix=".omg-bak-", dir=destination.parent)
     try:
@@ -547,6 +593,8 @@ def write_private_backup(source, destination):
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
+        if destination.is_symlink():
+            raise ValueError("refusing symbolic link: " + str(destination))
         os.replace(temporary, destination)
     finally:
         if descriptor >= 0:
@@ -558,18 +606,33 @@ def write_private_backup(source, destination):
 
 
 def backup(path):
+    ensure_not_symlink(path)
     if not path.exists() or path.is_dir():
         return
     destination = path.with_name(path.name + ".omg-backup")
+    ensure_not_symlink(destination)
     if not destination.exists():
         write_private_backup(path, destination)
 
 
-def atomic_write(path, content):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() and not path.is_dir() and ".config/oh-my-ghostty/agent-status" not in path.as_posix():
+def atomic_write(path, content, default_mode=0o600, force_mode=None):
+    ensure_not_symlink(path)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    ensure_not_symlink(path)
+    exists_reg = False
+    existing_mode = default_mode
+    try:
+        st = path.lstat()
+        if stat.S_ISLNK(st.st_mode):
+            raise ValueError("refusing symbolic link: " + str(path))
+        if stat.S_ISREG(st.st_mode):
+            exists_reg = True
+            existing_mode = stat.S_IMODE(st.st_mode)
+    except FileNotFoundError:
+        pass
+    if exists_reg and ".config/oh-my-ghostty/agent-status" not in path.as_posix():
         write_private_backup(path, path.with_name(path.name + ".omg.bak"))
-    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
+    mode = force_mode if force_mode is not None else (existing_mode if exists_reg else default_mode)
     descriptor, temporary = tempfile.mkstemp(prefix=".omg-agent-", dir=path.parent)
     try:
         os.fchmod(descriptor, mode)
@@ -578,6 +641,8 @@ def atomic_write(path, content):
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
+        if path.is_symlink():
+            raise ValueError("refusing symbolic link: " + str(path))
         os.replace(temporary, path)
     finally:
         if descriptor >= 0:
@@ -729,8 +794,7 @@ def install_auxiliary(item):
         except OSError:
             pass
         backup(script_path)
-        atomic_write(script_path, item["source"])
-        script_path.chmod(0o700)
+        atomic_write(script_path, item["source"], force_mode=0o700)
         lines = [
             "# >>> OMG agent-status hooks (managed; do not edit) >>>",
             "hooks_auto_accept: true",
@@ -752,8 +816,7 @@ def install_auxiliary(item):
             if target.exists() and (": " + MARKER + ";") not in target.read_text(encoding="utf-8"):
                 raise ValueError(str(target) + " is owned by another hook")
             backup(target)
-            atomic_write(target, "#!/bin/sh\n" + entry["command"] + "\n")
-            target.chmod(0o700)
+            atomic_write(target, "#!/bin/sh\n" + entry["command"] + "\n", force_mode=0o700)
 
 
 def expand(raw):
@@ -1184,15 +1247,10 @@ else:
     /// the Agent runs it from a pane-attached process or from its daemon.
     private func installYAMLHookScript(for agent: SupportedAgent) throws {
         let url = yamlHookScriptURL(agent)
-        try FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(),
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        try writeText(Self.yamlHookScriptSource(for: agent), to: url)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o700],
-            ofItemAtPath: url.path
+        try writeText(
+            Self.yamlHookScriptSource(for: agent),
+            to: url,
+            forcePermissions: 0o700
         )
     }
 
@@ -1359,11 +1417,7 @@ else:
                     state: event.state
                 )
             ) + "\n"
-            try writeText(source, to: url)
-            try FileManager.default.setAttributes(
-                [.posixPermissions: 0o700],
-                ofItemAtPath: url.path
-            )
+            try writeText(source, to: url, forcePermissions: 0o700)
         }
     }
 
@@ -1604,11 +1658,28 @@ else:
         try writeText(text, to: url)
     }
 
-    private func writeText(_ text: String, to url: URL) throws {
+    private static func ensureNotSymlink(_ url: URL) throws {
+        var st = stat()
+        if Darwin.lstat(url.path, &st) == 0, (st.st_mode & S_IFMT) == S_IFLNK {
+            throw OMGPrivateFileWriter.WriteError.unsafePath
+        }
+    }
+
+    private func writeText(
+        _ text: String,
+        to url: URL,
+        defaultPermissions: mode_t = 0o600,
+        forcePermissions: mode_t? = nil
+    ) throws {
         guard let data = text.data(using: .utf8) else {
             throw CocoaError(.fileWriteInapplicableStringEncoding)
         }
-        try writeData(data, to: url)
+        try writeData(
+            data,
+            to: url,
+            defaultPermissions: defaultPermissions,
+            forcePermissions: forcePermissions
+        )
     }
 
     struct BackupAudit: Equatable, Sendable {
@@ -1626,6 +1697,9 @@ else:
                 }
             } else {
                 urls.append(base)
+                if agent.definition.hook.kind == .yaml {
+                    urls.append(yamlHookScriptURL(agent))
+                }
             }
         }
         var seen = Set<String>()
@@ -1633,41 +1707,47 @@ else:
         var insecureBackupCount = 0
         let expectedUID = getuid()
         for target in urls {
-            let bakURL = target.appendingPathExtension("omg.bak")
-            guard seen.insert(bakURL.path).inserted else { continue }
-            var st = stat()
-            guard lstat(bakURL.path, &st) == 0 else { continue }
-            backupCount += 1
-            let isRegular = (st.st_mode & S_IFMT) == S_IFREG
-            let isPrivate = (st.st_mode & 0o777) == 0o600
-            let ownedByUser = st.st_uid == expectedUID
-            if !isRegular || !isPrivate || !ownedByUser {
-                insecureBackupCount += 1
+            for ext in ["omg.bak", "omg-backup"] {
+                let bakURL = target.appendingPathExtension(ext)
+                guard seen.insert(bakURL.path).inserted else { continue }
+                var st = stat()
+                guard lstat(bakURL.path, &st) == 0 else { continue }
+                backupCount += 1
+                let isRegular = (st.st_mode & S_IFMT) == S_IFREG
+                let isPrivate = (st.st_mode & 0o777) == 0o600
+                let ownedByUser = st.st_uid == expectedUID
+                if !isRegular || !isPrivate || !ownedByUser {
+                    insecureBackupCount += 1
+                }
             }
         }
         return BackupAudit(backupCount: backupCount, insecureBackupCount: insecureBackupCount)
     }
 
-    private func writeData(_ data: Data, to url: URL) throws {
-        var isDirectory: ObjCBool = false
-        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
-           !isDirectory.boolValue,
-           !url.path.contains("/.config/oh-my-ghostty/agent-status/") {
+    private func writeData(
+        _ data: Data,
+        to url: URL,
+        defaultPermissions: mode_t = 0o600,
+        forcePermissions: mode_t? = nil
+    ) throws {
+        try Self.ensureNotSymlink(url.deletingLastPathComponent())
+        try Self.ensureNotSymlink(url)
+        var st = stat()
+        let existsRegular = Darwin.lstat(url.path, &st) == 0 && (st.st_mode & S_IFMT) == S_IFREG
+        if existsRegular, !url.path.contains("/.config/oh-my-ghostty/agent-status/") {
+            let bakURL = url.appendingPathExtension("omg.bak")
+            try Self.ensureNotSymlink(bakURL)
             let existing = try Data(contentsOf: url)
             try OMGPrivateFileWriter.writeAtomically(
                 existing,
-                to: url.appendingPathExtension("omg.bak")
+                to: bakURL
             )
         }
-        let attributes = try? FileManager.default.attributesOfItem(
-            atPath: url.path
-        )
-        let permissions = attributes?[.posixPermissions] as? NSNumber ??
-            NSNumber(value: 0o600)
-        try data.write(to: url, options: .atomic)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: permissions],
-            ofItemAtPath: url.path
+        let permissions = forcePermissions ?? (existsRegular ? (st.st_mode & 0o777) : defaultPermissions)
+        try OMGPrivateFileWriter.writeAtomically(
+            data,
+            to: url,
+            permissions: permissions
         )
     }
 
@@ -1718,11 +1798,15 @@ else:
     }
 
     private func backupIfNeeded(_ url: URL) throws {
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
-              !isDirectory.boolValue else { return }
+        try Self.ensureNotSymlink(url.deletingLastPathComponent())
+        try Self.ensureNotSymlink(url)
+        var st = stat()
+        guard Darwin.lstat(url.path, &st) == 0,
+              (st.st_mode & S_IFMT) == S_IFREG else { return }
         let backup = url.appendingPathExtension("omg-backup")
-        guard !FileManager.default.fileExists(atPath: backup.path) else { return }
+        try Self.ensureNotSymlink(backup)
+        var backupStat = stat()
+        guard Darwin.lstat(backup.path, &backupStat) != 0 else { return }
         let existing = try Data(contentsOf: url)
         try OMGPrivateFileWriter.writeAtomically(existing, to: backup)
     }

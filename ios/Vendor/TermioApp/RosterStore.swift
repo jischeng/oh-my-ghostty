@@ -254,6 +254,7 @@ final class RosterStore {
         }
         if currentSessionKey == oldSessionID {
             currentSessionKey = newSessionID
+            changed = true
         }
         if changed {
             NotificationCenter.default.post(name: Self.didChange, object: nil)

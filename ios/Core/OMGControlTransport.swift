@@ -73,6 +73,7 @@ public actor OMGControlTransport {
 
     private var activeSocket: (any OMGControlWebSocket)?
     private var activeGeneration: UInt64 = 0
+    private var socketHasBecomeReady = false
     private var receiveLoopTask: Task<Void, Never>?
     private var pending: [UUID: PendingCall] = [:]
     private var isClosed = false
@@ -158,7 +159,7 @@ public actor OMGControlTransport {
             throw CocoaError(.fileReadCorruptFile)
         }
 
-        let wasReusedSocket = (activeSocket != nil)
+        let wasReusedSocket = (activeSocket != nil && socketHasBecomeReady)
         let (socket, generation) = ensureConnected()
         let timeoutSeconds = self.timeoutSeconds
         let timeoutTask = Task { [weak self] in
@@ -204,6 +205,7 @@ public actor OMGControlTransport {
         }
         activeGeneration &+= 1
         let generation = activeGeneration
+        socketHasBecomeReady = false
         connectionCount += 1
         let socket = makeSocket(request)
         activeSocket = socket
@@ -231,8 +233,11 @@ public actor OMGControlTransport {
     private func handleIncomingFrame(_ data: Data, generation: UInt64) -> Bool {
         guard activeGeneration == generation else { return false }
         guard !data.isEmpty,
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let reqString = object["_request"] as? String,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return true
+        }
+        socketHasBecomeReady = true
+        guard let reqString = object["_request"] as? String,
               let reqID = UUID(uuidString: reqString) else {
             // Unsolicited server push (e.g. roster update) has no `_request` field.
             return true
@@ -250,11 +255,10 @@ public actor OMGControlTransport {
     }
 
     private func timeoutRequest(_ requestID: UUID, generation: UInt64) {
-        guard let entry = pending.removeValue(forKey: requestID) else { return }
+        guard activeGeneration == generation,
+              let entry = pending.removeValue(forKey: requestID) else { return }
         entry.continuation.resume(throwing: URLError(.timedOut))
-        if pending.isEmpty, activeGeneration == generation {
-            tearDownCurrentSocket(error: URLError(.timedOut), allowRetry: false)
-        }
+        tearDownCurrentSocket(error: URLError(.timedOut), allowRetry: false)
     }
 
     private func handleSocketFailure(generation: UInt64, error: Error) {
@@ -263,6 +267,8 @@ public actor OMGControlTransport {
     }
 
     private func tearDownCurrentSocket(error: Error, allowRetry: Bool) {
+        activeGeneration &+= 1
+        socketHasBecomeReady = false
         receiveLoopTask?.cancel()
         receiveLoopTask = nil
         activeSocket?.cancelGoingAway()

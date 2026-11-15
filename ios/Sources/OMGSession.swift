@@ -46,28 +46,35 @@ final class OMGSession: StreamDeviceSession {
                 endpoint: MobileEndpoint(id: route.endpointID, name: "OMG"))
             self.connection = connection
             connection.onSessions = { [weak self, weak connection] sessions in
-                guard let self, let connection, !connection.hasSession else { return }
-                guard let session = sessions.first(where: {
-                    $0.id == self.targetID
-                        && $0.generation == self.generation
-                        && MobileSessionRoute.isAttachableEndedState($0.ended)
-                }) else {
-                    self.onState?(.failed("The session is no longer running."))
-                    return
+                guard let self, let connection else { return }
+                let candidates = sessions.map {
+                    MobileSessionRoute.CatalogCandidate(
+                        id: $0.id,
+                        generation: $0.generation,
+                        ended: $0.ended
+                    )
                 }
-                connection.open(session)
+                switch route.resolveAttachment(
+                    currentGeneration: self.generation ?? route.generation,
+                    isAttached: connection.isAttached,
+                    inFlightOpenGeneration: connection.inFlightOpenGeneration,
+                    candidates: candidates
+                ) {
+                case .alreadyAttached, .keepInFlight:
+                    return
+                case .open(let index, let adoptedGeneration):
+                    if let adoptedGeneration {
+                        self.updateGeneration(adoptedGeneration, route: route)
+                    }
+                    connection.open(sessions[index])
+                case .notRunning:
+                    connection.stop()
+                    self.onState?(.failed("The session is no longer running."))
+                }
             }
             connection.onGenerationChanged = { [weak self] nextGeneration in
                 guard let self else { return }
-                let previous = self.activeRouteID
-                let nextRoute = route.replacingGeneration(nextGeneration)
-                self.generation = nextGeneration
-                self.activeRouteID = nextRoute
-                NotificationCenter.default.post(
-                    name: Self.generationDidChange,
-                    object: nil,
-                    userInfo: ["oldSessionID": previous, "newSessionID": nextRoute]
-                )
+                self.updateGeneration(nextGeneration, route: route)
             }
             connection.onChange = { [weak self] in self?.changed() }
             connection.onOutput = { [weak self] data in self?.onStreamData?(data) }
@@ -248,6 +255,20 @@ final class OMGSession: StreamDeviceSession {
 
     func setHostAnswers(_ answers: Termiod.HostAnswers) {
         // Existing omgd answers probes in its own VT, including while detached.
+    }
+
+    private func updateGeneration(_ nextGeneration: String, route: MobileSessionRoute) {
+        guard nextGeneration != generation else { return }
+        let previous = activeRouteID
+        let nextRoute = route.replacingGeneration(nextGeneration)
+        guard MobileSessionRoute(nextRoute) != nil else { return }
+        generation = nextGeneration
+        activeRouteID = nextRoute
+        NotificationCenter.default.post(
+            name: Self.generationDidChange,
+            object: nil,
+            userInfo: ["oldSessionID": previous, "newSessionID": nextRoute]
+        )
     }
 
     private func apply(_ effects: [RuntimeWriterGate.Effect], on connection: RuntimeConnection) {

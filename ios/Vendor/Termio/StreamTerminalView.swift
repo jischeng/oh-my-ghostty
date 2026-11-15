@@ -36,6 +36,9 @@ final class StreamTerminalView: UIView, UITextInput {
     fileprivate var needsFullDraw = true
     private var lastViewport: TerminalGrid?
     private var scrollRemainder: CGFloat = 0
+    private var hostAllowsRendering = true
+    private var isAppInBackground = false
+    private var lifecycleObservers: [NSObjectProtocol] = []
     /// Incremental IME composition state (draws preedit overlay without invalidating cached rows).
     fileprivate var imeState = TermiodStreamIMEState()
     weak var inputDelegate: UITextInputDelegate?
@@ -49,9 +52,17 @@ final class StreamTerminalView: UIView, UITextInput {
         }
     }
 
+    override var isHidden: Bool {
+        didSet {
+            guard isHidden != oldValue else { return }
+            updateDisplayLinkPaused()
+        }
+    }
+
     init(appearance: TermiodStreamRenderer.Appearance) {
         super.init(frame: .zero)
         accessibilityIdentifier = "terminal.stream"
+        isAppInBackground = UIApplication.shared.applicationState == .background
         metalLayer?.pixelFormat = .bgra8Unorm
         // Theme colors are sRGB values, as the embedded surface treats them.
         metalLayer?.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
@@ -70,6 +81,39 @@ final class StreamTerminalView: UIView, UITextInput {
         addGestureRecognizer(UILongPressGestureRecognizer(target: self, action: #selector(longPressed(_:))))
         inputAssistantItem.leadingBarButtonGroups = []
         inputAssistantItem.trailingBarButtonGroups = []
+        lifecycleObservers = [
+            NotificationCenter.default.addObserver(
+                forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.isAppInBackground = true
+                    self?.updateDisplayLinkPaused()
+                }
+            },
+            NotificationCenter.default.addObserver(
+                forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.isAppInBackground = false
+                    self?.updateDisplayLinkPaused()
+                }
+            },
+            NotificationCenter.default.addObserver(
+                forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.isAppInBackground = false
+                    self?.updateDisplayLinkPaused()
+                }
+            },
+        ]
+    }
+
+    deinit {
+        displayLink?.invalidate()
+        for observer in lifecycleObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 
     @available(*, unavailable)
@@ -110,13 +154,45 @@ final class StreamTerminalView: UIView, UITextInput {
         }
     }
 
+    private var shouldPauseDisplayLink: Bool {
+        MobileStreamDisplayLinkPolicy.shouldPause(
+            hasWindow: window != nil,
+            isHidden: isHidden,
+            hostAllowsRendering: hostAllowsRendering,
+            isAppInBackground: isAppInBackground
+        )
+    }
+
+    var isDisplayLinkPaused: Bool {
+        displayLink?.isPaused ?? true
+    }
+
+    func setRenderingActive(_ active: Bool) {
+        guard hostAllowsRendering != active else { return }
+        hostAllowsRendering = active
+        updateDisplayLinkPaused()
+    }
+
+    private func updateDisplayLinkPaused() {
+        let shouldPause = shouldPauseDisplayLink
+        guard let link = displayLink else { return }
+        if link.isPaused != shouldPause {
+            link.isPaused = shouldPause
+            if !shouldPause {
+                needsFullDraw = true
+            }
+        }
+    }
+
     override func didMoveToWindow() {
         super.didMoveToWindow()
         displayLink?.invalidate()
         displayLink = nil
         guard let window else { return }
+        isAppInBackground = UIApplication.shared.applicationState == .background
         metalLayer?.contentsScale = window.screen.scale
         let link = CADisplayLink(target: self, selector: #selector(tick))
+        link.isPaused = shouldPauseDisplayLink
         link.add(to: .main, forMode: .common)
         displayLink = link
         needsFullDraw = true
@@ -146,7 +222,8 @@ final class StreamTerminalView: UIView, UITextInput {
     }
 
     @objc private func tick() {
-        guard let renderer, let metalLayer, let terminal = terminal() else { return }
+        guard !shouldPauseDisplayLink,
+              let renderer, let metalLayer, let terminal = terminal() else { return }
         let identity = ObjectIdentifier(terminal)
         let replaced = identity != drawnTerminal
         drawnTerminal = identity

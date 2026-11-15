@@ -68,6 +68,7 @@ final class ProjectListViewController: UIViewController {
     private var linkStateObserver: NSObjectProtocol?
     private var themeObserver: NSObjectProtocol?
     private var workspaceObserver: NSObjectProtocol?
+    private var swipeReloadGate = MobileSwipeReloadGate()
 
     init(store: RosterStore, scope: WorkspaceScope) {
         self.store = store
@@ -76,6 +77,11 @@ final class ProjectListViewController: UIViewController {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        flushDeferredReloadIfReady()
+    }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
@@ -125,6 +131,7 @@ final class ProjectListViewController: UIViewController {
     }
 
     func refresh() {
+        guard swipeReloadGate.shouldReloadNow(isTableEditing: tableView.isEditing) else { return }
         tableView.reloadData()
     }
 
@@ -303,6 +310,7 @@ final class ProjectListViewController: UIViewController {
     ///
     /// The roster's order is the Mac sidebar's order; "Name" re-sorts locally.
     private func refilter() {
+        guard swipeReloadGate.shouldReloadNow(isTableEditing: tableView.isEditing) else { return }
         // Read straight from the store, past the workspace scope. "Needs You" is
         // the cross-workspace question the phone is opened to answer, so it is
         // never scoped — a blocked agent in a workspace that isn't on screen is
@@ -320,6 +328,12 @@ final class ProjectListViewController: UIViewController {
         updateTitle()
         tableView.reloadData()
         updateEmptyState()
+    }
+
+    private func flushDeferredReloadIfReady() {
+        if swipeReloadGate.consumeDeferredReloadIfReady(isTableEditing: tableView.isEditing) {
+            refilter()
+        }
     }
 
     private func configureFab() {
@@ -689,11 +703,30 @@ extension ProjectListViewController: UITableViewDataSource, UITableViewDelegate 
         }
         guard let sessionID else { return nil }
         let close = UIContextualAction(style: .destructive, title: localized("Close")) { [weak self] _, _, done in
-            self?.store.stopSession(sessionID)
+            guard let self else {
+                done(false)
+                return
+            }
+            let hadDeferred = self.swipeReloadGate.hasDeferredReload
+            self.swipeReloadGate.beginSwipeAction()
+            defer { self.swipeReloadGate.endSwipeAction() }
+            self.store.stopSession(sessionID)
+            if hadDeferred && self.swipeReloadGate.hasDeferredReload {
+                self.refilter()
+            }
             done(true)
         }
         close.image = UIImage(systemName: "xmark.circle")
         return UISwipeActionsConfiguration(actions: [close])
+    }
+
+    func tableView(_ tableView: UITableView, didEndEditingRowAt indexPath: IndexPath?) {
+        flushDeferredReloadIfReady()
+        if swipeReloadGate.hasDeferredReload {
+            DispatchQueue.main.async { [weak self] in
+                self?.flushDeferredReloadIfReady()
+            }
+        }
     }
 
     /// Long-press a project for its new-session menu, or a session to close it.

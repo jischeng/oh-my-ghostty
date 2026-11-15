@@ -21,6 +21,7 @@ final class ProjectDetailViewController: UIViewController {
     private let emptyState = ListEmptyStateView()
     private var rosterObserver: NSObjectProtocol?
     private var themeObserver: NSObjectProtocol?
+    private var swipeReloadGate = MobileSwipeReloadGate()
 
     /// `project` is the caller's row — the live roster entry at push time.
     init(store: RosterStore, project: MockProject) {
@@ -31,6 +32,11 @@ final class ProjectDetailViewController: UIViewController {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        flushDeferredReloadIfReady()
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -58,6 +64,7 @@ final class ProjectDetailViewController: UIViewController {
     }
 
     func refresh() {
+        guard swipeReloadGate.shouldReloadNow(isTableEditing: tableView.isEditing) else { return }
         tableView.reloadData()
     }
 
@@ -66,6 +73,7 @@ final class ProjectDetailViewController: UIViewController {
     /// the store's last roster, so it doesn't land here) — and a page with no
     /// subject pops back to the root.
     private func reload() {
+        guard swipeReloadGate.shouldReloadNow(isTableEditing: tableView.isEditing) else { return }
         guard let live = store.project(forKey: projectKey) else {
             navigationController?.popToRootViewController(animated: true)
             return
@@ -74,6 +82,12 @@ final class ProjectDetailViewController: UIViewController {
         addButton.isHidden = store.deviceEndpoint == nil || project.rosterID == nil
         tableView.reloadData()
         updateEmptyState()
+    }
+
+    private func flushDeferredReloadIfReady() {
+        if swipeReloadGate.consumeDeferredReloadIfReady(isTableEditing: tableView.isEditing) {
+            reload()
+        }
     }
 
     // MARK: - Top bar (back + title)
@@ -273,11 +287,30 @@ extension ProjectDetailViewController: UITableViewDataSource, UITableViewDelegat
               let sessionID = project.sessions[indexPath.row].rosterID
         else { return nil }
         let close = UIContextualAction(style: .destructive, title: localized("Close")) { [weak self] _, _, done in
-            self?.store.stopSession(sessionID)
+            guard let self else {
+                done(false)
+                return
+            }
+            let hadDeferred = self.swipeReloadGate.hasDeferredReload
+            self.swipeReloadGate.beginSwipeAction()
+            defer { self.swipeReloadGate.endSwipeAction() }
+            self.store.stopSession(sessionID)
+            if hadDeferred && self.swipeReloadGate.hasDeferredReload {
+                self.reload()
+            }
             done(true)
         }
         close.image = UIImage(systemName: "xmark.circle")
         return UISwipeActionsConfiguration(actions: [close])
+    }
+
+    func tableView(_ tableView: UITableView, didEndEditingRowAt indexPath: IndexPath?) {
+        flushDeferredReloadIfReady()
+        if swipeReloadGate.hasDeferredReload {
+            DispatchQueue.main.async { [weak self] in
+                self?.flushDeferredReloadIfReady()
+            }
+        }
     }
 
     func tableView(

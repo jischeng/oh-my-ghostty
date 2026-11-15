@@ -79,7 +79,7 @@ def main():
             pid_file = directory / "desktop.pid"
             startup_command = (
                 f'cd {project}; printf "%s" "$$" > {pid_file}; printf "OMG VM desktop ready\\n"; '
-                "printf '\\033]7501;state=working:app=codex:id=mobile-agent-fixture\\007'"
+                "printf '\\033]7501;state=working:app=codex:id=mobile-agent-fixture\\007'; read -r _"
             )
             gui_type(startup_command, new_window=True)
             last_probe = time.monotonic()

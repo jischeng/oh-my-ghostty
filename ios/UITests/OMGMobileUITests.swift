@@ -82,7 +82,11 @@ final class OMGMobileUITests: XCTestCase {
         XCTAssertTrue(app.buttons["tab"].waitForExistence(timeout: 5))
         let marker = "\\115\\117\\102\\111\\114\\105\\137\\125\\111\\137\\105\\130\\105\\103\\125\\124\\105\\104"
         let status = usingVM ? "\\033]7501;state=blocked:app=claude:id=mobile-agent-fixture:kind=permission\\007" : ""
-        app.typeText("printf '\(marker) pid=%s\\n\(status)' \"$$\"\n")
+        if usingVM {
+            app.typeText("\nprintf '\(marker) pid=%s\\n\(status)' \"$$\"; read -r _\n")
+        } else {
+            app.typeText("printf '\(marker) pid=%s\\n\(status)' \"$$\"\n")
+        }
         if usingVM {
             app.buttons["terminal.back"].tap()
             assertRow(app, agent: "Claude Code", state: "Needs You")
@@ -91,7 +95,7 @@ final class OMGMobileUITests: XCTestCase {
                 NSPredicate(format: "label == %@", "Needs You")).firstMatch.waitForExistence(timeout: 10))
             capture(app, "Upstream Needs You populated by the omgd holder facts")
             openSessionTerminal(app)
-            app.typeText("printf '\\115\\117\\102\\111\\114\\105\\137\\122\\105\\101\\104\\131\\137\\106\\117\\122\\137\\115\\101\\103\\n'\n")
+            app.typeText("\nprintf '\\115\\117\\102\\111\\114\\105\\137\\122\\105\\101\\104\\131\\137\\106\\117\\122\\137\\115\\101\\103\\n'\n")
         }
         expectation(for: NSPredicate(format: "value == %@", "Read Only"),
                     evaluatedWith: app.staticTexts["terminal.title"])
@@ -125,7 +129,7 @@ final class OMGMobileUITests: XCTestCase {
             assertRow(app, agent: "Pi", state: "Idle")
             openSessionTerminal(app)
             let reconnect = "\\115\\117\\102\\111\\114\\105\\137\\122\\105\\103\\117\\116\\116\\105\\103\\124\\105\\104"
-            app.typeText("printf '\(reconnect) pid=%s\\n\\033]7501;state=working:app=antigravity:id=mobile-agent-fixture\\007' \"$$\"\n")
+            app.typeText("printf '\(reconnect) pid=%s\\n\\033]7501;state=working:app=antigravity:id=mobile-agent-fixture\\007' \"$$\"; read -r _\n")
             app.buttons["terminal.back"].tap()
             assertRow(app, agent: "Antigravity", state: "Working")
             capture(app, "Upstream project sessions after restoring and updating agent state")

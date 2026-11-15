@@ -389,4 +389,100 @@ final class TerminalTests: XCTestCase {
         let wheelString = try XCTUnwrap(String(data: wheelBytes, encoding: .utf8))
         XCTAssertTrue(wheelString.hasPrefix("\u{1b}[<65;"))
     }
+
+    func testReconnectPolicyBacksOffOnPostUpgradeAndPostSnapshotStreamErrorsUntilHealthyUptime() {
+        var policy = ReconnectPolicy()
+        let exact = 1.0...1.0
+
+        // 1. Repeated HTTP 101 upgrades that drop or resync before protocol readiness
+        //    (e.g. unexpected `'Q'` or missing `'S'`) MUST advance exponential backoff
+        //    (`0.5 -> 1 -> 2 -> 4 -> 5 -> 5 -> 30s`) instead of spinning at ~2 Hz (`0.5s`)!
+        var delaysBeforeReady: [Double] = []
+        var now: TimeInterval = 100
+        for _ in 0..<7 {
+            policy.noteSocketOpened(at: now, requiresProtocolReady: true)
+            now += 0.02
+            let delay = policy.nextDelayAfterDrop(at: now, ceiling: 30, jitter: exact)
+            delaysBeforeReady.append(delay)
+            now += delay
+        }
+        XCTAssertEqual(delaysBeforeReady, [0.5, 1.0, 2.0, 4.0, 5.0, 5.0, 30.0])
+        XCTAssertEqual(policy.attempts, 7)
+
+        // 2. Even if `'S'` (`noteProtocolReady`) arrives right before a stream error in the same
+        //    attach burst (e.g. `'G'` activity with >64 records or invalid sequence 10ms after `'S'`),
+        //    uptime < `minimumHealthyUptime` (5s) MUST NOT reset `attempts` to 0!
+        policy.noteSocketOpened(at: now, requiresProtocolReady: true)
+        policy.noteProtocolReady(at: now + 0.01)
+        XCTAssertFalse(policy.hasSustainedHealthyConnection(at: now + 0.02))
+        let postBurstErrorDelay = policy.nextDelayAfterDrop(at: now + 0.02, ceiling: 30, jitter: exact)
+        XCTAssertEqual(postBurstErrorDelay, 30.0, "Immediate post-snapshot stream error must stay backed off")
+        XCTAssertEqual(policy.attempts, 8)
+
+        // 3. Opening a session stream on an already-ready catalogue link (`requireFreshProtocolReady()`)
+        //    clears prior readiness until the session's `'S'` arrives and sustains healthy uptime.
+        now += 30.0
+        policy.noteSocketOpened(at: now, requiresProtocolReady: true)
+        policy.noteProtocolReady(at: now + 0.05) // `'L'` arrived while session == nil
+        policy.requireFreshProtocolReady()       // `'U'` sent to attach session
+        XCTAssertFalse(policy.hasSustainedHealthyConnection(at: now + 10.0))
+
+        // 4. Once `'S'` arrives AND the stream stays healthy for >= `minimumHealthyUptime` (5s),
+        //    a later transient Wi-Fi drop resets `attempts` back to the fast `0.5s` burst.
+        policy.noteProtocolReady(at: now + 0.10)
+        XCTAssertTrue(policy.hasSustainedHealthyConnection(at: now + 5.20))
+        let recoveredDropDelay = policy.nextDelayAfterDrop(at: now + 5.20, ceiling: 30, jitter: exact)
+        XCTAssertEqual(recoveredDropDelay, 0.5)
+        XCTAssertEqual(policy.attempts, 1)
+    }
+
+    func testReconnectPolicyPreservesProtocolReadyAndStrictGateWhenCallbacksRaceNoteSocketOpened() {
+        var policy = ReconnectPolicy()
+        let exact = 1.0...1.0
+
+        // Seed non-zero backoff attempts.
+        _ = policy.nextDelay(ceiling: 30, jitter: exact)
+        _ = policy.nextDelay(ceiling: 30, jitter: exact)
+        XCTAssertEqual(policy.attempts, 2)
+
+        // Case 1 (`delegateQueue == .main` fast local link): `connect()` calls `beginConnectAttempt`,
+        // then `onOpen` + first frame (`noteProtocolReady`) arrive before an async `noteSocketOpened`.
+        // `noteSocketOpened` MUST NOT wipe `protocolReadyAt`!
+        let t0: TimeInterval = 500
+        policy.beginConnectAttempt(requiresProtocolReady: true)
+        policy.requireFreshProtocolReady()
+        policy.noteProtocolReady(at: t0 + 0.01)
+        policy.noteSocketOpened(at: t0, requiresProtocolReady: true)
+
+        XCTAssertFalse(policy.hasSustainedHealthyConnection(at: t0 + 1.0))
+        XCTAssertTrue(
+            policy.hasSustainedHealthyConnection(at: t0 + 5.05),
+            "Late noteSocketOpened must preserve earlier protocolReadyAt on the same connection attempt"
+        )
+        XCTAssertEqual(policy.nextDelayAfterDrop(at: t0 + 5.05, ceiling: 30, jitter: exact), 0.5)
+        XCTAssertEqual(policy.attempts, 1)
+
+        // Case 2 (`delegateQueue == nil` background delegate): `beginConnectAttempt(requiresProtocolReady: false)`
+        // followed by `onOpen` calling `requireFreshProtocolReady()` ahead of `noteSocketOpened(..., requiresProtocolReady: false)`.
+        // `noteSocketOpened` MUST NOT downgrade `requiresProtocolReady` back to `false`!
+        let t1: TimeInterval = 600
+        _ = policy.nextDelay(ceiling: 30, jitter: exact) // attempts == 2
+        policy.beginConnectAttempt(requiresProtocolReady: false)
+        policy.requireFreshProtocolReady()
+        policy.noteSocketOpened(at: t1, requiresProtocolReady: false)
+
+        // Even after >5s of raw TCP uptime, protocolReady was required and never arrived -> must NOT be healthy!
+        XCTAssertFalse(
+            policy.hasSustainedHealthyConnection(at: t1 + 10.0),
+            "Late noteSocketOpened(requiresProtocolReady: false) must not downgrade requireFreshProtocolReady()"
+        )
+        XCTAssertEqual(policy.nextDelayAfterDrop(at: t1 + 10.0, ceiling: 30, jitter: exact), 2.0)
+        XCTAssertEqual(policy.attempts, 3)
+
+        // Starting the next connect attempt resets per-attempt state cleanly.
+        let t2: TimeInterval = 700
+        policy.beginConnectAttempt(requiresProtocolReady: false)
+        policy.noteSocketOpened(at: t2, requiresProtocolReady: false)
+        XCTAssertTrue(policy.hasSustainedHealthyConnection(at: t2 + 5.1))
+    }
 }

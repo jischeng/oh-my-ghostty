@@ -490,4 +490,84 @@ final class RuntimeFrameTests: XCTestCase {
         ))
         XCTAssertNil(disappearing.declaredViewport)
     }
+
+    func testStreamDisplayLinkPausePolicyCoversWindowVisibilityHostParkingAndAppBackground() {
+        // Active foreground visible terminal: displayLink runs unpaused.
+        XCTAssertFalse(
+            MobileStreamDisplayLinkPolicy.shouldPause(
+                hasWindow: true,
+                isHidden: false,
+                hostAllowsRendering: true,
+                isAppInBackground: false
+            )
+        )
+
+        // Off-window view: paused.
+        XCTAssertTrue(
+            MobileStreamDisplayLinkPolicy.shouldPause(
+                hasWindow: false,
+                isHidden: false,
+                hostAllowsRendering: true,
+                isAppInBackground: false
+            )
+        )
+
+        // Parked terminal kept in window with `view.isHidden = true`: paused (no 60-120 Hz spin).
+        XCTAssertTrue(
+            MobileStreamDisplayLinkPolicy.shouldPause(
+                hasWindow: true,
+                isHidden: true,
+                hostAllowsRendering: true,
+                isAppInBackground: false
+            )
+        )
+
+        // Parked via `RootContainerViewController.open(_:)` / `goHome()` (`hostAllowsRendering == false`): paused immediately.
+        XCTAssertTrue(
+            MobileStreamDisplayLinkPolicy.shouldPause(
+                hasWindow: true,
+                isHidden: false,
+                hostAllowsRendering: false,
+                isAppInBackground: false
+            )
+        )
+
+        // App entered background while terminal is visible on screen: paused.
+        XCTAssertTrue(
+            MobileStreamDisplayLinkPolicy.shouldPause(
+                hasWindow: true,
+                isHidden: false,
+                hostAllowsRendering: true,
+                isAppInBackground: true
+            )
+        )
+    }
+
+    func testSwipeReloadGateDefersBackgroundReloadsWhileSwipeEditingAndAllowsExplicitSwipeClose() {
+        var gate = MobileSwipeReloadGate()
+
+        // Normal non-editing updates reload immediately.
+        XCTAssertTrue(gate.shouldReloadNow(isTableEditing: false))
+        XCTAssertFalse(gate.hasDeferredReload)
+
+        // While user has swiped a row open (`isTableEditing == true`), background roster pushes defer.
+        XCTAssertFalse(gate.shouldReloadNow(isTableEditing: true))
+        XCTAssertTrue(gate.hasDeferredReload)
+        XCTAssertFalse(gate.consumeDeferredReloadIfReady(isTableEditing: true))
+
+        // Dismissing swipe without closing flushes the deferred reload once editing ends.
+        XCTAssertTrue(gate.consumeDeferredReloadIfReady(isTableEditing: false))
+        XCTAssertFalse(gate.hasDeferredReload)
+        XCTAssertFalse(gate.consumeDeferredReloadIfReady(isTableEditing: false))
+
+        // Tapping "Close" between `beginSwipeAction()` and `endSwipeAction()` reloads immediately
+        // even while `isTableEditing == true`, without overlapping struct mutation.
+        XCTAssertFalse(gate.shouldReloadNow(isTableEditing: true))
+        XCTAssertTrue(gate.hasDeferredReload)
+        gate.beginSwipeAction()
+        XCTAssertTrue(gate.shouldReloadNow(isTableEditing: true))
+        gate.endSwipeAction()
+        XCTAssertFalse(gate.isPerformingSwipeAction)
+        XCTAssertFalse(gate.hasDeferredReload)
+    }
 }

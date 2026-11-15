@@ -383,3 +383,51 @@ public struct MobileTerminalViewportPolicy: Equatable, Sendable {
         )
     }
 }
+
+/// Pure gating policy for `StreamTerminalView`'s `CADisplayLink` so parked terminals,
+/// hidden views, and backgrounded app states never spin at 60–120 Hz on `RunLoop.main`.
+public enum MobileStreamDisplayLinkPolicy {
+    public static func shouldPause(
+        hasWindow: Bool,
+        isHidden: Bool,
+        hostAllowsRendering: Bool,
+        isAppInBackground: Bool
+    ) -> Bool {
+        !hasWindow || isHidden || !hostAllowsRendering || isAppInBackground
+    }
+}
+
+/// Defers background roster/table reloads while a row's swipe contextual action
+/// (`tableView.isEditing`) is open so background pushes never cancel swipe-to-close,
+/// while allowing explicit user-initiated swipe-close commits through immediately.
+public struct MobileSwipeReloadGate: Sendable {
+    public private(set) var hasDeferredReload = false
+    public private(set) var isPerformingSwipeAction = false
+
+    public init() {}
+
+    public mutating func shouldReloadNow(isTableEditing: Bool) -> Bool {
+        if isTableEditing && !isPerformingSwipeAction {
+            hasDeferredReload = true
+            return false
+        }
+        hasDeferredReload = false
+        return true
+    }
+
+    public mutating func beginSwipeAction() {
+        isPerformingSwipeAction = true
+    }
+
+    public mutating func endSwipeAction() {
+        isPerformingSwipeAction = false
+    }
+
+    public mutating func consumeDeferredReloadIfReady(isTableEditing: Bool) -> Bool {
+        guard hasDeferredReload, !isTableEditing, !isPerformingSwipeAction else {
+            return false
+        }
+        hasDeferredReload = false
+        return true
+    }
+}

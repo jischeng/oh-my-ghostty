@@ -97,9 +97,7 @@ final class RootContainerViewController: UIViewController {
     /// phone those add up fast, and libghostty answers memory exhaustion by
     /// replacing the surface with its own "non-functional" panic screen — so
     /// keep the cache small.
-    private var recentTerminals: [String: UIViewController] = [:]
-    private var recentKeys: [String] = []
-    private let maxRecentTerminals = 2
+    private var recentTerminals = MobileRecentTerminalCache<UIViewController>(maxCount: 2)
 
     /// The terminal currently slid in over the list, or nil when the list is
     /// the top screen. Tracked directly (not via the key) so keyless demo
@@ -109,9 +107,10 @@ final class RootContainerViewController: UIViewController {
     private var themeObserver: NSObjectProtocol?
     private var pairingObserver: NSObjectProtocol?
     private var rosterObserver: NSObjectProtocol?
+    private var generationObserver: NSObjectProtocol?
 
     deinit {
-        for observer in [themeObserver, pairingObserver, rosterObserver].compactMap({ $0 }) {
+        for observer in [themeObserver, pairingObserver, rosterObserver, generationObserver].compactMap({ $0 }) {
             NotificationCenter.default.removeObserver(observer)
         }
     }
@@ -151,7 +150,7 @@ final class RootContainerViewController: UIViewController {
             // Every session is the terminal itself (the iSH pattern): the
             // agent's TUI is already the conversation UI, keys go straight in.
             let screen: UIViewController
-            if let parked = recentTerminals[session.key] {
+            if let parked = recentTerminals.screen(forKey: session.key) {
                 (parked as? TerminalViewController)?.updateSession(session)
                 screen = parked
             } else if let endpoint {
@@ -170,6 +169,17 @@ final class RootContainerViewController: UIViewController {
         }
         store.start()
 
+        generationObserver = NotificationCenter.default.addObserver(
+            forName: OMGSession.generationDidChange, object: nil, queue: .main
+        ) { [weak self] note in
+            MainActor.assumeIsolated {
+                guard let self,
+                      let oldID = note.userInfo?["oldSessionID"] as? String,
+                      let newID = note.userInfo?["newSessionID"] as? String else { return }
+                self.adoptResurrectedGeneration(from: oldID, to: newID)
+            }
+        }
+
         // Switching (or forgetting) a Mac orphans every terminal screen: each
         // one's socket and session ids belong to the previous link. Drop them
         // all; the new roster repopulates the lists.
@@ -180,10 +190,39 @@ final class RootContainerViewController: UIViewController {
         }
     }
 
+    private func adoptResurrectedGeneration(from oldSessionID: String, to newSessionID: String) {
+        let result = recentTerminals.adoptResurrectedGeneration(
+            from: oldSessionID,
+            to: newSessionID,
+            activeScreen: activeScreen
+        )
+        for stale in result.evicted {
+            evict(stale)
+        }
+        let target: UIViewController?
+        if let rekeyed = result.rekeyed {
+            target = rekeyed
+        } else if let active = activeScreen as? TerminalViewController,
+                  active.session.rosterID == oldSessionID || active.session.rosterID == newSessionID {
+            target = active
+        } else {
+            target = nil
+        }
+        if let terminal = target as? TerminalViewController {
+            if let latest = store.projects.lazy.flatMap(\.sessions).first(where: { $0.key == newSessionID }) {
+                terminal.updateSession(latest)
+            } else {
+                terminal.adoptResurrectedSessionID(newSessionID)
+            }
+        }
+        if let target, activeScreen === target, store.currentSessionKey != newSessionID {
+            store.currentSessionKey = newSessionID
+            refreshHomeLists()
+        }
+    }
+
     private func dropTerminalsForPairingChange() {
-        let parked = recentTerminals.values
-        recentTerminals.removeAll()
-        recentKeys.removeAll()
+        let parked = recentTerminals.removeAll()
         for screen in parked where screen !== activeScreen {
             evict(screen)
         }
@@ -192,17 +231,21 @@ final class RootContainerViewController: UIViewController {
     }
 
     private func syncCachedTerminalsWithRoster() {
-        guard !recentTerminals.isEmpty else { return }
         var sessionsByKey: [String: MockSession] = [:]
         for project in store.projects {
             for session in project.sessions {
                 sessionsByKey[session.key] = session
             }
         }
-        for (key, screen) in recentTerminals {
+        for (key, screen) in recentTerminals.entries {
             if let latest = sessionsByKey[key] {
                 (screen as? TerminalViewController)?.updateSession(latest)
             }
+        }
+        if let active = activeScreen as? TerminalViewController,
+           !recentTerminals.contains(active),
+           let latest = sessionsByKey[active.session.key] {
+            active.updateSession(latest)
         }
     }
 
@@ -213,13 +256,9 @@ final class RootContainerViewController: UIViewController {
     /// down detached and idle.
     override func didReceiveMemoryWarning() {
         super.didReceiveMemoryWarning()
-        let survivor = recentTerminals.first { $0.value === activeScreen }?.key
-        for key in recentKeys where key != survivor {
-            if let screen = recentTerminals.removeValue(forKey: key) {
-                evict(screen)
-            }
+        for screen in recentTerminals.evictInactive(keeping: activeScreen) {
+            evict(screen)
         }
-        recentKeys = survivor.map { [$0] } ?? []
     }
 
     // MARK: - Content
@@ -229,20 +268,42 @@ final class RootContainerViewController: UIViewController {
     /// cache. One conversation at a time, like Messages.
     func open(_ screen: UIViewController, sessionKey: String? = nil, animated: Bool = true) {
         loadViewIfNeeded()
-        guard activeScreen !== screen else { return }
-        dismissWorkspaceRailImmediately()
-
-        if let sessionKey {
-            recentTerminals[sessionKey] = screen
-            recentKeys.removeAll { $0 == sessionKey }
-            recentKeys.append(sessionKey)
-            // Evict the coldest parked screen (never the incoming one). It
-            // tears down detached and idle — no in-flight frames to race.
-            while recentKeys.count > maxRecentTerminals {
-                let coldest = recentKeys.removeFirst()
-                if let cold = recentTerminals.removeValue(forKey: coldest), cold !== screen {
+        if activeScreen === screen {
+            if let sessionKey {
+                for cold in recentTerminals.recordOpen(screen, forKey: sessionKey) {
                     evict(cold)
                 }
+                if store.currentSessionKey != sessionKey {
+                    store.currentSessionKey = sessionKey
+                    refreshHomeLists()
+                }
+            }
+            return
+        }
+        dismissWorkspaceRailImmediately()
+
+        let previous = activeScreen
+        if let previous {
+            (previous as? TerminalViewController)?.suspendForParking()
+            activeScreen = nil
+            if interactiveBackScreen === previous {
+                interactiveBackScreen = nil
+            }
+        }
+
+        if let sessionKey {
+            // Evict the coldest parked screen (never the incoming one). It
+            // tears down detached and idle — no in-flight frames to race.
+            for cold in recentTerminals.recordOpen(screen, forKey: sessionKey) where cold !== previous {
+                evict(cold)
+            }
+        }
+        if let previous, previous.parent === self {
+            if recentTerminals.contains(previous) {
+                previous.view.isHidden = true
+                previous.view.frame = view.bounds.offsetBy(dx: view.bounds.width, dy: 0)
+            } else {
+                evict(previous)
             }
         }
         if let terminal = screen as? TerminalViewController {
@@ -292,15 +353,18 @@ final class RootContainerViewController: UIViewController {
     /// otherwise it is torn down.
     private func goHome(animated: Bool = true) {
         guard let screen = activeScreen else { return }
-        (screen as? TerminalViewController)?.setRuntimeRendering(false)
+        (screen as? TerminalViewController)?.suspendForParking()
         activeScreen = nil
+        if interactiveBackScreen === screen {
+            interactiveBackScreen = nil
+        }
         store.currentSessionKey = nil
         refreshHomeLists()
 
-        let parked = recentTerminals.contains { $0.value === screen }
         let offscreen = view.bounds.offsetBy(dx: view.bounds.width, dy: 0)
-        let finish = {
-            if parked {
+        let finish = { [weak self] in
+            guard let self, self.activeScreen !== screen else { return }
+            if self.recentTerminals.contains(screen) {
                 screen.view.isHidden = true // stays in the window: surface alive
             } else {
                 self.evict(screen)
@@ -586,12 +650,11 @@ final class RootContainerViewController: UIViewController {
         let currentX = screen.view.frame.origin.x
 
         if commit {
-            (screen as? TerminalViewController)?.setRuntimeRendering(false)
+            (screen as? TerminalViewController)?.suspendForParking()
             // Teardown deferred from goHome to here (only once the drag commits).
             if activeScreen === screen { activeScreen = nil }
             store.currentSessionKey = nil
             refreshHomeLists()
-            let parked = recentTerminals.contains { $0.value === screen }
             let offscreen = view.bounds.offsetBy(dx: width, dy: 0)
             let remaining = max(1, width - currentX)
             let v = min(max(velocityX / remaining, 0), 30)
@@ -599,8 +662,9 @@ final class RootContainerViewController: UIViewController {
                            usingSpringWithDamping: 0.9, initialSpringVelocity: v,
                            options: .curveEaseOut,
                            animations: { screen.view.frame = offscreen },
-                           completion: { _ in
-                if parked {
+                           completion: { [weak self] _ in
+                guard let self, self.activeScreen !== screen else { return }
+                if self.recentTerminals.contains(screen) {
                     screen.view.isHidden = true // stays in the window: surface alive
                 } else {
                     self.evict(screen)
@@ -622,10 +686,7 @@ final class RootContainerViewController: UIViewController {
     /// back, which parks the screen: drop it from the cache and, if it owned the
     /// screen, reveal the list.
     private func close(_ screen: UIViewController) {
-        if let key = recentTerminals.first(where: { $0.value === screen })?.key {
-            recentTerminals.removeValue(forKey: key)
-            recentKeys.removeAll { $0 == key }
-        }
+        recentTerminals.remove(screen: screen)
         if activeScreen === screen {
             goHome() // screen is no longer cached, so goHome evicts it
         } else {

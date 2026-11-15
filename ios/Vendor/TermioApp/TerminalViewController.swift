@@ -19,7 +19,7 @@ final class TerminalViewController: UIViewController {
         case device(DeviceEndpoint)
     }
 
-    private var session: MockSession
+    private(set) var session: MockSession
     private let backend: Backend
 
     /// Set by RootContainerViewController: the session DIED (exit or lost
@@ -131,6 +131,7 @@ final class TerminalViewController: UIViewController {
     /// Main-thread only — fed from the companion byte stream, read on key taps.
     private var altScreenSniffer = AlternateScreenSniffer()
     private var uploadClient: DeviceClient?
+    private var uploadClientSessionID: String?
     private var uploadQueue: [(name: String, data: Data)] = []
     private var uploadInFlight = false
     private var uploadTotal = 0
@@ -230,6 +231,7 @@ final class TerminalViewController: UIViewController {
         // toward the session's size. `didBecomeActive` rather than
         // `willEnterForeground` so a link reconnecting on that same
         // notification finds the viewport already declared.
+        applicationIsActive = UIApplication.shared.applicationState != .background
         lifecycleObservers = [
             NotificationCenter.default.addObserver(
                 forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
@@ -251,10 +253,16 @@ final class TerminalViewController: UIViewController {
     }
 
     /// The session counts this phone's viewport only while there is actually a
-    /// viewer: the screen is up *and* the app is frontmost.
+    /// viewer: the screen is up *and* the app is frontmost. Also pauses the
+    /// stream plane's `CADisplayLink` whenever parked or backgrounded.
     private func publishRendering() {
+        let active = screenIsShowing && applicationIsActive
+        streamView?.setRenderingActive(active)
+        if !active {
+            terminalView.cancelScrollPump()
+        }
         guard case .device = backend else { return }
-        companion?.setRendering(screenIsShowing && applicationIsActive)
+        companion?.setRendering(active)
     }
 
     func setRuntimeRendering(_ showing: Bool) {
@@ -266,6 +274,16 @@ final class TerminalViewController: UIViewController {
         }
         screenIsShowing = showing
         publishRendering()
+    }
+
+    /// Suspends rendering and resigns keyboard focus without emitting a parting
+    /// resize when `RootContainerViewController.open(_:)` parks an active screen.
+    func suspendForParking() {
+        isLeavingScreen = true
+        cancelPendingViewportDeclaration()
+        screenIsShowing = false
+        publishRendering()
+        inputSurface.resignFirstResponder()
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -615,10 +633,17 @@ final class TerminalViewController: UIViewController {
 
     func updateSession(_ newSession: MockSession) {
         let oldTitle = session.title
+        let sessionIdentityChanged = session.rosterID != newSession.rosterID
         let remoteChanged = session.remoteHost != newSession.remoteHost
             || session.remotePath != newSession.remotePath
         session = newSession
+        if sessionIdentityChanged, !uploadInFlight {
+            uploadClient?.stop()
+            uploadClient = nil
+            uploadClientSessionID = nil
+        }
         if isViewLoaded {
+            view.accessibilityIdentifier = "terminal.session.\(newSession.rosterID ?? newSession.key)"
             contextLabel.text = Self.headerContextText(for: newSession)
             if statusLabel.isHidden {
                 let compact = traitCollection.verticalSizeClass == .compact
@@ -634,6 +659,16 @@ final class TerminalViewController: UIViewController {
             overflowButton.isUserInteractionEnabled = hasActions
         }
         inspector.updateSession(newSession)
+    }
+
+    func adoptResurrectedSessionID(_ newSessionID: String) {
+        var updated = session
+        updated.rosterID = newSessionID
+        updated.isPaused = false
+        if updated.subtitle.hasPrefix("Paused · ") {
+            updated.subtitle = ""
+        }
+        updateSession(updated)
     }
 
     private func configureHeader() {
@@ -1086,11 +1121,18 @@ final class TerminalViewController: UIViewController {
         uploadQueue.removeFirst()
         uploadInFlight = true
         terminalView.keyBar.setAttachBusy(true, progress: (done: uploadDone, total: uploadTotal))
+        if uploadClient != nil, uploadClientSessionID != session.rosterID {
+            uploadClient?.stop()
+            uploadClient = nil
+            uploadClientSessionID = nil
+        }
         if uploadClient == nil {
             // Scoped to this session: a device files a transfer in the session's
             // own scratch directory and reaps it when the session dies, so a
             // pasted screenshot never outlives the conversation it belonged to.
-            let client = DeviceBackends.client(for: endpoint, sessionID: session.rosterID)
+            let targetSessionID = session.rosterID
+            let client = DeviceBackends.client(for: endpoint, sessionID: targetSessionID)
+            uploadClientSessionID = targetSessionID
             client.onUploaded = { [weak self] path in
                 guard let self else { return }
                 self.typeUploadedPath(path)
@@ -1408,6 +1450,7 @@ final class TerminalViewController: UIViewController {
                 self?.pasteIntoPrompt(text)
             }
             stream.addInteraction(editMenuInteraction)
+            stream.setRenderingActive(screenIsShowing && applicationIsActive)
             let hadKeyboard = terminalView.isFirstResponder
             terminalHost.addSubview(stream)
             streamView = stream
@@ -2270,8 +2313,16 @@ private final class DisplayTerminalView: UITerminalView {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
+        if window == nil {
+            stopScrollPump()
+            return
+        }
         installScrollHookIfNeeded()
         installPasteLongPressIfNeeded()
+    }
+
+    func cancelScrollPump() {
+        stopScrollPump()
     }
 
     /// The wrapper's own pan-to-scroll recognizer (direct touches, single

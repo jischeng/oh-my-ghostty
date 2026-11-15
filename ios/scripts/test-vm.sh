@@ -51,7 +51,7 @@ cleanup() {
     omg_vm_scp_from "$(omg_vm_ip)" "$guest_directory.log" "$evidence/fixture.log" 2>/dev/null || true
   fi
   if $vm_started; then
-    omg_vm_ssh 'rm -rf "$HOME/.config/oh-my-ghostty-dev"' >/dev/null 2>&1 || true
+    omg_vm_ssh 'pkill -TERM -x omgd 2>/dev/null || true; rm -rf "$HOME/.config/oh-my-ghostty-dev" "$HOME/.omg/run"' >/dev/null 2>&1 || true
     "$vm" down || result=1
   fi
   echo "Mobile VM evidence: $evidence"
@@ -113,10 +113,17 @@ for pid in $(pgrep -x omg || true); do
   done
   if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid"; fi
 done
+pkill -TERM -x omgd 2>/dev/null || true
+for attempt in {1..30}; do
+  pgrep -x omgd >/dev/null 2>&1 || break
+  sleep 0.1
+done
+pkill -KILL -x omgd 2>/dev/null || true
 defaults delete com.jischeng.omg.debug >/dev/null 2>&1 || true
 rm -rf "$HOME/Library/Application Support/OMG Dev" \
   "$HOME/Library/Saved Application State/com.jischeng.omg.debug.savedState" \
-  "$HOME/.config/oh-my-ghostty-dev"
+  "$HOME/.config/oh-my-ghostty-dev" \
+  "$HOME/.omg/run"
 mkdir -p "$HOME/.config/oh-my-ghostty-dev"
 echo '{"sessions.startupMode":"newTerminal"}' >"$HOME/.config/oh-my-ghostty-dev/settings.json"
 GUEST

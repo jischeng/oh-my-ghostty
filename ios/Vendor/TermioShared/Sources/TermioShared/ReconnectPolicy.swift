@@ -18,10 +18,79 @@ import Foundation
 /// just the fallback for the case events miss (lid reopened on the same Wi-Fi
 /// while the app is already foreground).
 public struct ReconnectPolicy {
+    /// Minimum healthy connection uptime (in seconds) required before a subsequent
+    /// drop resets the backoff attempt counter. Prevents ~2 Hz reconnect/resync loops
+    /// when HTTP 101 upgrades succeed (or a snapshot arrives) right before a stream error.
+    public static let defaultMinimumHealthyUptime: TimeInterval = 5
+
     /// Failed attempts since the last `reset()`. Exposed for logging/tests.
     public private(set) var attempts = 0
+    private var upgradedAt: TimeInterval?
+    private var protocolReadyAt: TimeInterval?
+    private var requiresProtocolReady = false
 
     public init() {}
+
+    /// Initializes per-connection state before dialing a new WebSocket task so
+    /// asynchronous open/read callbacks on the new task cannot clobber each other.
+    public mutating func beginConnectAttempt(requiresProtocolReady: Bool = false) {
+        upgradedAt = nil
+        protocolReadyAt = nil
+        self.requiresProtocolReady = requiresProtocolReady
+    }
+
+    /// Records an HTTP 101 WebSocket upgrade without resetting `attempts`, while
+    /// preserving any `protocolReadyAt` or stricter `requiresProtocolReady` flag
+    /// already recorded if protocol frames or `onOpen` raced ahead of upgrade bookkeeping.
+    public mutating func noteSocketOpened(
+        at uptime: TimeInterval,
+        requiresProtocolReady: Bool = false
+    ) {
+        upgradedAt = uptime
+        self.requiresProtocolReady = self.requiresProtocolReady || requiresProtocolReady
+    }
+
+    /// Records that the application protocol on the current socket reached a valid
+    /// baseline state (e.g. session snapshot `'S'` applied, or `'L'` catalogue decoded
+    /// when not attached to a session).
+    public mutating func noteProtocolReady(at uptime: TimeInterval) {
+        protocolReadyAt = uptime
+    }
+
+    /// Requires a fresh `noteProtocolReady(at:)` call before the current connection
+    /// can qualify as healthy (e.g. when opening a session stream on an already-open link).
+    public mutating func requireFreshProtocolReady() {
+        protocolReadyAt = nil
+        requiresProtocolReady = true
+    }
+
+    /// True only when the current connection reached readiness and stayed up without
+    /// dropping or resynchronizing for at least `minimumHealthyUptime`.
+    public func hasSustainedHealthyConnection(
+        at uptime: TimeInterval,
+        minimumHealthyUptime: TimeInterval = Self.defaultMinimumHealthyUptime
+    ) -> Bool {
+        let anchor = requiresProtocolReady ? protocolReadyAt : (protocolReadyAt ?? upgradedAt)
+        guard let anchor else { return false }
+        return uptime - anchor >= max(0, minimumHealthyUptime)
+    }
+
+    /// Computes the next backoff delay when a socket drops or resynchronizes.
+    /// Resets `attempts` first ONLY if the dropped connection had sustained healthy
+    /// operation; otherwise advances exponential backoff (`0.5 -> 1 -> 2 -> 4 -> 5 -> 30s`).
+    public mutating func nextDelayAfterDrop(
+        at uptime: TimeInterval,
+        minimumHealthyUptime: TimeInterval = Self.defaultMinimumHealthyUptime,
+        ceiling: Double = 30,
+        jitter: ClosedRange<Double> = 0.8...1.2
+    ) -> Double {
+        if hasSustainedHealthyConnection(at: uptime, minimumHealthyUptime: minimumHealthyUptime) {
+            attempts = 0
+        }
+        upgradedAt = nil
+        protocolReadyAt = nil
+        return nextDelay(ceiling: ceiling, jitter: jitter)
+    }
 
     /// The next backoff delay in seconds, with ±20% jitter, advancing the
     /// attempt counter. `0.5 → 1 → 2 → 4 → 5` for the first six tries (~17s of
@@ -39,5 +108,7 @@ public struct ReconnectPolicy {
     /// reachable again (foreground, network path up, a manual "Try Again").
     public mutating func reset() {
         attempts = 0
+        upgradedAt = nil
+        protocolReadyAt = nil
     }
 }

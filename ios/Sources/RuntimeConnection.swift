@@ -70,6 +70,7 @@ final class RuntimeConnection {
     var hasSession: Bool { session != nil }
     var isAttached: Bool { snapshotApplied }
     var supportsWriterTransfer: Bool { transferSupported }
+    var inFlightOpenGeneration: String? { attachment.stream != nil ? session?.generation : nil }
     private var snapshotApplied = false
     private var transferSupported = false
     private var activityAcknowledge = false
@@ -98,6 +99,7 @@ final class RuntimeConnection {
         config.maximumMessageSize = RuntimeFrame.maximumPayload + 13
         config.subprotocols = ["omg.\(token)"]
         config.pingRunLoopMode = .common
+        config.requiresProtocolReadyForBackoffReset = true
         link = WebSocketLink(configuration: config)
         link.onConnecting = { [weak self] in
             self?.resetConnection()
@@ -107,7 +109,11 @@ final class RuntimeConnection {
             guard let self else { return }
             send(RuntimeFrame(80))
             refresh()
-            if let session { open(session) }
+            // Defer re-opening a `"lost"` session whose resurrection (`'J'`) has
+            // not been confirmed yet until `'L'` delivers its current generation.
+            if let session, session.ended == nil {
+                open(session)
+            }
         }
         link.onData = { [weak self] data in self?.receive(data) }
         link.onDown = { [weak self] in
@@ -116,10 +122,15 @@ final class RuntimeConnection {
         }
         link.onForeground = { [weak self] in self?.refresh() }
     }
+    deinit {
+        heartbeat?.invalidate()
+        link.stop()
+    }
     func start() {
         guard !active else { return }
         active = true
         link.start()
+        heartbeat?.invalidate()
         heartbeat = Timer(timeInterval: 15, repeats: true) { [weak self] _ in self?.send(RuntimeFrame(80)) }
         if let heartbeat { RunLoop.main.add(heartbeat, forMode: .common) }
     }
@@ -135,6 +146,7 @@ final class RuntimeConnection {
     }
     func open(_ session: MobileSession) {
         if let previous = attachment.detach() { send(RuntimeFrame(81, previous)) }
+        link.requireProtocolReady()
         self.session = session
         sessionEnded = false
         snapshotApplied = false
@@ -219,7 +231,11 @@ final class RuntimeConnection {
             for frame in try decoder.append(data) {
                 switch frame.kind {
                 case 76:
-                    onSessions?(try JSONDecoder().decode([MobileSession].self, from: frame.data))
+                    let sessions = try JSONDecoder().decode([MobileSession].self, from: frame.data)
+                    onSessions?(sessions)
+                    if session == nil {
+                        link.noteProtocolReady()
+                    }
                 case 68 where attachment.accepts(frame):
                     var innerDecoder = RuntimeFrame.Decoder()
                     let frames = try innerDecoder.append(frame.data)
@@ -228,12 +244,10 @@ final class RuntimeConnection {
                     }
                     try receiveInner(frames[0])
                 case 69 where frame.sequence == 0 || attachment.accepts(frame):
-                    if frame.sequence != 0 {
-                        snapshotApplied = false
-                        isWriter = false
-                        onChange?()
-                    }
-                    onState?(.failed(String(data: frame.data, encoding: .utf8) ?? "Session error"))
+                    let message = String(data: frame.data, encoding: .utf8) ?? "Session error"
+                    stop()
+                    onState?(.failed(message))
+                    return
                 case 81 where attachment.accepts(frame):
                     snapshotApplied = false
                     isWriter = false
@@ -285,6 +299,7 @@ final class RuntimeConnection {
             })
             watermark.snapshot(frame.sequence)
             snapshotApplied = true
+            link.noteProtocolReady()
             inner(RuntimeFrame(65, frame.sequence))
             onChange?()
             onState?(.attached)

@@ -29,6 +29,7 @@ final class TerminalListViewController: UIViewController {
     private var scopeObserver: NSObjectProtocol?
     private var rosterObserver: NSObjectProtocol?
     private var themeObserver: NSObjectProtocol?
+    private var swipeReloadGate = MobileSwipeReloadGate()
 
     init(store: RosterStore) {
         self.store = store
@@ -36,6 +37,11 @@ final class TerminalListViewController: UIViewController {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        flushDeferredReloadIfReady()
+    }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
@@ -72,6 +78,7 @@ final class TerminalListViewController: UIViewController {
     }
 
     func refresh() {
+        guard swipeReloadGate.shouldReloadNow(isTableEditing: tableView.isEditing) else { return }
         tableView.reloadData()
     }
 
@@ -199,12 +206,19 @@ final class TerminalListViewController: UIViewController {
     }
 
     private func refilter() {
+        guard swipeReloadGate.shouldReloadNow(isTableEditing: tableView.isEditing) else { return }
         groups = store.terminalGroups
         // Shown whenever paired: New Terminal is project-less, so it no longer
         // needs an existing terminals container to land in (it seeds the first).
         newTerminalButton.isHidden = store.deviceEndpoint == nil
         tableView.reloadData()
         updateEmptyState()
+    }
+
+    private func flushDeferredReloadIfReady() {
+        if swipeReloadGate.consumeDeferredReloadIfReady(isTableEditing: tableView.isEditing) {
+            refilter()
+        }
     }
 
     /// Every terminal on screen, in section order.
@@ -433,10 +447,29 @@ extension TerminalListViewController: UITableViewDataSource, UITableViewDelegate
               let sessionID = session(at: indexPath)?.rosterID
         else { return nil }
         let close = UIContextualAction(style: .destructive, title: localized("Close")) { [weak self] _, _, done in
-            self?.store.stopSession(sessionID)
+            guard let self else {
+                done(false)
+                return
+            }
+            let hadDeferred = self.swipeReloadGate.hasDeferredReload
+            self.swipeReloadGate.beginSwipeAction()
+            defer { self.swipeReloadGate.endSwipeAction() }
+            self.store.stopSession(sessionID)
+            if hadDeferred && self.swipeReloadGate.hasDeferredReload {
+                self.refilter()
+            }
             done(true)
         }
         close.image = UIImage(systemName: "xmark.circle")
         return UISwipeActionsConfiguration(actions: [close])
+    }
+
+    func tableView(_ tableView: UITableView, didEndEditingRowAt indexPath: IndexPath?) {
+        flushDeferredReloadIfReady()
+        if swipeReloadGate.hasDeferredReload {
+            DispatchQueue.main.async { [weak self] in
+                self?.flushDeferredReloadIfReady()
+            }
+        }
     }
 }

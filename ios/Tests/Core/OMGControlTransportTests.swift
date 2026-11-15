@@ -106,6 +106,10 @@ struct OMGControlTransportTests {
                 (sockets.count, requests[0], sockets[0])
             }
         }
+
+        func allSockets() -> [MockOMGControlWebSocket] {
+            lock.withLock { sockets }
+        }
     }
 
     @Test func multiplexesConcurrentCallsIgnoresRosterPushesAndReconnectsOnDrop() async throws {
@@ -184,6 +188,117 @@ struct OMGControlTransportTests {
         let afterDrop = try await call(["t": "workspaces"])
         #expect(afterDrop["echo"] as? String == "workspaces")
         #expect(await transport.connectionCount == 2)
+
+        await transport.close()
+    }
+
+    @Test func partialTimeoutWithOverlappingRPCsTearsDownSocketUnconditionally() async throws {
+        let recorder = SocketRecorder()
+        let transport = OMGControlTransport(
+            baseURL: URL(string: "ws://192.168.1.10:8791")!,
+            token: "test-secret-token",
+            timeoutSeconds: 0.12
+        ) { request in
+            let attempt = recorder.allSockets().count
+            let socket = MockOMGControlWebSocket { sock, rawText in
+                guard attempt > 0,
+                      let data = rawText.data(using: .utf8),
+                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let reqID = obj["_request"] as? String else {
+                    // First socket swallows all frames to simulate a wedged TCP/WebSocket link.
+                    return
+                }
+                sock.pushServerJSON(["t": "ok", "_request": reqID])
+            }
+            recorder.record(socket: socket, request: request)
+            return socket
+        }
+
+        let firstPayload = try JSONSerialization.data(withJSONObject: ["t": "workspaces"])
+        let secondPayload = try JSONSerialization.data(withJSONObject: ["t": "hosts"])
+
+        async let firstCall: Result<Data, Error> = {
+            do { return .success(try await transport.callJSONData(firstPayload)) }
+            catch { return .failure(error) }
+        }()
+        try await Task.sleep(for: .milliseconds(50))
+        async let overlappingCall: Result<Data, Error> = {
+            do { return .success(try await transport.callJSONData(secondPayload)) }
+            catch { return .failure(error) }
+        }()
+
+        let firstResult = await firstCall
+        let socketsAfterFirstTimeout = recorder.allSockets()
+        #expect(socketsAfterFirstTimeout.count == 1)
+        // Even with `overlappingCall` still pending when `firstCall` timed out, the wedged socket
+        // MUST be torn down unconditionally so future RPCs never inherit the dead socket.
+        #expect(socketsAfterFirstTimeout[0].cancelled)
+
+        let secondResult = await overlappingCall
+        if case .success = firstResult { Issue.record("Expected firstCall to time out") }
+        if case .success = secondResult { Issue.record("Expected overlappingCall to fail on socket teardown") }
+
+        let recoveryData = try await transport.callJSONData(secondPayload)
+        let recoveryObj = try JSONSerialization.jsonObject(with: recoveryData) as? [String: Any]
+        #expect(recoveryObj?["t"] as? String == "ok")
+        #expect(await transport.connectionCount == 2)
+
+        await transport.close()
+    }
+
+    @Test func concurrentInitialDialFailureDoesNotRetryWhileReadySocketDropRetriesOnce() async throws {
+        let recorder = SocketRecorder()
+        let transport = OMGControlTransport(
+            baseURL: URL(string: "ws://192.168.1.10:8791")!,
+            token: "test-secret-token"
+        ) { request in
+            let index = recorder.allSockets().count
+            let socket = MockOMGControlWebSocket { sock, rawText in
+                guard let data = rawText.data(using: .utf8),
+                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let reqID = obj["_request"] as? String,
+                      let op = obj["t"] as? String else { return }
+                if index == 0 {
+                    // Simulate unreachable peer failing the initial unready dial.
+                    throw URLError(.cannotConnectToHost)
+                }
+                if index == 1 && op == "dropAfterReady" {
+                    throw URLError(.networkConnectionLost)
+                }
+                sock.pushServerJSON(["t": "ok", "echo": op, "_request": reqID])
+            }
+            recorder.record(socket: socket, request: request)
+            return socket
+        }
+
+        @Sendable func call(_ type: String) async throws -> [String: Any] {
+            let reqData = try JSONSerialization.data(withJSONObject: ["t": type])
+            let replyData = try await transport.callJSONData(reqData)
+            return try JSONSerialization.jsonObject(with: replyData) as? [String: Any] ?? [:]
+        }
+
+        // 1. Three concurrent RPCs on a fresh unready dial (`socketHasBecomeReady == false`)
+        //    MUST fail on that single attempt without retrying (`connectionCount == 1`).
+        async let c1: Error? = { do { _ = try await call("workspaces"); return nil } catch { return error } }()
+        async let c2: Error? = { do { _ = try await call("hosts"); return nil } catch { return error } }()
+        async let c3: Error? = { do { _ = try await call("directories"); return nil } catch { return error } }()
+        let (e1, e2, e3) = await (c1, c2, c3)
+        #expect(e1 != nil)
+        #expect(e2 != nil)
+        #expect(e3 != nil)
+        #expect(await transport.connectionCount == 1)
+
+        // 2. Establish a healthy socket (`socketHasBecomeReady == true` after valid JSON reply).
+        let established = try await call("workspaces")
+        #expect(established["echo"] as? String == "workspaces")
+        #expect(await transport.connectionCount == 2)
+
+        // 3. Now simulate an idle drop on that ready socket during an idempotent RPC (`hosts`),
+        //    verifying it transparently reconnects once onto socket #3!
+        recorder.allSockets()[1].simulateDrop()
+        let retried = try await call("hosts")
+        #expect(retried["echo"] as? String == "hosts")
+        #expect(await transport.connectionCount == 3)
 
         await transport.close()
     }

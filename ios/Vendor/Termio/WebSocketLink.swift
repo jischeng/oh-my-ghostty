@@ -42,6 +42,12 @@ final class WebSocketLink: NSObject {
         /// operator's allowed origin — a value it chose, which is why the token
         /// stays the only thing authenticating the pipe.
         var headers: [String: String] = [:]
+        /// When true, HTTP 101 upgrade alone never qualifies the connection for
+        /// backoff reset; the protocol owner must call `noteProtocolReady()` once
+        /// a valid application frame (such as an `'S'` snapshot) arrives.
+        var requiresProtocolReadyForBackoffReset = false
+        /// Minimum sustained healthy uptime before a subsequent drop resets backoff.
+        var minimumHealthyUptime: TimeInterval = ReconnectPolicy.defaultMinimumHealthyUptime
     }
 
     /// About to dial. Main queue — reset whatever per-connection state the
@@ -159,6 +165,34 @@ final class WebSocketLink: NSObject {
         died(task)
     }
 
+    /// Marks the active socket's application protocol as ready (e.g. after a
+    /// valid snapshot `'S'` is applied), allowing sustained healthy uptime to
+    /// reset reconnect backoff on future drops.
+    func noteProtocolReady() {
+        let now = ProcessInfo.processInfo.systemUptime
+        if Thread.isMainThread {
+            guard !stopped, isUp else { return }
+            policy.noteProtocolReady(at: now)
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !stopped, isUp else { return }
+                policy.noteProtocolReady(at: now)
+            }
+        }
+    }
+
+    /// Requires a fresh `noteProtocolReady()` call before the current connection
+    /// can reset reconnect backoff (e.g. when opening a session attachment).
+    func requireProtocolReady() {
+        if Thread.isMainThread {
+            policy.requireFreshProtocolReady()
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.policy.requireFreshProtocolReady()
+            }
+        }
+    }
+
     /// Put a frame on the current socket. Order is preserved, so the owner's
     /// `onOpen` preamble stays ahead of everything queued behind it.
     func send(_ text: String) {
@@ -187,6 +221,9 @@ final class WebSocketLink: NSObject {
         }
         currentTaskDidDie = false
         task?.cancel(with: .goingAway, reason: nil)
+        policy.beginConnectAttempt(
+            requiresProtocolReady: configuration.requiresProtocolReadyForBackoffReset
+        )
         let task = makeTask()
         task.maximumMessageSize = configuration.maximumMessageSize
         setOpen(false)
@@ -221,8 +258,12 @@ final class WebSocketLink: NSObject {
         guard !stopped else { return }
         // Fast burst then a slow heartbeat (see ReconnectPolicy): quick to
         // notice a rebuilt peer, easy on the radio when the laptop's just
-        // closed.
-        let delay = policy.nextDelay()
+        // closed. Only connections with sustained post-handshake uptime reset
+        // backoff, preventing ~2 Hz resync spins on post-upgrade stream errors.
+        let delay = policy.nextDelayAfterDrop(
+            at: ProcessInfo.processInfo.systemUptime,
+            minimumHealthyUptime: configuration.minimumHealthyUptime
+        )
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, !stopped, !isUp else { return }
             connect()
@@ -261,10 +302,18 @@ final class WebSocketLink: NSObject {
                 guard error != nil else { return }
                 DispatchQueue.main.async { [weak self] in
                     guard let self, !stopped, task === self.task, isUp else { return }
+                    guard policy.hasSustainedHealthyConnection(
+                        at: ProcessInfo.processInfo.systemUptime,
+                        minimumHealthyUptime: configuration.minimumHealthyUptime
+                    ) else {
+                        died(task)
+                        return
+                    }
+                    currentTaskDidDie = true
                     setOpen(false)
                     onDown?()
-                    // The phone knows the link is dead right now, so there is
-                    // nothing to back off from — dial immediately.
+                    // The phone knows a previously healthy link just died, so
+                    // dial immediately once.
                     policy.reset()
                     connect()
                 }
@@ -346,10 +395,26 @@ extension WebSocketLink: URLSessionWebSocketDelegate {
             "\(self.configuration.name, privacy: .public) link connected to \(self.configuration.url.host ?? "?", privacy: .public)"
         )
         setOpen(true)
+        let openedAt = ProcessInfo.processInfo.systemUptime
+        if Thread.isMainThread {
+            if !stopped {
+                policy.noteSocketOpened(
+                    at: openedAt,
+                    requiresProtocolReady: configuration.requiresProtocolReadyForBackoffReset
+                )
+            }
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !stopped, task === self.task else { return }
+                policy.noteSocketOpened(
+                    at: openedAt,
+                    requiresProtocolReady: configuration.requiresProtocolReadyForBackoffReset
+                )
+            }
+        }
         onOpen?()
         DispatchQueue.main.async { [weak self] in
             guard let self, !stopped, task === self.task else { return }
-            policy.reset()
             onUp?()
         }
     }

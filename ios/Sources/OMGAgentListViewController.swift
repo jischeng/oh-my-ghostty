@@ -68,6 +68,7 @@ final class OMGAgentListViewController: UIViewController {
     private let emptyState = ListEmptyStateView()
     private var observers: [NSObjectProtocol] = []
     private var themeObserver: NSObjectProtocol?
+    private var swipeReloadGate = MobileSwipeReloadGate()
 
     init(store: RosterStore) {
         self.store = store
@@ -82,6 +83,11 @@ final class OMGAgentListViewController: UIViewController {
         if let themeObserver {
             NotificationCenter.default.removeObserver(themeObserver)
         }
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        flushDeferredReloadIfReady()
     }
 
     override func viewDidLayoutSubviews() {
@@ -106,6 +112,7 @@ final class OMGAgentListViewController: UIViewController {
     }
 
     func refresh() {
+        guard swipeReloadGate.shouldReloadNow(isTableEditing: tableView.isEditing) else { return }
         projects = store.scopedProjects.filter { $0.kind != "terminals" }.map {
             var project = $0
             project.sessions = project.sessions.filter { $0.agent.id != "terminal" }
@@ -115,6 +122,12 @@ final class OMGAgentListViewController: UIViewController {
         newAgentButton.isHidden = !canStart
         tableView.reloadData()
         updateEmptyState(canStart: canStart)
+    }
+
+    private func flushDeferredReloadIfReady() {
+        if swipeReloadGate.consumeDeferredReloadIfReady(isTableEditing: tableView.isEditing) {
+            refresh()
+        }
     }
 
     // MARK: - Top bar & FAB
@@ -353,11 +366,30 @@ extension OMGAgentListViewController: UITableViewDataSource, UITableViewDelegate
               let sessionID = projects[indexPath.section].sessions[indexPath.row - 1].rosterID
         else { return nil }
         let close = UIContextualAction(style: .destructive, title: localized("Close")) { [weak self] _, _, done in
-            self?.store.stopSession(sessionID)
+            guard let self else {
+                done(false)
+                return
+            }
+            let hadDeferred = self.swipeReloadGate.hasDeferredReload
+            self.swipeReloadGate.beginSwipeAction()
+            defer { self.swipeReloadGate.endSwipeAction() }
+            self.store.stopSession(sessionID)
+            if hadDeferred && self.swipeReloadGate.hasDeferredReload {
+                self.refresh()
+            }
             done(true)
         }
         close.image = UIImage(systemName: "xmark.circle")
         return UISwipeActionsConfiguration(actions: [close])
+    }
+
+    func tableView(_ tableView: UITableView, didEndEditingRowAt indexPath: IndexPath?) {
+        flushDeferredReloadIfReady()
+        if swipeReloadGate.hasDeferredReload {
+            DispatchQueue.main.async { [weak self] in
+                self?.flushDeferredReloadIfReady()
+            }
+        }
     }
 
     func tableView(

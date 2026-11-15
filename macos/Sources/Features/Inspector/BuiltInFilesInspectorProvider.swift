@@ -52,7 +52,10 @@ final class LocalFilesDirectoryWatcher {
         .prefix(Self.maxWatchedDirectories)
         let desired = Set(resolvedTargets)
 
-        for existingPath in Array(entries.keys) where !desired.contains(existingPath) || invalidatedPaths.contains(existingPath) {
+        for (existingPath, entry) in Array(entries)
+        where !desired.contains(existingPath)
+            || invalidatedPaths.contains(existingPath)
+            || !Self.descriptorMatchesPath(entry.descriptor, path: existingPath) {
             entries.removeValue(forKey: existingPath)?.source.cancel()
             invalidatedPaths.remove(existingPath)
         }
@@ -90,6 +93,17 @@ final class LocalFilesDirectoryWatcher {
             entry.source.cancel()
         }
         entries.removeAll()
+    }
+
+    private static func descriptorMatchesPath(_ fd: CInt, path: String) -> Bool {
+        var pathStat = Darwin.stat()
+        var fdStat = Darwin.stat()
+        guard stat(path, &pathStat) == 0,
+              fstat(fd, &fdStat) == 0,
+              (pathStat.st_mode & S_IFMT) == S_IFDIR else {
+            return false
+        }
+        return pathStat.st_dev == fdStat.st_dev && pathStat.st_ino == fdStat.st_ino
     }
 
     private func scheduleChangeNotification() {
@@ -270,12 +284,42 @@ final class BuiltInFilesInspectorProvider {
             directoryWatchers[tabID] = created
             return created
         }()
+        let resolvedRoot = URL(fileURLWithPath: state.rootPath).resolvingSymlinksInPath().path
         var directories = state.expanded
         directories.insert(state.rootPath)
+        directories.insert(resolvedRoot)
+        var rootCandidates: Set<String> = [state.rootPath, resolvedRoot]
         if let tree = state.tree {
-            directories.insert(Self.nodeRoot(of: tree))
+            rootCandidates.insert(Self.nodeRoot(of: tree))
+            Self.collectCompactChainAncestors(in: tree.nodes, into: &directories)
+        }
+        for rootCandidate in rootCandidates {
+            for expandedPath in state.expanded {
+                directories.formUnion(Self.ancestorDirectories(of: expandedPath, root: rootCandidate))
+            }
         }
         watcher.update(directories: directories)
+    }
+
+    nonisolated private static func collectCompactChainAncestors(
+        in nodes: [InspectorFileNode],
+        into directories: inout Set<String>
+    ) {
+        for node in nodes where node.isDirectory {
+            let compactDepth = node.name.split(separator: "/").count - 1
+            if compactDepth > 0 {
+                var current = node.id
+                for _ in 0..<compactDepth {
+                    let parent = (current as NSString).deletingLastPathComponent
+                    guard !parent.isEmpty, parent != "/", parent != current else { break }
+                    directories.insert(parent)
+                    current = parent
+                }
+            }
+            if node.isExpanded, let children = node.children {
+                collectCompactChainAncestors(in: children, into: &directories)
+            }
+        }
     }
 
     private func stopDirectoryWatcher(for tabID: UUID) {
@@ -569,6 +613,13 @@ final class BuiltInFilesInspectorProvider {
                 states[context.tabID] = current
                 syncDirectoryWatcher(for: context.tabID)
                 published = .fileTree(tree)
+            } else {
+                if var current = states[context.tabID] {
+                    current.tree = nil
+                    current.pendingReveal = nil
+                    states[context.tabID] = current
+                }
+                stopDirectoryWatcher(for: context.tabID)
             }
             publish(published, tabID: context.tabID)
             loadTasks.removeValue(forKey: key)
@@ -621,6 +672,7 @@ final class BuiltInFilesInspectorProvider {
                 )
             }
             states[context.tabID] = current
+            syncDirectoryWatcher(for: context.tabID)
             publishTree(for: context.tabID)
             loadTasks.removeValue(forKey: key)
             let elapsed = ContinuousClock.now - started
@@ -861,8 +913,14 @@ final class BuiltInFilesInspectorProvider {
     }
 
     nonisolated private static func validChildName(_ name: String) -> Bool {
-        !name.isEmpty && name != "." && name != ".." &&
-            !name.contains("/") && !name.contains(":")
+        !name.isEmpty
+            && name != "."
+            && name != ".."
+            && !name.contains("/")
+            && !name.contains(":")
+            && !name.contains("\0")
+            && !name.contains("\n")
+            && !name.contains("\r")
     }
 
     private static func loadContent(

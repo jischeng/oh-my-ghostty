@@ -63,20 +63,17 @@ final class EditorWorkspace: ObservableObject {
 
     /// Returns the local workspace root of the active (or first) local document when Restricted Mode applies.
     var untrustedLocalWorkspaceRoot: String? {
-        let candidateDocs: [EditorDocument]
-        if gitDiff == nil, let selected = selectedDocument {
-            candidateDocs = [selected] + documents.filter { $0.id != selected.id }
-        } else {
-            candidateDocs = documents
+        guard gitDiff == nil,
+              let activeDocument = selectedDocument ?? documents.first,
+              activeDocument.id.endpoint == .local else {
+            return nil
         }
-        let store = trustStore
-        for document in candidateDocs where document.id.endpoint == .local {
-            let ctx = EditorIntelligenceDocumentContext(document: document)
-            if let root = ctx.effectiveLocalRoot, !store.isTrusted(workspaceRoot: root) {
-                return root
-            }
+        let ctx = EditorIntelligenceDocumentContext(document: activeDocument)
+        guard let root = ctx.effectiveLocalRoot,
+              !trustStore.isTrusted(workspaceRoot: root) else {
+            return nil
         }
-        return nil
+        return root
     }
 
     /// Grants workspace trust for the active untrusted local root and immediately starts LSP sessions.
@@ -122,7 +119,9 @@ final class EditorWorkspace: ObservableObject {
     }
 
     var canReclaimWorkbenchNow: Bool {
-        isIdleForWorkbenchReap && workbenchController.webView != nil
+        isIdleForWorkbenchReap
+            && (workbenchController.webView != nil
+                || (!isVisible && !documents.isEmpty && !intelligenceBridge.hasSuspendedDocuments))
     }
 
     @discardableResult
@@ -130,9 +129,17 @@ final class EditorWorkspace: ObservableObject {
         guard isIdleForWorkbenchReap else { return false }
         cancelWorkbenchReap()
         let hadWebView = workbenchController.webView != nil
+        let suspendedDocs: Bool
         if !isVisible && !documents.isEmpty {
-            await intelligenceBridge.suspendDocumentsForHiddenReclaim()
-            guard isIdleForWorkbenchReap else { return false }
+            suspendedDocs = await intelligenceBridge.suspendDocumentsForHiddenReclaim()
+            guard isIdleForWorkbenchReap else {
+                if isVisible && intelligenceBridge.hasSuspendedDocuments {
+                    intelligenceBridge.rehydrateWorkbenchDecorations()
+                }
+                return false
+            }
+        } else {
+            suspendedDocs = false
         }
         if hadWebView || workbenchController.webView != nil {
             if !documents.isEmpty || !gitDiffs.isEmpty {
@@ -143,6 +150,10 @@ final class EditorWorkspace: ObservableObject {
                 reapedActiveDiff = nil
             }
             workbenchController.tearDown()
+            return true
+        }
+        if suspendedDocs, !documents.isEmpty {
+            wasReapedWhileHidden = true
             return true
         }
         return false
@@ -163,7 +174,13 @@ final class EditorWorkspace: ObservableObject {
             wasReapedWhileHidden = false
             reapedActiveDiff = nil
         }
-        guard isIdleForWorkbenchReap, workbenchController.webView != nil else { return }
+        let needsLSPDocumentSuspend = !isVisible
+            && !documents.isEmpty
+            && !intelligenceBridge.hasSuspendedDocuments
+        guard isIdleForWorkbenchReap,
+              workbenchController.webView != nil || needsLSPDocumentSuspend else {
+            return
+        }
         let delay = idleReapDelay
         workbenchReapTask = Task { @MainActor [weak self] in
             do {
@@ -173,14 +190,29 @@ final class EditorWorkspace: ObservableObject {
             }
             guard let self, !Task.isCancelled, self.isIdleForWorkbenchReap else { return }
             self.workbenchReapTask = nil
-            if !self.documents.isEmpty || !self.gitDiffs.isEmpty {
-                self.wasReapedWhileHidden = true
-                self.reapedActiveDiff = self.workbenchController.activeDiff
-            } else {
-                self.wasReapedWhileHidden = false
-                self.reapedActiveDiff = nil
+            let hadWebView = self.workbenchController.webView != nil
+            var suspendedDocs = false
+            if !self.isVisible && !self.documents.isEmpty {
+                suspendedDocs = await self.intelligenceBridge.suspendDocumentsForHiddenReclaim()
+                guard !Task.isCancelled, self.isIdleForWorkbenchReap else {
+                    if self.isVisible && self.intelligenceBridge.hasSuspendedDocuments {
+                        self.intelligenceBridge.rehydrateWorkbenchDecorations()
+                    }
+                    return
+                }
             }
-            self.workbenchController.tearDown()
+            if hadWebView || self.workbenchController.webView != nil {
+                if !self.documents.isEmpty || !self.gitDiffs.isEmpty {
+                    self.wasReapedWhileHidden = true
+                    self.reapedActiveDiff = self.workbenchController.activeDiff
+                } else {
+                    self.wasReapedWhileHidden = false
+                    self.reapedActiveDiff = nil
+                }
+                self.workbenchController.tearDown()
+            } else if suspendedDocs && !self.documents.isEmpty {
+                self.wasReapedWhileHidden = true
+            }
         }
     }
 
@@ -244,13 +276,16 @@ final class EditorWorkspace: ObservableObject {
                 activateDocumentInWorkbench(activeDoc)
             }
 
-            if workbenchController.webView != nil {
+            if workbenchController.webView != nil || intelligenceBridge.hasSuspendedDocuments {
                 intelligenceBridge.rehydrateWorkbenchDecorations()
             }
             workbenchRehydrationRevision &+= 1
             return
         }
 
+        if intelligenceBridge.hasSuspendedDocuments {
+            intelligenceBridge.rehydrateWorkbenchDecorations()
+        }
         guard workbenchController.webView != nil else { return }
         if let request = gitDiff,
            let activeDiff = workbenchController.activeDiff,

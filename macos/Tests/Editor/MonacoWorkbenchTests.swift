@@ -1261,4 +1261,47 @@ struct MonacoWorkbenchTests {
             #expect(keymap.action(for: ctrlOptRightBracket) == .nextDiffFile)
         }
     }
+
+    @Test func inFlightLSPRequestCompletingAfterTearDownNeverResurrectsWebView() async throws {
+        let controller = MonacoWorkbenchController()
+        _ = controller.ensureWebView()
+        #expect(controller.webView != nil)
+
+        var enteredHandler = false
+        var continuationBox: CheckedContinuation<Any?, Never>?
+        controller.onLSPRequest = { _, _, _, _, _, _ in
+            await MainActor.run { enteredHandler = true }
+            return await withCheckedContinuation { cont in
+                Task { @MainActor in
+                    continuationBox = cont
+                }
+            }
+        }
+
+        controller.handleOutboundMessage(type: "lspRequest", body: [
+            "requestId": "req-inflight-1",
+            "method": "hover",
+            "uri": "omg-model://local/tmp/Demo.swift",
+            "path": "/tmp/Demo.swift",
+            "line": 1,
+            "column": 1
+        ])
+
+        for _ in 0..<60 {
+            if enteredHandler, continuationBox != nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(enteredHandler)
+
+        // Tear down workbench while the async LSP request is still suspended.
+        controller.tearDown()
+        #expect(controller.webView == nil)
+
+        // Resume the late LSP response and exercise passive resolve/close calls while torn down.
+        continuationBox?.resume(returning: ["markdown": "late hover payload"])
+        try await Task.sleep(for: .milliseconds(60))
+        controller.resolveRequest(requestId: "req-late-2", payload: ["markdown": "direct late call"])
+        controller.closeModel(uri: "omg-model://local/tmp/Demo.swift")
+        #expect(controller.webView == nil)
+    }
 }

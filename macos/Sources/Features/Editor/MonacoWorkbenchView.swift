@@ -600,6 +600,7 @@ final class MonacoWorkbenchController: NSObject, ObservableObject, WKNavigationD
     private var lastFontPayloadJSON: String?
     private var cachedGitDiffLines: [String: [String: String]] = [:]
     private var cachedDiagnostics: [String: [[String: Any]]] = [:]
+    private var inFlightLSPTasks: [UUID: Task<Void, Never>] = [:]
     private var isTornDown = false
     private let customResourceRootURL: URL?
 
@@ -610,6 +611,10 @@ final class MonacoWorkbenchController: NSObject, ObservableObject, WKNavigationD
 
     deinit {
         let view = webView
+        let tasks = Array(inFlightLSPTasks.values)
+        for task in tasks {
+            task.cancel()
+        }
         MainActor.assumeIsolated {
             EditorCommandRouter.shared.unregister(owner: self)
             view?.configuration.userContentController.removeScriptMessageHandler(forName: Self.messageHandlerName)
@@ -655,6 +660,10 @@ final class MonacoWorkbenchController: NSObject, ObservableObject, WKNavigationD
     func tearDown() {
         isTornDown = true
         isReady = false
+        for (_, task) in inFlightLSPTasks {
+            task.cancel()
+        }
+        inFlightLSPTasks.removeAll()
         pendingCalls.removeAll()
         openModels.removeAll()
         cachedGitDiffLines.removeAll()
@@ -756,6 +765,7 @@ final class MonacoWorkbenchController: NSObject, ObservableObject, WKNavigationD
         if activeURI == uri {
             activeURI = nil
         }
+        guard !isTornDown, webView != nil else { return }
         sendCall("closeModel", payload: ["uri": uri])
     }
 
@@ -912,6 +922,7 @@ final class MonacoWorkbenchController: NSObject, ObservableObject, WKNavigationD
     }
 
     func resolveRequest(requestId: Any, payload: Any?) {
+        guard !isTornDown, webView != nil else { return }
         let idJSON: String
         if let stringID = requestId as? String {
             idJSON = Self.encodeJSONStringLiteral(stringID)
@@ -1044,7 +1055,9 @@ final class MonacoWorkbenchController: NSObject, ObservableObject, WKNavigationD
             onDiffSelectionChanged?(hunkIndex, currentChangeIndex)
 
         case "lspRequest":
-            guard let requestId = body["requestId"],
+            guard !isTornDown,
+                  let activeWebView = webView,
+                  let requestId = body["requestId"],
                   let method = body["method"] as? String else { return }
             let rawURI = (body["uri"] as? String) ?? activeURI ?? ""
             let uri = canonicalModelURI(uri: rawURI, path: body["path"] as? String)
@@ -1056,10 +1069,20 @@ final class MonacoWorkbenchController: NSObject, ObservableObject, WKNavigationD
                 resolveRequest(requestId: requestId, payload: nil)
                 return
             }
-            Task { @MainActor [weak self] in
+            let taskID = UUID()
+            let task = Task { @MainActor [weak self, weak activeWebView] in
+                defer { self?.inFlightLSPTasks.removeValue(forKey: taskID) }
                 let response = await onLSPRequest(method, uri, path, line, column, triggerCharacter)
-                self?.resolveRequest(requestId: requestId, payload: response)
+                guard !Task.isCancelled,
+                      let self,
+                      !self.isTornDown,
+                      let activeWebView,
+                      self.webView === activeWebView else {
+                    return
+                }
+                self.resolveRequest(requestId: requestId, payload: response)
             }
+            inFlightLSPTasks[taskID] = task
 
         case "navigateDefinition":
             guard let target = body["target"] as? [String: Any],

@@ -665,6 +665,55 @@ struct EditorWorkspaceTests {
         #expect(workspace.gitDiffs.count == 2)
         #expect(workspace.gitDiff?.id == staged.id)
     }
+
+    @Test @MainActor func untrustedLocalWorkspaceRootScopesToActiveForegroundTabOnly() async throws {
+        let baseDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("editor-fg-trust-\(UUID().uuidString)")
+        let trustedDir = baseDir.appendingPathComponent("trusted-repo")
+        let untrustedDir = baseDir.appendingPathComponent("untrusted-repo")
+        try FileManager.default.createDirectory(at: trustedDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: untrustedDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: baseDir) }
+
+        let trustedFile = trustedDir.appendingPathComponent("Trusted.swift")
+        let untrustedFile = untrustedDir.appendingPathComponent("Untrusted.swift")
+        try Data("let safe = true\n".utf8).write(to: trustedFile)
+        try Data("let untrusted = true\n".utf8).write(to: untrustedFile)
+
+        let trustStore = EditorWorkspaceTrustStore(fileURL: baseDir.appendingPathComponent("trust.json"))
+        #expect(trustStore.trust(workspaceRoot: trustedDir.path))
+        let disabled = EditorLSPServerCommand(executable: "/usr/bin/false-omg-xctest-lsp-disabled")
+        let lspManager = EditorLSPManager(
+            serverCommands: ["swift": disabled],
+            trustStore: trustStore
+        )
+        let coordinator = EditorIntelligenceCoordinator(lspManager: lspManager)
+        let workspace = EditorWorkspace(intelligenceCoordinator: coordinator)
+        defer {
+            workspace.cancelAndClear()
+            Task { await lspManager.shutdownAll() }
+        }
+
+        let trustedFS = LocalWorkspaceFilesystem(workingDirectory: trustedDir.path)
+        workspace.open(path: untrustedFile.path, filesystem: trustedFS)
+        await waitUntil { !workspace.isLoading && workspace.documents.count == 1 }
+        let untrustedDoc = try #require(workspace.selectedDocument)
+        let canonicalUntrusted = try #require(EditorWorkspaceTrustStore.canonicalPath(untrustedDir.path))
+        #expect(workspace.untrustedLocalWorkspaceRoot == canonicalUntrusted)
+
+        workspace.open(path: trustedFile.path, filesystem: trustedFS)
+        await waitUntil { !workspace.isLoading && workspace.documents.count == 2 }
+        let trustedDoc = try #require(workspace.selectedDocument)
+        #expect(trustedDoc.path == trustedFile.path)
+        // Viewing a trusted foreground tab must not display or trust a background untrusted tab's root.
+        #expect(workspace.untrustedLocalWorkspaceRoot == nil)
+        workspace.trustCurrentWorkspace()
+        #expect(!trustStore.isTrusted(workspaceRoot: canonicalUntrusted))
+
+        // Switching back to the untrusted tab resurfaces its Restricted Mode root.
+        workspace.selectedID = untrustedDoc.id
+        #expect(workspace.untrustedLocalWorkspaceRoot == canonicalUntrusted)
+    }
 }
 
 private actor ControlledEditorWorkspaceFilesystem: WorkspaceFilesystem {

@@ -152,4 +152,115 @@ struct InspectorFileTreeViewTests {
         registry.presentationDidChange(to: nil, context: context)
         #expect(provider.activeWatchedDirectoryCountForTesting == 0)
     }
+
+    @Test func deletingOrMovingWatchedDirectoriesClosesEventOnlyFileDescriptorsImmediately() async throws {
+        let sandbox = FileManager.default.temporaryDirectory
+            .appendingPathComponent("files-fd-leak-\(UUID().uuidString)")
+        let root = sandbox.appendingPathComponent("workspace")
+        let srcDir = root.appendingPathComponent("src")
+        let nestedDir = srcDir.appendingPathComponent("nested")
+        let movedSrcDir = sandbox.appendingPathComponent("moved-src")
+        try FileManager.default.createDirectory(at: nestedDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sandbox) }
+        try Data("root".utf8).write(to: root.appendingPathComponent("README.md"))
+        // Include a sibling file in `src` so `src` and `nested` are distinct non-compacted nodes.
+        try Data("app".utf8).write(to: srcDir.appendingPathComponent("App.swift"))
+        try Data("leaf".utf8).write(to: nestedDir.appendingPathComponent("Leaf.swift"))
+
+        let registry = InspectorRegistry()
+        let provider = BuiltInFilesInspectorProvider(
+            registry: registry,
+            fsEventDebounceInterval: .milliseconds(25),
+            openFile: { _, _, _ in }
+        )
+        try provider.register()
+        let context = InspectorPaneContext(
+            tabID: UUID(),
+            surfaceID: UUID(),
+            title: "FD Leak Test",
+            workingDirectory: root.path
+        )
+
+        func currentTree() -> InspectorFileTree? {
+            guard case .fileTree(let tree) = registry.content(
+                for: BuiltInFilesInspectorProvider.paneID,
+                context: context
+            ) else {
+                return nil
+            }
+            return tree
+        }
+
+        registry.presentationDidChange(to: BuiltInFilesInspectorProvider.paneID, context: context)
+        for _ in 0..<80 {
+            if currentTree()?.nodes.count == 2 { break }
+            try await Task.sleep(for: .milliseconds(15))
+        }
+
+        let srcNode = try #require(currentTree()?.nodes.first(where: { $0.name == "src" }))
+        registry.performAction(
+            paneID: BuiltInFilesInspectorProvider.paneID,
+            action: .init(context: context, kind: .toggleNode(id: srcNode.id, expanded: true))
+        )
+        for _ in 0..<80 {
+            if currentTree()?.nodes.first(where: { $0.name == "src" })?.children?.count == 2 { break }
+            try await Task.sleep(for: .milliseconds(15))
+        }
+
+        let nestedNode = try #require(
+            currentTree()?.nodes.first(where: { $0.name == "src" })?.children?.first(where: { $0.name == "nested" })
+        )
+        registry.performAction(
+            paneID: BuiltInFilesInspectorProvider.paneID,
+            action: .init(context: context, kind: .toggleNode(id: nestedNode.id, expanded: true))
+        )
+        for _ in 0..<80 {
+            if provider.activeWatchedDirectoryCountForTesting == 3 { break }
+            try await Task.sleep(for: .milliseconds(15))
+        }
+        #expect(provider.activeWatchedDirectoryCountForTesting == 3)
+
+        // 1. Moving `src` out of `root` must release BOTH `src` and `src/nested` O_EVTONLY descriptors.
+        try FileManager.default.moveItem(at: srcDir, to: movedSrcDir)
+        for _ in 0..<100 {
+            if provider.activeWatchedDirectoryCountForTesting == 1,
+               currentTree()?.nodes.map(\.name) == ["README.md"] {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(provider.activeWatchedDirectoryCountForTesting == 1)
+
+        // 2. Single-child compact chains (`pkg/internal`) also watch intermediate `pkg` and close cleanly on delete.
+        let compactLeafDir = root.appendingPathComponent("pkg/internal")
+        try FileManager.default.createDirectory(at: compactLeafDir, withIntermediateDirectories: true)
+        try Data("mod".utf8).write(to: compactLeafDir.appendingPathComponent("Mod.swift"))
+        for _ in 0..<100 {
+            if currentTree()?.nodes.contains(where: { $0.name == "pkg/internal" }) == true,
+               provider.activeWatchedDirectoryCountForTesting == 2 {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(provider.activeWatchedDirectoryCountForTesting == 2)
+
+        // 3. Deleting the root directory while the Files pane stays visible transitions to `.empty`
+        // and closes all O_EVTONLY descriptors immediately.
+        try FileManager.default.removeItem(at: root)
+        for _ in 0..<100 {
+            if provider.activeWatchedDirectoryCountForTesting == 0,
+               case .empty = registry.content(for: BuiltInFilesInspectorProvider.paneID, context: context) {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(provider.activeWatchedDirectoryCountForTesting == 0)
+        if case .empty = registry.content(for: BuiltInFilesInspectorProvider.paneID, context: context) {
+            // Expected `.empty` state when root directory disappears.
+        } else {
+            Issue.record("Expected Files pane to publish .empty after root directory removal")
+        }
+
+        registry.presentationDidChange(to: nil, context: context)
+    }
 }

@@ -16,7 +16,7 @@ final class EditorWorkspaceIntelligenceBridge {
     private var gutterTasks: [EditorDocumentID: Task<Void, Never>] = [:]
     private var lifecycleTasks: [EditorDocumentID: Task<Void, Never>] = [:]
     private var focusCheckTask: Task<Void, Never>?
-    private var hasSuspendedLSPDocuments = false
+    private(set) var hasSuspendedDocuments = false
     private nonisolated(unsafe) var windowKeyObserver: NSObjectProtocol?
     private nonisolated(unsafe) var trustChangeObserver: NSObjectProtocol?
 
@@ -74,9 +74,11 @@ final class EditorWorkspaceIntelligenceBridge {
             if document.id.endpoint == .local {
                 self.fileWatcher.updateExpectedData(data, forPath: document.path)
             }
+            guard !self.hasSuspendedDocuments else { return }
             let ctx = self.documentContext(for: document)
             Task { @MainActor [weak self] in
-                await self?.coordinator.documentDidSave(ctx, text: savedText)
+                guard let self, !self.hasSuspendedDocuments else { return }
+                await self.coordinator.documentDidSave(ctx, text: savedText)
             }
             self.refreshGitGutter(for: document)
         }
@@ -92,11 +94,13 @@ final class EditorWorkspaceIntelligenceBridge {
             )
         }
 
+        guard !hasSuspendedDocuments else { return }
         let ctx = documentContext(for: document)
         let initialText = document.text
         lifecycleTasks[docID]?.cancel()
         lifecycleTasks[docID] = Task { @MainActor [weak self] in
-            await self?.coordinator.documentDidOpen(ctx, text: initialText)
+            guard let self, !self.hasSuspendedDocuments else { return }
+            await self.coordinator.documentDidOpen(ctx, text: initialText)
         }
 
         refreshGitGutter(for: document)
@@ -111,6 +115,11 @@ final class EditorWorkspaceIntelligenceBridge {
         debouncedChangeTasks.removeValue(forKey: docID)?.cancel()
         gutterTasks.removeValue(forKey: docID)?.cancel()
         lifecycleTasks.removeValue(forKey: docID)?.cancel()
+
+        let hasOtherDocuments = workspace?.documents.contains { $0.id != docID } ?? false
+        if !hasOtherDocuments {
+            hasSuspendedDocuments = false
+        }
 
         if document.id.endpoint == .local {
             let stillOpenLocally = workspace?.documents.contains { other in
@@ -131,6 +140,7 @@ final class EditorWorkspaceIntelligenceBridge {
     func tearDown() {
         focusCheckTask?.cancel()
         focusCheckTask = nil
+        hasSuspendedDocuments = false
         for (_, task) in debouncedChangeTasks { task.cancel() }
         debouncedChangeTasks.removeAll()
         for (_, task) in gutterTasks { task.cancel() }
@@ -150,7 +160,7 @@ final class EditorWorkspaceIntelligenceBridge {
 
     /// Immediately opens all trusted local documents in `EditorLSPManager` after workspace trust is granted.
     func activateTrustedOpenDocuments() {
-        guard let workspace else { return }
+        guard let workspace, !hasSuspendedDocuments else { return }
         let store = coordinator.lspManager.trustStore
         for document in workspace.documents where document.id.endpoint == .local {
             let ctx = documentContext(for: document)
@@ -159,30 +169,37 @@ final class EditorWorkspaceIntelligenceBridge {
             let currentText = document.text
             lifecycleTasks[docID]?.cancel()
             lifecycleTasks[docID] = Task { @MainActor [weak self] in
-                await self?.coordinator.documentDidOpen(ctx, text: currentText)
+                guard let self, !self.hasSuspendedDocuments else { return }
+                await self.coordinator.documentDidOpen(ctx, text: currentText)
             }
         }
     }
 
-    func suspendDocumentsForHiddenReclaim() async {
-        guard let workspace, !workspace.documents.isEmpty else { return }
+    @discardableResult
+    func suspendDocumentsForHiddenReclaim() async -> Bool {
+        guard let workspace, !workspace.documents.isEmpty, !hasSuspendedDocuments else {
+            return false
+        }
+        for (_, task) in debouncedChangeTasks { task.cancel() }
+        debouncedChangeTasks.removeAll()
         for (_, task) in lifecycleTasks { task.cancel() }
         lifecycleTasks.removeAll()
         for (_, task) in gutterTasks { task.cancel() }
         gutterTasks.removeAll()
-        hasSuspendedLSPDocuments = true
+        hasSuspendedDocuments = true
         for document in workspace.documents {
             let ctx = documentContext(for: document)
             await coordinator.documentDidClose(ctx)
         }
+        return true
     }
 
     /// Restores git gutter bars and language-server diagnostics after an idle-reaped workbench
     /// recreates its `WKWebView` while open documents remained preserved in `EditorWorkspace`.
     func rehydrateWorkbenchDecorations() {
         guard let workspace else { return }
-        let reopenSuspended = hasSuspendedLSPDocuments
-        hasSuspendedLSPDocuments = false
+        let reopenSuspended = hasSuspendedDocuments
+        hasSuspendedDocuments = false
         for document in workspace.documents {
             refreshGitGutter(for: document)
             let ctx = documentContext(for: document)
@@ -190,10 +207,11 @@ final class EditorWorkspaceIntelligenceBridge {
             let docID = document.id
             lifecycleTasks[docID]?.cancel()
             lifecycleTasks[docID] = Task { @MainActor [weak self] in
+                guard let self, !self.hasSuspendedDocuments else { return }
                 if reopenSuspended {
-                    await self?.coordinator.documentDidOpen(ctx, text: currentText)
+                    await self.coordinator.documentDidOpen(ctx, text: currentText)
                 } else {
-                    await self?.coordinator.documentDidChange(ctx, text: currentText)
+                    await self.coordinator.documentDidChange(ctx, text: currentText)
                 }
             }
         }
@@ -324,17 +342,23 @@ final class EditorWorkspaceIntelligenceBridge {
                 doc.applyExternalDiskUpdate(data: change.data, decoded: (text, encoding))
                 if !wasDirty {
                     fileWatcher.updateExpectedData(change.data, forPath: doc.path)
-                    let ctx = documentContext(for: doc)
-                    Task { @MainActor [weak self] in
-                        await self?.coordinator.documentDidChange(ctx, text: text)
+                    if !hasSuspendedDocuments {
+                        let ctx = documentContext(for: doc)
+                        Task { @MainActor [weak self] in
+                            guard let self, !self.hasSuspendedDocuments else { return }
+                            await self.coordinator.documentDidChange(ctx, text: text)
+                        }
                     }
                 }
             }
-            refreshGitGutter(for: doc)
+            if !hasSuspendedDocuments {
+                refreshGitGutter(for: doc)
+            }
         }
     }
 
     private func scheduleDidChange(for document: EditorDocument, text: String) {
+        guard !hasSuspendedDocuments else { return }
         let docID = document.id
         let ctx = documentContext(for: document)
         debouncedChangeTasks[docID]?.cancel()
@@ -344,7 +368,7 @@ final class EditorWorkspaceIntelligenceBridge {
             } catch {
                 return
             }
-            guard !Task.isCancelled, let self else { return }
+            guard !Task.isCancelled, let self, !self.hasSuspendedDocuments else { return }
             await self.coordinator.documentDidChange(ctx, text: text)
         }
     }

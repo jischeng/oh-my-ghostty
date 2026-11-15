@@ -947,6 +947,13 @@ struct WorkspaceProviderTests {
 
     @Test func parsesSFTPListingPathsWithoutDuplicatingDirectory() throws {
         let output = """
+        drwxr-xr-x 4 root root 128 Jan 1 00:00 /root/.
+        drwxr-xr-x 4 root root 128 Jan 1 00:00 /root/..
+        drwxr-xr-x 4 root root 128 Jan 1 00:00 root/.
+        drwxr-xr-x 4 root root 128 Jan 1 00:00 root/..
+        drwxr-xr-x 4 root root 128 Jan 1 00:00 .
+        drwxr-xr-x 4 root root 128 Jan 1 00:00 ..
+        -rw-r--r-- 1 root root 1 Jan 1 00:00 /root/.env
         -rw-r--r-- 1 root root 1 Jan 1 00:00 /root/configure-maintenance.sh
         -rw-r--r-- 1 root root 1 Jan 1 00:00 root/file with spaces.txt
         -rw-r--r-- 1 root root 1 Jan 1 00:00 relative.txt
@@ -954,17 +961,24 @@ struct WorkspaceProviderTests {
         """
         let entries = try SSHWorkspaceFilesystem.parseLongListing(output, directory: "/root")
         #expect(entries.map(\.path) == [
+            "/root/.env",
             "/root/configure-maintenance.sh",
             "/root/current",
             "/root/file with spaces.txt",
             "/root/relative.txt",
         ])
         #expect(entries.first { $0.name == "current" }?.isDirectory == false)
+
+        let statuses = SSHWorkspaceFilesystem.parseDirectoryListingStatuses(output, directory: "/root")
+        #expect(statuses["root"] == nil)
+        #expect(statuses[".env"] == .file)
     }
 
     @Test func quotesSFTPBatchPaths() {
         #expect(SSHWorkspaceFilesystem.quote("/root/file name") == "\"/root/file name\"")
         #expect(SSHWorkspaceFilesystem.quote("/root/a\\b\"c") == "\"/root/a\\\\b\\\"c\"")
+        #expect(SSHWorkspaceFilesystem.quoteLiteral("/root/{id}/[slug]") == "\"/root/{id}/[slug]\"")
+        #expect(SSHWorkspaceFilesystem.quoteGlobEscaped("/root/{id}/[slug]") == "\"/root/\\{id\\}/[slug]\"")
     }
 
     @Test func createsSSHWorkspaceDescriptorFromAlias() throws {
@@ -1415,6 +1429,220 @@ struct WorkspaceProviderTests {
             try await holder.value
         }
         #expect(await limiter.activeConcurrency(for: key) == 0)
+    }
+
+    @Test func sshFilesystemHandlesBracketBraceGlobPathsAndCreateFileViaRealLocalSFTPServer() async throws {
+        guard FileManager.default.isExecutableFile(atPath: "/usr/bin/sftp"),
+              FileManager.default.isExecutableFile(atPath: "/usr/libexec/sftp-server") else {
+            return
+        }
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-real-sftp-\(UUID().uuidString)", isDirectory: true)
+        let slugDir = root.appendingPathComponent("app/blog/[slug]", isDirectory: true)
+        let decoyDir = root.appendingPathComponent("app/blog/s", isDirectory: true)
+        let catchAllDir = root.appendingPathComponent("app/docs/[[...slug]]", isDirectory: true)
+        let braceDir = root.appendingPathComponent("app/routes/{id}", isDirectory: true)
+        let braceCommaDir = root.appendingPathComponent("app/routes/{a,b}", isDirectory: true)
+        let wildDir = root.appendingPathComponent("app/special/star*q?quote\"tick'space", isDirectory: true)
+        for dir in [slugDir, decoyDir, catchAllDir, braceDir, braceCommaDir, wildDir] {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let slugFile = slugDir.appendingPathComponent("page.tsx")
+        let decoyFile = decoyDir.appendingPathComponent("page.tsx")
+        let catchAllFile = catchAllDir.appendingPathComponent("page.tsx")
+        let braceFile = braceDir.appendingPathComponent("route.ts")
+        let braceCommaFile = braceCommaDir.appendingPathComponent("route.ts")
+        let wildFile = wildDir.appendingPathComponent("notes.md")
+        try Data("export default 'real-slug';\n".utf8).write(to: slugFile)
+        try Data("export default 'decoy-s';\n".utf8).write(to: decoyFile)
+        try Data("export default 'catchall';\n".utf8).write(to: catchAllFile)
+        try Data("export const id = 1;\n".utf8).write(to: braceFile)
+        try Data("export const pair = 2;\n".utf8).write(to: braceCommaFile)
+        try Data("wild content\n".utf8).write(to: wildFile)
+
+        let host = SSHHostConfiguration(
+            alias: "local-sftp",
+            hostname: "127.0.0.1",
+            user: nil,
+            port: nil,
+            proxyJump: nil
+        )
+        let transport = LocalSFTPServerTransport()
+        let filesystem = SSHWorkspaceFilesystem(
+            host: host,
+            workingDirectory: root.path,
+            transport: transport,
+            itemTypeCache: SSHWorkspaceItemTypeCache()
+        )
+
+        // 1. [slug]/page.tsx reads & writes the exact bracket directory, never matching sibling `s/page.tsx`.
+        let slugEntries = try await filesystem.listDirectory(at: slugDir.path)
+        #expect(slugEntries.map(\.name) == ["page.tsx"])
+        let slugRead = try await filesystem.readFile(at: slugFile.path)
+        #expect(String(data: slugRead, encoding: .utf8) == "export default 'real-slug';\n")
+
+        try await filesystem.writeFile(
+            Data("export default 'updated-slug';\n".utf8),
+            at: slugFile.path,
+            replacing: slugRead
+        )
+        #expect(try String(contentsOf: slugFile, encoding: .utf8) == "export default 'updated-slug';\n")
+        #expect(try String(contentsOf: decoyFile, encoding: .utf8) == "export default 'decoy-s';\n")
+
+        // 2. BSD GLOB_BRACE paths (`{id}`, `{a,b}`), `[[...slug]]`, and `* ? " '` paths work end-to-end.
+        for (target, expected) in [
+            (catchAllFile, "export default 'catchall';\n"),
+            (braceFile, "export const id = 1;\n"),
+            (braceCommaFile, "export const pair = 2;\n"),
+            (wildFile, "wild content\n"),
+        ] {
+            let attrs = try #require(try await filesystem.statFile(at: target.path))
+            #expect(!attrs.isDirectory)
+            let data = try await filesystem.readFile(at: target.path)
+            #expect(String(data: data, encoding: .utf8) == expected)
+        }
+
+        try await filesystem.writeFile(
+            Data("export const id = 99;\n".utf8),
+            at: braceFile.path,
+            replacing: Data("export const id = 1;\n".utf8)
+        )
+        #expect(try String(contentsOf: braceFile, encoding: .utf8) == "export const id = 99;\n")
+
+        // 3. createDirectory and createFile work on real OpenSSH sftp (no `/dev/null is not a regular file` error).
+        try await filesystem.createDirectory(named: "[created-dir]", in: braceDir.path)
+        let createdSubdir = braceDir.appendingPathComponent("[created-dir]", isDirectory: true)
+        #expect(FileManager.default.fileExists(atPath: createdSubdir.path))
+        try await filesystem.createFile(named: "empty.ts", in: createdSubdir.path)
+        let createdFile = createdSubdir.appendingPathComponent("empty.ts")
+        #expect(FileManager.default.fileExists(atPath: createdFile.path))
+        #expect(try Data(contentsOf: createdFile).isEmpty)
+    }
+
+    @Test func sshFilesystemRejectsNewlineCarriageReturnNullAndLeadingDashPaths() async throws {
+        // Quick Open parser strips newline/CR entries while keeping valid bracket/brace paths.
+        let rawQuickOpen = [
+            "app/[slug]/page.tsx",
+            "evil\nput /etc/passwd /tmp/leak.ts",
+            "evil\rcarriage.ts",
+            "routes/{id}/index.ts",
+            ""
+        ].joined(separator: "\0")
+        let parsed = SSHWorkspaceFilesystem.parseQuickOpenListing(
+            rawQuickOpen,
+            rootDirectory: "/remote/repo",
+            maxFiles: 50
+        )
+        #expect(parsed.map(\.path) == [
+            "/remote/repo/app/[slug]/page.tsx",
+            "/remote/repo/routes/{id}/index.ts",
+        ])
+
+        #expect(SSHWorkspaceFilesystem.parseResolvedCanonicalPath("/remote/a\nput /tmp/x /tmp/y\n") == nil)
+        #expect(SSHWorkspaceFilesystem.parseResolvedCanonicalPath("-bad/flag\n") == nil)
+
+        let host = SSHHostConfiguration(
+            alias: "cloud",
+            hostname: "example.com",
+            user: "dev",
+            port: nil,
+            proxyJump: nil
+        )
+        let transport = MockSSHRemoteTransport(
+            commandHandler: { _ in "" },
+            sftpHandler: { _ in "" }
+        )
+        let filesystem = SSHWorkspaceFilesystem(
+            host: host,
+            workingDirectory: "/remote/repo",
+            transport: transport,
+            itemTypeCache: SSHWorkspaceItemTypeCache()
+        )
+
+        for injectedPath in [
+            "/remote/repo/evil\nput /etc/passwd /tmp/pwn",
+            "/remote/repo/evil\rrm /tmp/x",
+            "/remote/repo/evil\0null",
+            "-oProxyCommand=bad",
+        ] {
+            await #expect(throws: WorkspaceFilesystemError.invalidPath) {
+                _ = try await filesystem.listDirectory(at: injectedPath)
+            }
+            await #expect(throws: WorkspaceFilesystemError.invalidPath) {
+                _ = try await filesystem.statFile(at: injectedPath)
+            }
+            await #expect(throws: WorkspaceFilesystemError.invalidPath) {
+                _ = try await filesystem.readFile(at: injectedPath)
+            }
+            await #expect(throws: WorkspaceFilesystemError.invalidPath) {
+                try await filesystem.writeFile(Data("x".utf8), at: injectedPath, replacing: Data())
+            }
+            await #expect(throws: WorkspaceFilesystemError.invalidPath) {
+                _ = try await filesystem.itemTypes(at: [injectedPath])
+            }
+            #expect(try await filesystem.itemType(at: injectedPath) == nil)
+        }
+        await #expect(throws: WorkspaceFilesystemError.invalidPath) {
+            try await filesystem.createFile(named: "bad\nfile.txt", in: "/remote/repo")
+        }
+        await #expect(throws: WorkspaceFilesystemError.invalidPath) {
+            try await filesystem.createDirectory(named: "bad\rdir", in: "/remote/repo")
+        }
+        #expect(await transport.recordedCommands().isEmpty)
+        #expect(await transport.recordedSFTPBatches().isEmpty)
+    }
+}
+
+private actor LocalSFTPServerTransport: SSHRemoteTransport {
+    func runSFTP(batch: String, host: String, connection: GitSSHConnection?) async throws -> String {
+        try await Task.detached(priority: .userInitiated) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/sftp")
+            process.arguments = ["-q", "-D", "/usr/libexec/sftp-server", "-b", "-"]
+            let inPipe = Pipe()
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            process.standardInput = inPipe
+            process.standardOutput = outPipe
+            process.standardError = errPipe
+            try process.run()
+            inPipe.fileHandleForWriting.write(Data((batch + "\n").utf8))
+            try? inPipe.fileHandleForWriting.close()
+            let stdoutData = outPipe.fileHandleForReading.readDataToEndOfFile()
+            let stderrData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
+            let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+            guard process.terminationStatus == 0 else {
+                throw WorkspaceFilesystemError.commandFailed(process.terminationStatus, stderr.isEmpty ? stdout : stderr)
+            }
+            return stdout
+        }.value
+    }
+
+    func runCommand(_ command: String, host: String, connection: GitSSHConnection?) async throws -> String {
+        try await Task.detached(priority: .userInitiated) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/sh")
+            process.arguments = ["-c", command]
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            process.standardOutput = outPipe
+            process.standardError = errPipe
+            try process.run()
+            let stdoutData = outPipe.fileHandleForReading.readDataToEndOfFile()
+            let stderrData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
+            let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+            guard process.terminationStatus == 0 else {
+                throw WorkspaceFilesystemError.commandFailed(process.terminationStatus, stderr.isEmpty ? stdout : stderr)
+            }
+            return stdout
+        }.value
     }
 }
 

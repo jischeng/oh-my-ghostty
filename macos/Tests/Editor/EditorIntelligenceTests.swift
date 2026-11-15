@@ -786,6 +786,209 @@ struct EditorIntelligenceTests {
         await lspManager.shutdownAll()
     }
 
+    @Test
+    @MainActor
+    func outOfTreeOpenAndBroadContainerPathsNeverBypassWorkspaceTrust() async throws {
+        guard let pythonPath = Self.resolveRealPython3Executable() else {
+            Issue.record("Python 3 executable not found on test machine")
+            return
+        }
+
+        let baseDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-lsp-outoftree-\(UUID().uuidString)", isDirectory: true)
+        let trustedRepo = baseDir.appendingPathComponent("trusted-repo", isDirectory: true)
+        let untrustedRepo = baseDir.appendingPathComponent("untrusted-poc", isDirectory: true)
+        let untrustedSrc = untrustedRepo.appendingPathComponent("src", isDirectory: true)
+        try FileManager.default.createDirectory(at: trustedRepo, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: untrustedSrc, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: untrustedRepo.appendingPathComponent(".git", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        let standaloneFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-standalone-\(UUID().uuidString).py")
+        let siblingStandaloneFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-sibling-\(UUID().uuidString).py")
+        defer {
+            try? FileManager.default.removeItem(at: baseDir)
+            try? FileManager.default.removeItem(at: standaloneFile)
+            try? FileManager.default.removeItem(at: siblingStandaloneFile)
+        }
+
+        let scriptURL = baseDir.appendingPathComponent("mock_lsp.py")
+        try Data(Self.mockPythonLSPServerScript.utf8).write(to: scriptURL)
+
+        let trustedFile = trustedRepo.appendingPathComponent("safe.py")
+        let untrustedFile = untrustedSrc.appendingPathComponent("exploit.py")
+        let symlinkInsideTrusted = trustedRepo.appendingPathComponent("escaped_link.py")
+        try Data("x = 1\n".utf8).write(to: trustedFile)
+        try Data("import os\n".utf8).write(to: untrustedFile)
+        try FileManager.default.createSymbolicLink(at: symlinkInsideTrusted, withDestinationURL: untrustedFile)
+        try Data("standalone = 1\n".utf8).write(to: standaloneFile)
+        try Data("sibling = 2\n".utf8).write(to: siblingStandaloneFile)
+
+        let trustStore = EditorWorkspaceTrustStore(fileURL: baseDir.appendingPathComponent("trust.json"))
+        #expect(trustStore.trust(workspaceRoot: trustedRepo.path))
+
+        // Broad containers ($HOME, /Users/alice, ~/Downloads, /tmp, NSTemporaryDirectory) are never trustable.
+        let homePath = FileManager.default.homeDirectoryForCurrentUser.path
+        for broad in [
+            "/",
+            "/Users",
+            "/Users/alice",
+            "/Users/alice/Downloads",
+            "/tmp",
+            homePath,
+            (homePath as NSString).appendingPathComponent("Downloads"),
+            FileManager.default.temporaryDirectory.path,
+        ] {
+            #expect(!trustStore.trust(workspaceRoot: broad))
+            #expect(!trustStore.isTrusted(workspaceRoot: broad))
+        }
+
+        let lspManager = EditorLSPManager(
+            serverCommands: ["python": EditorLSPServerCommand(executable: pythonPath, arguments: ["-u", scriptURL.path])],
+            idleTimeout: 5.0,
+            emptyWorkspaceIdleTimeout: 0.2,
+            reaperInterval: 0.05,
+            trustStore: trustStore
+        )
+        let coordinator = EditorIntelligenceCoordinator(lspManager: lspManager)
+        let workspace = EditorWorkspace(intelligenceCoordinator: coordinator, fileWatcherDebounce: 0.04)
+        defer {
+            workspace.cancelAndClear()
+            Task { await lspManager.shutdownAll() }
+        }
+
+        // 1. Opening an out-of-tree file using a trusted terminal CWD filesystem must NOT inherit trustedRepo's trust.
+        let trustedCWDFilesystem = LocalWorkspaceFilesystem(workingDirectory: trustedRepo.path)
+        workspace.open(path: untrustedFile.path, filesystem: trustedCWDFilesystem)
+        let openedOutOfTree = await waitForMainCondition(timeoutMs: 2_000) {
+            !workspace.isLoading && workspace.selectedDocument?.path == untrustedFile.path
+        }
+        #expect(openedOutOfTree)
+        let canonicalUntrustedRepo = try #require(EditorWorkspaceTrustStore.canonicalPath(untrustedRepo.path))
+        #expect(workspace.untrustedLocalWorkspaceRoot == canonicalUntrustedRepo)
+        try? await Task.sleep(for: .milliseconds(120))
+        #expect(await lspManager.activeServerCount == 0)
+
+        // 2. Opening a symlink inside trustedRepo that resolves outside trustedRepo also stays in Restricted Mode.
+        workspace.open(path: symlinkInsideTrusted.path, filesystem: trustedCWDFilesystem)
+        let openedSymlink = await waitForMainCondition(timeoutMs: 2_000) {
+            !workspace.isLoading && workspace.selectedDocument?.path == symlinkInsideTrusted.path
+        }
+        #expect(openedSymlink)
+        #expect(workspace.untrustedLocalWorkspaceRoot == canonicalUntrustedRepo)
+        try? await Task.sleep(for: .milliseconds(100))
+        #expect(await lspManager.activeServerCount == 0)
+
+        // 3. Standalone file directly inside a broad container scopes to the exact file, never trusting siblings.
+        let standaloneCtx = EditorIntelligenceDocumentContext(
+            path: standaloneFile.path,
+            languageHint: "python",
+            workspaceRoot: trustedRepo.path,
+            isLocal: true
+        )
+        let canonicalStandalone = try #require(EditorWorkspaceTrustStore.canonicalPath(standaloneFile.path))
+        #expect(standaloneCtx.effectiveLocalRoot == canonicalStandalone)
+        #expect(standaloneCtx.effectiveSymbolSearchRoot == nil)
+        #expect(!trustStore.isTrusted(workspaceRoot: canonicalStandalone))
+        #expect(trustStore.trust(workspaceRoot: canonicalStandalone))
+        #expect(trustStore.isTrusted(workspaceRoot: canonicalStandalone))
+        #expect(!trustStore.isTrusted(workspaceRoot: siblingStandaloneFile.path))
+
+        await coordinator.documentDidOpen(standaloneCtx, text: "standalone = 1\n")
+        let standaloneSpawned = await waitForAsyncCondition(timeoutMs: 2_500) {
+            await lspManager.activeServerCount == 1
+        }
+        #expect(standaloneSpawned)
+        await lspManager.shutdownAll()
+    }
+
+    @Test
+    @MainActor
+    func autoIdleCollapseReapSuspendsLSPAndExternalEditsDoNotLeakOpenCount() async throws {
+        guard let pythonPath = Self.resolveRealPython3Executable() else {
+            Issue.record("Python 3 executable not found on test machine")
+            return
+        }
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-lsp-autoreap-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let scriptURL = tempDir.appendingPathComponent("mock_lsp.py")
+        try Data(Self.mockPythonLSPServerScript.utf8).write(to: scriptURL)
+        let fileURL = tempDir.appendingPathComponent("watched.py")
+        try Data("value = 1\n".utf8).write(to: fileURL)
+
+        let trustStore = EditorWorkspaceTrustStore(fileURL: tempDir.appendingPathComponent("trust.json"))
+        trustStore.trust(workspaceRoot: tempDir.path)
+
+        let lspManager = EditorLSPManager(
+            serverCommands: ["python": EditorLSPServerCommand(executable: pythonPath, arguments: ["-u", scriptURL.path])],
+            idleTimeout: 30.0,
+            emptyWorkspaceIdleTimeout: 0.12,
+            reaperInterval: 0.04,
+            trustStore: trustStore
+        )
+        let coordinator = EditorIntelligenceCoordinator(lspManager: lspManager)
+        let workspace = EditorWorkspace(
+            intelligenceCoordinator: coordinator,
+            fileWatcherDebounce: 0.03,
+            idleReapDelay: .milliseconds(80)
+        )
+        defer {
+            workspace.cancelAndClear()
+            Task { await lspManager.shutdownAll() }
+        }
+
+        let fs = LocalWorkspaceFilesystem(workingDirectory: tempDir.path)
+        workspace.open(path: fileURL.path, filesystem: fs)
+        let opened = await waitForMainCondition(timeoutMs: 2_000) {
+            !workspace.isLoading && workspace.selectedDocument != nil
+        }
+        #expect(opened)
+        let doc = try #require(workspace.selectedDocument)
+
+        let serverStarted = await waitForAsyncCondition(timeoutMs: 2_500) {
+            await lspManager.activeServerCount == 1
+        }
+        #expect(serverStarted)
+
+        // 1. Hide workspace and rely solely on automatic `idleReapDelay` (no manual `reclaimIdleWorkbenchNow()`).
+        workspace.isVisible = false
+        let autoReaped = await waitForAsyncCondition(timeoutMs: 3_000) {
+            await lspManager.activeServerCount == 0
+        }
+        #expect(autoReaped)
+        #expect(workspace.intelligenceBridge.hasSuspendedDocuments)
+
+        // 2. External file edit while hidden updates the clean document buffer WITHOUT waking LSP or bumping openCount.
+        try Data("value = 2\n".utf8).write(to: fileURL, options: .atomic)
+        let syncedWhileHidden = await waitForMainCondition(timeoutMs: 2_000) {
+            doc.text == "value = 2\n"
+        }
+        #expect(syncedWhileHidden)
+        try? await Task.sleep(for: .milliseconds(120))
+        #expect(await lspManager.activeServerCount == 0)
+
+        // 3. Uncollapsing re-opens the document once (`openCount == 1`), so closing the tab drops openCount to 0.
+        workspace.isVisible = true
+        let reopened = await waitForAsyncCondition(timeoutMs: 2_500) {
+            await lspManager.activeServerCount == 1
+        }
+        #expect(reopened)
+
+        workspace.remove(doc)
+        let closedCleanly = await waitForAsyncCondition(timeoutMs: 2_500) {
+            await lspManager.activeServerCount == 0
+        }
+        #expect(closedCleanly)
+        await lspManager.shutdownAll()
+    }
+
     // MARK: - Helpers
 
     @MainActor

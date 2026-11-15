@@ -1560,7 +1560,8 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
     }
 
     func listDirectory(at path: String) async throws -> [WorkspaceFileEntry] {
-        let output = try await runSFTP(batch: "ls -la \(Self.quote(path))")
+        try Self.validateRemotePath(path)
+        let output = try await runSFTP(batch: "ls -la \(Self.quoteGlobEscaped(path))")
         let entries = try Self.parseLongListing(output, directory: path)
         let dirStatuses = Self.parseDirectoryListingStatuses(output, directory: path)
         var cacheUpdates: [String: SSHWorkspaceItemTypeCache.EntryState] = [:]
@@ -1580,7 +1581,7 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
     }
 
     func listQuickOpenFiles(under rootDirectory: String, maxFiles: Int) async throws -> [WorkspaceFileEntry]? {
-        guard rootDirectory.hasPrefix("/"), !rootDirectory.contains("\0"), maxFiles > 0 else {
+        guard rootDirectory.hasPrefix("/"), Self.isValidRemotePath(rootDirectory), maxFiles > 0 else {
             throw WorkspaceFilesystemError.invalidPath
         }
         let normalizedRoot = Self.standardized(rootDirectory)
@@ -1644,7 +1645,10 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
 
         for rawPart in rawParts {
             guard entries.count < maxFiles else { break }
-            guard !rawPart.isEmpty, !rawPart.hasSuffix("/") else { continue }
+            guard !rawPart.isEmpty,
+                  !rawPart.hasSuffix("/"),
+                  !rawPart.contains("\n"),
+                  !rawPart.contains("\r") else { continue }
             var relative = Substring(rawPart)
             while relative.hasPrefix("./") {
                 relative = relative.dropFirst(2)
@@ -1668,21 +1672,38 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
     }
 
     func createFile(named name: String, in directory: String) async throws {
+        try Self.validateRemotePath(directory)
         guard Self.validChildName(name) else { throw WorkspaceFilesystemError.invalidPath }
-        _ = try await runSFTP(batch: "put /dev/null \(Self.quote(Self.join(directory, name)))")
+        let targetPath = Self.join(directory, name)
+        try Self.validateRemotePath(targetPath)
+        let emptyLocalURL = Self.temporaryTransferURL()
+        defer { try? FileManager.default.removeItem(at: emptyLocalURL) }
+        do {
+            try Data().write(to: emptyLocalURL, options: [.atomic])
+        } catch {
+            throw WorkspaceFilesystemError.unavailable
+        }
+        _ = try await runSFTP(
+            batch: "put \(Self.quoteGlobEscaped(emptyLocalURL.path)) \(Self.quoteLiteral(targetPath))"
+        )
         itemTypeCache.invalidateAll(for: descriptor.id)
         quickOpenCache.invalidateAll(for: descriptor.id)
     }
 
     func createDirectory(named name: String, in directory: String) async throws {
+        try Self.validateRemotePath(directory)
         guard Self.validChildName(name) else { throw WorkspaceFilesystemError.invalidPath }
-        _ = try await runSFTP(batch: "mkdir \(Self.quote(Self.join(directory, name)))")
+        let targetPath = Self.join(directory, name)
+        try Self.validateRemotePath(targetPath)
+        _ = try await runSFTP(batch: "mkdir \(Self.quoteLiteral(targetPath))")
         itemTypeCache.invalidateAll(for: descriptor.id)
         quickOpenCache.invalidateAll(for: descriptor.id)
     }
 
     func renameItem(at path: String, to name: String) async throws {
+        try Self.validateRemotePath(path)
         let destination = try WorkspaceFileActions.renamedPath(path, name: name)
+        try Self.validateRemotePath(destination)
         guard destination != path else { return }
         let command = "python3 -c " + Self.shellQuote(Self.exclusiveRenameScript) + " " +
             Self.shellQuote(path) + " " + Self.shellQuote(destination)
@@ -1711,7 +1732,8 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
     """
 
     func statFile(at path: String) async throws -> (size: UInt64, permissions: Int?, isDirectory: Bool)? {
-        let output = try await runSFTP(batch: "ls -la \(Self.quote(path))")
+        try Self.validateRemotePath(path)
+        let output = try await runSFTP(batch: "ls -la \(Self.quoteGlobEscaped(path))")
         return Self.parseFileAttributes(from: output)
     }
 
@@ -1719,7 +1741,7 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
         // SFTP ls on a directory lists its children, not the target's type.
         // Test the exact path; this also works for empty directories and follows
         // symlinks consistently with local itemType. No directory enumeration.
-        guard !path.isEmpty, !path.contains("\0") else { return nil }
+        guard Self.isValidRemotePath(path) else { return nil }
         if let cached = itemTypeCache.lookup(path: path, workspaceID: descriptor.id) {
             switch cached {
             case .present(let kind): return kind
@@ -1748,7 +1770,8 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
     }
 
     static func canProbeViaParentListing(_ path: String) -> Bool {
-        guard path.hasPrefix("/"), path != "/", !path.hasSuffix("/"),
+        guard isValidRemotePath(path),
+              path.hasPrefix("/"), path != "/", !path.hasSuffix("/"),
               !path.contains("//"),
               !path.contains("/./"), !path.hasSuffix("/."),
               !path.contains("/../"), !path.hasSuffix("/..") else {
@@ -1768,7 +1791,9 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
             guard line.count > 10, !line.hasPrefix("sftp>") else { continue }
             let columns = line.split(maxSplits: 8, whereSeparator: { $0 == " " || $0 == "\t" })
             guard columns.count >= 9 else { continue }
-            let listedPath = listingPath(String(columns[8]), directory: directory)
+            let rawField = String(columns[8])
+            guard !isDotDirectoryListingField(rawField) else { continue }
+            let listedPath = listingPath(rawField, directory: directory)
             let name = (listedPath as NSString).lastPathComponent
             guard name != ".", name != ".." else { continue }
             let kind: DirectoryEntryKind
@@ -1818,7 +1843,7 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
                 try Task.checkCancellation()
                 let groupPaths = parentGroups[parent] ?? []
                 do {
-                    let listing = try await runSFTP(batch: "ls -laf \(Self.quote(parent))")
+                    let listing = try await runSFTP(batch: "ls -laf \(Self.quoteGlobEscaped(parent))")
                     let statuses = Self.parseDirectoryListingStatuses(listing, directory: parent)
                     var cacheUpdates: [String: SSHWorkspaceItemTypeCache.EntryState] = [:]
                     for (name, status) in statuses.prefix(500) {
@@ -1884,7 +1909,7 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
         var batches: [[String]] = [], batch: [String] = []
         var bytes = 0
         for path in Set(paths).sorted() {
-            guard !path.isEmpty, !path.contains("\0"), path.utf8.count <= 16_384 else {
+            guard isValidRemotePath(path) else {
                 throw WorkspaceFilesystemError.invalidPath
             }
             let cost = itemTypesCommand([path]).utf8.count
@@ -1933,9 +1958,10 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
     }
 
     private func readFileWithPermissions(at path: String) async throws -> (data: Data, permissions: Int?) {
+        try Self.validateRemotePath(path)
         // Pre-check remote attributes before downloading (E11) and capture permissions in one SFTP call.
         var remotePermissions: Int?
-        if let output = try? await runSFTP(batch: "ls -la \(Self.quote(path))"),
+        if let output = try? await runSFTP(batch: "ls -la \(Self.quoteGlobEscaped(path))"),
            let attrs = Self.parseFileAttributes(from: output) {
             guard !attrs.isDirectory else {
                 throw WorkspaceFilesystemError.invalidPath
@@ -1948,7 +1974,9 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
 
         let localURL = Self.temporaryTransferURL()
         defer { try? FileManager.default.removeItem(at: localURL) }
-        _ = try await runSFTP(batch: "get \(Self.quote(path)) \(Self.quote(localURL.path))")
+        _ = try await runSFTP(
+            batch: "get \(Self.quoteGlobEscaped(path)) \(Self.quoteLiteral(localURL.path))"
+        )
         do {
             let attributes = try FileManager.default.attributesOfItem(atPath: localURL.path)
             let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
@@ -1969,21 +1997,24 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
 
     static func parseResolvedCanonicalPath(_ output: String) -> String? {
         let result = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard result.hasPrefix("/"), !result.contains("\0") else { return nil }
+        guard result.hasPrefix("/"), isValidRemotePath(result) else { return nil }
         return standardized(result)
     }
 
     private func resolveSymlinkViaSSH(at path: String) async -> String? {
+        guard Self.isValidRemotePath(path) else { return nil }
         let command = "readlink -f \(Self.shellQuote(path)) 2>/dev/null || realpath \(Self.shellQuote(path)) 2>/dev/null"
         guard let output = try? await runRemoteCommand(command) else { return nil }
         return Self.parseResolvedCanonicalPath(output)
     }
 
     func resolveCanonicalPath(at path: String) async -> String? {
+        guard Self.isValidRemotePath(path) else { return nil }
         if let resolved = await resolveSymlinkViaSSH(at: path) {
             return resolved
         }
         let resolved = await resolveSymlinkTarget(at: path)
+        guard Self.isValidRemotePath(resolved) else { return nil }
         if resolved == path {
             switch await checkRemoteSymlinkStatus(at: path) {
             case .regularFile:
@@ -2017,34 +2048,42 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
     }
 
     func checkRemoteSymlinkStatus(at path: String) async -> RemoteSymlinkCheckResult {
+        guard Self.isValidRemotePath(path) else { return .indeterminate }
         let parentDir = (path as NSString).deletingLastPathComponent
+        guard Self.isValidRemotePath(parentDir) else { return .indeterminate }
         let targetName = (path as NSString).lastPathComponent
-        guard let output = try? await runSFTP(batch: "ls -la \(Self.quote(parentDir))") else {
+        guard let output = try? await runSFTP(batch: "ls -la \(Self.quoteGlobEscaped(parentDir))") else {
             return .indeterminate
         }
         return Self.parseSymlinkStatus(name: targetName, fromDirectoryListing: output)
     }
 
     func resolveSymlinkTarget(at path: String) async -> String {
+        guard Self.isValidRemotePath(path) else { return path }
         var currentPath = path
         var depth = 0
         while depth < 32 {
-            guard let output = try? await runSFTP(batch: "ls -la \(Self.quote(currentPath))"),
+            guard Self.isValidRemotePath(currentPath),
+                  let output = try? await runSFTP(batch: "ls -la \(Self.quoteGlobEscaped(currentPath))"),
                   let target = Self.parseSymlinkTarget(from: output) else {
                 break
             }
+            let nextPath: String
             if target.hasPrefix("/") {
-                currentPath = Self.standardized(target)
+                nextPath = Self.standardized(target)
             } else {
                 let parentDir = (currentPath as NSString).deletingLastPathComponent
-                currentPath = Self.standardized(Self.join(parentDir, target))
+                nextPath = Self.standardized(Self.join(parentDir, target))
             }
+            guard Self.isValidRemotePath(nextPath) else { break }
+            currentPath = nextPath
             depth += 1
         }
         return currentPath
     }
 
     func writeFile(_ data: Data, at path: String, replacing expectedData: Data) async throws {
+        try Self.validateRemotePath(path)
         let targetPath: String
         let verifiedCanonicalTarget: Bool
         if let resolved = await resolveSymlinkViaSSH(at: path) {
@@ -2054,6 +2093,7 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
             targetPath = await resolveSymlinkTarget(at: path)
             verifiedCanonicalTarget = false
         }
+        try Self.validateRemotePath(targetPath)
 
         if !verifiedCanonicalTarget && targetPath == path {
             let status = await checkRemoteSymlinkStatus(at: path)
@@ -2088,15 +2128,16 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
         let directory = (targetPath as NSString).deletingLastPathComponent
         let tempFileName = ".omg-tmp-\(UUID().uuidString)"
         let remoteTempPath = Self.join(directory, tempFileName)
+        try Self.validateRemotePath(remoteTempPath)
 
         var batchCommands = [
-            "put \(Self.quote(localURL.path)) \(Self.quote(remoteTempPath))"
+            "put \(Self.quoteGlobEscaped(localURL.path)) \(Self.quoteLiteral(remoteTempPath))"
         ]
         if let permissions = remotePermissions {
             let octal = String(permissions, radix: 8)
-            batchCommands.append("chmod \(octal) \(Self.quote(remoteTempPath))")
+            batchCommands.append("chmod \(octal) \(Self.quoteGlobEscaped(remoteTempPath))")
         }
-        batchCommands.append("rename \(Self.quote(remoteTempPath)) \(Self.quote(targetPath))")
+        batchCommands.append("rename \(Self.quoteLiteral(remoteTempPath)) \(Self.quoteLiteral(targetPath))")
         let batch = batchCommands.joined(separator: "\n")
 
         do {
@@ -2104,7 +2145,7 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
             itemTypeCache.invalidateAll(for: descriptor.id)
             quickOpenCache.invalidateAll(for: descriptor.id)
         } catch {
-            _ = try? await runSFTP(batch: "rm \(Self.quote(remoteTempPath))")
+            _ = try? await runSFTP(batch: "rm \(Self.quoteGlobEscaped(remoteTempPath))")
             throw error
         }
     }
@@ -2141,7 +2182,12 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
             guard line.count > 10, !line.hasPrefix("sftp>") else { continue }
             guard line.first == "l" else { return nil }
             guard let arrowRange = line.range(of: " -> ") else { return nil }
-            return String(line[arrowRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+            let target = String(line[arrowRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+            guard !target.isEmpty,
+                  !target.contains("\0"),
+                  !target.contains("\n"),
+                  !target.contains("\r") else { return nil }
+            return target
         }
         return nil
     }
@@ -2195,7 +2241,9 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
                 character == " " || character == "\t"
             })
             guard columns.count == 9 else { continue }
-            let listedPath = listingPath(String(columns[8]), directory: directory)
+            let rawField = String(columns[8])
+            guard !isDotDirectoryListingField(rawField) else { continue }
+            let listedPath = listingPath(rawField, directory: directory)
             let name = (listedPath as NSString).lastPathComponent
             guard name != ".", name != "..", name != ".DS_Store" else { continue }
             result.append(.init(
@@ -2211,11 +2259,53 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
         }
     }
 
-    static func quote(_ path: String) -> String {
+    static func isValidRemotePath(_ path: String) -> Bool {
+        !path.isEmpty
+            && !path.hasPrefix("-")
+            && !path.contains("\0")
+            && !path.contains("\n")
+            && !path.contains("\r")
+            && path.utf8.count <= 16_384
+    }
+
+    private static func validateRemotePath(_ path: String) throws {
+        guard isValidRemotePath(path) else {
+            throw WorkspaceFilesystemError.invalidPath
+        }
+    }
+
+    /// Literal double-quoted argument for OpenSSH `sftp` batch commands that do not invoke
+    /// `glob(3)` (`mkdir`, `rename`, `put` remote destination, `get` local destination).
+    static func quoteLiteral(_ path: String) -> String {
         let escaped = path
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
         return "\"\(escaped)\""
+    }
+
+    /// Glob-safe double-quoted argument for OpenSSH `sftp` batch commands that pass arguments
+    /// through `makeargv(..., make_quoted = 1)` + BSD `glob(..., GLOB_BRACE)` (`ls`, `get`
+    /// remote source, `put` local source, `chmod`, `rm`). OpenSSH `makeargv` already escapes
+    /// `*`, `?`, `[`, and `\` inside double quotes, while BSD `GLOB_BRACE` also expands `{` and `}`.
+    static func quoteGlobEscaped(_ path: String) -> String {
+        let escaped = path
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "{", with: "\\{")
+            .replacingOccurrences(of: "}", with: "\\}")
+        return "\"\(escaped)\""
+    }
+
+    static func quote(_ path: String) -> String {
+        quoteLiteral(path)
+    }
+
+    private static func isDotDirectoryListingField(_ field: String) -> Bool {
+        let rawField = field.components(separatedBy: " -> ").first ?? field
+        return rawField == "."
+            || rawField == ".."
+            || rawField.hasSuffix("/.")
+            || rawField.hasSuffix("/..")
     }
 
     private static func listingPath(_ field: String, directory: String) -> String {
@@ -2243,8 +2333,14 @@ struct SSHWorkspaceFilesystem: WorkspaceFilesystem {
     }
 
     private static func validChildName(_ name: String) -> Bool {
-        !name.isEmpty && name != "." && name != ".." &&
-            !name.contains("/") && !name.contains(":")
+        !name.isEmpty
+            && name != "."
+            && name != ".."
+            && !name.contains("/")
+            && !name.contains(":")
+            && !name.contains("\0")
+            && !name.contains("\n")
+            && !name.contains("\r")
     }
 
     private static func temporaryTransferURL() -> URL {

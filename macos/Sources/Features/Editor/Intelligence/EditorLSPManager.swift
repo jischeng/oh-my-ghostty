@@ -11,6 +11,7 @@ final class EditorWorkspaceTrustStore: ObservableObject, @unchecked Sendable {
     private struct PersistedState: Codable {
         var version: Int = 1
         var trustedRoots: [String]
+        var trustedFiles: [String]?
     }
 
     @MainActor @Published private(set) var revision: UInt64 = 0
@@ -18,6 +19,7 @@ final class EditorWorkspaceTrustStore: ObservableObject, @unchecked Sendable {
     let fileURL: URL?
     private let lock = NSLock()
     private var trustedPrefixes: Set<String>
+    private var trustedSingleFiles: Set<String>
     private let trustAllByDefault: Bool
 
     init(
@@ -29,26 +31,53 @@ final class EditorWorkspaceTrustStore: ObservableObject, @unchecked Sendable {
         self.fileURL = fileURL
         self.trustAllByDefault = trustAllByDefault
 
-        var loaded = Set(initiallyTrustedRoots.compactMap(Self.canonicalDirectoryPath))
+        var loadedPrefixes = Set<String>()
+        var loadedFiles = Set<String>()
+
+        func ingestRoot(_ raw: String) {
+            guard let canonical = Self.canonicalDirectoryPath(raw),
+                  !Self.isBroadContainerDirectory(canonical) else {
+                return
+            }
+            if Self.shouldScopeAsSingleFile(canonical) {
+                loadedFiles.insert(canonical)
+            } else {
+                loadedPrefixes.insert(canonical)
+            }
+        }
+
+        for raw in initiallyTrustedRoots {
+            ingestRoot(raw)
+        }
         if let fileURL {
             OMGPrivateFileWriter.tightenPermissionsIfPresent(at: fileURL)
             if let data = try? Data(contentsOf: fileURL),
                data.count <= 1_048_576,
                let decoded = try? JSONDecoder().decode(PersistedState.self, from: data) {
                 for raw in decoded.trustedRoots {
-                    if let canonical = Self.canonicalDirectoryPath(raw) {
-                        loaded.insert(canonical)
+                    ingestRoot(raw)
+                }
+                for raw in decoded.trustedFiles ?? [] {
+                    if let canonical = Self.canonicalDirectoryPath(raw),
+                       !Self.isBroadContainerDirectory(canonical) {
+                        loadedFiles.insert(canonical)
                     }
                 }
             }
         }
-        self.trustedPrefixes = loaded
+        self.trustedPrefixes = loadedPrefixes
+        self.trustedSingleFiles = loadedFiles
     }
 
-    static func canonicalDirectoryPath(_ rawPath: String) -> String? {
+    static func canonicalPath(_ rawPath: String) -> String? {
         let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix("/"), !trimmed.contains("\0") else { return nil }
-        let resolved = URL(fileURLWithPath: trimmed, isDirectory: true)
+        guard trimmed.hasPrefix("/"),
+              !trimmed.contains("\0"),
+              !trimmed.contains("\n"),
+              !trimmed.contains("\r") else {
+            return nil
+        }
+        let resolved = URL(fileURLWithPath: trimmed)
             .resolvingSymlinksInPath()
             .standardizedFileURL
             .path
@@ -60,20 +89,110 @@ final class EditorWorkspaceTrustStore: ObservableObject, @unchecked Sendable {
         return normalized
     }
 
+    static func canonicalDirectoryPath(_ rawPath: String) -> String? {
+        canonicalPath(rawPath)
+    }
+
+    private static let broadSystemContainers: Set<String> = [
+        "/",
+        "/Users",
+        "/home",
+        "/Volumes",
+        "/private",
+        "/var",
+        "/private/var",
+        "/tmp",
+        "/private/tmp",
+        "/var/tmp",
+        "/private/var/tmp",
+        "/var/folders",
+        "/private/var/folders",
+    ]
+
+    private static let broadUserSubcontainers: Set<String> = [
+        "Downloads",
+        "Desktop",
+        "Documents",
+        "Library",
+        "Public",
+    ]
+
+    /// Returns `true` for broad container directories (`$HOME`, `/Users`, `/tmp`, `~/Downloads`,
+    /// `~/Desktop`, etc.) that must never receive recursive workspace prefix trust.
+    static func isBroadContainerDirectory(_ rawPath: String) -> Bool {
+        let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed == "/" { return true }
+        guard let canonical = canonicalPath(trimmed) else { return false }
+        if broadSystemContainers.contains(canonical) {
+            return true
+        }
+        if let tempCanonical = canonicalPath(FileManager.default.temporaryDirectory.path),
+           tempCanonical == canonical || tempCanonical.hasPrefix(canonical + "/") {
+            return true
+        }
+        for homeRaw in [FileManager.default.homeDirectoryForCurrentUser.path, NSHomeDirectory()] {
+            guard let home = canonicalPath(homeRaw) else { continue }
+            if canonical == home {
+                return true
+            }
+            for sub in broadUserSubcontainers where canonical == home + "/" + sub {
+                return true
+            }
+        }
+        let parts = canonical.split(separator: "/", omittingEmptySubsequences: true)
+        if parts.count == 2, parts[0] == "Users" || parts[0] == "home" {
+            return true
+        }
+        if parts.count == 3,
+           parts[0] == "Users" || parts[0] == "home",
+           broadUserSubcontainers.contains(String(parts[2])) {
+            return true
+        }
+        return false
+    }
+
+    static func shouldScopeAsSingleFile(_ canonicalPath: String) -> Bool {
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: canonicalPath, isDirectory: &isDir) {
+            return !isDir.boolValue
+        }
+        let ext = URL(fileURLWithPath: canonicalPath).pathExtension
+        if !ext.isEmpty {
+            let parent = (canonicalPath as NSString).deletingLastPathComponent
+            if isBroadContainerDirectory(parent) {
+                return true
+            }
+        }
+        return false
+    }
+
     var trustedRoots: [String] {
         lock.lock()
         defer { lock.unlock() }
-        return trustedPrefixes.sorted()
+        return trustedPrefixes.union(trustedSingleFiles).sorted()
     }
 
     func isTrusted(workspaceRoot: String) -> Bool {
         if trustAllByDefault { return true }
-        guard let candidate = Self.canonicalDirectoryPath(workspaceRoot) else { return false }
+        guard let candidate = Self.canonicalDirectoryPath(workspaceRoot),
+              !Self.isBroadContainerDirectory(candidate) else {
+            return false
+        }
         lock.lock()
-        let snapshot = trustedPrefixes
+        let prefixes = trustedPrefixes
+        let singleFiles = trustedSingleFiles
         lock.unlock()
-        for prefix in snapshot {
-            if candidate == prefix || candidate.hasPrefix(prefix + "/") {
+        if singleFiles.contains(candidate) {
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: candidate, isDirectory: &isDir), isDir.boolValue {
+                return false
+            }
+            return true
+        }
+        for prefix in prefixes where !Self.isBroadContainerDirectory(prefix) {
+            if Self.shouldScopeAsSingleFile(prefix) {
+                if candidate == prefix { return true }
+            } else if candidate == prefix || candidate.hasPrefix(prefix + "/") {
                 return true
             }
         }
@@ -82,9 +201,16 @@ final class EditorWorkspaceTrustStore: ObservableObject, @unchecked Sendable {
 
     @discardableResult
     func trust(workspaceRoot: String) -> Bool {
-        guard let canonical = Self.canonicalDirectoryPath(workspaceRoot) else { return false }
+        guard let canonical = Self.canonicalDirectoryPath(workspaceRoot),
+              !Self.isBroadContainerDirectory(canonical) else {
+            return false
+        }
+        let asSingleFile = Self.shouldScopeAsSingleFile(canonical)
         let inserted: Bool = lock.withLock {
-            trustedPrefixes.insert(canonical).inserted
+            if asSingleFile {
+                return trustedSingleFiles.insert(canonical).inserted
+            }
+            return trustedPrefixes.insert(canonical).inserted
         }
         persist()
         if inserted {
@@ -97,7 +223,9 @@ final class EditorWorkspaceTrustStore: ObservableObject, @unchecked Sendable {
     func revoke(workspaceRoot: String) -> Bool {
         guard let canonical = Self.canonicalDirectoryPath(workspaceRoot) else { return false }
         let removed: Bool = lock.withLock {
-            trustedPrefixes.remove(canonical) != nil
+            let removedPrefix = trustedPrefixes.remove(canonical) != nil
+            let removedFile = trustedSingleFiles.remove(canonical) != nil
+            return removedPrefix || removedFile
         }
         persist()
         if removed {
@@ -108,8 +236,13 @@ final class EditorWorkspaceTrustStore: ObservableObject, @unchecked Sendable {
 
     private func persist() {
         guard let fileURL else { return }
-        let sorted = trustedRoots
-        let state = PersistedState(trustedRoots: sorted)
+        let (sortedPrefixes, sortedFiles): ([String], [String]) = lock.withLock {
+            (trustedPrefixes.sorted(), trustedSingleFiles.sorted())
+        }
+        let state = PersistedState(
+            trustedRoots: sortedPrefixes,
+            trustedFiles: sortedFiles.isEmpty ? nil : sortedFiles
+        )
         guard let data = try? JSONEncoder().encode(state) else { return }
         try? OMGPrivateFileWriter.writeAtomically(data, to: fileURL)
     }
@@ -1086,17 +1219,26 @@ private final class LSPServerSession: @unchecked Sendable {
         lock.unlock()
     }
 
+    private var isSingleFileOrBroadScope: Bool {
+        EditorWorkspaceTrustStore.isBroadContainerDirectory(workspaceRoot)
+            || EditorWorkspaceTrustStore.shouldScopeAsSingleFile(workspaceRoot)
+    }
+
     func startAndInitialize() async throws {
         try launchProcess()
+        let singleFileMode = isSingleFileOrBroadScope
         let rootURI = Self.fileURI(forPath: workspaceRoot)
         let folderName = (workspaceRoot as NSString).lastPathComponent
+        let rootURIValue: Any = singleFileMode ? NSNull() : rootURI
+        let rootPathValue: Any = singleFileMode ? NSNull() : workspaceRoot
+        let workspaceFoldersValue: Any = singleFileMode
+            ? NSNull()
+            : [["uri": rootURI, "name": folderName.isEmpty ? "workspace" : folderName]]
         let initParams: [String: Any] = [
             "processId": Int(ProcessInfo.processInfo.processIdentifier),
-            "rootUri": rootURI,
-            "rootPath": workspaceRoot,
-            "workspaceFolders": [
-                ["uri": rootURI, "name": folderName.isEmpty ? "workspace" : folderName]
-            ],
+            "rootUri": rootURIValue,
+            "rootPath": rootPathValue,
+            "workspaceFolders": workspaceFoldersValue,
             "capabilities": [
                 "textDocument": [
                     "synchronization": [
@@ -1354,7 +1496,19 @@ private final class LSPServerSession: @unchecked Sendable {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: command.executable)
         proc.arguments = command.arguments
-        proc.currentDirectoryURL = URL(fileURLWithPath: workspaceRoot)
+        var isDir: ObjCBool = false
+        let workingDirectoryPath: String
+        if FileManager.default.fileExists(atPath: workspaceRoot, isDirectory: &isDir), isDir.boolValue {
+            workingDirectoryPath = workspaceRoot
+        } else {
+            let parent = (workspaceRoot as NSString).deletingLastPathComponent
+            if FileManager.default.fileExists(atPath: parent, isDirectory: &isDir), isDir.boolValue {
+                workingDirectoryPath = parent
+            } else {
+                workingDirectoryPath = NSTemporaryDirectory()
+            }
+        }
+        proc.currentDirectoryURL = URL(fileURLWithPath: workingDirectoryPath, isDirectory: true)
         proc.environment = environment
 
         let stdinPipe = Pipe()
@@ -1890,12 +2044,51 @@ struct EditorIntelligenceDocumentContext: Equatable, Sendable {
     }
 
     var effectiveLocalRoot: String? {
-        guard isLocal else { return nil }
-        if let workspaceRoot, workspaceRoot.hasPrefix("/") {
-            return workspaceRoot
+        guard isLocal,
+              let canonicalDoc = EditorWorkspaceTrustStore.canonicalPath(path) else {
+            return nil
         }
-        guard path.hasPrefix("/") else { return nil }
-        return URL(fileURLWithPath: path).deletingLastPathComponent().path
+        if let workspaceRoot,
+           let canonicalWS = EditorWorkspaceTrustStore.canonicalDirectoryPath(workspaceRoot),
+           !EditorWorkspaceTrustStore.isBroadContainerDirectory(canonicalWS) {
+            if EditorWorkspaceTrustStore.shouldScopeAsSingleFile(canonicalWS) {
+                if canonicalDoc == canonicalWS {
+                    return canonicalWS
+                }
+            } else if canonicalDoc == canonicalWS || canonicalDoc.hasPrefix(canonicalWS + "/") {
+                return canonicalWS
+            }
+        }
+
+        let parentDir = (canonicalDoc as NSString).deletingLastPathComponent
+        var cursor = parentDir
+        while !cursor.isEmpty,
+              cursor != "/",
+              !EditorWorkspaceTrustStore.isBroadContainerDirectory(cursor) {
+            let gitMarker = (cursor as NSString).appendingPathComponent(".git")
+            if FileManager.default.fileExists(atPath: gitMarker) {
+                return cursor
+            }
+            let next = (cursor as NSString).deletingLastPathComponent
+            if next == cursor { break }
+            cursor = next
+        }
+
+        if parentDir.isEmpty
+            || parentDir == "/"
+            || EditorWorkspaceTrustStore.isBroadContainerDirectory(parentDir) {
+            return canonicalDoc
+        }
+        return parentDir
+    }
+
+    var effectiveSymbolSearchRoot: String? {
+        guard let root = effectiveLocalRoot,
+              !EditorWorkspaceTrustStore.isBroadContainerDirectory(root),
+              !EditorWorkspaceTrustStore.shouldScopeAsSingleFile(root) else {
+            return nil
+        }
+        return root
     }
 }
 
@@ -2048,7 +2241,7 @@ final class EditorIntelligenceCoordinator {
             symbol: wordHit.word,
             currentPath: context.path,
             currentText: text,
-            workspaceRoot: context.effectiveLocalRoot
+            workspaceRoot: context.effectiveSymbolSearchRoot
         ) else {
             return nil
         }
@@ -2081,7 +2274,7 @@ final class EditorIntelligenceCoordinator {
             symbol: wordHit.word,
             currentPath: context.path,
             currentText: text,
-            workspaceRoot: context.effectiveLocalRoot
+            workspaceRoot: context.effectiveSymbolSearchRoot
         )
     }
 
@@ -2111,7 +2304,7 @@ final class EditorIntelligenceCoordinator {
             symbol: wordHit.word,
             currentPath: context.path,
             currentText: text,
-            workspaceRoot: context.effectiveLocalRoot
+            workspaceRoot: context.effectiveSymbolSearchRoot
         )
     }
 
@@ -2177,7 +2370,7 @@ final class EditorIntelligenceCoordinator {
             let symbolItems = await symbolIndex.workspaceCompletions(
                 prefix: cursorSnapshot.prefix,
                 currentPath: context.path,
-                workspaceRoot: context.effectiveLocalRoot,
+                workspaceRoot: context.effectiveSymbolSearchRoot,
                 limit: 20
             )
             appendUnique(symbolItems)

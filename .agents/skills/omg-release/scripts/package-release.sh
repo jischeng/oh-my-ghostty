@@ -95,9 +95,19 @@ for pid in "${dmg_pids[@]}"; do
 done
 
 if [[ -x "$repo_root/ios/scripts/package-release.sh" ]]; then
-  "$repo_root/ios/scripts/package-release.sh" "$omg_version" "$artifacts"
+  prev_altstore_dir=$(mktemp -d "${TMPDIR:-/tmp}/omg-prev-altstore.XXXXXX")
+  trap 'rm -rf "$prev_altstore_dir"' EXIT
+  prev_altstore_arg=()
+  if gh release download "$PREVIOUS_TAG" \
+    -R jischeng/oh-my-ghostty \
+    -p altstore-source.json \
+    -D "$prev_altstore_dir" \
+    --clobber >/dev/null 2>&1; then
+    prev_altstore_arg=(--previous-source "$prev_altstore_dir/altstore-source.json")
+  fi
+  "$repo_root/ios/scripts/package-release.sh" "$omg_version" "$artifacts" "${prev_altstore_arg[@]}"
 fi
-(cd "$artifacts" && shasum -a 256 *.dmg OMG-Mobile-* > SHA256SUMS.txt)
+(cd "$artifacts" && shasum -a 256 *.dmg OMG-Mobile-* altstore-source.json > SHA256SUMS.txt)
 
 if ! gh release download "$PREVIOUS_TAG" \
   -R jischeng/oh-my-ghostty \

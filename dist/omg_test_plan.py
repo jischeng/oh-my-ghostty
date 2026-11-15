@@ -113,7 +113,7 @@ FULL_SUITE_GLOBS = (
 NO_SWIFT_GLOBS = (
     "docs/**", "*.md", "LICENSE*", ".agents/skills/omg-issue-report/**",
     ".agents/skills/omg-release/**", ".agents/skills/*/SKILL.md",
-    "dist/*docs*.py", "dist/macos/omg_release.py", "dist/test_omg_release.py",
+    "dist/*docs*.py", "dist/macos/altstore_source.py", "dist/macos/omg_release.py", "dist/test_omg_release.py",
     ".github/ISSUE_TEMPLATE/**",
     "ios/**", "dist/omg_mobile_test_plan.py", "dist/test_omg_mobile_test_plan.py",
 )

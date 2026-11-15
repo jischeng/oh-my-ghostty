@@ -325,6 +325,214 @@ extension NativeSettingsController {
         update()
         let tokens = mobile.objectWillChange.receive(on: RunLoop.main).sink { _ in update() }
         form.retained.append(tokens)
+
+        addPhoneProvisioningSection(to: form, provisioner: mobileDeviceProvisioner)
+    }
+
+    private func addPhoneProvisioningSection(
+        to form: NativeSettingsForm,
+        provisioner: MobileDeviceProvisioner
+    ) {
+        let devicePopup = SettingsPopup(titles: [text("Scanning…", "正在扫描…")], selected: 0) { [weak provisioner] index in
+            guard let provisioner, index >= 0, index < provisioner.devices.count else { return }
+            provisioner.selectDevice(udid: provisioner.devices[index].udid)
+        }
+        let scanButton = SettingsActionButton(text("Scan", "扫描")) { [weak provisioner] in
+            guard let provisioner else { return }
+            Task { @MainActor in await provisioner.scanDevices(silent: false) }
+        }
+        let deviceControl = NSStackView(views: [devicePopup, scanButton])
+        deviceControl.orientation = .horizontal
+        deviceControl.spacing = 8
+
+        let signingLabel = NSTextField(labelWithString: "")
+        signingLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        signingLabel.alignment = .right
+
+        let installButton = SettingsActionButton(text("Install / Refresh Now", "立即安装 / 刷新")) { [weak provisioner] in
+            guard let provisioner else { return }
+            let forceRenew: Bool
+            switch provisioner.expiryStatus {
+            case .missing, .expired, .expiringSoon:
+                forceRenew = true
+            case .unknown, .valid:
+                forceRenew = false
+            }
+            provisioner.installOrRefreshSelectedDevice(forcePortalRefresh: forceRenew)
+        }
+        let progress = NSProgressIndicator()
+        progress.style = .spinning
+        progress.controlSize = .small
+        progress.isDisplayedWhenStopped = false
+        let installControl = NSStackView(views: [progress, installButton])
+        installControl.orientation = .horizontal
+        installControl.spacing = 8
+
+        let autoRefreshSwitch = SettingsSwitch(value: provisioner.autoRefreshEnabled) { [weak provisioner] enabled in
+            provisioner?.setAutoRefreshEnabled(enabled)
+        }
+
+        let copySourceTitle = text("Copy Source URL", "复制订阅地址")
+        let copiedSourceTitle = text("Copied ✓", "已复制 ✓")
+        let copySourceButton = SettingsActionButton(copySourceTitle) {}
+        copySourceButton.invoke = { [weak provisioner, weak copySourceButton] in
+            provisioner?.copySideStoreSourceURL()
+            copySourceButton?.title = copiedSourceTitle
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak copySourceButton] in
+                copySourceButton?.title = copySourceTitle
+            }
+        }
+
+        form.section(text("iPhone App (OMG Mobile)", "iPhone App（OMG Mobile）"))
+        let deviceRow = form.row(
+            text("Target Device", "目标设备"),
+            subtitle: text("Connect via USB once for pairing; subsequent updates run over Wi-Fi.", "首次配对需使用 USB 连接并信任 Mac，后续可通过 Wi-Fi 无线安装与续签。"),
+            control: deviceControl
+        )
+        let signingRow = form.row(
+            text("7-Day Signing Status", "7 天签名状态"),
+            subtitle: text("Checks cached provisioning profiles without contacting Apple unless renewal is needed.", "优先使用本地缓存描述文件签名，仅在缺失或快到期时连接 Apple 更新。"),
+            control: signingLabel
+        )
+        let installRow = form.row(
+            text("Install or Refresh App", "安装 / 刷新 iPhone App"),
+            subtitle: text("Preserves your existing bundle ID and device pairings.", "自动保留已安装的 Bundle ID，不会重置手机上的配对密钥与记录。"),
+            control: installControl
+        )
+        form.row(
+            text("Wi-Fi Auto-Refresh", "Wi-Fi 自动续签"),
+            subtitle: text(
+                "Opt-in: silently renews 7-day signing when < 48h remain and your iPhone is reachable on Wi-Fi.",
+                "可选：开启后，当 7 天签名剩余不足 48 小时且 iPhone 在同一 Wi-Fi 下可达时，在后台自动续签（默认关闭）。"
+            ),
+            control: autoRefreshSwitch
+        )
+        form.row(
+            text("SideStore Source", "SideStore 订阅源"),
+            subtitle: MobileDeviceProvisioner.altStoreSourceURL,
+            control: copySourceButton
+        )
+
+        let deviceSubtitle = deviceRow?.labels.arrangedSubviews.dropFirst().first as? NSTextField
+        let signingSubtitle = signingRow?.labels.arrangedSubviews.dropFirst().first as? NSTextField
+        let installSubtitle = installRow?.labels.arrangedSubviews.dropFirst().first as? NSTextField
+
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+
+        let updateProvisioningUI = { [weak self, weak provisioner, weak devicePopup, weak scanButton, weak deviceSubtitle, weak signingLabel, weak signingSubtitle, weak installButton, weak progress, weak installSubtitle, weak autoRefreshSwitch] in
+            guard let self, let provisioner else { return }
+
+            if let popup = devicePopup {
+                popup.removeAllItems()
+                if provisioner.devices.isEmpty {
+                    popup.addItem(withTitle: provisioner.isScanning
+                        ? self.text("Scanning…", "正在扫描…")
+                        : self.text("No iPhone Found", "未检测到已配对 iPhone"))
+                    popup.isEnabled = false
+                } else {
+                    for dev in provisioner.devices {
+                        let suffix = dev.osVersion.isEmpty ? dev.transport.displayLabel : "iOS \(dev.osVersion) · \(dev.transport.displayLabel)"
+                        popup.addItem(withTitle: "\(dev.name) (\(suffix))")
+                    }
+                    popup.isEnabled = !provisioner.isBusy
+                    if let selected = provisioner.selectedDevice,
+                       let idx = provisioner.devices.firstIndex(of: selected) {
+                        popup.selectItem(at: idx)
+                    }
+                }
+            }
+            scanButton?.isEnabled = !provisioner.isBusy
+
+            if let dev = provisioner.selectedDevice {
+                let installedLabel = dev.installedBundleID ?? self.text("Not probed / new install", "未检测到已安装版本（将全新安装）")
+                deviceSubtitle?.stringValue = "UDID: \(dev.udid) · \(dev.transport.displayLabel) · \(installedLabel)"
+            } else {
+                deviceSubtitle?.stringValue = self.text(
+                    "Connect via USB once, enable Developer Mode on iPhone, then click Scan.",
+                    "请先通过 USB 连接 iPhone 并开启开发者模式，然后点击「扫描」。"
+                )
+            }
+
+            let teamText = provisioner.activeTeamID ?? self.text("None", "无")
+            let bundleText = provisioner.activeBundleID
+            switch provisioner.expiryStatus {
+            case .unknown:
+                signingLabel?.stringValue = self.text("Unknown", "待检测")
+                signingLabel?.textColor = .secondaryLabelColor
+                signingSubtitle?.stringValue = "Team: \(teamText) · Bundle ID: \(bundleText)"
+            case .missing(let reason):
+                signingLabel?.stringValue = self.text("Not Provisioned", "未签名 / 无描述文件")
+                signingLabel?.textColor = .systemOrange
+                signingSubtitle?.stringValue = reason
+            case .expired(let expiredAt):
+                signingLabel?.stringValue = self.text("Expired", "已过期")
+                signingLabel?.textColor = .systemRed
+                signingSubtitle?.stringValue = "Team: \(teamText) · Bundle ID: \(bundleText) · " + self.text(
+                    "Expired \(formatter.string(from: expiredAt))",
+                    "已于 \(formatter.string(from: expiredAt)) 过期"
+                )
+            case .expiringSoon(let expiresAt, let remaining):
+                let hours = max(1, Int(remaining / 3600))
+                signingLabel?.stringValue = self.text("Expiring (\(hours)h left)", "即将过期（剩余 \(hours) 小时）")
+                signingLabel?.textColor = .systemOrange
+                signingSubtitle?.stringValue = "Team: \(teamText) · Bundle ID: \(bundleText) · " + self.text(
+                    "Valid until \(formatter.string(from: expiresAt))",
+                    "有效期至 \(formatter.string(from: expiresAt))"
+                )
+            case .valid(let expiresAt, let remaining):
+                let days = Int(remaining / 86400)
+                let hours = Int((remaining.truncatingRemainder(dividingBy: 86400)) / 3600)
+                signingLabel?.stringValue = self.text("Valid (\(days)d \(hours)h left)", "有效（剩余 \(days) 天 \(hours) 小时）")
+                signingLabel?.textColor = .systemGreen
+                signingSubtitle?.stringValue = "Team: \(teamText) · Bundle ID: \(bundleText) · " + self.text(
+                    "Valid until \(formatter.string(from: expiresAt))",
+                    "有效期至 \(formatter.string(from: expiresAt))"
+                )
+            }
+
+            switch provisioner.operationState {
+            case .idle:
+                progress?.stopAnimation(nil)
+                installButton?.isEnabled = !provisioner.isBusy
+                installSubtitle?.stringValue = self.text(
+                    "Builds or re-signs OMGMobile and deploys directly over USB or Wi-Fi without opening Xcode.",
+                    "无需打开 Xcode，直接通过 USB 或 Wi-Fi 完成签名并安装到 iPhone。"
+                )
+                installSubtitle?.textColor = .secondaryLabelColor
+            case .installing(let step):
+                progress?.startAnimation(nil)
+                installButton?.isEnabled = false
+                installSubtitle?.stringValue = step
+                installSubtitle?.textColor = .secondaryLabelColor
+            case .succeeded(let summary):
+                progress?.stopAnimation(nil)
+                installButton?.isEnabled = !provisioner.isBusy
+                installSubtitle?.stringValue = summary
+                installSubtitle?.textColor = .systemGreen
+            case .failed(let message):
+                progress?.stopAnimation(nil)
+                installButton?.isEnabled = !provisioner.isBusy
+                installSubtitle?.stringValue = message
+                installSubtitle?.textColor = .systemRed
+            }
+
+            let desiredAuto = provisioner.autoRefreshEnabled ? NSControl.StateValue.on : .off
+            if autoRefreshSwitch?.state != desiredAuto {
+                autoRefreshSwitch?.state = desiredAuto
+            }
+        }
+
+        updateProvisioningUI()
+        let sub = provisioner.objectWillChange.receive(on: RunLoop.main).sink { _ in updateProvisioningUI() }
+        form.retained.append(sub)
+
+        if !OMGApplicationEnvironment.isRunningTests, provisioner.lastUpdatedAt == nil {
+            Task { @MainActor [weak provisioner] in
+                await provisioner?.scanDevices(silent: true)
+            }
+        }
     }
 
     private func showError(_ message: String) {

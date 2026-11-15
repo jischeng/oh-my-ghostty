@@ -94,6 +94,7 @@ final class RosterStore {
     private var pendingStart: (project: MockProject, agent: RosterAgent?)?
     private var pairingObserver: NSObjectProtocol?
     private var activityObserver: NSObjectProtocol?
+    private var generationObserver: NSObjectProtocol?
 
     /// Every session currently blocked on the user, across all projects, in
     /// roster order — the root page's "Needs You" strip.
@@ -225,6 +226,38 @@ final class RosterStore {
                 self.applyLiveActivity(snapshot, forSessionID: sessionID)
             }
         }
+        generationObserver = NotificationCenter.default.addObserver(
+            forName: OMGSession.generationDidChange, object: nil, queue: .main
+        ) { [weak self] note in
+            MainActor.assumeIsolated {
+                guard let self,
+                      let oldID = note.userInfo?["oldSessionID"] as? String,
+                      let newID = note.userInfo?["newSessionID"] as? String else { return }
+                self.adoptResurrectedGeneration(from: oldID, to: newID)
+            }
+        }
+    }
+
+    private func adoptResurrectedGeneration(from oldSessionID: String, to newSessionID: String) {
+        var changed = false
+        projects = projects.map { project in
+            var copy = project
+            for idx in copy.sessions.indices where copy.sessions[idx].rosterID == oldSessionID {
+                copy.sessions[idx].rosterID = newSessionID
+                copy.sessions[idx].isPaused = false
+                if copy.sessions[idx].subtitle.hasPrefix("Paused · ") {
+                    copy.sessions[idx].subtitle = ""
+                }
+                changed = true
+            }
+            return copy
+        }
+        if currentSessionKey == oldSessionID {
+            currentSessionKey = newSessionID
+        }
+        if changed {
+            NotificationCenter.default.post(name: Self.didChange, object: nil)
+        }
     }
 
     private func applyLiveActivity(_ snapshot: RuntimeActivitySnapshot, forSessionID sessionID: String) {
@@ -257,11 +290,16 @@ final class RosterStore {
                         isBackground: nextRow.isBackground,
                         isMobileCreated: nextRow.isMobileCreated,
                         remoteHost: snapshot.remoteHost ?? nextRow.remoteHost,
-                        remotePath: snapshot.remoteCwd ?? nextRow.remotePath
+                        remotePath: snapshot.remoteCwd ?? nextRow.remotePath,
+                        isPaused: false
                     )
                     copy.sessions[idx] = nextRow
                     changed = true
                 } else {
+                    if copy.sessions[idx].isPaused {
+                        copy.sessions[idx].isPaused = false
+                        changed = true
+                    }
                     if copy.sessions[idx].status != effectiveStatus {
                         copy.sessions[idx].status = effectiveStatus
                         changed = true

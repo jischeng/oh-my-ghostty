@@ -20,7 +20,9 @@ import xml.etree.ElementTree as ET
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "dist"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import altstore_source  # noqa: E402
 import omg_mobile_test_plan  # noqa: E402
 import omg_test_plan  # noqa: E402
 
@@ -671,6 +673,7 @@ def verify_packaged_artifacts(root: Path, version: str) -> dict[str, object]:
         f"OMG-{version}-macos-universal.dmg",
         f"OMG-Mobile-{version}-ios-installer.tar.gz",
         f"OMG-Mobile-{version}-ios-unsigned.ipa",
+        "altstore-source.json",
         "SHA256SUMS.txt",
         "appcast.xml",
     ]
@@ -684,10 +687,19 @@ def verify_packaged_artifacts(root: Path, version: str) -> dict[str, object]:
     for line in sums_lines:
         digest, filename = line.split(None, 1)
         recorded[filename.strip()] = digest.strip()
-    for name in expected_files[:5]:
+    hashed_files = [name for name in expected_files if name not in ("SHA256SUMS.txt", "appcast.xml")]
+    for name in hashed_files:
         actual = hashlib.sha256((artifacts / name).read_bytes()).hexdigest()
         if recorded.get(name) != actual:
             raise RuntimeError(f"SHA256SUMS mismatch for {name}: expected {recorded.get(name)}, got {actual}")
+
+    altstore_payload = json.loads((artifacts / "altstore-source.json").read_text(encoding="utf-8"))
+    altstore_source.validate_altstore_source(
+        altstore_payload,
+        expected_version=version,
+        expected_ipa=artifacts / f"OMG-Mobile-{version}-ios-unsigned.ipa",
+        expected_release_tag=f"v{version}",
+    )
 
     appcast_root = ET.parse(artifacts / "appcast.xml").getroot()
     item = appcast_root.find("./channel/item")

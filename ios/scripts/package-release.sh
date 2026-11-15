@@ -2,15 +2,47 @@
 # Build and package OMG Mobile release artifacts:
 #   1. OMG-Mobile-<version>-ios-installer.tar.gz (self-contained Xcode + prebuilt VT kit)
 #   2. OMG-Mobile-<version>-ios-unsigned.ipa      (for SideStore / AltStore / Sideloadly / TrollStore)
+#   3. altstore-source.json                        (AltStore 2.0 / SideStore source feed)
 set -euo pipefail
 
-if [[ $# -ne 2 || ! "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "usage: $0 OMG_VERSION OUTPUT_DIR" >&2
+usage() {
+  echo "usage: $0 OMG_VERSION OUTPUT_DIR [--previous-source PATH]" >&2
   exit 64
-fi
+}
 
-omg_version=$1
-output_dir=$2
+omg_version=""
+output_dir=""
+previous_source=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --previous-source)
+      [[ $# -ge 2 ]] || usage
+      previous_source=$2
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      ;;
+    -*)
+      usage
+      ;;
+    *)
+      if [[ -z "$omg_version" ]]; then
+        omg_version=$1
+      elif [[ -z "$output_dir" ]]; then
+        output_dir=$1
+      else
+        usage
+      fi
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$omg_version" || -z "$output_dir" || ! "$omg_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  usage
+fi
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 ios_dir="$repo_root/ios"
 
@@ -82,6 +114,18 @@ ipa_path="$output_dir/OMG-Mobile-$omg_version-ios-unsigned.ipa"
 rm -f "$ipa_path"
 (cd "$ipa_stage" && /usr/bin/zip -qry "$ipa_path" Payload)
 
+altstore_json="$output_dir/altstore-source.json"
+altstore_args=(
+  --info-plist "$built_app/Info.plist"
+  --ipa "$ipa_path"
+  --tag "v$omg_version"
+  --output "$altstore_json"
+)
+if [[ -n "$previous_source" && -f "$previous_source" ]]; then
+  altstore_args+=(--previous-source "$previous_source")
+fi
+python3 "$repo_root/dist/macos/altstore_source.py" "${altstore_args[@]}"
+
 # 4. Assemble clean self-contained installer kit (no Zig, Rust, or XcodeGen required).
 kit_name="OMG-Mobile-$omg_version-ios"
 kit_root="$work_dir/$kit_name"
@@ -122,7 +166,7 @@ generated Xcode project. **Zig, Rust, and XcodeGen are not required.**
 ## Prerequisites
 
 1. A Mac with **Xcode** installed (sign in with any Apple ID under **Xcode → Settings → Accounts**; a free Personal Team Apple ID works).
-2. An iPhone or iPad running **iOS 17+**, connected via USB, unlocked, with **Settings → Privacy & Security → Developer Mode** enabled.
+2. An iPhone or iPad running **iOS 17+**, paired via USB (subsequent refreshes work over Wi-Fi), unlocked, with **Settings → Privacy & Security → Developer Mode** enabled.
 
 ## One-command install
 
@@ -132,16 +176,21 @@ generated Xcode project. **Zig, Rust, and XcodeGen are not required.**
 
 Optional flags:
 - \`--team <TEAM_ID>\`: choose a specific 10-character Apple Team ID when multiple accounts exist.
-- \`--device <UDID_OR_NAME>\`: target a specific iPhone/iPad when multiple devices are connected.
-- \`--bundle-id <BUNDLE_ID>\`: override the default per-team bundle identifier (\`com.jischeng.omg.mobile.<team>\`).
+- \`--device <UDID_OR_NAME>\`: target a specific iPhone/iPad when multiple devices are connected (USB or Wi-Fi).
+- \`--bundle-id <BUNDLE_ID>\`: override the bundle identifier (by default preserves the already-installed \`com.jischeng.omg.mobile*\` app or \`com.jischeng.omg.mobile\` so pairings are retained).
+- \`--ipa <PATH>\`: re-sign and install a packaged \`.ipa\` / \`.app\` without rebuilding.
+- \`--refresh\`: force Xcode provisioning profile renewal against the Apple Developer portal.
+- \`--no-launch\`: install without launching OMG Mobile afterwards.
 
 On a first install with a free Apple ID, trust your developer profile on the iPhone under
-**Settings → General → VPN & Device Management**, then launch **OMG Mobile** and run
-\`omg +mobile\` on your Mac (or open **OMG Settings → Mobile Devices**) to scan the pairing QR code.
+**Settings → General → VPN & Device Management**, then launch **OMG Mobile** and open
+**OMG Settings → Mobile Devices** (or run \`omg +mobile\`) on your Mac to scan the pairing QR code.
+You can also refresh OMG Mobile directly inside **OMG Settings → Mobile Devices → iPhone App (OMG Mobile)** or subscribe to the SideStore source:
+\`https://github.com/jischeng/oh-my-ghostty/releases/latest/download/altstore-source.json\`.
 EOF
 
 tar_path="$output_dir/OMG-Mobile-$omg_version-ios-installer.tar.gz"
 rm -f "$tar_path"
 COPYFILE_DISABLE=1 tar -czf "$tar_path" -C "$work_dir" "$kit_name"
 
-printf '[ios] ipa=%s\n[ios] kit=%s\n' "$ipa_path" "$tar_path"
+printf '[ios] ipa=%s\n[ios] kit=%s\n[ios] altstore=%s\n' "$ipa_path" "$tar_path" "$altstore_json"

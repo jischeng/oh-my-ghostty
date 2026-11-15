@@ -21,22 +21,39 @@ Rust/Cargo. No Xcode GUI is needed.
 ios/scripts/build.sh iphonesimulator
 ios/scripts/build.sh iphoneos
 ios/scripts/install-to-iphone.sh
+ios/scripts/install-to-iphone.sh --ipa /path/to/OMG-Mobile-<version>-ios-unsigned.ipa
 ios/scripts/package-release.sh <OMG_VERSION> <OUTPUT_DIR>
 ```
 
 The first command builds for Apple Silicon Simulator. Simulator builds use local
 ad-hoc signing so Keychain works without a device profile. Device builds are
 unsigned unless `OMG_IOS_DEVELOPMENT_TEAM` names an existing development team;
-physical installation requires matching provisioning. `install-to-iphone.sh`
-auto-detects a local Xcode Apple Development team and connected physical iPhone/iPad,
-uses a per-team bundle identifier (`com.jischeng.omg.mobile.<team>`) by default so
-free Personal Teams do not collide on App ID registration, signs with
-`-allowProvisioningUpdates`, and installs via `xcrun devicectl`.
-`package-release.sh` produces both `OMG-Mobile-<version>-ios-installer.tar.gz`
+physical installation requires matching provisioning.
+
+`install-to-iphone.sh` supports both USB and Wi-Fi installs (`--device`, `--team`,
+`--bundle-id`, `--ipa`, `--refresh`, `--no-launch`, `--timeout`):
+- **Bundle ID preservation**: probes the already-installed `com.jischeng.omg.mobile*`
+  app (via `xcrun devicectl device info apps`) or matching local `.mobileprovision`
+  profile before defaulting to `com.jischeng.omg.mobile`, avoiding accidental bundle ID
+  changes that would wipe Keychain/UserDefaults pairings. Only falls back to
+  `com.jischeng.omg.mobile.<team>` when Apple's portal explicitly rejects registering
+  `com.jischeng.omg.mobile`.
+- **Offline cached profile fast path**: inspects local `.mobileprovision` files
+  for a non-expired profile matching the team, bundle ID, device UDID, and valid
+  Keychain `Apple Development` certificate and signs incrementally with `codesign`
+  from persistent `ios/.build/iphoneos-release` (or `--ipa`) without hitting Apple's
+  portal (`-allowProvisioningUpdates` is used only when missing/expired or `--refresh`).
+- **macOS 1-click install/refresh & SideStore**: open **OMG Settings → Mobile Devices →
+  iPhone App (OMG Mobile)** for 1-click wireless install/refresh, an opt-in 7-day
+  auto-refresh toggle (`<48h` remaining on Wi-Fi), or to copy the SideStore / AltStore
+  source URL:
+  `https://github.com/jischeng/oh-my-ghostty/releases/latest/download/altstore-source.json`.
+
+`package-release.sh` produces `OMG-Mobile-<version>-ios-installer.tar.gz`
 (with prebuilt `libghostty-vt.a` and generated Xcode project so end users do not
-need Zig, Rust or XcodeGen) and `OMG-Mobile-<version>-ios-unsigned.ipa`. Generated
-projects, headers, libraries and build products remain ignored. The minimum OS is
-iOS 17.
+need Zig, Rust or XcodeGen), `OMG-Mobile-<version>-ios-unsigned.ipa`, and
+`altstore-source.json`. Generated projects, headers, libraries and build products
+remain ignored. The minimum OS is iOS 17.
 
 ## CLI and LAN pairing
 

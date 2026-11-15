@@ -66,7 +66,14 @@ struct SessionRow: View {
                 }
             }
             Spacer(minLength: 4)
-            if session.isBackground {
+            if session.isPaused {
+                Text(localized("Paused"))
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.primary.opacity(0.08), in: Capsule())
+            } else if session.isBackground {
                 Text(localized("Background"))
                     .font(.caption2.weight(.medium))
                     .foregroundStyle(.secondary)

@@ -102,7 +102,18 @@ struct SettingsControlsTests {
         defer { window.close() }
         settingsController.view.layoutSubtreeIfNeeded()
         let form = try #require(settingsController.children.compactMap { $0 as? NativeSettingsForm }.first)
-        #expect(form.rowTitles == ["允许 iPhone 连接", "网关状态", "网络接口", "外部 WSS 入口", "配对密钥"])
+        #expect(form.rowTitles == [
+            "允许 iPhone 连接",
+            "网关状态",
+            "网络接口",
+            "外部 WSS 入口",
+            "配对密钥",
+            "目标设备",
+            "7 天签名状态",
+            "安装 / 刷新 iPhone App",
+            "Wi-Fi 自动续签",
+            "SideStore 订阅源",
+        ])
 
         controller.revokePairings()
         #expect(!controller.isEnabledPreference)

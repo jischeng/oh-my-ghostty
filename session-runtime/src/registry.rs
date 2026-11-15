@@ -247,11 +247,8 @@ impl Registry {
             && meta.uid() == unsafe { libc::geteuid() }
             && (meta.mode() & 0o077) == 0
     }
-    fn sibling_session_roots(&self) -> Vec<PathBuf> {
-        if self.mode != RuntimeMode::Local {
-            return Vec::new();
-        }
-        let Some(current_state_dir) = self.root.parent() else {
+    fn sibling_session_roots_for(root: &Path) -> Vec<PathBuf> {
+        let Some(current_state_dir) = root.parent() else {
             return Vec::new();
         };
         let Some(run_root) = current_state_dir.parent() else {
@@ -277,14 +274,18 @@ impl Registry {
         roots.sort();
         roots
     }
+    fn sibling_session_roots(&self) -> Vec<PathBuf> {
+        if self.mode != RuntimeMode::Local {
+            return Vec::new();
+        }
+        Self::sibling_session_roots_for(&self.root)
+    }
 
     fn is_closed_in_any_root(&self, id: &str) -> bool {
-        if self.root.join(format!("{id}.closed")).exists() {
-            return true;
+        if self.mode != RuntimeMode::Local {
+            return self.root.join(format!("{id}.closed")).exists();
         }
-        self.sibling_session_roots()
-            .into_iter()
-            .any(|sessions_dir| sessions_dir.join(format!("{id}.closed")).exists())
+        is_local_session_closed(&self.root, id)
     }
 
     fn find_sibling_local_session_root(&self, id: &str) -> Option<PathBuf> {
@@ -1579,6 +1580,17 @@ impl Registry {
 
         self.spawn_and_connect_local_holder(id, socket, path, &mut record, launch, false)
     }
+}
+
+/// Checks whether a local session has an explicit `.closed` tombstone in
+/// `sessions_dir` or any sibling state directory under the same `run` root.
+pub fn is_local_session_closed(sessions_dir: &Path, id: &str) -> bool {
+    if sessions_dir.join(format!("{id}.closed")).exists() {
+        return true;
+    }
+    Registry::sibling_session_roots_for(sessions_dir)
+        .into_iter()
+        .any(|sibling_dir| sibling_dir.join(format!("{id}.closed")).exists())
 }
 
 #[cfg(test)]

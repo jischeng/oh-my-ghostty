@@ -58,4 +58,19 @@ final class MobileSessionRouteTests: XCTestCase {
         XCTAssertEqual(MobileSessionIcon.normalizeAgentID("qwen-code"), "qwen")
         XCTAssertEqual(MobileSessionIcon.normalizeAgentID("gh-copilot"), "copilot")
     }
+
+    func testAttachableEndedStateAllowsLiveAndPostRebootLostSessionsOnly() throws {
+        XCTAssertTrue(MobileSessionRoute.isAttachableEndedState(nil))
+        XCTAssertTrue(MobileSessionRoute.isAttachableEndedState("lost"))
+        XCTAssertFalse(MobileSessionRoute.isAttachableEndedState("explicit_close"))
+        XCTAssertFalse(MobileSessionRoute.isAttachableEndedState("process_exited"))
+        XCTAssertFalse(MobileSessionRoute.isAttachableEndedState("detached_timeout"))
+
+        let ep = String(repeating: "a", count: 64)
+        let sid = "77777777-8888-9999-aaaa-bbbbbbbbbbbb"
+        let gen1 = String(repeating: "0", count: 32)
+        let gen2 = String(repeating: "f", count: 32)
+        let route = try XCTUnwrap(MobileSessionRoute("\(ep)/\(sid)/\(gen1)"))
+        XCTAssertEqual(route.replacingGeneration(gen2), "\(ep)/\(sid)/\(gen2)")
+    }
 }

@@ -26,6 +26,7 @@ final class NativeSettingsController: NSViewController, NSTableViewDataSource, N
     let registry: SSHHostRegistry
     let agents: AgentIntegrationManager
     let mobileAccessController: MobileAccessController
+    var mobileDeviceProvisioner: MobileDeviceProvisioner = .shared
     let doctor: OMGDoctorService
     var hostChoices: @Sendable () async -> [SSHRegistrationChoice] = { await SSHConfigurationCatalog.choices(live: []) }
     private(set) var selection: OhMyGhosttySettingsTab

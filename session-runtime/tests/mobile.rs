@@ -742,3 +742,134 @@ fn cli_pair_status_revoke_and_stop_manage_standalone_or_ssh_gateway() {
     drop(fixture);
     let _ = fs::remove_dir_all(&base);
 }
+
+#[test]
+fn post_reboot_lost_local_session_appears_in_roster_and_resurrects_on_ws_attach() {
+    let dir = std::env::temp_dir().join(format!("omg-mobile-lost-{}", std::process::id()));
+    let sessions_dir = dir.join("sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&sessions_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut fixture = Fixture {
+        children: vec![],
+        dir: dir.clone(),
+        owned: vec![],
+    };
+
+    // Simulate a persisted local session lost across reboot: ended = "lost", pid = null, dead socket
+    let id = "77777777-8888-9999-aaaa-bbbbbbbbbbbb";
+    let mut rec = omg_session_runtime::record::Record::new(
+        id,
+        omg_session_runtime::lifecycle::Policy::default(),
+    )
+    .unwrap();
+    let old_gen = rec.generation.clone();
+    rec.ended = Some(omg_session_runtime::lifecycle::EndReason::Lost);
+    rec.cwd = Some("/tmp".into());
+    rec.save(&sessions_dir.join(format!("{id}.json"))).unwrap();
+
+    let host_sock = dir.join("host.sock");
+    fixture.children.push(
+        Command::new(env!("CARGO_BIN_EXE_omgd"))
+            .args(["host-local"])
+            .arg(&fixture.dir)
+            .args(["--", "/bin/sh"])
+            .env("HOME", &fixture.dir)
+            .env("SHELL", "/bin/sh")
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    assert!((0..300).any(|_| {
+        if host_sock.exists() && UnixStream::connect(&host_sock).is_ok() {
+            true
+        } else {
+            std::thread::sleep(Duration::from_millis(10));
+            false
+        }
+    }));
+
+    let key = dir.join("pair.token");
+    let mut gateway = Command::new(env!("CARGO_BIN_EXE_omgd"))
+        .args(["mobile", "--listen", "127.0.0.1:0", "--socket"])
+        .arg(&host_sock)
+        .arg("--token-file")
+        .arg(&key)
+        .arg("--no-qr")
+        .env("HOME", &fixture.dir)
+        .env("SHELL", "/bin/sh")
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr = gateway.stderr.take().unwrap();
+    fixture.children.push(gateway);
+    let (send_address, recv_address) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if let Some(value) = line.strip_prefix("OMG mobile listening on ws://") {
+                let _ = send_address.send(value.trim_end_matches("/catalogue").to_owned());
+            }
+        }
+    });
+    let addr = recv_address.recv_timeout(Duration::from_secs(5)).unwrap();
+    let token_raw = fs::read_to_string(&key).unwrap();
+    let token = token_raw.trim();
+
+    let mut ctrl = connect(&addr, "/control", token).unwrap();
+    let roster = json_reply(&mut ctrl, "roster");
+    let sessions: Vec<&serde_json::Value> = roster["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|p| p["sessions"].as_array().unwrap().iter())
+        .collect();
+    let paused_row = sessions
+        .iter()
+        .find(|s| {
+            s["id"]
+                .as_str()
+                .is_some_and(|sid| sid.ends_with(&format!("/{id}/{old_gen}")))
+        })
+        .expect("Lost session visible in /control roster");
+    assert_eq!(paused_row["paused"], true);
+    let route = paused_row["id"].as_str().unwrap().to_owned();
+    let ep_id = route.split('/').next().unwrap();
+    ctrl.close(None).unwrap();
+
+    let mut ws = connect(&addr, &format!("/ws/{ep_id}"), token).unwrap();
+    ws.send(Message::Binary(Frame::new(b'L', 0, &[]).encode().into()))
+        .unwrap();
+    let mut pending = Vec::new();
+    let catalog = receive(&mut ws, &mut pending, b'L');
+    let list: Vec<serde_json::Value> = serde_json::from_slice(&catalog.data).unwrap();
+    assert_eq!(list[0]["id"], id);
+    assert_eq!(list[0]["ended"], "lost");
+
+    let open = serde_json::json!({"id": id, "generation": old_gen, "replay": false});
+    ws.send(Message::Binary(
+        Frame::new(b'U', 1, &serde_json::to_vec(&open).unwrap())
+            .encode()
+            .into(),
+    ))
+    .unwrap();
+    let mut rotated_gen = String::new();
+    loop {
+        let wrapped = receive(&mut ws, &mut pending, b'D');
+        let inner = Frame::read(&mut wrapped.data.as_slice()).unwrap();
+        if inner.kind == b'J' {
+            let meta: serde_json::Value = serde_json::from_slice(&inner.data).unwrap();
+            rotated_gen = meta["generation"].as_str().unwrap().to_owned();
+        }
+        if inner.kind == b'S' {
+            break;
+        }
+    }
+    assert!(!rotated_gen.is_empty());
+    assert_ne!(rotated_gen, old_gen);
+    ws.close(None).unwrap();
+    let mut host_ctrl = UnixStream::connect(&host_sock).unwrap();
+    Frame::new(b'K', 1, id.as_bytes())
+        .send(&mut host_ctrl)
+        .unwrap();
+    let _ = Frame::read(&mut host_ctrl);
+}

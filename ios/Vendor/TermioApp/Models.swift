@@ -34,6 +34,9 @@ struct MockSession: Identifiable {
     var remoteHost: String?
     /// Active remote directory on the SSH target machine.
     var remotePath: String?
+    /// True when this session lost its holder across a reboot/disconnect and
+    /// restarts cleanly when attached from iOS.
+    var isPaused: Bool = false
 
     static let samples: [MockSession] = [
         .init(title: "fix-sidebar", project: "termio", agent: .sampleClaude,
@@ -204,7 +207,8 @@ extension MockSession {
             isBackground: roster.background ?? false,
             isMobileCreated: roster.mobileCreated ?? false,
             remoteHost: activeRemoteHost,
-            remotePath: activeRemotePath
+            remotePath: activeRemotePath,
+            isPaused: roster.paused ?? false
         )
     }
 }

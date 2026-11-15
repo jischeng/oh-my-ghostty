@@ -62,7 +62,7 @@ enum SettingsSearchCatalog {
             item(.keyboard, \.keybindingsSection, [], "keybind terminal shortcut 键位 终端 快捷键"),
             item(.git, \.gitSection, ["git.autoFetch"], "fetch Git 自动拉取"),
             item(.git, \.gitAISettingsTitle, ["git.commitAI"], "commit AI model prompt 提交 模型 提示词", anchor: "gitAI"),
-            item(.mobile, \.mobileAccessTitle, [], "mobile iPhone iPad device pair invitation gateway LAN 手机 移动 设备 配对 邀请 网关 局域网 连接 状态 访问 权限"),
+            item(.mobile, \.mobileAccessTitle, [], "mobile iPhone iPad device pair invitation gateway LAN wifi usb sidestore altstore refresh provisioning certificate wireless 手机 移动 设备 配对 邀请 网关 局域网 连接 状态 访问 权限 签名 证书 续签 安装 刷新"),
             item(.ssh, \.sshSettingsTitle, [], "ssh machine host remote register 机器 主机 远程 注册", anchor: "sshRegistration"),
             item(.plugins, \.officialPluginsSection, [], "plugin install 插件 安装 官方"),
             item(.plugins, \.doctorSection, [], "doctor health diagnostics accessibility tcc signing certificate trust keychain gatekeeper memory webview lsp reclaim runtime omgd ssh backup 健康 自检 诊断 辅助功能 签名 证书 信任 钥匙串 权限 内存 回收"),

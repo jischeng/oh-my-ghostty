@@ -45,10 +45,10 @@ struct MobileEndpoint: Decodable {
 
 struct MobileSession: Decodable {
     let id: String
-    let generation: String
+    var generation: String
     let pid: Int?
     let cwd: String?
-    let ended: String?
+    var ended: String?
 }
 
 /// The host protocol is unchanged by the LAN pipe. Every attachment starts
@@ -88,6 +88,7 @@ final class RuntimeConnection {
     var onActivity: ((RuntimeActivitySnapshot) -> Void)?
     var onSignal: ((TermiodStreamTerminal.Signal) -> Void)?
     var onWriterChanged: ((Bool) -> Void)?
+    var onGenerationChanged: ((String) -> Void)?
 
     init(base: URL, token: String, endpoint: MobileEndpoint) {
         self.endpoint = endpoint
@@ -259,6 +260,17 @@ final class RuntimeConnection {
             let metadata = try JSONSerialization.jsonObject(with: frame.data) as? [String: Any]
             transferSupported = metadata?["writer_transfer"] as? Bool ?? false
             activityAcknowledge = metadata?["activity_acknowledge"] as? Bool ?? false
+            if let joinedGen = metadata?["generation"] as? String, !joinedGen.isEmpty,
+               var activeSession = session,
+               activeSession.generation != joinedGen {
+                activeSession.generation = joinedGen
+                activeSession.ended = nil
+                session = activeSession
+                onGenerationChanged?(joinedGen)
+            } else if var activeSession = session, activeSession.ended != nil {
+                activeSession.ended = nil
+                session = activeSession
+            }
         case 83:
             // Regular local sessions are answered by omgd, so this terminal's
             // automatic reports are deliberately not sent back as user input.

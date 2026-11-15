@@ -21,6 +21,16 @@ public struct MobileSessionRoute: Equatable {
             (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0)
         }
     }
+
+    /// Post-reboot paused local sessions (`ended == "lost"`) remain attachable because
+    /// `omgd` resurrects them transparently when `b'U'` connects.
+    public static func isAttachableEndedState(_ ended: String?) -> Bool {
+        ended == nil || ended == "lost"
+    }
+
+    public func replacingGeneration(_ nextGeneration: String) -> String {
+        "\(endpointID)/\(sessionID)/\(nextGeneration)"
+    }
 }
 
 /// Canonical mobile agent metadata matching `session-runtime/src/agents.rs`.

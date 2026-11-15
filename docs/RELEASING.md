@@ -710,7 +710,7 @@ done
 
 ios/scripts/package-release.sh "$OMG_VERSION" "$OMG_BUILD_ROOT/artifacts"
 
-(cd "$OMG_BUILD_ROOT/artifacts" && shasum -a 256 *.dmg OMG-Mobile-* > SHA256SUMS.txt)
+(cd "$OMG_BUILD_ROOT/artifacts" && shasum -a 256 *.dmg OMG-Mobile-* altstore-source.json > SHA256SUMS.txt)
 ```
 
 The DMG script verifies bundle ID, OMG version, signature, and either one named
@@ -724,8 +724,9 @@ validates post-sign `session-runtime` manifests on every bundle. Use
 `signing-requirement.txt`, and the latest `universal/Release/OMG.app`.
 `ios/scripts/package-release.sh` builds (or restores cached) ReleaseFast `libghostty-vt.a` for
 `iphoneos` and `iphonesimulator`, verifies unsigned `Release` `OMGMobile.app`
-compilation, and packages both a self-contained Xcode/Agent signing kit (no Zig,
-Rust, or XcodeGen required on the user's Mac) and an unsigned IPA for sideloaders.
+compilation, and packages a self-contained Xcode/Agent signing kit (no Zig,
+Rust, or XcodeGen required on the user's Mac), an unsigned IPA for sideloaders,
+and an AltStore 2.0 / SideStore `altstore-source.json` feed validated against the IPA.
 Release artifacts are named:
 
 ```text
@@ -734,6 +735,7 @@ OMG-<version>-macos-x86_64.dmg
 OMG-<version>-macos-universal.dmg
 OMG-Mobile-<version>-ios-installer.tar.gz
 OMG-Mobile-<version>-ios-unsigned.ipa
+altstore-source.json
 SHA256SUMS.txt
 appcast.xml
 ```
@@ -795,6 +797,7 @@ gh release upload "v$OMG_VERSION" \
   -R jischeng/oh-my-ghostty \
   "$OMG_BUILD_ROOT"/artifacts/*.dmg \
   "$OMG_BUILD_ROOT"/artifacts/OMG-Mobile-* \
+  "$OMG_BUILD_ROOT/artifacts/altstore-source.json" \
   "$OMG_BUILD_ROOT/artifacts/SHA256SUMS.txt" \
   "$OMG_BUILD_ROOT/artifacts/appcast.xml"
 ```

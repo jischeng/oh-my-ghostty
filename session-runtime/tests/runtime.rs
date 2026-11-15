@@ -752,6 +752,10 @@ fn user_keystroke_resets_agent_done_reaper_without_wiping_done_badge() {
             &script,
             format!(
                 r#"import subprocess, sys
+while True:
+    line = sys.stdin.readline()
+    if not line or "READY" in line:
+        break
 subprocess.run([{bin:?}, "report", "hermes", "done", "conv-reaper", "/tmp", "--message", "Done"], check=True)
 while True:
     line = sys.stdin.readline()
@@ -794,18 +798,14 @@ while True:
         }
 
         {
-            let (mut client, _, initial_snap) = connect_session(&sock_path);
+            let (mut client, _, _initial_snap) = connect_session(&sock_path);
             Frame::new(CLAIM, 0, &[]).send(&mut client).unwrap();
             until(&mut client, CLAIM);
-            if initial_snap
-                .presentation()
-                .is_none_or(|p| p.state != "done")
-            {
-                loop {
-                    let s = next_activity(&mut client, "reaper_done");
-                    if s.presentation().is_some_and(|p| p.state == "done") {
-                        break;
-                    }
+            Frame::new(INPUT, 0, b"READY\n").send(&mut client).unwrap();
+            loop {
+                let s = next_activity(&mut client, "reaper_done");
+                if s.presentation().is_some_and(|p| p.state == "done") {
+                    break;
                 }
             }
             Frame::new(INPUT, 0, input_frame).send(&mut client).unwrap();
@@ -999,7 +999,13 @@ while True:
     });
 
     for _ in 0..100 {
-        if sock_path.exists() && shell_pid_file.exists() {
+        if sock_path.exists()
+            && shell_pid_file.exists()
+            && record::Record::load(&rec_path)
+                .ok()
+                .and_then(|r| r.pid)
+                .is_some()
+        {
             break;
         }
         std::thread::sleep(Duration::from_millis(20));

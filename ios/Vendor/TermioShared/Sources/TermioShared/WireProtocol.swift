@@ -683,13 +683,17 @@ public struct RosterSession: Codable, Sendable, Equatable {
     /// Synthetic project ID on `omgd` representing the remote SSH directory, so
     /// the Inspector drawer and file uploads follow the active SSH session.
     public let remoteProjectID: String?
+    /// True when the local session stopped across a host reboot/disconnect
+    /// (`EndReason::Lost`) and can be seamlessly resurrected on attach.
+    public let paused: Bool?
 
     public init(
         id: String, title: String, agent: String, status: String,
         subtitle: String? = nil, branch: String? = nil,
         background: Bool? = nil, mobileCreated: Bool? = nil,
         remoteHost: String? = nil, remotePath: String? = nil,
-        remoteProjectID: String? = nil
+        remoteProjectID: String? = nil,
+        paused: Bool? = nil
     ) {
         self.id = id
         self.title = title
@@ -702,6 +706,7 @@ public struct RosterSession: Codable, Sendable, Equatable {
         self.remoteHost = remoteHost
         self.remotePath = remotePath
         self.remoteProjectID = remoteProjectID
+        self.paused = paused
     }
 }
 

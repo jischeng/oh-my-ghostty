@@ -11,6 +11,7 @@ import TermioStream
 /// triggers `takeover()`.
 final class OMGSession: StreamDeviceSession {
     static let activityDidChange = Notification.Name("OMGSessionActivityDidChange")
+    static let generationDidChange = Notification.Name("OMGSessionGenerationDidChange")
 
     var onOutput: ((Data) -> Void)?
     var onState: ((DeviceSessionState) -> Void)?
@@ -23,8 +24,9 @@ final class OMGSession: StreamDeviceSession {
 
     private var connection: RuntimeConnection?
     private let routeID: String
+    private var activeRouteID: String
     private let targetID: String?
-    private let generation: String?
+    private var generation: String?
     private(set) var liveActivity: RuntimeActivitySnapshot?
     private var writerGate = RuntimeWriterGate()
     private var inputRejected = false
@@ -35,6 +37,7 @@ final class OMGSession: StreamDeviceSession {
 
     init(endpoint: DeviceEndpoint, sessionID: String) {
         routeID = sessionID
+        activeRouteID = sessionID
         let route = MobileSessionRoute(sessionID)
         targetID = route?.sessionID
         generation = route?.generation
@@ -45,12 +48,26 @@ final class OMGSession: StreamDeviceSession {
             connection.onSessions = { [weak self, weak connection] sessions in
                 guard let self, let connection, !connection.hasSession else { return }
                 guard let session = sessions.first(where: {
-                    $0.id == self.targetID && $0.generation == self.generation && $0.ended == nil
+                    $0.id == self.targetID
+                        && $0.generation == self.generation
+                        && MobileSessionRoute.isAttachableEndedState($0.ended)
                 }) else {
                     self.onState?(.failed("The session is no longer running."))
                     return
                 }
                 connection.open(session)
+            }
+            connection.onGenerationChanged = { [weak self] nextGeneration in
+                guard let self else { return }
+                let previous = self.activeRouteID
+                let nextRoute = route.replacingGeneration(nextGeneration)
+                self.generation = nextGeneration
+                self.activeRouteID = nextRoute
+                NotificationCenter.default.post(
+                    name: Self.generationDidChange,
+                    object: nil,
+                    userInfo: ["oldSessionID": previous, "newSessionID": nextRoute]
+                )
             }
             connection.onChange = { [weak self] in self?.changed() }
             connection.onOutput = { [weak self] data in self?.onStreamData?(data) }
@@ -66,7 +83,7 @@ final class OMGSession: StreamDeviceSession {
                 NotificationCenter.default.post(
                     name: Self.activityDidChange,
                     object: nil,
-                    userInfo: ["sessionID": self.routeID, "snapshot": snapshot]
+                    userInfo: ["sessionID": self.activeRouteID, "snapshot": snapshot]
                 )
             }
             connection.onSignal = { [weak self] signal in self?.onStreamSignal?(signal) }

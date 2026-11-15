@@ -4,7 +4,7 @@ mod experience;
 use super::{Config, Endpoint};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::{SinkExt, StreamExt};
-use omg_session_runtime::{activity, agents, holder, record, Frame};
+use omg_session_runtime::{activity, agents, holder, lifecycle::EndReason, record, Frame};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -912,6 +912,10 @@ impl State {
         Ok(view)
     }
 }
+fn session_visible_in_roster(summary: &record::SessionSummary, is_relay: bool) -> bool {
+    summary.ended.is_none() || (!is_relay && summary.ended == Some(EndReason::Lost))
+}
+
 fn build_view(config: &Config) -> io::Result<View> {
     let desktop = desktop(config);
     let home = home()?;
@@ -1019,7 +1023,7 @@ fn build_view(config: &Config) -> io::Result<View> {
                 .is_some_and(|p| p.file_name().is_some_and(|n| n == "bridges"));
         for session in sessions
             .into_iter()
-            .filter(|s| s.ended.is_none())
+            .filter(|s| session_visible_in_roster(s, is_relay))
             .take(2048)
         {
             let pane_key = session.id.to_ascii_lowercase();
@@ -1032,18 +1036,24 @@ fn build_view(config: &Config) -> io::Result<View> {
             }
             if !is_relay {
                 let sessions_dir = endpoint.socket.parent().unwrap().join("sessions");
-                if sessions_dir.join(format!("{}.closed", session.id)).exists() {
+                if omg_session_runtime::registry::is_local_session_closed(
+                    &sessions_dir,
+                    &session.id,
+                ) {
                     continue;
                 }
             }
             if !seen_sessions.insert((session.id.clone(), session.generation.clone())) {
                 continue;
             }
+            let is_paused = !is_relay && session.ended == Some(EndReason::Lost);
             let record = if !is_relay {
                 let sessions_dir = endpoint.socket.parent().unwrap().join("sessions");
                 let record_path = sessions_dir.join(format!("{}.json", session.id));
                 record::Record::load(&record_path).ok().filter(|r| {
-                    r.generation == session.generation && r.pid == session.pid && r.ended.is_none()
+                    r.generation == session.generation
+                        && r.pid == session.pid
+                        && (r.ended.is_none() || r.ended == Some(EndReason::Lost))
                 })
             } else {
                 None
@@ -1058,7 +1068,7 @@ fn build_view(config: &Config) -> io::Result<View> {
                 .or_else(|| {
                     record
                         .as_ref()
-                        .filter(|_| supports_presentation)
+                        .filter(|_| supports_presentation && session.ended.is_none())
                         .and_then(|rec| {
                             let socket = endpoint
                                 .socket
@@ -1150,7 +1160,7 @@ fn build_view(config: &Config) -> io::Result<View> {
                 }
             }
             let observed = facts.as_ref().and_then(presentation);
-            let (agent, state, mut subtitle) = observed.unwrap_or_else(|| {
+            let (agent, mut state, mut subtitle) = observed.unwrap_or_else(|| {
                 let agent = saved
                     .map(|m| m.agent.clone())
                     .or_else(|| {
@@ -1175,13 +1185,26 @@ fn build_view(config: &Config) -> io::Result<View> {
                         }
                     })
                     .unwrap_or_else(|| "terminal".into());
-                let subtitle = if facts.is_some() || agent == "terminal" {
+                let subtitle = if facts.is_some() || agent == "terminal" || is_paused {
                     String::new()
                 } else {
                     "Activity unavailable on this runtime".into()
                 };
                 (agent, "idle".into(), subtitle)
             });
+            if is_paused {
+                state = "idle".into();
+                if subtitle.is_empty()
+                    || subtitle == "Activity unavailable on this runtime"
+                    || facts.as_ref().is_some()
+                {
+                    subtitle = if session.resume.is_some() {
+                        "Paused · Tap to resume".into()
+                    } else {
+                        "Paused · Tap to reopen".into()
+                    };
+                }
+            }
             let workspace = saved
                 .map(|m| m.workspace.as_str())
                 .or_else(|| owner.map(|o| o.workspace.as_str()))
@@ -1366,7 +1389,7 @@ fn build_view(config: &Config) -> io::Result<View> {
                     };
                 }
             }
-            let is_background = config.support.is_some() && owner.is_none();
+            let is_background = !is_paused && config.support.is_some() && owner.is_none();
             let mobile_created = saved.is_some();
             let mut session_json = json!({
                 "id":format!("{}/{}/{}",endpoint.id,session.id,session.generation),"title":title,"agent":agent,
@@ -1374,6 +1397,9 @@ fn build_view(config: &Config) -> io::Result<View> {
                 "background":is_background,"mobileCreated":mobile_created,
             });
             if let Some(object) = session_json.as_object_mut() {
+                if is_paused {
+                    object.insert("paused".into(), json!(true));
+                }
                 if let Some(host) = remote_host {
                     object.insert("remoteHost".into(), json!(host));
                 }
@@ -1533,9 +1559,18 @@ fn route(config: &Config, id: &str) -> io::Result<(Endpoint, String, String)> {
         .into_iter()
         .find(|e| e.id == endpoint)
         .ok_or_else(|| io::Error::other("Session endpoint is unavailable"))?;
+    let is_relay = endpoint.relay.is_some();
+    if !is_relay {
+        let sessions_dir = endpoint.socket.parent().unwrap().join("sessions");
+        if omg_session_runtime::registry::is_local_session_closed(&sessions_dir, session) {
+            return Err(io::Error::other("Session closed"));
+        }
+    }
     if !omg_session_runtime::client::list_local(&endpoint.socket)?
         .iter()
-        .any(|s| s.id == session && s.generation == generation && s.ended.is_none())
+        .any(|s| {
+            s.id == session && s.generation == generation && session_visible_in_roster(s, is_relay)
+        })
     {
         return Err(io::Error::other("Session generation changed"));
     }
@@ -1584,10 +1619,10 @@ fn request_control(config: &Config, request: &Value) -> io::Result<Value> {
         if endpoint.relay.is_none() {
             let sessions_dir = endpoint.socket.parent().unwrap().join("sessions");
             let record_path = sessions_dir.join(format!("{id}.json"));
-            if let Some(rec) = record::Record::load(&record_path)
-                .ok()
-                .filter(|r| r.generation == generation && r.ended.is_none())
-            {
+            if let Some(rec) = record::Record::load(&record_path).ok().filter(|r| {
+                r.generation == generation
+                    && (r.ended.is_none() || r.ended == Some(EndReason::Lost))
+            }) {
                 let sock = endpoint
                     .socket
                     .parent()
@@ -3193,5 +3228,180 @@ mod tests {
         assert_eq!(sess["agent"], "opencode");
         assert_eq!(sess["status"], "working");
         assert_eq!(sess["subtitle"], "Compiling");
+    }
+
+    #[test]
+    fn lost_local_sessions_stay_visible_as_paused_and_closed_tombstones_stay_hidden() {
+        use std::os::unix::fs::PermissionsExt;
+        let run_root = std::env::temp_dir().join(format!(
+            "omg-ctrl-lost-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cur_state = run_root.join("cur");
+        let cur_sessions = cur_state.join("sessions");
+        let sibling_sessions = run_root.join("old/sessions");
+        fs::create_dir_all(&cur_sessions).unwrap();
+        fs::create_dir_all(&sibling_sessions).unwrap();
+        fs::set_permissions(&run_root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&cur_state, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&cur_sessions, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(run_root.join("old"), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&sibling_sessions, fs::Permissions::from_mode(0o700)).unwrap();
+
+        struct Guard(PathBuf);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _guard = Guard(run_root.clone());
+
+        let lost_shell = "11111111-1111-1111-1111-111111111111";
+        let lost_agent = "22222222-2222-2222-2222-222222222222";
+        let closed_sibling = "33333333-3333-3333-3333-333333333333";
+        let exited = "44444444-4444-4444-4444-444444444444";
+        let explicit = "55555555-5555-5555-5555-555555555555";
+        fs::write(
+            sibling_sessions.join(format!("{closed_sibling}.closed")),
+            b"",
+        )
+        .unwrap();
+
+        let host_sock = cur_state.join("host.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&host_sock).unwrap();
+        let list_json = json!([
+            {
+                "id": lost_shell,
+                "generation": "gen-lost-1",
+                "created_at": 1,
+                "updated_at": 2,
+                "pid": null,
+                "ended": "lost",
+                "resume": null,
+                "policy": {},
+                "cwd": "/tmp",
+            },
+            {
+                "id": lost_agent,
+                "generation": "gen-lost-2",
+                "created_at": 1,
+                "updated_at": 2,
+                "pid": null,
+                "ended": "lost",
+                "resume": {"agent": "codex", "conversation_id": "c1", "cwd": "/tmp"},
+                "policy": {},
+                "cwd": "/tmp",
+            },
+            {
+                "id": closed_sibling,
+                "generation": "gen-closed-3",
+                "created_at": 1,
+                "updated_at": 2,
+                "pid": null,
+                "ended": "lost",
+                "resume": null,
+                "policy": {},
+                "cwd": "/tmp",
+            },
+            {
+                "id": exited,
+                "generation": "gen-exit-4",
+                "created_at": 1,
+                "updated_at": 2,
+                "pid": null,
+                "ended": "process_exited",
+                "resume": null,
+                "policy": {},
+                "cwd": "/tmp",
+            },
+            {
+                "id": explicit,
+                "generation": "gen-explicit-5",
+                "created_at": 1,
+                "updated_at": 2,
+                "pid": null,
+                "ended": "explicit_close",
+                "resume": null,
+                "policy": {},
+                "cwd": "/tmp",
+            }
+        ]);
+        let payload = serde_json::to_vec(&list_json).unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    while let Ok(req) = Frame::read(&mut stream) {
+                        match req.kind {
+                            b'P' => {
+                                let _ = Frame::new(b'P', 0, b"local-resurrect/1").send(&mut stream);
+                            }
+                            b'L' => {
+                                let _ = Frame::new(b'L', 0, &payload).send(&mut stream);
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        });
+
+        let endpoint_id = hash(&host_sock.to_string_lossy());
+        let config = Config {
+            endpoints: vec![Endpoint {
+                id: endpoint_id.clone(),
+                name: "This Mac".into(),
+                socket: host_sock.clone(),
+                relay: None,
+            }],
+            support: None,
+            token: "t".repeat(64),
+            origin: None,
+            control: State::default(),
+        };
+        let view = build_view(&config).unwrap();
+        let all_sessions: Vec<&Value> = view.roster["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|p| p["sessions"].as_array().unwrap().iter())
+            .collect();
+        let shell_row = all_sessions
+            .iter()
+            .find(|s| s["id"] == format!("{endpoint_id}/{lost_shell}/gen-lost-1"))
+            .expect("lost shell row visible");
+        assert_eq!(shell_row["paused"], true);
+        assert_eq!(shell_row["status"], "idle");
+        assert_eq!(shell_row["background"], false);
+        assert_eq!(shell_row["subtitle"], "Paused · Tap to reopen");
+
+        let agent_row = all_sessions
+            .iter()
+            .find(|s| s["id"] == format!("{endpoint_id}/{lost_agent}/gen-lost-2"))
+            .expect("lost agent row visible");
+        assert_eq!(agent_row["paused"], true);
+        assert_eq!(agent_row["agent"], "codex");
+        assert_eq!(agent_row["subtitle"], "Paused · Tap to resume");
+
+        for hidden in [closed_sibling, exited, explicit] {
+            assert!(
+                !all_sessions
+                    .iter()
+                    .any(|s| s["id"].as_str().unwrap().contains(hidden)),
+                "closed/exited session {hidden} must remain hidden"
+            );
+        }
+        assert!(route(&config, &format!("{endpoint_id}/{lost_shell}/gen-lost-1")).is_ok());
+        assert!(route(
+            &config,
+            &format!("{endpoint_id}/{closed_sibling}/gen-closed-3")
+        )
+        .is_err());
+        let _ = UnixStream::connect(&host_sock);
+        let _ = server.join();
     }
 }

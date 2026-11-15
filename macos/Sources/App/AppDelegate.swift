@@ -339,6 +339,7 @@ class AppDelegate: NSObject,
         // Store our start time
         applicationLaunchTime = ProcessInfo.processInfo.systemUptime
         SessionRuntimeCloseQueue.shared.start()
+        MobileDeviceProvisioner.shared.startAutoRefreshMonitor()
         if !OMGApplicationEnvironment.isRunningTests {
             let supportURL = OMGApplicationEnvironment.applicationSupportURL()
             DispatchQueue.global(qos: .utility).async {

@@ -1048,6 +1048,17 @@ fn resolve_listen_address(
     Ok(address)
 }
 
+fn should_launch_gateway_via_launchd(
+    has_support: bool,
+    exe: &Path,
+    env_bundle: Option<&Path>,
+    env_bundle_id: Option<&str>,
+) -> bool {
+    cfg!(target_os = "macos")
+        && has_support
+        && omg_session_runtime::launchd::resolve_host_app(exe, env_bundle, env_bundle_id).is_some()
+}
+
 fn ensure_background_gateway(
     support: Option<&Path>,
     socket: Option<&Path>,
@@ -1061,41 +1072,74 @@ fn ensure_background_gateway(
         .ok_or_else(|| io::Error::other("No mobile state directory available"))?;
     ensure_state_dir(state_dir)?;
     let log_path = state_dir.join("mobile-gateway.log");
-    let log = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&log_path)?;
     let exe = std::env::current_exe()?;
-    let mut cmd = Command::new(&exe);
-    cmd.args(["mobile", "serve", "--listen", &address.to_string()]);
+    let mut serve_args = vec![
+        "mobile".to_string(),
+        "serve".to_string(),
+        "--listen".to_string(),
+        address.to_string(),
+    ];
     if let Some(dir) = support {
-        cmd.arg("--state-dir").arg(dir);
+        serve_args.push("--state-dir".to_string());
+        serve_args.push(dir.to_string_lossy().into_owned());
     } else if let Some(sock) = socket {
-        cmd.arg("--socket").arg(sock);
+        serve_args.push("--socket".to_string());
+        serve_args.push(sock.to_string_lossy().into_owned());
     }
-    cmd.arg("--token-file").arg(token_file);
+    serve_args.push("--token-file".to_string());
+    serve_args.push(token_file.to_string_lossy().into_owned());
     if let Some(pub_url) = public_url {
-        cmd.arg("--public-url").arg(pub_url);
+        serve_args.push("--public-url".to_string());
+        serve_args.push(pub_url.to_string());
     }
     if let Some(orig) = origin {
-        cmd.arg("--allow-origin").arg(orig);
+        serve_args.push("--allow-origin".to_string());
+        serve_args.push(orig.to_string());
     }
-    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(log);
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::setsid() < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            libc::signal(libc::SIGHUP, libc::SIG_IGN);
-            Ok(())
+
+    let env_bundle = std::env::var_os("OMG_HOST_APP_BUNDLE").map(PathBuf::from);
+    let env_bundle_id = std::env::var("OMG_HOST_APP_BUNDLE_ID").ok();
+    let launched_via_launchd = if should_launch_gateway_via_launchd(
+        support.is_some(),
+        &exe,
+        env_bundle.as_deref(),
+        env_bundle_id.as_deref(),
+    ) {
+        let mut launchd_cmd = Vec::with_capacity(serve_args.len() + 1);
+        launchd_cmd.push(exe.to_string_lossy().into_owned());
+        launchd_cmd.extend(serve_args.iter().cloned());
+        matches!(
+            omg_session_runtime::launchd::spawn(&exe, &launchd_cmd, &log_path),
+            Ok(Some(_))
+        )
+    } else {
+        false
+    };
+
+    if !launched_via_launchd {
+        let log = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&log_path)?;
+        let mut cmd = Command::new(&exe);
+        cmd.args(&serve_args);
+        cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(log);
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                libc::signal(libc::SIGHUP, libc::SIG_IGN);
+                Ok(())
+            });
+        }
+        let mut child = cmd.spawn()?;
+        std::thread::spawn(move || {
+            let _ = child.wait();
         });
     }
-    let mut child = cmd.spawn()?;
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
     for _ in 0..100 {
         if let Some(record) = read_gateway_record(state_dir) {
             return Ok(record);
@@ -1580,6 +1624,50 @@ mod tests {
 
         drop(guard_b_control);
         assert_eq!(read_gateway_record(&dir).unwrap().connected_devices, 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn background_gateway_prefers_launchd_only_with_support_and_resolved_host_app() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "omg-mobile-launchd-{}",
+            omg_session_runtime::record::nonce().unwrap()
+        ));
+        let macos = dir.join("OMG Test.app/Contents/MacOS");
+        let runtime = dir.join("OMG Test.app/Contents/Resources/session-runtime");
+        fs::create_dir_all(&macos).unwrap();
+        fs::create_dir_all(&runtime).unwrap();
+        fs::write(
+            dir.join("OMG Test.app/Contents/Info.plist"),
+            "<plist><dict><key>CFBundleIdentifier</key><string>com.jischeng.omg.test</string><key>CFBundleExecutable</key><string>omg</string></dict></plist>",
+        )
+        .unwrap();
+        let host_exe = macos.join("omg");
+        fs::write(&host_exe, b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(&host_exe, fs::Permissions::from_mode(0o755)).unwrap();
+        let bundled_omgd = runtime.join("omgd");
+        fs::write(&bundled_omgd, b"#!/bin/sh\n").unwrap();
+
+        assert_eq!(
+            should_launch_gateway_via_launchd(true, &bundled_omgd, None, None),
+            cfg!(target_os = "macos")
+        );
+        assert!(!should_launch_gateway_via_launchd(false, &bundled_omgd, None, None));
+
+        let unbundled = dir.join("bin/omgd");
+        assert!(!should_launch_gateway_via_launchd(true, &unbundled, None, None));
+        assert_eq!(
+            should_launch_gateway_via_launchd(
+                true,
+                &unbundled,
+                Some(&dir.join("OMG Test.app")),
+                Some("com.jischeng.omg.test"),
+            ),
+            cfg!(target_os = "macos")
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

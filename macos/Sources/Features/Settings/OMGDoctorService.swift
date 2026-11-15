@@ -1,8 +1,10 @@
 import AppKit
 import Combine
+import CryptoKit
 import Darwin
 import Foundation
 import GhosttyKit
+import Security
 
 enum OMGDoctorHealthStatus: String, Codable, Equatable, Sendable {
     case healthy
@@ -150,8 +152,123 @@ struct OMGDoctorResourceCheck: Equatable, Sendable {
     }
 }
 
+enum OMGSignerTrustMode: String, Codable, Equatable, Sendable {
+    case appleTrusted = "apple_trusted"
+    case selfSignedAdminTrusted = "self_signed_admin_trusted"
+    case selfSignedUserOnlyTrusted = "self_signed_user_only_trusted"
+    case selfSignedUntrusted = "self_signed_untrusted"
+    case adHocOrDevelopment = "ad_hoc_or_development"
+    case unsigned = "unsigned"
+}
+
+enum OMGSignerTrustInstallError: Error, Equatable, Sendable {
+    case missingCertificate
+    case invalidCertificate
+    case canceled
+    case executionFailed(String)
+
+    func localizedSummary(strings: SettingsStrings) -> String {
+        switch self {
+        case .missingCertificate:
+            return strings.t(
+                "No self-signed release certificate is present on this bundle.",
+                "当前应用包未附带自签名发布证书。"
+            )
+        case .invalidCertificate:
+            return strings.t(
+                "Refusing to install trust for a non-self-signed certificate.",
+                "仅支持为自签名发布证书安装代码签名信任。"
+            )
+        case .canceled:
+            return strings.t(
+                "Administrator authorization canceled; no keychain trust settings were changed.",
+                "已取消管理员授权，未修改钥匙串信任设置。"
+            )
+        case .executionFailed(let message):
+            return message
+        }
+    }
+}
+
+struct OMGDoctorSignerTrustCheck: Equatable, Sendable {
+    let status: OMGDoctorHealthStatus
+    let mode: OMGSignerTrustMode
+    let bundleIdentifier: String?
+    let teamIdentifier: String?
+    let certificateCommonName: String?
+    let certificateSHA1: String?
+    let isSelfSignedLeaf: Bool
+    let trustedInAdminDomain: Bool
+    let trustedInUserDomain: Bool
+    let isCodeSigningTrusted: Bool
+    let isNonCodeSigningBlocked: Bool
+    let hasUnscopedTrust: Bool
+    let leafCertificateDER: Data?
+
+    var needsTrustAction: Bool {
+        status == .warning && isSelfSignedLeaf && leafCertificateDER != nil
+    }
+
+    func summary(strings: SettingsStrings) -> String {
+        let certLabel = certificateCommonName ?? "OMG Release Signing"
+        let fpSuffix = certificateSHA1.map { " (\($0.prefix(12))…)" } ?? ""
+        switch mode {
+        case .appleTrusted:
+            let teamNote = teamIdentifier.map { "Team \($0)" } ?? "Apple signed"
+            return strings.t(
+                "Apple code signing trusted · \(teamNote).",
+                "Apple 开发者签名已受信任 · \(teamNote)。"
+            )
+        case .selfSignedAdminTrusted:
+            if hasUnscopedTrust || !isNonCodeSigningBlocked {
+                return strings.t(
+                    "\(certLabel)\(fpSuffix) has overly broad trust (non-CodeSigning policies allowed). Re-apply CodeSigning-only Admin trust.",
+                    "\(certLabel)\(fpSuffix) 的信任范围过宽（允许了非代码签名策略）。请重新安装仅限代码签名的管理员域信任。"
+                )
+            }
+            return strings.t(
+                "\(certLabel)\(fpSuffix) trusted in System Admin domain (Code Signing only; Accessibility & Gatekeeper persist across updates).",
+                "\(certLabel)\(fpSuffix) 已在系统管理员域受信任（仅限代码签名；辅助功能与 Gatekeeper 权限将在更新后保持）。"
+            )
+        case .selfSignedUserOnlyTrusted:
+            return strings.t(
+                "\(certLabel)\(fpSuffix) is only trusted in the user keychain. Install Admin domain trust so Accessibility & Gatekeeper persist across updates.",
+                "\(certLabel)\(fpSuffix) 仅在当前用户钥匙串受信任。请安装管理员域信任，以便辅助功能与 Gatekeeper 权限在更新后保持。"
+            )
+        case .selfSignedUntrusted:
+            return strings.t(
+                "\(certLabel)\(fpSuffix) is not yet trusted for Code Signing in System Keychain; Accessibility & Gatekeeper prompts will repeat on updates.",
+                "\(certLabel)\(fpSuffix) 尚未在系统钥匙串中授予代码签名信任；每次更新后都会重复弹出辅助功能与 Gatekeeper 提示。"
+            )
+        case .adHocOrDevelopment:
+            if bundleIdentifier == "com.jischeng.omg" {
+                return strings.t(
+                    "Release bundle uses ad-hoc or non-pinned signing without a persistent team or self-signed leaf.",
+                    "发布包未使用固定团队签名或自签名发布证书。"
+                )
+            }
+            return strings.t(
+                "Development/local build signature (\(bundleIdentifier ?? "unbundled")).",
+                "开发/本地构建签名（\(bundleIdentifier ?? "非应用包")）。"
+            )
+        case .unsigned:
+            if bundleIdentifier == "com.jischeng.omg" {
+                return strings.t(
+                    "Release bundle code signature could not be read.",
+                    "无法读取发布包代码签名。"
+                )
+            }
+            return strings.t(
+                "Unsigned development binary.",
+                "未签名的本地开发二进制。"
+            )
+        }
+    }
+}
+
 struct OMGDoctorReport: Equatable, Sendable {
     let accessibility: OMGDoctorAccessibilityCheck
+    let signerTrust: OMGDoctorSignerTrustCheck
     let runtimeSSH: OMGDoctorRuntimeSSHCheck
     let agentBackups: OMGDoctorAgentBackupCheck
     let resources: OMGDoctorResourceCheck
@@ -159,6 +276,7 @@ struct OMGDoctorReport: Equatable, Sendable {
     var overallStatus: OMGDoctorHealthStatus {
         let checks = [
             accessibility.status,
+            signerTrust.status,
             runtimeSSH.status,
             agentBackups.status,
             resources.status,
@@ -193,12 +311,19 @@ final class OMGDoctorService: ObservableObject {
         var agentManager: AgentIntegrationManager = .shared
         var surfaceCounter: @MainActor () -> OMGDoctorSurfaceCounts = OMGDoctorService.defaultSurfaceCounts
         var residentMemoryProvider: @Sendable () -> UInt64 = OMGDoctorService.currentResidentMemoryBytes
+        var inspectSignerTrust: @Sendable () -> OMGDoctorSignerTrustCheck = {
+            OMGDoctorService.defaultInspectSignerTrust(bundleURL: Bundle.main.bundleURL)
+        }
+        var installSignerTrust: @Sendable (Data) async -> Result<Void, OMGSignerTrustInstallError> = { derData in
+            await OMGDoctorService.defaultInstallSignerTrust(derData: derData)
+        }
     }
 
     static let shared = OMGDoctorService()
 
     @Published private(set) var report: OMGDoctorReport
     @Published private(set) var lastReclaimResult: OMGDoctorReclaimResult?
+    @Published private(set) var lastSignerTrustError: OMGSignerTrustInstallError?
 
     private let dependencies: Dependencies
     private var tapObserver: AnyCancellable?
@@ -234,6 +359,31 @@ final class OMGDoctorService: ObservableObject {
     }
 
     @discardableResult
+    func installReleaseSignerTrust() async -> Bool {
+        lastSignerTrustError = nil
+        guard let derData = report.signerTrust.leafCertificateDER,
+              report.signerTrust.isSelfSignedLeaf else {
+            lastSignerTrustError = .missingCertificate
+            return false
+        }
+        switch await dependencies.installSignerTrust(derData) {
+        case .success:
+            await refresh()
+            if report.signerTrust.status != .healthy {
+                lastSignerTrustError = .executionFailed(
+                    "Post-install verification failed: Admin CodeSigning-only trust is not yet active."
+                )
+                return false
+            }
+            return true
+        case .failure(let error):
+            lastSignerTrustError = error
+            await refresh()
+            return false
+        }
+    }
+
+    @discardableResult
     func reclaimIdleResources() async -> OMGDoctorReclaimResult {
         let reclaimedWebViews = await dependencies.workspaceStore.reclaimIdleWebViews()
         let reclaimedLSPServers = await dependencies.lspManager.reclaimIdleServers()
@@ -260,6 +410,7 @@ final class OMGDoctorService: ObservableObject {
             isEventTapEnabled: tapActive
         )
 
+        let signerTrust = dependencies.inspectSignerTrust()
         let runtimeSSH = inspectRuntimeAndSSH(dependencies: dependencies)
         let agentBackups = inspectAgentsAndBackups(dependencies: dependencies)
 
@@ -278,6 +429,7 @@ final class OMGDoctorService: ObservableObject {
 
         return OMGDoctorReport(
             accessibility: accessibility,
+            signerTrust: signerTrust,
             runtimeSSH: runtimeSSH,
             agentBackups: agentBackups,
             resources: resources
@@ -469,5 +621,300 @@ final class OMGDoctorService: ObservableObject {
         }
         guard result == KERN_SUCCESS else { return 0 }
         return UInt64(info.resident_size)
+    }
+
+    nonisolated static func defaultInspectSignerTrust(bundleURL: URL) -> OMGDoctorSignerTrustCheck {
+        let fallbackBundleID = Bundle(url: bundleURL)?.bundleIdentifier
+        var staticCode: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(bundleURL as CFURL, [], &staticCode) == errSecSuccess,
+              let code = staticCode else {
+            return makeNonSelfSignedTrustCheck(
+                mode: .unsigned,
+                bundleIdentifier: fallbackBundleID,
+                teamIdentifier: nil,
+                certificate: nil
+            )
+        }
+
+        var cfInfo: CFDictionary?
+        let flags = SecCSFlags(rawValue: kSecCSSigningInformation)
+        guard SecCodeCopySigningInformation(code, flags, &cfInfo) == errSecSuccess,
+              let info = cfInfo as? [String: Any] else {
+            return makeNonSelfSignedTrustCheck(
+                mode: .unsigned,
+                bundleIdentifier: fallbackBundleID,
+                teamIdentifier: nil,
+                certificate: nil
+            )
+        }
+
+        let signingIdentifier = (info[kSecCodeInfoIdentifier as String] as? String) ?? fallbackBundleID
+        let teamIdentifier = info[kSecCodeInfoTeamIdentifier as String] as? String
+        let certificates = (info[kSecCodeInfoCertificates as String] as? [SecCertificate]) ?? []
+
+        if let teamIdentifier, !teamIdentifier.isEmpty {
+            return makeNonSelfSignedTrustCheck(
+                mode: .appleTrusted,
+                bundleIdentifier: signingIdentifier,
+                teamIdentifier: teamIdentifier,
+                certificate: certificates.first
+            )
+        }
+
+        guard let leafCertificate = certificates.first else {
+            return makeNonSelfSignedTrustCheck(
+                mode: .adHocOrDevelopment,
+                bundleIdentifier: signingIdentifier,
+                teamIdentifier: nil,
+                certificate: nil
+            )
+        }
+
+        return inspectLeafCertificateTrust(
+            certificate: leafCertificate,
+            bundleIdentifier: signingIdentifier,
+            teamIdentifier: nil
+        )
+    }
+
+    nonisolated static func inspectLeafCertificateTrust(
+        certificate: SecCertificate,
+        bundleIdentifier: String?,
+        teamIdentifier: String? = nil
+    ) -> OMGDoctorSignerTrustCheck {
+        let derData = SecCertificateCopyData(certificate) as Data
+        let sha1 = Insecure.SHA1.hash(data: derData)
+            .map { String(format: "%02X", $0) }
+            .joined()
+        let commonName = SecCertificateCopySubjectSummary(certificate) as String?
+
+        let subject = SecCertificateCopyNormalizedSubjectSequence(certificate) as Data?
+        let issuer = SecCertificateCopyNormalizedIssuerSequence(certificate) as Data?
+        let isSelfSigned = subject != nil && subject == issuer
+        guard isSelfSigned else {
+            let status: OMGDoctorHealthStatus = bundleIdentifier == "com.jischeng.omg" ? .warning : .healthy
+            return OMGDoctorSignerTrustCheck(
+                status: status,
+                mode: .adHocOrDevelopment,
+                bundleIdentifier: bundleIdentifier,
+                teamIdentifier: teamIdentifier,
+                certificateCommonName: commonName,
+                certificateSHA1: sha1,
+                isSelfSignedLeaf: false,
+                trustedInAdminDomain: false,
+                trustedInUserDomain: false,
+                isCodeSigningTrusted: false,
+                isNonCodeSigningBlocked: true,
+                hasUnscopedTrust: false,
+                leafCertificateDER: nil
+            )
+        }
+
+        let adminDomain = checkDomainTrust(certificate: certificate, domain: .admin)
+        let userDomain = checkDomainTrust(certificate: certificate, domain: .user)
+
+        let certArray = [certificate] as CFArray
+        let csPolicy = SecPolicyCreateWithProperties(kSecPolicyAppleCodeSigning, nil)
+        let csTrusted = csPolicy.map { evaluateTrustPolicy($0, certificates: certArray) } ?? false
+        let x509Trusted = evaluateTrustPolicy(SecPolicyCreateBasicX509(), certificates: certArray)
+        let sslTrusted = evaluateTrustPolicy(SecPolicyCreateSSL(true, nil), certificates: certArray)
+
+        let nonCodeSigningBlocked = !x509Trusted && !sslTrusted
+        let hasUnscopedTrust = adminDomain.hasUnscoped || userDomain.hasUnscoped || x509Trusted || sslTrusted
+
+        let mode: OMGSignerTrustMode
+        if adminDomain.hasCodeSigning && csTrusted {
+            mode = .selfSignedAdminTrusted
+        } else if userDomain.hasCodeSigning && csTrusted {
+            mode = .selfSignedUserOnlyTrusted
+        } else {
+            mode = .selfSignedUntrusted
+        }
+
+        let isHealthy = mode == .selfSignedAdminTrusted
+            && csTrusted
+            && nonCodeSigningBlocked
+            && !hasUnscopedTrust
+
+        return OMGDoctorSignerTrustCheck(
+            status: isHealthy ? .healthy : .warning,
+            mode: mode,
+            bundleIdentifier: bundleIdentifier,
+            teamIdentifier: teamIdentifier,
+            certificateCommonName: commonName,
+            certificateSHA1: sha1,
+            isSelfSignedLeaf: true,
+            trustedInAdminDomain: adminDomain.hasCodeSigning,
+            trustedInUserDomain: userDomain.hasCodeSigning,
+            isCodeSigningTrusted: csTrusted,
+            isNonCodeSigningBlocked: nonCodeSigningBlocked,
+            hasUnscopedTrust: hasUnscopedTrust,
+            leafCertificateDER: derData
+        )
+    }
+
+    nonisolated private static func makeNonSelfSignedTrustCheck(
+        mode: OMGSignerTrustMode,
+        bundleIdentifier: String?,
+        teamIdentifier: String?,
+        certificate: SecCertificate?
+    ) -> OMGDoctorSignerTrustCheck {
+        let derData = certificate.map { SecCertificateCopyData($0) as Data }
+        let sha1 = derData.map { data in
+            Insecure.SHA1.hash(data: data).map { String(format: "%02X", $0) }.joined()
+        }
+        let commonName = certificate.flatMap { SecCertificateCopySubjectSummary($0) as String? }
+        let status: OMGDoctorHealthStatus = switch mode {
+        case .appleTrusted:
+            .healthy
+        case .adHocOrDevelopment, .unsigned:
+            bundleIdentifier == "com.jischeng.omg" ? .warning : .healthy
+        case .selfSignedAdminTrusted, .selfSignedUserOnlyTrusted, .selfSignedUntrusted:
+            .warning
+        }
+
+        return OMGDoctorSignerTrustCheck(
+            status: status,
+            mode: mode,
+            bundleIdentifier: bundleIdentifier,
+            teamIdentifier: teamIdentifier,
+            certificateCommonName: commonName,
+            certificateSHA1: sha1,
+            isSelfSignedLeaf: false,
+            trustedInAdminDomain: false,
+            trustedInUserDomain: false,
+            isCodeSigningTrusted: mode == .appleTrusted,
+            isNonCodeSigningBlocked: true,
+            hasUnscopedTrust: false,
+            leafCertificateDER: nil
+        )
+    }
+
+    nonisolated private static func checkDomainTrust(
+        certificate: SecCertificate,
+        domain: SecTrustSettingsDomain
+    ) -> (hasCodeSigning: Bool, hasUnscoped: Bool) {
+        var cfSettings: CFArray?
+        let status = SecTrustSettingsCopyTrustSettings(certificate, domain, &cfSettings)
+        guard status == errSecSuccess else {
+            return (false, false)
+        }
+        guard let entries = cfSettings as? [[String: Any]], !entries.isEmpty else {
+            // An empty array in macOS Trust Settings means "Always Trust" for all policies.
+            return (true, true)
+        }
+
+        let codeSignOID = kSecPolicyAppleCodeSigning as String
+        var hasCodeSigning = false
+        var hasUnscoped = false
+
+        for dict in entries {
+            let resultRaw = (dict[kSecTrustSettingsResult as String] as? NSNumber)?.uint32Value
+                ?? SecTrustSettingsResult.trustRoot.rawValue
+            guard resultRaw == SecTrustSettingsResult.trustRoot.rawValue
+                || resultRaw == SecTrustSettingsResult.trustAsRoot.rawValue else {
+                continue
+            }
+
+            guard let policyObj = dict[kSecTrustSettingsPolicy as String] else {
+                hasUnscoped = true
+                hasCodeSigning = true
+                continue
+            }
+
+            let policyOID: String?
+            let cfPolicy = policyObj as AnyObject as CFTypeRef
+            if CFGetTypeID(cfPolicy) == SecPolicyGetTypeID() {
+                let secPolicy = unsafeBitCast(cfPolicy, to: SecPolicy.self)
+                let props = SecPolicyCopyProperties(secPolicy) as? [String: Any]
+                policyOID = props?[kSecPolicyOid as String] as? String
+            } else {
+                policyOID = policyObj as? String
+            }
+
+            if policyOID == codeSignOID {
+                let hasAppScope = dict[kSecTrustSettingsApplication as String] != nil
+                let hasPolicyString = dict[kSecTrustSettingsPolicyString as String] != nil
+                if !hasAppScope && !hasPolicyString {
+                    hasCodeSigning = true
+                }
+            }
+        }
+
+        return (hasCodeSigning, hasUnscoped)
+    }
+
+    nonisolated private static func evaluateTrustPolicy(
+        _ policy: SecPolicy,
+        certificates: CFArray
+    ) -> Bool {
+        var trust: SecTrust?
+        guard SecTrustCreateWithCertificates(certificates, policy, &trust) == errSecSuccess,
+              let trust else {
+            return false
+        }
+        return SecTrustEvaluateWithError(trust, nil)
+    }
+
+    nonisolated static func defaultInstallSignerTrust(
+        derData: Data
+    ) async -> Result<Void, OMGSignerTrustInstallError> {
+        guard let cert = SecCertificateCreateWithData(nil, derData as CFData) else {
+            return .failure(.invalidCertificate)
+        }
+        let subject = SecCertificateCopyNormalizedSubjectSequence(cert) as Data?
+        let issuer = SecCertificateCopyNormalizedIssuerSequence(cert) as Data?
+        guard subject != nil && subject == issuer else {
+            return .failure(.invalidCertificate)
+        }
+
+        return await Task.detached(priority: .userInitiated) {
+            let tempURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("omg-release-signer-\(UUID().uuidString).der")
+            let fd = Darwin.open(tempURL.path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0o600)
+            guard fd >= 0 else {
+                return .failure(.executionFailed("Failed to create temporary certificate file (errno \(errno))."))
+            }
+            defer { _ = Darwin.unlink(tempURL.path) }
+
+            let writeSucceeded = derData.withUnsafeBytes { rawBuffer -> Bool in
+                guard let base = rawBuffer.baseAddress else { return true }
+                var offset = 0
+                while offset < rawBuffer.count {
+                    let written = Darwin.write(fd, base.advanced(by: offset), rawBuffer.count - offset)
+                    if written < 0 {
+                        if errno == EINTR { continue }
+                        return false
+                    }
+                    offset += written
+                }
+                return true
+            }
+            _ = Darwin.close(fd)
+            guard writeSucceeded else {
+                return .failure(.executionFailed("Failed to write release certificate bytes."))
+            }
+
+            let escapedPath = tempURL.path
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+            // Self-signed CA:FALSE certificates fail with errSecParam (-50) under -r trustAsRoot;
+            // use -r trustRoot -p codeSign in Admin domain (-d) so TCC/Gatekeeper stick across updates.
+            let source = "do shell script \"/usr/bin/security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain \" & quoted form of \"\(escapedPath)\" with administrator privileges"
+            guard let script = NSAppleScript(source: source) else {
+                return .failure(.executionFailed("Unable to initialize administrator authorization script."))
+            }
+            var errorInfo: NSDictionary?
+            _ = script.executeAndReturnError(&errorInfo)
+            if let errorInfo {
+                if let code = errorInfo[NSAppleScript.errorNumber] as? Int, code == -128 {
+                    return .failure(.canceled)
+                }
+                let message = (errorInfo[NSAppleScript.errorMessage] as? String)
+                    ?? "Administrator trust installation failed."
+                return .failure(.executionFailed(message))
+            }
+            return .success(())
+        }.value
     }
 }

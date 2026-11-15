@@ -9,19 +9,19 @@ private final class DoctorObserverToken {
 }
 
 @MainActor
-private final class DoctorAccessibilityControlContainer: NSView {
-    let grantButton: SettingsActionButton
+private final class DoctorActionOrBadgeControl: NSView {
+    let actionButton: SettingsActionButton
     let statusBadge: NSTextField
     private var activeConstraints: [NSLayoutConstraint] = []
 
-    init(grantButton: SettingsActionButton, statusBadge: NSTextField) {
-        self.grantButton = grantButton
+    init(actionButton: SettingsActionButton, statusBadge: NSTextField) {
+        self.actionButton = actionButton
         self.statusBadge = statusBadge
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
-        grantButton.translatesAutoresizingMaskIntoConstraints = false
+        actionButton.translatesAutoresizingMaskIntoConstraints = false
         statusBadge.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(grantButton)
+        addSubview(actionButton)
         addSubview(statusBadge)
     }
 
@@ -30,11 +30,11 @@ private final class DoctorAccessibilityControlContainer: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func update(showGrantButton: Bool) {
+    func update(showActionButton: Bool) {
         NSLayoutConstraint.deactivate(activeConstraints)
-        grantButton.isHidden = !showGrantButton
-        statusBadge.isHidden = showGrantButton
-        let activeView: NSView = showGrantButton ? grantButton : statusBadge
+        actionButton.isHidden = !showActionButton
+        statusBadge.isHidden = showActionButton
+        let activeView: NSView = showActionButton ? actionButton : statusBadge
         activeConstraints = [
             activeView.leadingAnchor.constraint(equalTo: leadingAnchor),
             activeView.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -119,16 +119,41 @@ extension NativeSettingsController {
             _ = doctor.grantAccessibilityPermission()
         }
         let accessibilityBadge = makeDoctorStatusBadge(initialReport.accessibility.status)
-        let accessibilityContainer = DoctorAccessibilityControlContainer(
-            grantButton: grantButton,
+        let accessibilityContainer = DoctorActionOrBadgeControl(
+            actionButton: grantButton,
             statusBadge: accessibilityBadge
         )
-        accessibilityContainer.update(showGrantButton: initialReport.accessibility.needsGrantAction)
+        accessibilityContainer.update(showActionButton: initialReport.accessibility.needsGrantAction)
 
         let accessibilityRow = form.row(
             currentStrings.doctorAccessibilityLabel,
             subtitle: initialReport.accessibility.summary(strings: currentStrings),
             control: accessibilityContainer
+        )
+
+        let trustButton = SettingsActionButton(currentStrings.doctorInstallSignerTrustButton) {}
+        trustButton.invoke = { [weak trustButton] in
+            trustButton?.isEnabled = false
+            Task { @MainActor [weak trustButton] in
+                defer { trustButton?.isEnabled = true }
+                _ = await doctor.installReleaseSignerTrust()
+            }
+        }
+        let signerTrustBadge = makeDoctorStatusBadge(initialReport.signerTrust.status)
+        let signerTrustContainer = DoctorActionOrBadgeControl(
+            actionButton: trustButton,
+            statusBadge: signerTrustBadge
+        )
+        signerTrustContainer.update(showActionButton: initialReport.signerTrust.needsTrustAction)
+
+        let signerTrustRow = form.row(
+            currentStrings.doctorSignerTrustLabel,
+            subtitle: formatDoctorSignerTrustSubtitle(
+                report: initialReport,
+                lastError: doctor.lastSignerTrustError,
+                strings: currentStrings
+            ),
+            control: signerTrustContainer
         )
 
         let runtimeSSHBadge = makeDoctorStatusBadge(initialReport.runtimeSSH.status)
@@ -181,39 +206,57 @@ extension NativeSettingsController {
 
         struct DoctorSectionBindings {
             let accessibilityRow: NativeSettingsRow?
+            let signerTrustRow: NativeSettingsRow?
             let runtimeSSHRow: NativeSettingsRow?
             let agentBackupRow: NativeSettingsRow?
             let resourcesRow: NativeSettingsRow?
             let snapshotRow: NativeSettingsRow?
-            weak var accessibilityContainer: DoctorAccessibilityControlContainer?
+            weak var accessibilityContainer: DoctorActionOrBadgeControl?
             weak var accessibilityBadge: NSTextField?
+            weak var signerTrustContainer: DoctorActionOrBadgeControl?
+            weak var signerTrustBadge: NSTextField?
             weak var runtimeSSHBadge: NSTextField?
             weak var agentBackupBadge: NSTextField?
         }
         let bindings = DoctorSectionBindings(
             accessibilityRow: accessibilityRow,
+            signerTrustRow: signerTrustRow,
             runtimeSSHRow: runtimeSSHRow,
             agentBackupRow: agentBackupRow,
             resourcesRow: resourcesRow,
             snapshotRow: snapshotRow,
             accessibilityContainer: accessibilityContainer,
             accessibilityBadge: accessibilityBadge,
+            signerTrustContainer: signerTrustContainer,
+            signerTrustBadge: signerTrustBadge,
             runtimeSSHBadge: runtimeSSHBadge,
             agentBackupBadge: agentBackupBadge
         )
 
         let subscription = doctor.$report
-            .combineLatest(doctor.$lastReclaimResult)
+            .combineLatest(doctor.$lastReclaimResult, doctor.$lastSignerTrustError)
             .dropFirst()
             .receive(on: RunLoop.main)
-            .sink { [weak self] report, lastReclaim in
+            .sink { [weak self] report, lastReclaim, lastTrustError in
                 guard let self else { return }
                 let localized = self.strings
                 bindings.accessibilityRow?.setSubtitle(report.accessibility.summary(strings: localized))
                 if let badge = bindings.accessibilityBadge {
                     self.applyDoctorStatusBadge(badge, status: report.accessibility.status, strings: localized)
                 }
-                bindings.accessibilityContainer?.update(showGrantButton: report.accessibility.needsGrantAction)
+                bindings.accessibilityContainer?.update(showActionButton: report.accessibility.needsGrantAction)
+
+                bindings.signerTrustRow?.setSubtitle(
+                    self.formatDoctorSignerTrustSubtitle(
+                        report: report,
+                        lastError: lastTrustError,
+                        strings: localized
+                    )
+                )
+                if let badge = bindings.signerTrustBadge {
+                    self.applyDoctorStatusBadge(badge, status: report.signerTrust.status, strings: localized)
+                }
+                bindings.signerTrustContainer?.update(showActionButton: report.signerTrust.needsTrustAction)
 
                 bindings.runtimeSSHRow?.setSubtitle(report.runtimeSSH.summary(strings: localized))
                 if let badge = bindings.runtimeSSHBadge {
@@ -240,6 +283,18 @@ extension NativeSettingsController {
             guard form != nil else { return }
             await doctor.refresh()
         }
+    }
+
+    private func formatDoctorSignerTrustSubtitle(
+        report: OMGDoctorReport,
+        lastError: OMGSignerTrustInstallError?,
+        strings: SettingsStrings
+    ) -> String {
+        var subtitle = report.signerTrust.summary(strings: strings)
+        if let lastError {
+            subtitle += "\n" + lastError.localizedSummary(strings: strings)
+        }
+        return subtitle
     }
 
     private func formatDoctorResourcesSubtitle(

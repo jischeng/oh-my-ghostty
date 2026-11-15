@@ -26,6 +26,77 @@ struct SessionRuntimeHostLauncherTests {
         ))
     }
 
+    @Test func parseForegroundAcceptsForegroundInvocationAndRejectsMalformed() {
+        #expect(SessionRuntimeHostLauncher.parseForeground(arguments: ["/Applications/OMG.app/Contents/MacOS/omg"]) == nil)
+        #expect(SessionRuntimeHostLauncher.parseForeground(arguments: ["/Applications/OMG.app/Contents/MacOS/omg", "+internal-runtime-foreground", "--"]) == nil)
+        #expect(SessionRuntimeHostLauncher.parseForeground(arguments: ["/Applications/OMG.app/Contents/MacOS/omg", "+internal-runtime-foreground", "--", ""]) == nil)
+        #expect(SessionRuntimeHostLauncher.parseForeground(arguments: ["/Applications/OMG.app/Contents/MacOS/omg", "+internal-runtime-foreground", "/tmp/x", "--", "/bin/echo"]) == nil)
+
+        let parsed = SessionRuntimeHostLauncher.parseForeground(arguments: [
+            "/Applications/OMG.app/Contents/MacOS/omg",
+            "+internal-runtime-foreground",
+            "--",
+            "/tmp/omgd",
+            "mobile",
+            "serve",
+        ])
+        #expect(parsed == .init(command: ["/tmp/omgd", "mobile", "serve"]))
+    }
+
+    @Test func spawnForegroundChildStaysInCallerSessionWithoutSetsid() throws {
+        let pid = try SessionRuntimeHostLauncher.spawnForegroundChild(.init(
+            command: ["/bin/sleep", "30"]
+        ))
+        defer {
+            _ = kill(pid, SIGTERM)
+            var status: Int32 = 0
+            while waitpid(pid, &status, 0) < 0 && errno == EINTR {}
+        }
+
+        #expect(pid > 0)
+        #expect(getsid(pid) != pid)
+    }
+
+    @Test func foregroundWrapperPreservesExitCodeAndForwardsSigtermWhenAppHosted() throws {
+        guard Bundle.main.bundleURL.pathExtension == "app",
+              let bundleID = Bundle.main.bundleIdentifier,
+              bundleID.hasPrefix("com.jischeng.omg"),
+              let executableURL = Bundle.main.executableURL else {
+            return
+        }
+
+        let exitProbe = Process()
+        exitProbe.executableURL = executableURL
+        exitProbe.arguments = [SessionRuntimeHostLauncher.foregroundActionFlag, "--", "/bin/sh", "-c", "exit 42"]
+        try exitProbe.run()
+        exitProbe.waitUntilExit()
+        #expect(exitProbe.terminationStatus == 42)
+
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("omg-fg-sig-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let childPIDFile = dir.appendingPathComponent("child.pid")
+        let termMarker = dir.appendingPathComponent("child-term")
+
+        let wrapper = Process()
+        wrapper.executableURL = executableURL
+        wrapper.arguments = [
+            SessionRuntimeHostLauncher.foregroundActionFlag,
+            "--",
+            "/bin/sh",
+            "-c",
+            "trap 'touch \"\(termMarker.path)\"; exit 0' TERM; echo $$ > \"\(childPIDFile.path)\"; while :; do sleep 0.05; done",
+        ]
+        try wrapper.run()
+        let deadline = Date().addingTimeInterval(5)
+        while !FileManager.default.fileExists(atPath: childPIDFile.path), Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        wrapper.terminate()
+        wrapper.waitUntilExit()
+        #expect(FileManager.default.fileExists(atPath: termMarker.path))
+    }
+
     @Test func applyingHostBundleEnvironmentPopulatesHostBundleMetadata() {
         let env = SessionRuntimeHostLauncher.applyingHostBundleEnvironment(["PATH": "/usr/bin:/bin"], bundle: .main)
         if Bundle.main.bundleURL.pathExtension == "app",

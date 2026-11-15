@@ -65,7 +65,7 @@ enum SettingsSearchCatalog {
             item(.mobile, \.mobileAccessTitle, [], "mobile iPhone iPad device pair invitation gateway LAN 手机 移动 设备 配对 邀请 网关 局域网 连接 状态 访问 权限"),
             item(.ssh, \.sshSettingsTitle, [], "ssh machine host remote register 机器 主机 远程 注册", anchor: "sshRegistration"),
             item(.plugins, \.officialPluginsSection, [], "plugin install 插件 安装 官方"),
-            item(.plugins, \.doctorSection, [], "doctor health diagnostics accessibility tcc memory webview lsp reclaim runtime omgd ssh backup 健康 自检 诊断 辅助功能 权限 内存 回收"),
+            item(.plugins, \.doctorSection, [], "doctor health diagnostics accessibility tcc signing certificate trust keychain gatekeeper memory webview lsp reclaim runtime omgd ssh backup 健康 自检 诊断 辅助功能 签名 证书 信任 钥匙串 权限 内存 回收"),
             item(.advanced, \.settingsLocationsSection, [""], "config settings.json reload 配置文件 重载 来源", anchor: "settingsFiles"),
         ]
         for group in CoreSetting.Group.allCases {

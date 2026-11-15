@@ -1,5 +1,7 @@
 import AppKit
+import CryptoKit
 import Foundation
+import Security
 import Testing
 @testable import Ghostty
 
@@ -327,7 +329,191 @@ struct OMGDoctorTests {
             return out
         }
         let expectedMemoryText = doctor.report.resources.summary(strings: SettingsStrings(language: .english))
+        let expectedTrustText = doctor.report.signerTrust.summary(strings: SettingsStrings(language: .english))
         let renderedStrings = collectStrings(in: currentForm.view)
         #expect(renderedStrings.contains { $0.contains(expectedMemoryText) })
+        #expect(renderedStrings.contains { $0.contains(expectedTrustText) })
+    }
+
+    @Test func doctorDetectsSelfSignedTrustStatesAndInstallsAdminCodeSigningTrust() async throws {
+        let certDER = Data("test-self-signed-der".utf8)
+        final class TrustState: @unchecked Sendable {
+            private let lock = NSLock()
+            let certDER: Data
+            var mode: OMGSignerTrustMode = .selfSignedUntrusted
+            var unscoped = false
+            var installedDERs: [Data] = []
+            var nextInstallResult: Result<Void, OMGSignerTrustInstallError> = .success(())
+
+            init(certDER: Data) {
+                self.certDER = certDER
+            }
+
+            func snapshot() -> OMGDoctorSignerTrustCheck {
+                lock.lock()
+                defer { lock.unlock() }
+                let admin = mode == .selfSignedAdminTrusted
+                let user = mode == .selfSignedUserOnlyTrusted
+                let csTrusted = admin || user
+                let healthy = admin && csTrusted && !unscoped
+                return OMGDoctorSignerTrustCheck(
+                    status: healthy ? .healthy : .warning,
+                    mode: mode,
+                    bundleIdentifier: "com.jischeng.omg",
+                    teamIdentifier: nil,
+                    certificateCommonName: "OMG Release Signing",
+                    certificateSHA1: "9B2E176C03E5458E6FDAF73392CD9D79203972C6",
+                    isSelfSignedLeaf: true,
+                    trustedInAdminDomain: admin,
+                    trustedInUserDomain: user,
+                    isCodeSigningTrusted: csTrusted,
+                    isNonCodeSigningBlocked: !unscoped,
+                    hasUnscopedTrust: unscoped,
+                    leafCertificateDER: certDER
+                )
+            }
+
+            func install(_ der: Data) -> Result<Void, OMGSignerTrustInstallError> {
+                lock.lock()
+                defer { lock.unlock() }
+                installedDERs.append(der)
+                if case .success = nextInstallResult {
+                    mode = .selfSignedAdminTrusted
+                }
+                return nextInstallResult
+            }
+        }
+
+        let state = TrustState(certDER: certDER)
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-doctor-trust-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let suiteName = "OMGDoctorTests.Trust.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let registry = SSHHostRegistry(defaults: defaults, live: { [] }, inventory: { _ in .init() })
+        let agents = AgentIntegrationManager(
+            defaults: defaults,
+            homeURL: dir,
+            snapshots: [AgentIntegrationManager.localID: AgentIntegrationSnapshot(hooks: [:], cli: [:])],
+            connectionTargets: { [] },
+            registry: registry
+        )
+
+        let doctor = OMGDoctorService(
+            dependencies: .init(
+                hasGlobalKeybinds: { false },
+                isAccessibilityTrusted: { true },
+                isEventTapEnabled: { false },
+                resourcesURL: nil,
+                homeDirectory: dir,
+                sshControlDirectoryPath: dir.appendingPathComponent("no-ssh").path,
+                agentManager: agents,
+                surfaceCounter: { .init(visible: 1, occluded: 0) },
+                residentMemoryProvider: { 64 * 1_048_576 },
+                inspectSignerTrust: { state.snapshot() },
+                installSignerTrust: { der in state.install(der) }
+            )
+        )
+
+        let stringsEN = SettingsStrings(language: .english)
+        let stringsZH = SettingsStrings(language: .simplifiedChinese)
+
+        await doctor.refresh()
+        #expect(doctor.report.overallStatus == .warning)
+        #expect(doctor.report.signerTrust.status == .warning)
+        #expect(doctor.report.signerTrust.needsTrustAction)
+        #expect(doctor.report.signerTrust.summary(strings: stringsEN).contains("System Keychain"))
+        #expect(doctor.report.signerTrust.summary(strings: stringsZH).contains("系统钥匙串"))
+
+        // Canceled administrator prompt preserves warning and records cancellation error.
+        state.nextInstallResult = .failure(.canceled)
+        #expect(!(await doctor.installReleaseSignerTrust()))
+        #expect(doctor.lastSignerTrustError == .canceled)
+        #expect(doctor.report.signerTrust.status == .warning)
+
+        // Successful Admin CodeSigning install resolves warning cleanly.
+        state.nextInstallResult = .success(())
+        #expect(await doctor.installReleaseSignerTrust())
+        #expect(doctor.lastSignerTrustError == nil)
+        #expect(doctor.report.signerTrust.mode == .selfSignedAdminTrusted)
+        #expect(doctor.report.signerTrust.status == .healthy)
+        #expect(!doctor.report.signerTrust.needsTrustAction)
+        #expect(doctor.report.overallStatus == .healthy)
+
+        // Overly broad trust (e.g. non-CodeSigning allowed) triggers warning and remediation prompt.
+        state.unscoped = true
+        await doctor.refresh()
+        #expect(doctor.report.signerTrust.status == .warning)
+        #expect(doctor.report.signerTrust.needsTrustAction)
+        #expect(doctor.report.signerTrust.summary(strings: stringsEN).contains("overly broad"))
+
+        // User-only trust warns that Admin trust is required for TCC persistence.
+        state.unscoped = false
+        state.mode = .selfSignedUserOnlyTrusted
+        await doctor.refresh()
+        #expect(doctor.report.signerTrust.status == .warning)
+        #expect(doctor.report.signerTrust.summary(strings: stringsEN).contains("user keychain"))
+    }
+
+    @Test func doctorInspectsRealSelfSignedCertificateViaSecurityFrameworkWithoutKeychainMutation() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-doctor-cert-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let keyURL = dir.appendingPathComponent("key.pem")
+        let derURL = dir.appendingPathComponent("cert.der")
+        let confURL = dir.appendingPathComponent("cert.conf")
+        try """
+        [req]
+        distinguished_name = dn
+        x509_extensions = ext
+        prompt = no
+        [dn]
+        CN = OMG Test Release Signer
+        [ext]
+        basicConstraints = critical, CA:FALSE
+        keyUsage = critical, digitalSignature
+        extendedKeyUsage = codeSigning
+        """.write(to: confURL, atomically: true, encoding: .utf8)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
+        process.arguments = [
+            "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+            "-keyout", keyURL.path,
+            "-outform", "DER", "-out", derURL.path,
+            "-days", "1", "-config", confURL.path,
+        ]
+        process.standardError = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        #expect(process.terminationStatus == 0)
+
+        let derData = try Data(contentsOf: derURL)
+        let certificate = try #require(SecCertificateCreateWithData(nil, derData as CFData))
+        let check = OMGDoctorService.inspectLeafCertificateTrust(
+            certificate: certificate,
+            bundleIdentifier: "com.jischeng.omg"
+        )
+
+        let expectedSHA1 = Insecure.SHA1.hash(data: derData)
+            .map { String(format: "%02X", $0) }
+            .joined()
+        #expect(check.mode == .selfSignedUntrusted)
+        #expect(check.status == .warning)
+        #expect(check.isSelfSignedLeaf)
+        #expect(!check.trustedInAdminDomain)
+        #expect(!check.trustedInUserDomain)
+        #expect(!check.isCodeSigningTrusted)
+        #expect(check.isNonCodeSigningBlocked)
+        #expect(!check.hasUnscopedTrust)
+        #expect(check.certificateSHA1 == expectedSHA1)
+        #expect(check.leafCertificateDER == derData)
+        #expect(check.needsTrustAction)
     }
 }

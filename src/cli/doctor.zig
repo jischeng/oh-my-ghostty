@@ -62,9 +62,35 @@ pub const PortableSettingsReport = struct {
     has_git_diff: bool,
 };
 
+pub const SignerTrustMode = enum {
+    apple_trusted,
+    self_signed_admin_trusted,
+    self_signed_user_only_trusted,
+    self_signed_untrusted,
+    ad_hoc_or_development,
+    unsigned,
+};
+
+pub const SignerTrustReport = struct {
+    status: HealthStatus,
+    mode: SignerTrustMode,
+    bundle_identifier: ?[]const u8 = null,
+    team_identifier: ?[]const u8 = null,
+    certificate_cn: ?[]const u8 = null,
+    certificate_sha1: ?[]const u8 = null,
+    is_self_signed_leaf: bool = false,
+    trusted_in_admin_domain: bool = false,
+    trusted_in_user_domain: bool = false,
+    is_code_signing_trusted: bool = false,
+    is_non_code_signing_blocked: bool = true,
+    has_unscoped_trust: bool = false,
+    recommended_fix_command: ?[]const u8 = null,
+};
+
 pub const DoctorReport = struct {
     status: HealthStatus,
     accessibility: AccessibilityReport,
+    signer_trust: SignerTrustReport,
     runtime_ssh: RuntimeSSHReport,
     agent_backups: BackupsReport,
     portable_settings: PortableSettingsReport,
@@ -78,6 +104,7 @@ pub const InspectParams = struct {
     has_global_keybinds: bool,
     accessibility_trusted: bool,
     expected_uid: ?u32 = null,
+    signer_trust: ?SignerTrustReport = null,
 };
 
 pub fn settingsRelPathForExecutableDir(executable_dir: ?[]const u8) []const u8 {
@@ -124,6 +151,7 @@ pub fn run(gpa: Allocator) !u8 {
 
     const has_global = detectConfiguredGlobalKeybinds(gpa);
     const ax_trusted = checkMacOSAccessibilityTrusted();
+    const signer_trust = checkMacOSSignerTrust(global.io(), alloc, executable_dir);
 
     const settings_rel = settingsRelPathForExecutableDir(executable_dir);
 
@@ -134,6 +162,7 @@ pub fn run(gpa: Allocator) !u8 {
         .settings_rel_path = settings_rel,
         .has_global_keybinds = has_global,
         .accessibility_trusted = ax_trusted,
+        .signer_trust = signer_trust,
     });
 
     var buffer: [4096]u8 = undefined;
@@ -187,6 +216,446 @@ fn checkMacOSAccessibilityTrusted() bool {
     const Fn = *const fn () callconv(.c) u8;
     const func: Fn = @ptrCast(@alignCast(sym));
     return func() != 0;
+}
+
+fn defaultSignerTrustReport() SignerTrustReport {
+    return .{
+        .status = .healthy,
+        .mode = .ad_hoc_or_development,
+    };
+}
+
+const MacOSCF = struct {
+    handle: *anyopaque,
+    release: *const fn (?*const anyopaque) callconv(.c) void,
+    get_type_id: *const fn (?*const anyopaque) callconv(.c) c_ulong,
+    string_get_type_id: *const fn () callconv(.c) c_ulong,
+    string_create: *const fn (?*const anyopaque, [*:0]const u8, u32) callconv(.c) ?*const anyopaque,
+    string_get_cstr: *const fn (?*const anyopaque, [*]u8, c_long, u32) callconv(.c) u8,
+    url_from_fs: *const fn (?*const anyopaque, [*]const u8, c_long, u8) callconv(.c) ?*const anyopaque,
+    data_create: *const fn (?*const anyopaque, [*]const u8, c_long) callconv(.c) ?*const anyopaque,
+    data_get_len: *const fn (?*const anyopaque) callconv(.c) c_long,
+    data_get_ptr: *const fn (?*const anyopaque) callconv(.c) [*]const u8,
+    array_create: *const fn (?*const anyopaque, [*]const ?*const anyopaque, c_long, ?*const anyopaque) callconv(.c) ?*const anyopaque,
+    array_get_count: *const fn (?*const anyopaque) callconv(.c) c_long,
+    array_get_val: *const fn (?*const anyopaque, c_long) callconv(.c) ?*const anyopaque,
+    dict_get_val: *const fn (?*const anyopaque, ?*const anyopaque) callconv(.c) ?*const anyopaque,
+    number_get_val: *const fn (?*const anyopaque, c_long, *anyopaque) callconv(.c) u8,
+    array_callbacks: ?*const anyopaque,
+
+    fn loadSym(comptime T: type, handle: *anyopaque, name: [:0]const u8) ?T {
+        const sym = std.c.dlsym(handle, name) orelse return null;
+        return @ptrCast(@alignCast(sym));
+    }
+
+    fn load() ?MacOSCF {
+        const h = std.c.dlopen(
+            "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+            .{ .LAZY = true },
+        ) orelse return null;
+        errdefer _ = std.c.dlclose(h);
+        return .{
+            .handle = h,
+            .release = loadSym(@TypeOf(@as(MacOSCF, undefined).release), h, "CFRelease") orelse return null,
+            .get_type_id = loadSym(@TypeOf(@as(MacOSCF, undefined).get_type_id), h, "CFGetTypeID") orelse return null,
+            .string_get_type_id = loadSym(@TypeOf(@as(MacOSCF, undefined).string_get_type_id), h, "CFStringGetTypeID") orelse return null,
+            .string_create = loadSym(@TypeOf(@as(MacOSCF, undefined).string_create), h, "CFStringCreateWithCString") orelse return null,
+            .string_get_cstr = loadSym(@TypeOf(@as(MacOSCF, undefined).string_get_cstr), h, "CFStringGetCString") orelse return null,
+            .url_from_fs = loadSym(@TypeOf(@as(MacOSCF, undefined).url_from_fs), h, "CFURLCreateFromFileSystemRepresentation") orelse return null,
+            .data_create = loadSym(@TypeOf(@as(MacOSCF, undefined).data_create), h, "CFDataCreate") orelse return null,
+            .data_get_len = loadSym(@TypeOf(@as(MacOSCF, undefined).data_get_len), h, "CFDataGetLength") orelse return null,
+            .data_get_ptr = loadSym(@TypeOf(@as(MacOSCF, undefined).data_get_ptr), h, "CFDataGetBytePtr") orelse return null,
+            .array_create = loadSym(@TypeOf(@as(MacOSCF, undefined).array_create), h, "CFArrayCreate") orelse return null,
+            .array_get_count = loadSym(@TypeOf(@as(MacOSCF, undefined).array_get_count), h, "CFArrayGetCount") orelse return null,
+            .array_get_val = loadSym(@TypeOf(@as(MacOSCF, undefined).array_get_val), h, "CFArrayGetValueAtIndex") orelse return null,
+            .dict_get_val = loadSym(@TypeOf(@as(MacOSCF, undefined).dict_get_val), h, "CFDictionaryGetValue") orelse return null,
+            .number_get_val = loadSym(@TypeOf(@as(MacOSCF, undefined).number_get_val), h, "CFNumberGetValue") orelse return null,
+            .array_callbacks = std.c.dlsym(h, "kCFTypeArrayCallBacks"),
+        };
+    }
+
+    fn deinit(self: MacOSCF) void {
+        _ = std.c.dlclose(self.handle);
+    }
+
+    fn readCFString(self: MacOSCF, alloc: Allocator, ref: ?*const anyopaque) ?[]const u8 {
+        const obj = ref orelse return null;
+        if (self.get_type_id(obj) != self.string_get_type_id()) return null;
+        var buf: [1024]u8 = undefined;
+        if (self.string_get_cstr(obj, &buf, buf.len, 0x08000100) == 0) return null;
+        const slice = std.mem.sliceTo(&buf, 0);
+        return alloc.dupe(u8, slice) catch null;
+    }
+
+    fn readCFDataSlice(self: MacOSCF, ref: ?*const anyopaque) ?[]const u8 {
+        const obj = ref orelse return null;
+        const raw_len = self.data_get_len(obj);
+        if (raw_len < 0) return null;
+        const len: usize = @intCast(raw_len);
+        const ptr = self.data_get_ptr(obj);
+        return ptr[0..len];
+    }
+};
+
+const MacOSSecurity = struct {
+    handle: *anyopaque,
+    static_code_create_with_path: *const fn (?*const anyopaque, u32, *?*const anyopaque) callconv(.c) i32,
+    code_copy_signing_info: *const fn (?*const anyopaque, u32, *?*const anyopaque) callconv(.c) i32,
+    cert_create_with_data: *const fn (?*const anyopaque, ?*const anyopaque) callconv(.c) ?*const anyopaque,
+    cert_copy_data: *const fn (?*const anyopaque) callconv(.c) ?*const anyopaque,
+    cert_copy_subject_summary: *const fn (?*const anyopaque) callconv(.c) ?*const anyopaque,
+    cert_copy_norm_subject: *const fn (?*const anyopaque) callconv(.c) ?*const anyopaque,
+    cert_copy_norm_issuer: *const fn (?*const anyopaque) callconv(.c) ?*const anyopaque,
+    trust_settings_copy: *const fn (?*const anyopaque, u32, *?*const anyopaque) callconv(.c) i32,
+    policy_get_type_id: *const fn () callconv(.c) c_ulong,
+    policy_copy_props: *const fn (?*const anyopaque) callconv(.c) ?*const anyopaque,
+    policy_create_with_props: *const fn (?*const anyopaque, ?*const anyopaque) callconv(.c) ?*const anyopaque,
+    policy_create_basic_x509: *const fn () callconv(.c) ?*const anyopaque,
+    policy_create_ssl: *const fn (u8, ?*const anyopaque) callconv(.c) ?*const anyopaque,
+    trust_create_with_certs: *const fn (?*const anyopaque, ?*const anyopaque, *?*const anyopaque) callconv(.c) i32,
+    trust_evaluate_with_error: *const fn (?*const anyopaque, *?*const anyopaque) callconv(.c) u8,
+    k_code_info_certs: ?*const anyopaque,
+    k_code_info_team: ?*const anyopaque,
+    k_code_info_identifier: ?*const anyopaque,
+    k_policy_apple_codesigning: ?*const anyopaque,
+    k_policy_oid: ?*const anyopaque,
+
+    fn loadCFGlobal(handle: *anyopaque, name: [:0]const u8) ?*const anyopaque {
+        const sym = std.c.dlsym(handle, name) orelse return null;
+        return @as(*const ?*const anyopaque, @ptrCast(@alignCast(sym))).*;
+    }
+
+    fn load() ?MacOSSecurity {
+        const h = std.c.dlopen(
+            "/System/Library/Frameworks/Security.framework/Security",
+            .{ .LAZY = true },
+        ) orelse return null;
+        errdefer _ = std.c.dlclose(h);
+        return .{
+            .handle = h,
+            .static_code_create_with_path = MacOSCF.loadSym(@TypeOf(@as(MacOSSecurity, undefined).static_code_create_with_path), h, "SecStaticCodeCreateWithPath") orelse return null,
+            .code_copy_signing_info = MacOSCF.loadSym(@TypeOf(@as(MacOSSecurity, undefined).code_copy_signing_info), h, "SecCodeCopySigningInformation") orelse return null,
+            .cert_create_with_data = MacOSCF.loadSym(@TypeOf(@as(MacOSSecurity, undefined).cert_create_with_data), h, "SecCertificateCreateWithData") orelse return null,
+            .cert_copy_data = MacOSCF.loadSym(@TypeOf(@as(MacOSSecurity, undefined).cert_copy_data), h, "SecCertificateCopyData") orelse return null,
+            .cert_copy_subject_summary = MacOSCF.loadSym(@TypeOf(@as(MacOSSecurity, undefined).cert_copy_subject_summary), h, "SecCertificateCopySubjectSummary") orelse return null,
+            .cert_copy_norm_subject = MacOSCF.loadSym(@TypeOf(@as(MacOSSecurity, undefined).cert_copy_norm_subject), h, "SecCertificateCopyNormalizedSubjectSequence") orelse return null,
+            .cert_copy_norm_issuer = MacOSCF.loadSym(@TypeOf(@as(MacOSSecurity, undefined).cert_copy_norm_issuer), h, "SecCertificateCopyNormalizedIssuerSequence") orelse return null,
+            .trust_settings_copy = MacOSCF.loadSym(@TypeOf(@as(MacOSSecurity, undefined).trust_settings_copy), h, "SecTrustSettingsCopyTrustSettings") orelse return null,
+            .policy_get_type_id = MacOSCF.loadSym(@TypeOf(@as(MacOSSecurity, undefined).policy_get_type_id), h, "SecPolicyGetTypeID") orelse return null,
+            .policy_copy_props = MacOSCF.loadSym(@TypeOf(@as(MacOSSecurity, undefined).policy_copy_props), h, "SecPolicyCopyProperties") orelse return null,
+            .policy_create_with_props = MacOSCF.loadSym(@TypeOf(@as(MacOSSecurity, undefined).policy_create_with_props), h, "SecPolicyCreateWithProperties") orelse return null,
+            .policy_create_basic_x509 = MacOSCF.loadSym(@TypeOf(@as(MacOSSecurity, undefined).policy_create_basic_x509), h, "SecPolicyCreateBasicX509") orelse return null,
+            .policy_create_ssl = MacOSCF.loadSym(@TypeOf(@as(MacOSSecurity, undefined).policy_create_ssl), h, "SecPolicyCreateSSL") orelse return null,
+            .trust_create_with_certs = MacOSCF.loadSym(@TypeOf(@as(MacOSSecurity, undefined).trust_create_with_certs), h, "SecTrustCreateWithCertificates") orelse return null,
+            .trust_evaluate_with_error = MacOSCF.loadSym(@TypeOf(@as(MacOSSecurity, undefined).trust_evaluate_with_error), h, "SecTrustEvaluateWithError") orelse return null,
+            .k_code_info_certs = loadCFGlobal(h, "kSecCodeInfoCertificates"),
+            .k_code_info_team = loadCFGlobal(h, "kSecCodeInfoTeamIdentifier"),
+            .k_code_info_identifier = loadCFGlobal(h, "kSecCodeInfoIdentifier"),
+            .k_policy_apple_codesigning = loadCFGlobal(h, "kSecPolicyAppleCodeSigning"),
+            .k_policy_oid = loadCFGlobal(h, "kSecPolicyOid"),
+        };
+    }
+
+    fn deinit(self: MacOSSecurity) void {
+        _ = std.c.dlclose(self.handle);
+    }
+};
+
+fn formatSha1Upper(alloc: Allocator, bytes: []const u8) ?[]const u8 {
+    var digest: [std.crypto.hash.Sha1.digest_length]u8 = undefined;
+    std.crypto.hash.Sha1.hash(bytes, &digest, .{});
+    const out = alloc.alloc(u8, digest.len * 2) catch return null;
+    const digits = "0123456789ABCDEF";
+    for (digest, 0..) |byte, i| {
+        out[i * 2] = digits[byte >> 4];
+        out[i * 2 + 1] = digits[byte & 0x0f];
+    }
+    return out;
+}
+
+fn checkMacOSDomainTrust(
+    cf: MacOSCF,
+    sec: MacOSSecurity,
+    cert: *const anyopaque,
+    domain: u32,
+) struct { has_codesign: bool, has_unscoped: bool } {
+    var arr_ref: ?*const anyopaque = null;
+    const rc = sec.trust_settings_copy(cert, domain, &arr_ref);
+    if (rc != 0) return .{ .has_codesign = false, .has_unscoped = false };
+    defer if (arr_ref) |r| cf.release(r);
+
+    const arr = arr_ref orelse return .{ .has_codesign = true, .has_unscoped = true };
+    const count = cf.array_get_count(arr);
+    if (count == 0) return .{ .has_codesign = true, .has_unscoped = true };
+
+    const k_result = cf.string_create(null, "kSecTrustSettingsResult", 0x08000100);
+    defer if (k_result) |r| cf.release(r);
+    const k_policy = cf.string_create(null, "kSecTrustSettingsPolicy", 0x08000100);
+    defer if (k_policy) |r| cf.release(r);
+    const k_app = cf.string_create(null, "kSecTrustSettingsApplication", 0x08000100);
+    defer if (k_app) |r| cf.release(r);
+    const k_policy_str = cf.string_create(null, "kSecTrustSettingsPolicyString", 0x08000100);
+    defer if (k_policy_str) |r| cf.release(r);
+
+    var has_codesign = false;
+    var has_unscoped = false;
+    var i: c_long = 0;
+    while (i < count) : (i += 1) {
+        const entry = cf.array_get_val(arr, i) orelse continue;
+        var result_val: i32 = 1;
+        if (k_result) |kr| {
+            if (cf.dict_get_val(entry, kr)) |res_ref| {
+                var num: i32 = 1;
+                if (cf.number_get_val(res_ref, 3, &num) != 0) {
+                    result_val = num;
+                }
+            }
+        }
+        if (result_val != 1 and result_val != 2) continue;
+
+        const pol_ref = if (k_policy) |kp| cf.dict_get_val(entry, kp) else null;
+        if (pol_ref == null) {
+            has_unscoped = true;
+            has_codesign = true;
+            continue;
+        }
+        const pol = pol_ref.?;
+        var oid_buf: [128]u8 = undefined;
+        var oid_slice: ?[]const u8 = null;
+        if (cf.get_type_id(pol) == sec.policy_get_type_id()) {
+            if (sec.policy_copy_props(pol)) |props| {
+                defer cf.release(props);
+                if (sec.k_policy_oid) |oid_key| {
+                    if (cf.dict_get_val(props, oid_key)) |oid_ref| {
+                        if (cf.get_type_id(oid_ref) == cf.string_get_type_id() and
+                            cf.string_get_cstr(oid_ref, &oid_buf, oid_buf.len, 0x08000100) != 0)
+                        {
+                            oid_slice = std.mem.sliceTo(&oid_buf, 0);
+                        }
+                    }
+                }
+            }
+        } else if (cf.get_type_id(pol) == cf.string_get_type_id() and
+            cf.string_get_cstr(pol, &oid_buf, oid_buf.len, 0x08000100) != 0)
+        {
+            oid_slice = std.mem.sliceTo(&oid_buf, 0);
+        }
+
+        if (oid_slice) |oid| {
+            if (std.mem.eql(u8, oid, "1.2.840.113635.100.1.16")) {
+                const app_scoped = if (k_app) |ka| cf.dict_get_val(entry, ka) != null else false;
+                const str_scoped = if (k_policy_str) |ks| cf.dict_get_val(entry, ks) != null else false;
+                if (!app_scoped and !str_scoped) {
+                    has_codesign = true;
+                }
+            }
+        }
+    }
+
+    return .{ .has_codesign = has_codesign, .has_unscoped = has_unscoped };
+}
+
+fn evaluateMacOSTrustPolicy(
+    cf: MacOSCF,
+    sec: MacOSSecurity,
+    cert_array: *const anyopaque,
+    policy_ref: ?*const anyopaque,
+) bool {
+    const policy = policy_ref orelse return false;
+    var trust_ref: ?*const anyopaque = null;
+    if (sec.trust_create_with_certs(cert_array, policy, &trust_ref) != 0) return false;
+    const trust = trust_ref orelse return false;
+    defer cf.release(trust);
+    var err_ref: ?*const anyopaque = null;
+    const ok = sec.trust_evaluate_with_error(trust, &err_ref) != 0;
+    if (err_ref) |e| cf.release(e);
+    return ok;
+}
+
+fn inspectMacOSLeafCertificate(
+    alloc: Allocator,
+    cf: MacOSCF,
+    sec: MacOSSecurity,
+    leaf_cert: *const anyopaque,
+    bundle_id: ?[]const u8,
+) SignerTrustReport {
+    const der_ref = sec.cert_copy_data(leaf_cert);
+    defer if (der_ref) |d| cf.release(d);
+    const cert_sha1 = if (cf.readCFDataSlice(der_ref)) |der| formatSha1Upper(alloc, der) else null;
+
+    const cn_ref = sec.cert_copy_subject_summary(leaf_cert);
+    defer if (cn_ref) |c| cf.release(c);
+    const cert_cn = cf.readCFString(alloc, cn_ref);
+
+    const subj_ref = sec.cert_copy_norm_subject(leaf_cert);
+    defer if (subj_ref) |s| cf.release(s);
+    const iss_ref = sec.cert_copy_norm_issuer(leaf_cert);
+    defer if (iss_ref) |i| cf.release(i);
+    const is_self_signed = blk: {
+        const s = cf.readCFDataSlice(subj_ref) orelse break :blk false;
+        const i = cf.readCFDataSlice(iss_ref) orelse break :blk false;
+        break :blk std.mem.eql(u8, s, i);
+    };
+
+    const is_release = if (bundle_id) |id| std.mem.eql(u8, id, "com.jischeng.omg") else false;
+    if (!is_self_signed) {
+        return .{
+            .status = if (is_release) .warning else .healthy,
+            .mode = .ad_hoc_or_development,
+            .bundle_identifier = bundle_id,
+            .certificate_cn = cert_cn,
+            .certificate_sha1 = cert_sha1,
+            .is_self_signed_leaf = false,
+        };
+    }
+
+    const admin_domain = checkMacOSDomainTrust(cf, sec, leaf_cert, 1);
+    const user_domain = checkMacOSDomainTrust(cf, sec, leaf_cert, 0);
+
+    const certs_ptr = [_]?*const anyopaque{leaf_cert};
+    const cert_array = cf.array_create(null, &certs_ptr, 1, cf.array_callbacks) orelse {
+        return .{
+            .status = .warning,
+            .mode = .self_signed_untrusted,
+            .bundle_identifier = bundle_id,
+            .certificate_cn = cert_cn,
+            .certificate_sha1 = cert_sha1,
+            .is_self_signed_leaf = true,
+        };
+    };
+    defer cf.release(cert_array);
+
+    const cs_pol = if (sec.k_policy_apple_codesigning) |oid| sec.policy_create_with_props(oid, null) else null;
+    defer if (cs_pol) |p| cf.release(p);
+    const x509_pol = sec.policy_create_basic_x509();
+    defer if (x509_pol) |p| cf.release(p);
+    const ssl_pol = sec.policy_create_ssl(1, null);
+    defer if (ssl_pol) |p| cf.release(p);
+
+    const cs_ok = evaluateMacOSTrustPolicy(cf, sec, cert_array, cs_pol);
+    const x509_ok = evaluateMacOSTrustPolicy(cf, sec, cert_array, x509_pol);
+    const ssl_ok = evaluateMacOSTrustPolicy(cf, sec, cert_array, ssl_pol);
+
+    const non_cs_blocked = !x509_ok and !ssl_ok;
+    const has_unscoped = admin_domain.has_unscoped or user_domain.has_unscoped or x509_ok or ssl_ok;
+
+    const mode: SignerTrustMode = if (admin_domain.has_codesign and cs_ok)
+        .self_signed_admin_trusted
+    else if (user_domain.has_codesign and cs_ok)
+        .self_signed_user_only_trusted
+    else
+        .self_signed_untrusted;
+
+    const healthy = mode == .self_signed_admin_trusted and cs_ok and non_cs_blocked and !has_unscoped;
+    return .{
+        .status = if (healthy) .healthy else .warning,
+        .mode = mode,
+        .bundle_identifier = bundle_id,
+        .certificate_cn = cert_cn,
+        .certificate_sha1 = cert_sha1,
+        .is_self_signed_leaf = true,
+        .trusted_in_admin_domain = admin_domain.has_codesign,
+        .trusted_in_user_domain = user_domain.has_codesign,
+        .is_code_signing_trusted = cs_ok,
+        .is_non_code_signing_blocked = non_cs_blocked,
+        .has_unscoped_trust = has_unscoped,
+        .recommended_fix_command = if (healthy)
+            null
+        else
+            "Open OMG Settings -> Plugins -> OMG Doctor -> Trust Release Signer for Updates (or run: sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain <leaf-cert.der>)",
+    };
+}
+
+pub fn inspectSignerTrustAtPath(alloc: Allocator, target_path: []const u8) SignerTrustReport {
+    if (comptime builtin.os.tag != .macos) return defaultSignerTrustReport();
+    const cf = MacOSCF.load() orelse return defaultSignerTrustReport();
+    defer cf.deinit();
+    const sec = MacOSSecurity.load() orelse return defaultSignerTrustReport();
+    defer sec.deinit();
+
+    const url = cf.url_from_fs(
+        null,
+        target_path.ptr,
+        @intCast(target_path.len),
+        @intFromBool(std.mem.endsWith(u8, target_path, ".app")),
+    ) orelse return defaultSignerTrustReport();
+    defer cf.release(url);
+
+    var static_code: ?*const anyopaque = null;
+    if (sec.static_code_create_with_path(url, 0, &static_code) != 0 or static_code == null) {
+        return .{ .status = .healthy, .mode = .unsigned };
+    }
+    defer cf.release(static_code.?);
+
+    var info_ref: ?*const anyopaque = null;
+    if (sec.code_copy_signing_info(static_code.?, 1 << 1, &info_ref) != 0 or info_ref == null) {
+        return .{ .status = .healthy, .mode = .unsigned };
+    }
+    defer cf.release(info_ref.?);
+
+    const bundle_id = if (sec.k_code_info_identifier) |key|
+        cf.readCFString(alloc, cf.dict_get_val(info_ref.?, key))
+    else
+        null;
+    const team_id = if (sec.k_code_info_team) |key|
+        cf.readCFString(alloc, cf.dict_get_val(info_ref.?, key))
+    else
+        null;
+    const is_release = if (bundle_id) |id| std.mem.eql(u8, id, "com.jischeng.omg") else false;
+
+    const certs_arr = if (sec.k_code_info_certs) |key| cf.dict_get_val(info_ref.?, key) else null;
+    const leaf_cert = if (certs_arr) |arr| (if (cf.array_get_count(arr) > 0) cf.array_get_val(arr, 0) else null) else null;
+
+    if (team_id) |tid| {
+        if (tid.len > 0) {
+            const cert_cn = if (leaf_cert) |leaf| blk: {
+                const ref = sec.cert_copy_subject_summary(leaf);
+                defer if (ref) |r| cf.release(r);
+                break :blk cf.readCFString(alloc, ref);
+            } else null;
+            const cert_sha1 = if (leaf_cert) |leaf| blk: {
+                const ref = sec.cert_copy_data(leaf);
+                defer if (ref) |r| cf.release(r);
+                break :blk if (cf.readCFDataSlice(ref)) |der| formatSha1Upper(alloc, der) else null;
+            } else null;
+            return .{
+                .status = .healthy,
+                .mode = .apple_trusted,
+                .bundle_identifier = bundle_id,
+                .team_identifier = tid,
+                .certificate_cn = cert_cn,
+                .certificate_sha1 = cert_sha1,
+                .is_code_signing_trusted = true,
+            };
+        }
+    }
+
+    const leaf = leaf_cert orelse return .{
+        .status = if (is_release) .warning else .healthy,
+        .mode = .ad_hoc_or_development,
+        .bundle_identifier = bundle_id,
+    };
+
+    return inspectMacOSLeafCertificate(alloc, cf, sec, leaf, bundle_id);
+}
+
+fn checkMacOSSignerTrust(io: std.Io, alloc: Allocator, executable_dir: ?[]const u8) SignerTrustReport {
+    if (comptime builtin.os.tag != .macos) return defaultSignerTrustReport();
+    if (executable_dir) |exe_dir| {
+        if (std.mem.eql(u8, std.fs.path.basename(exe_dir), "MacOS")) {
+            if (std.fs.path.dirname(exe_dir)) |contents| {
+                if (std.mem.eql(u8, std.fs.path.basename(contents), "Contents")) {
+                    if (std.fs.path.dirname(contents)) |app_dir| {
+                        if (std.mem.endsWith(u8, app_dir, ".app")) {
+                            return inspectSignerTrustAtPath(alloc, app_dir);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    const exe_path = std.process.executablePathAlloc(io, alloc) catch return defaultSignerTrustReport();
+    return inspectSignerTrustAtPath(alloc, exe_path);
 }
 
 pub fn inspectEnvironment(
@@ -448,7 +917,10 @@ pub fn inspectEnvironment(
         .has_git_diff = has_git_diff,
     };
 
+    const signer_trust = params.signer_trust orelse defaultSignerTrustReport();
+
     const overall: HealthStatus = if (accessibility.status == .warning or
+        signer_trust.status == .warning or
         runtime_ssh.status == .warning or
         agent_backups.status == .warning or
         portable_settings.status == .warning)
@@ -459,6 +931,7 @@ pub fn inspectEnvironment(
     return .{
         .status = overall,
         .accessibility = accessibility,
+        .signer_trust = signer_trust,
         .runtime_ssh = runtime_ssh,
         .agent_backups = agent_backups,
         .portable_settings = portable_settings,
@@ -495,6 +968,31 @@ pub fn writeReportText(writer: *std.Io.Writer, report: DoctorReport) !void {
     try writer.print("  - AXIsProcessTrusted        : {}\n", .{report.accessibility.accessibility_trusted});
     if (report.accessibility.global_keybinds_configured and !report.accessibility.accessibility_trusted) {
         try writer.print("  ! Grant Accessibility permission in System Settings > Privacy & Security > Accessibility (or Settings > Plugins > OMG Doctor).\n", .{});
+    }
+
+    try writer.print("\nRelease Signer Trust: {t}\n", .{report.signer_trust.status});
+    try writer.print("  - mode                      : {t}\n", .{report.signer_trust.mode});
+    if (report.signer_trust.bundle_identifier) |bid| {
+        try writer.print("  - bundle identifier         : {s}\n", .{bid});
+    }
+    if (report.signer_trust.team_identifier) |tid| {
+        try writer.print("  - team identifier           : {s}\n", .{tid});
+    }
+    if (report.signer_trust.certificate_cn) |cn| {
+        try writer.print("  - certificate CN            : {s}\n", .{cn});
+    }
+    if (report.signer_trust.certificate_sha1) |sha1| {
+        try writer.print("  - certificate SHA-1         : {s}\n", .{sha1});
+    }
+    if (report.signer_trust.is_self_signed_leaf) {
+        try writer.print("  - admin domain trusted      : {}\n", .{report.signer_trust.trusted_in_admin_domain});
+        try writer.print("  - user domain trusted       : {}\n", .{report.signer_trust.trusted_in_user_domain});
+        try writer.print("  - CodeSigning evaluated     : {}\n", .{report.signer_trust.is_code_signing_trusted});
+        try writer.print("  - non-CodeSigning blocked   : {}\n", .{report.signer_trust.is_non_code_signing_blocked});
+        try writer.print("  - unscoped trust present    : {}\n", .{report.signer_trust.has_unscoped_trust});
+    }
+    if (report.signer_trust.recommended_fix_command) |cmd| {
+        try writer.print("  ! {s}\n", .{cmd});
     }
 
     try writer.print("\nSession Runtime & SSH: {t}\n", .{report.runtime_ssh.status});
@@ -765,4 +1263,113 @@ test "doctor rejects symlinks, wrong-UID squatting, and resolves all dev channel
     try testing.expect(!symlink_report.portable_settings.private_mode);
     try testing.expect(!symlink_report.portable_settings.has_ssh_hosts);
     try testing.expectEqual(HealthStatus.warning, symlink_report.portable_settings.status);
+}
+
+test "doctor reports signer_trust warnings in overall status and inspects real macOS certificates" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const home_path = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+
+    const untrusted_report = try inspectEnvironment(testing.io, alloc, .{
+        .home_dir = home_path,
+        .ssh_control_dir = try std.fs.path.join(alloc, &.{ home_path, "missing-ssh" }),
+        .has_global_keybinds = false,
+        .accessibility_trusted = true,
+        .signer_trust = .{
+            .status = .warning,
+            .mode = .self_signed_untrusted,
+            .bundle_identifier = "com.jischeng.omg",
+            .certificate_cn = "OMG Release Signing",
+            .certificate_sha1 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            .is_self_signed_leaf = true,
+            .is_non_code_signing_blocked = true,
+            .recommended_fix_command = "sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain cert.der",
+        },
+    });
+    try testing.expectEqual(HealthStatus.warning, untrusted_report.status);
+    try testing.expectEqual(SignerTrustMode.self_signed_untrusted, untrusted_report.signer_trust.mode);
+
+    var text_alloc: std.Io.Writer.Allocating = .init(alloc);
+    try writeReportText(&text_alloc.writer, untrusted_report);
+    const text = text_alloc.written();
+    try testing.expect(std.mem.indexOf(u8, text, "Release Signer Trust: warning") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "-r trustRoot -p codeSign") != null);
+
+    var json_alloc: std.Io.Writer.Allocating = .init(alloc);
+    try writeReportJSON(&json_alloc.writer, untrusted_report);
+    try testing.expect(std.mem.indexOf(u8, json_alloc.written(), "\"signer_trust\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json_alloc.written(), "\"self_signed_untrusted\"") != null);
+
+    if (comptime builtin.os.tag == .macos) {
+        const cf = MacOSCF.load().?;
+        defer cf.deinit();
+        const sec = MacOSSecurity.load().?;
+        defer sec.deinit();
+
+        try tmp.dir.writeFile(testing.io, .{
+            .sub_path = "cert.conf",
+            .data =
+            \\[req]
+            \\distinguished_name = dn
+            \\x509_extensions = ext
+            \\prompt = no
+            \\[dn]
+            \\CN = OMG Zig Test Signer
+            \\[ext]
+            \\basicConstraints = critical, CA:FALSE
+            \\keyUsage = critical, digitalSignature
+            \\extendedKeyUsage = codeSigning
+            \\
+            ,
+        });
+        const conf_path = try std.fs.path.join(alloc, &.{ home_path, "cert.conf" });
+        const key_path = try std.fs.path.join(alloc, &.{ home_path, "key.pem" });
+        const der_path = try std.fs.path.join(alloc, &.{ home_path, "cert.der" });
+        const res = try std.process.run(alloc, testing.io, .{
+            .argv = &.{
+                "/usr/bin/openssl",
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-keyout",
+                key_path,
+                "-outform",
+                "DER",
+                "-out",
+                der_path,
+                "-days",
+                "1",
+                "-config",
+                conf_path,
+            },
+        });
+        try testing.expect(res.term == .exited and res.term.exited == 0);
+
+        const der_file = try std.Io.Dir.openFileAbsolute(testing.io, der_path, .{});
+        defer der_file.close(testing.io);
+        var reader = der_file.reader(testing.io, &.{});
+        const der_bytes = try reader.interface.allocRemaining(alloc, .limited(64 * 1024));
+        const cf_data = cf.data_create(null, der_bytes.ptr, @intCast(der_bytes.len)).?;
+        defer cf.release(cf_data);
+        const cert = sec.cert_create_with_data(null, cf_data).?;
+        defer cf.release(cert);
+
+        const inspected = inspectMacOSLeafCertificate(alloc, cf, sec, cert, "com.jischeng.omg");
+        try testing.expectEqual(HealthStatus.warning, inspected.status);
+        try testing.expectEqual(SignerTrustMode.self_signed_untrusted, inspected.mode);
+        try testing.expect(inspected.is_self_signed_leaf);
+        try testing.expect(!inspected.trusted_in_admin_domain);
+        try testing.expect(!inspected.trusted_in_user_domain);
+        try testing.expect(!inspected.is_code_signing_trusted);
+        try testing.expect(inspected.is_non_code_signing_blocked);
+        try testing.expect(!inspected.has_unscoped_trust);
+        try testing.expectEqualStrings(formatSha1Upper(alloc, der_bytes).?, inspected.certificate_sha1.?);
+    }
 }

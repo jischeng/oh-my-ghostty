@@ -19,6 +19,9 @@ if [[ "$mode" == self-signed ]]; then
     echo "self-signed release requires com.jischeng.omg" >&2; exit 1;
   }
   requirement=$(bash "$repo_root/dist/macos/signing-python.sh" requirement)
+  leaf_fp=${requirement##*H\"}
+  leaf_fp=${leaf_fp%\"}
+  [[ "$leaf_fp" =~ ^[0-9A-F]{40}$ ]] || { echo "invalid leaf fingerprint in requirement" >&2; exit 1; }
 fi
 
 if [[ ! -x "$app_path/Contents/MacOS/omg" ]]; then
@@ -42,6 +45,40 @@ case "$mode" in
 esac
 printf 'signing_mode=%s\n' "$mode" >&2
 
+bundle_identifier() {
+  local target=$1
+  local plist
+  for plist in \
+    "$target/Contents/Info.plist" \
+    "$target/Resources/Info.plist" \
+    "$target/Versions/Current/Resources/Info.plist"; do
+    if [[ -f "$plist" ]]; then
+      plutil -extract CFBundleIdentifier raw "$plist" 2>/dev/null && return 0
+    fi
+  done
+  return 1
+}
+
+sign_target() {
+  local target=$1
+  local explicit_id=${2:-}
+  local effective_id=$explicit_id
+  local target_options=("${sign_options[@]}")
+  if [[ -n "$explicit_id" ]]; then
+    target_options+=(-i "$explicit_id")
+  else
+    effective_id=$(bundle_identifier "$target" || true)
+  fi
+  if [[ "$mode" == self-signed ]]; then
+    [[ -n "$effective_id" ]] || {
+      echo "missing signing identifier for $target" >&2
+      exit 1
+    }
+    target_options+=(--requirements "=designated => identifier \"$effective_id\" and certificate leaf = H\"$leaf_fp\"")
+  fi
+  codesign "${target_options[@]}" "$target"
+}
+
 components=(
   "$sparkle/XPCServices/Downloader.xpc"
   "$sparkle/XPCServices/Installer.xpc"
@@ -55,9 +92,22 @@ components=(
 # data inside the signed bundle; refresh manifest hashes after Mach-O signing.
 runtime="$app_path/Contents/Resources/session-runtime"
 if [[ -d "$runtime" ]]; then
+  askpass="$runtime/askpass"
+  if [[ -e "$askpass" || -L "$askpass" ]]; then
+    [[ ! -L "$askpass" && -f "$askpass" && -x "$askpass" ]] || {
+      echo "session-runtime/askpass must be an executable regular file" >&2
+      exit 1
+    }
+  fi
   while IFS= read -r -d '' component; do
     if file -b "$component" | grep -q 'Mach-O'; then
-      codesign "${sign_options[@]}" "$component"
+      case "$(basename "$component")" in
+        omgd) comp_id="com.jischeng.omg.omgd" ;;
+        omg-mobile-support) comp_id="com.jischeng.omg.mobile-support" ;;
+        libghostty-vt*.dylib) comp_id="com.jischeng.omg.libghostty-vt" ;;
+        *) comp_id="com.jischeng.omg.runtime.$(basename "$component" | tr -c 'A-Za-z0-9._-' '_')" ;;
+      esac
+      sign_target "$component" "$comp_id"
     fi
   done < <(find "$runtime" -type f -print0)
   python3 - "$runtime" <<'PY'
@@ -73,12 +123,16 @@ fi
 for framework in "$app_path/Contents/Frameworks"/*.framework; do
   [[ -e "$framework" ]] || continue
   [[ "$(basename "$framework")" == "Sparkle.framework" ]] && continue
-  codesign "${sign_options[@]}" "$framework"
+  sign_target "$framework"
 done
 
 for component in "${components[@]}"; do
   [[ -e "$component" ]] || continue
-  codesign "${sign_options[@]}" "$component"
+  if [[ "$component" == "$sparkle/Autoupdate" ]]; then
+    sign_target "$component" "com.jischeng.omg.sparkle.autoupdate"
+  else
+    sign_target "$component"
+  fi
 done
 
 # Keep this array non-empty: macOS Bash 3.2 treats empty arrays as unset under -u.

@@ -569,12 +569,14 @@ struct SettingsStrings: Equatable, Sendable {
     var doctorSection: String { t("OMG Doctor", "OMG 健康中心") }
     var doctorCaption: String {
         t(
-            "Inspects macOS Accessibility permissions, persistent session runtime and SSH multiplexers, Agent dotfile backups, and live editor/LSP memory.",
-            "检查 macOS 辅助功能权限、持久会话运行时与 SSH 复用目录、Agent 配置备份，以及编辑器与语言服务实时内存占用。"
+            "Inspects macOS Accessibility permissions, release signer trust for update persistence, persistent session runtime and SSH multiplexers, Agent dotfile backups, and live editor/LSP memory.",
+            "检查 macOS 辅助功能权限、用于跨更新保持权限的发布签名信任、持久会话运行时与 SSH 复用目录、Agent 配置备份，以及编辑器与语言服务实时内存占用。"
         )
     }
     var doctorAccessibilityLabel: String { t("Accessibility & Global Keybinds", "辅助功能与全局快捷键") }
     var doctorGrantAccessibilityButton: String { t("Grant Accessibility Permission", "授予辅助功能权限") }
+    var doctorSignerTrustLabel: String { t("Release Signer Trust (TCC & Gatekeeper)", "发布签名信任（TCC 与 Gatekeeper）") }
+    var doctorInstallSignerTrustButton: String { t("Trust Release Signer for Updates", "信任发布签名以保持权限") }
     var doctorRuntimeSSHLabel: String { t("Session Runtime & SSH", "会话运行时与 SSH") }
     var doctorAgentBackupLabel: String { t("Agent Integrations & Backups", "Agent 集成与配置备份") }
     var doctorResourcesLabel: String { t("Editor, LSP & Surface Memory", "编辑器、语言服务与终端内存") }

@@ -586,14 +586,23 @@ codesign -dv --verbose=4 \
 ```
 
 Static code-signature verification and the executable launch probe are both
-required. `omg_signing.py verify` checks the compiled DR against the exact
-certificate-and-identifier requirement, and verifies the signer of all present
-nested components. TeamIdentifier equality alone is insufficient for self-signed
-apps because unrelated issuers both have `TeamIdentifier=not set`.
+required. `sign_omg_app.sh` signs every nested Sparkle binary/XPC/framework,
+`DockTilePlugin`, and every Mach-O inside `Contents/Resources/session-runtime`
+with explicit code identifiers (`com.jischeng.omg.omgd`,
+`com.jischeng.omg.mobile-support`, `com.jischeng.omg.libghostty-vt`,
+`com.jischeng.omg.sparkle.autoupdate`), explicit per-component designated
+requirements in `self-signed` mode, refreshes `*/manifest.json` SHA-256 digests
+right after runtime Mach-O signing, and rejects non-regular/unsealed
+`session-runtime/askpass`. `omg_signing.py verify` checks the compiled DR
+against each component's exact certificate-and-identifier requirement and seals.
+TeamIdentifier equality alone is insufficient for self-signed apps because
+unrelated issuers both have `TeamIdentifier=not set`.
 
 ```bash
 python3 dist/macos/omg_signing.py verify \
   "$OMG_BUILD_ROOT/universal/Release/OMG.app"
+python3 dist/macos/omg_signing.py trust-status --app \
+  "$OMG_BUILD_ROOT/universal/Release/OMG.app" --json || true
 python3 -m unittest discover -s dist -p 'test_omg_signing.py'
 python3 -m unittest discover -s dist -p 'test_omg_keychain.py'
 # Optional isolated certificate/code-signature/launch smoke, not a TCC test:
@@ -624,6 +633,43 @@ Switching to Developer ID is a separate authorized migration, not a fallback;
 it may require one more authorization. Code signing does not replace Sparkle's
 EdDSA update signature.
 
+### One-time release signer trust (`self-signed` TCC & Gatekeeper persistence)
+
+Because `OMG Release Signing` is a `$0` persistent self-signed leaf certificate
+(`Subject == Issuer`, `CA:FALSE`, `codeSigning` EKU), macOS TCC (`Accessibility`,
+Folders, Local Network) and Sparkle 2's atomic swap cannot match future signed
+updates by designated requirement alone until the host trusts that leaf
+certificate for Code Signing in the **System** keychain (`-d`, Admin domain):
+
+- Users can install trust in one click from **OMG -> Settings -> Plugins -> OMG
+  Doctor -> Trust Release Signer for Updates**, inspect status from `omg +doctor`,
+  or run the helper directly on an installed app:
+
+```bash
+python3 dist/macos/omg_signing.py trust-status --app /Applications/OMG.app
+python3 dist/macos/omg_signing.py install-trust --app /Applications/OMG.app
+```
+
+- Under the hood this runs `security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain`:
+  - `-r trustRoot` is required because `CA:FALSE` self-signed leaf certificates fail `security -r trustAsRoot` with `errSecParam (-50)`.
+  - `-p codeSign` scopes trust strictly to Apple Code Signing so SSL/TLS and Basic X.509 remain rejected.
+  - Admin domain (`-d` + `/Library/Keychains/System.keychain`) is required so `com.apple.tccd.system` (Accessibility) and Gatekeeper recognize swapped releases without repeating prompts. User-domain trust (`install-trust --user`) is opt-in only and warns that Accessibility and Gatekeeper persistence are not covered.
+
+### Local Network privacy & Sparkle 2 swap behavior
+
+- **Local Network attribution (`omgd mobile serve`)**: Launching the mobile
+  gateway GUI controller (`MobileAccessController`) routes `omgd mobile serve`
+  through `<App>.app/Contents/MacOS/omg +internal-runtime-foreground -- ...`,
+  and `omg +mobile` forwards `OMG_HOST_APP_BUNDLE`/`OMG_HOST_APP_BUNDLE_ID` so
+  macOS launches via `launchd` (`AssociatedBundleIdentifiers`) when running inside
+  an OMG `.app` bundle. This attributes port `8791` traffic to `com.jischeng.omg`
+  in macOS Privacy & Security -> Local Network instead of an unattributed helper binary.
+- **Sparkle 2 updates**: Sparkle performs an atomic bundle swap on update, strips
+  `com.apple.quarantine` on the staged replacement when updating cleanly, and keeps
+  the host app's TCC identity continuous when the same leaf certificate is trusted
+  and every nested component preserves its identifier and DR. `SUEnableAutomaticChecks`
+  remains `false`; users check for updates manually.
+
 ### Permission migration and verification scope
 
 The first transition from the old ad-hoc releases can require authorization once.
@@ -636,15 +682,15 @@ Full Desktop/Documents/Downloads and Sparkle upgrade permission experiments are
 for adopting this signing policy. Static signing/launch tests establish code
 identity, not end-to-end TCC behavior; monitor actual upgrades and report this
 limitation honestly. Do not reset/edit user TCC databases or require Full Disk
-Access to conceal identity problems.
+Access to conceal identity problems, and never regenerate an existing signing key
+identity to work around trust prompts.
 
 ## 5. Notarization status
 
 OMG apps and DMGs are not notarized. Notarization submission and ticket stapling
 are not release workflow steps. Release notes must state **persistently
 self-signed; not notarized** and disclose that macOS Gatekeeper may block the first launch. Users
-who trust the downloaded app can use macOS System Settings > Privacy & Security
-to review and allow it. Do not disable Gatekeeper globally.
+who trust the downloaded app can review and allow it once in macOS System Settings > Privacy & Security and optionally trust the release signer via OMG Doctor for future updates. Do not disable Gatekeeper globally.
 
 ## 6. Package DMGs and mobile installers
 
@@ -815,8 +861,9 @@ and artifact names; it is not an OMG publishing script.
 | --- | --- | --- |
 | x86_64 undefined `_ghostty_*` symbols | arm64-only GhosttyKit | rebuild universal XCFramework |
 | dyld refuses Sparkle at launch | inconsistent nested signatures or hardened runtime without an Apple Team ID | re-sign all components with the same persistent identity and correct runtime mode; repeat the launch probe |
-| Folder requests repeat after an update | changed certificate/DR or a newly protected resource | inspect old/new DR compatibility; do not reset TCC or regenerate keys as a workaround |
-| Gatekeeper blocks first launch | app is self-signed and not notarized | disclose this in release notes; trusted downloads can be reviewed in System Settings > Privacy & Security; do not disable Gatekeeper globally |
+| Folder or Accessibility requests repeat after an update | changed certificate/DR, missing Admin CodeSigning trust (`-d -r trustRoot -p codeSign`), or newly protected resource | inspect old/new DR compatibility and `omg +doctor` signer trust status; install Admin CodeSigning trust via OMG Doctor; do not reset TCC or regenerate keys |
+| Mobile Gateway (`omgd`) fails Local Network privacy or attribution | `mobile serve` started without `.app` bundle attribution (`+internal-runtime-foreground` / `launchd`) | launch from `OMG.app` GUI or bundled `omg +mobile` with `OMG_HOST_APP_BUNDLE` |
+| Gatekeeper blocks first launch | app is self-signed and not notarized | disclose this in release notes; trusted downloads can be reviewed in System Settings > Privacy & Security; install release signer trust via OMG Doctor for updates; do not disable Gatekeeper globally |
 | `Ghostty.app` appears in output | stale build or old product settings | clean build; expected product is `OMG.app` |
 | Release sorts below same version | tag used prerelease suffix | use plain `vX.Y.Z` OMG tag |
 | Update check compares against Ghostty | wrong appcast | use only OMG-owned appcast |

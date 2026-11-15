@@ -1,18 +1,33 @@
 import Darwin
 import Foundation
 
-/// Runs a persistent local `omgd` host under the enclosing OMG `.app` bundle's
-/// main executable so macOS TCC attributes `omgd` and its shell children to
-/// OMG (`com.jischeng.omg` / `com.jischeng.omg.debug`), while staying in its
+private nonisolated(unsafe) var foregroundChildPID: pid_t = 0
+
+private func forwardSignalToForegroundChild(_ sig: Int32) {
+    let pid = foregroundChildPID
+    if pid > 0 {
+        _ = kill(pid, sig)
+    }
+}
+
+/// Runs a persistent local `omgd` host (or foreground child such as `mobile serve`)
+/// under the enclosing OMG `.app` bundle's main executable so macOS TCC and
+/// Local Network privacy attribute child processes to OMG (`com.jischeng.omg`
+/// / `com.jischeng.omg.debug`), while `+internal-runtime-host` stays in its
 /// own `launchd` job coalition outside the GUI app's Dock lifecycle.
 enum SessionRuntimeHostLauncher {
     static let actionFlag = "+internal-runtime-host"
+    static let foregroundActionFlag = "+internal-runtime-foreground"
     static let hostBundlePathEnvironmentKey = "OMG_HOST_APP_BUNDLE"
     static let hostBundleIDEnvironmentKey = "OMG_HOST_APP_BUNDLE_ID"
     static let hostLaunchdLabelEnvironmentKey = "OMG_RUNTIME_HOST_LABEL"
 
     struct Invocation: Equatable {
         let readyPath: String
+        let command: [String]
+    }
+
+    struct ForegroundInvocation: Equatable {
         let command: [String]
     }
 
@@ -30,6 +45,19 @@ enum SessionRuntimeHostLauncher {
         return Invocation(readyPath: readyPath, command: command)
     }
 
+    static func parseForeground(arguments: [String]) -> ForegroundInvocation? {
+        guard arguments.count >= 4,
+              arguments[1] == foregroundActionFlag,
+              arguments[2] == "--" else {
+            return nil
+        }
+        let command = Array(arguments.dropFirst(3))
+        guard let program = command.first, !program.isEmpty else {
+            return nil
+        }
+        return ForegroundInvocation(command: command)
+    }
+
     static func applyingHostBundleEnvironment(
         _ environment: [String: String],
         bundle: Bundle = .main
@@ -45,7 +73,7 @@ enum SessionRuntimeHostLauncher {
         return result
     }
 
-    static func spawnDetachedChild(_ invocation: Invocation) throws -> pid_t {
+    private static func spawnChild(command: [String], detached: Bool) throws -> pid_t {
         var attr: posix_spawnattr_t?
         let initCode = posix_spawnattr_init(&attr)
         guard initCode == 0 else {
@@ -53,15 +81,21 @@ enum SessionRuntimeHostLauncher {
         }
         defer { _ = posix_spawnattr_destroy(&attr) }
 
-        let flagsCode = posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID))
-        guard flagsCode == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: flagsCode) ?? .EINVAL)
+        if detached {
+            let flagsCode = posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID))
+            guard flagsCode == 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: flagsCode) ?? .EINVAL)
+            }
         }
 
-        let previousHup = signal(SIGHUP, SIG_IGN)
-        defer { _ = signal(SIGHUP, previousHup) }
+        let previousHup = detached ? signal(SIGHUP, SIG_IGN) : nil
+        defer {
+            if detached {
+                _ = signal(SIGHUP, previousHup ?? SIG_DFL)
+            }
+        }
 
-        var cStrings = invocation.command.map { strdup($0) }
+        let cStrings = command.map { strdup($0) }
         defer {
             for pointer in cStrings {
                 free(pointer)
@@ -79,6 +113,11 @@ enum SessionRuntimeHostLauncher {
         guard spawnCode == 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: spawnCode) ?? .EINVAL)
         }
+        return pid
+    }
+
+    static func spawnDetachedChild(_ invocation: Invocation) throws -> pid_t {
+        let pid = try spawnChild(command: invocation.command, detached: true)
 
         let stagingPath = invocation.readyPath + ".tmp"
         let payload = Data("\(pid)".utf8)
@@ -102,7 +141,50 @@ enum SessionRuntimeHostLauncher {
         return pid
     }
 
+    static func spawnForegroundChild(_ invocation: ForegroundInvocation) throws -> pid_t {
+        try spawnChild(command: invocation.command, detached: false)
+    }
+
     static func runIfRequested(arguments: [String] = CommandLine.arguments) {
+        if let foreground = parseForeground(arguments: arguments) {
+            unsetenv(hostLaunchdLabelEnvironmentKey)
+            unsetenv(hostBundlePathEnvironmentKey)
+            unsetenv(hostBundleIDEnvironmentKey)
+
+            let childPid: pid_t
+            do {
+                childPid = try spawnForegroundChild(foreground)
+            } catch {
+                let message = "OMG foreground runtime wrapper failed: \(error)\n"
+                _ = message.withCString { Darwin.write(STDERR_FILENO, $0, strlen($0)) }
+                _exit(1)
+            }
+
+            foregroundChildPID = childPid
+            var action = sigaction()
+            action.__sigaction_u.__sa_handler = forwardSignalToForegroundChild
+            sigemptyset(&action.sa_mask)
+            action.sa_flags = 0
+            for sig in [SIGTERM, SIGINT, SIGHUP] {
+                _ = sigaction(sig, &action, nil)
+            }
+
+            var status: Int32 = 0
+            while waitpid(childPid, &status, 0) < 0 {
+                if errno != EINTR { break }
+            }
+            foregroundChildPID = 0
+
+            let signalNumber = status & 0x7f
+            if signalNumber == 0 {
+                _exit((status >> 8) & 0xff)
+            }
+            if signalNumber != 0x7f {
+                _exit(128 + signalNumber)
+            }
+            _exit(1)
+        }
+
         guard let invocation = parse(arguments: arguments) else { return }
         let jobLabel = ProcessInfo.processInfo.environment[hostLaunchdLabelEnvironmentKey]
         unsetenv(hostLaunchdLabelEnvironmentKey)

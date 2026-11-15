@@ -49,6 +49,7 @@ final class MobileAccessController: ObservableObject {
     @Published private(set) var connectedDevices = 0
 
     private let executable: URL
+    private let hostExecutable: URL?
     private let support: URL
     private let tokenFile: URL
     private let gatewayRecordFile: URL
@@ -95,10 +96,12 @@ final class MobileAccessController: ObservableObject {
         support: URL = OMGApplicationEnvironment.applicationSupportURL(),
         port: Int = OMGApplicationEnvironment.defaultMobileGatewayPort(),
         addressProvider: @escaping () -> String? = MobileAccessController.lanIPv4Address,
-        tailscaleAddressProvider: @escaping () -> String? = MobileAccessController.tailscaleIPv4Address
+        tailscaleAddressProvider: @escaping () -> String? = MobileAccessController.tailscaleIPv4Address,
+        hostExecutable: URL? = nil
     ) {
         self.executable = executable ?? Bundle.main.resourceURL!
             .appendingPathComponent("session-runtime/omgd")
+        self.hostExecutable = hostExecutable ?? (executable == nil ? Self.defaultHostExecutable() : nil)
         self.support = support
         self.port = port
         self.addressProvider = addressProvider
@@ -136,6 +139,33 @@ final class MobileAccessController: ObservableObject {
         }
         gatewayStateSource?.cancel()
         process?.terminate()
+    }
+
+    static func defaultHostExecutable(bundle: Bundle = .main) -> URL? {
+        guard bundle.bundleURL.pathExtension == "app",
+              let bundleID = bundle.bundleIdentifier,
+              bundleID.hasPrefix("com.jischeng.omg"),
+              let executableURL = bundle.executableURL,
+              FileManager.default.isExecutableFile(atPath: executableURL.path) else {
+            return nil
+        }
+        return executableURL
+    }
+
+    func gatewayLaunchSpecification(listenAddress: String) -> (executableURL: URL, arguments: [String]) {
+        let gatewayArgs = [
+            "mobile", "serve", "--listen", listenAddress,
+            "--app-support", support.path,
+            "--token-file", tokenFile.path,
+        ]
+        if let hostExecutable,
+           FileManager.default.isExecutableFile(atPath: hostExecutable.path) {
+            return (
+                hostExecutable,
+                [SessionRuntimeHostLauncher.foregroundActionFlag, "--", executable.path] + gatewayArgs
+            )
+        }
+        return (executable, gatewayArgs)
     }
 
     func resumeIfEnabled() {
@@ -252,13 +282,10 @@ final class MobileAccessController: ObservableObject {
             }
             let handle = try FileHandle(forWritingTo: logURL)
             try handle.seekToEnd()
+            let spec = gatewayLaunchSpecification(listenAddress: listenAddress)
             let process = Process()
-            process.executableURL = executable
-            process.arguments = [
-                "mobile", "serve", "--listen", listenAddress,
-                "--app-support", support.path,
-                "--token-file", tokenFile.path,
-            ]
+            process.executableURL = spec.executableURL
+            process.arguments = spec.arguments
             process.environment = SessionRuntimeHostLauncher.applyingHostBundleEnvironment(ProcessInfo.processInfo.environment)
             process.standardOutput = handle
             process.standardError = handle

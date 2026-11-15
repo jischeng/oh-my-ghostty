@@ -358,4 +358,47 @@ struct SettingsControlsTests {
         #expect(zh.agentSSHScopeCaption.contains("~/.omg/omgd"))
         #expect(!zh.agentSSHScopeCaption.contains("不在远端安装常驻服务"))
     }
+
+    @Test func mobileAccessRoutesGatewayLaunchThroughHostExecutableWhenProvided() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("omg-mobile-spec-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let omgd = dir.appendingPathComponent("omgd")
+        let host = dir.appendingPathComponent("omg")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: omgd)
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: host)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: omgd.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: host.path)
+
+        let bundled = MobileAccessController(
+            executable: omgd,
+            support: dir,
+            port: 18792,
+            addressProvider: { "192.168.1.10" },
+            tailscaleAddressProvider: { nil },
+            hostExecutable: host
+        )
+        let bundledSpec = bundled.gatewayLaunchSpecification(listenAddress: "192.168.1.10:18792")
+        #expect(bundledSpec.executableURL == host)
+        #expect(bundledSpec.arguments == [
+            SessionRuntimeHostLauncher.foregroundActionFlag,
+            "--",
+            omgd.path,
+            "mobile", "serve", "--listen", "192.168.1.10:18792",
+            "--app-support", dir.path,
+            "--token-file", dir.appendingPathComponent("mobile-pair.token").path,
+        ])
+
+        let unbundled = MobileAccessController(
+            executable: omgd,
+            support: dir,
+            port: 18792,
+            addressProvider: { "192.168.1.10" },
+            tailscaleAddressProvider: { nil }
+        )
+        let directSpec = unbundled.gatewayLaunchSpecification(listenAddress: "192.168.1.10:18792")
+        #expect(directSpec.executableURL == omgd)
+        #expect(directSpec.arguments.first == "mobile")
+    }
 }

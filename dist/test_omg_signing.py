@@ -92,6 +92,9 @@ class SignatureVerificationTests(unittest.TestCase):
             plistlib.dump({"CFBundleIdentifier": signing.RELEASE_ID}, stream)
         self.dr = signing.requirement(PIN)
         self.detail = "CodeDirectory v=20400 flags=0x0(none)\nTeamIdentifier=not set\n"
+        self.target_ids = {}
+        self.dr_overrides = {}
+        self.detail_overrides = {}
         self.commands = []
         self.patch_env = patch.dict(os.environ, ENV, clear=True)
         self.patch_env.start()
@@ -101,21 +104,89 @@ class SignatureVerificationTests(unittest.TestCase):
         self.commands.append(args)
         out, err = b"", b""
         if args[:3] == ("codesign", "-d", "-r-"):
-            err = ("designated => " + self.dr + "\n").encode()
+            target = args[3]
+            if target in self.dr_overrides:
+                dr = self.dr_overrides[target]
+            elif target == str(self.app):
+                dr = self.dr
+            else:
+                dr = signing.requirement(PIN, self.target_ids.get(target, signing.RELEASE_ID))
+            err = ("designated => " + dr + "\n").encode()
         elif args[:2] == ("codesign", "-dv"):
-            err = self.detail.encode()
+            target = args[-1]
+            detail = self.detail_overrides.get(target, self.detail)
+            if "Identifier=" not in detail and target in self.target_ids:
+                detail = f"Identifier={self.target_ids[target]}\n{detail}"
+            err = detail.encode()
         elif args[0] == "csreq":
             Path(args[4]).write_bytes(args[2].encode())
         return subprocess.CompletedProcess(args, 0, out, err)
 
     def test_accepts_pinned_identity_and_verifies_nested_signer(self):
-        nested = signing.components(self.app)[1]
-        nested.mkdir(parents=True)
+        downloader = signing.components(self.app)[1]
+        downloader.mkdir(parents=True)
+        autoupdate = signing.components(self.app)[3]
+        autoupdate.parent.mkdir(parents=True, exist_ok=True)
+        autoupdate.write_bytes(b"macho")
+        runtime = self.app / "Contents/Resources/session-runtime"
+        (runtime / "macos-aarch64").mkdir(parents=True)
+        omgd = runtime / "omgd"
+        mobile = runtime / "omg-mobile-support"
+        libvt = runtime / "libghostty-vt.0.1.0.dylib"
+        arch_omgd = runtime / "macos-aarch64/omgd"
+        for item in (omgd, mobile, libvt, arch_omgd):
+            item.write_bytes(b"macho")
+        askpass = runtime / "askpass"
+        askpass.write_text("#!/bin/sh\n")
+        askpass.chmod(0o755)
+        (self.app / "Contents/_CodeSignature").mkdir(parents=True, exist_ok=True)
+        with (self.app / "Contents/_CodeSignature/CodeResources").open("wb") as stream:
+            plistlib.dump({"files2": {"Resources/session-runtime/askpass": {}}}, stream)
+        self.target_ids = {
+            str(downloader): "org.sparkle-project.DownloaderService",
+            str(autoupdate): "com.jischeng.omg.sparkle.autoupdate",
+            str(omgd): "com.jischeng.omg.omgd",
+            str(mobile): "com.jischeng.omg.mobile-support",
+            str(libvt): "com.jischeng.omg.libghostty-vt",
+            str(arch_omgd): "com.jischeng.omg.omgd",
+        }
         with patch.object(signing, "run", side_effect=self.fake_run):
             self.assertEqual(signing.verify(self.app), self.dr)
         leaf_checks = [c for c in self.commands if "-R" in c]
-        self.assertEqual(len(leaf_checks), 2)
+        self.assertEqual(len(leaf_checks), 7)
         self.assertTrue(all(f'H"{PIN}"' in c[c.index("-R") + 1] for c in leaf_checks))
+
+    def test_rejects_wrong_nested_identifier_or_nested_cdhash(self):
+        omgd = self.app / "Contents/Resources/session-runtime/omgd"
+        omgd.parent.mkdir(parents=True)
+        omgd.write_bytes(b"macho")
+        self.dr_overrides[str(omgd)] = signing.requirement(PIN, "omgd")
+        self.detail_overrides[str(omgd)] = "Identifier=omgd\n" + self.detail
+        with patch.object(signing, "run", side_effect=self.fake_run), self.assertRaisesRegex(ValueError, "identifier"):
+            signing.verify(self.app)
+        self.detail_overrides.clear()
+        self.dr_overrides[str(omgd)] = f'cdhash H"{PIN}"'
+        with patch.object(signing, "run", side_effect=self.fake_run), self.assertRaisesRegex(ValueError, "code-hash-bound"):
+            signing.verify(self.app)
+
+    def test_rejects_symlink_nonexec_or_unsealed_askpass(self):
+        runtime = self.app / "Contents/Resources/session-runtime"
+        runtime.mkdir(parents=True)
+        askpass = runtime / "askpass"
+        askpass.symlink_to("/bin/echo")
+        with patch.object(signing, "run", side_effect=self.fake_run), self.assertRaisesRegex(ValueError, "symlink"):
+            signing.verify(self.app)
+        askpass.unlink()
+        askpass.write_text("#!/bin/sh\n")
+        askpass.chmod(0o644)
+        with patch.object(signing, "run", side_effect=self.fake_run), self.assertRaisesRegex(ValueError, "executable"):
+            signing.verify(self.app)
+        askpass.chmod(0o755)
+        (self.app / "Contents/_CodeSignature").mkdir(parents=True, exist_ok=True)
+        with (self.app / "Contents/_CodeSignature/CodeResources").open("wb") as stream:
+            plistlib.dump({"files2": {}}, stream)
+        with patch.object(signing, "run", side_effect=self.fake_run), self.assertRaisesRegex(ValueError, "CodeResources"):
+            signing.verify(self.app)
 
     def test_rejects_weak_wrong_signer_and_cdhash_requirements(self):
         for dr in ['identifier "com.jischeng.omg"', signing.requirement(OTHER), 'cdhash H"' + PIN + '"']:
@@ -146,9 +217,178 @@ class SignatureVerificationTests(unittest.TestCase):
             self.assertFalse(any(Path(temp).rglob("password")))
 
 
+class TrustStatusAndInstallTests(unittest.TestCase):
+    def setUp(self):
+        self.meta = {
+            "common_name": "OMG Release Signing",
+            "subject": "CN = OMG Release Signing",
+            "issuer": "CN = OMG Release Signing",
+            "sha1": PIN,
+            "self_signed": True,
+            "has_code_signing_eku": True,
+            "is_ca": False,
+        }
+        self.trust = {
+            "self_signed": True,
+            "trusted_in_admin_domain": True,
+            "trusted_in_user_domain": False,
+            "is_code_signing_trusted": True,
+            "is_non_code_signing_blocked": True,
+            "has_unscoped_trust": False,
+        }
+
+    def _inspector(self):
+        class Inspector:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def inspect(self, der_bytes):
+                return dict(self.payload)
+
+        return Inspector(self.trust)
+
+    def test_trust_status_modes(self):
+        with patch.object(signing, "_resolve_cert_der", return_value=b"DER"), patch.object(
+            signing, "_parse_x509_metadata", return_value=self.meta
+        ):
+            healthy = signing.trust_status(app=Path("/Applications/OMG.app"), inspector=self._inspector())
+            self.assertEqual(healthy["mode"], "self_signed_admin_trusted")
+            self.assertTrue(healthy["healthy"])
+
+            self.trust.update({"trusted_in_admin_domain": False, "trusted_in_user_domain": True})
+            user_only = signing.trust_status(cert=Path("cert.pem"), inspector=self._inspector())
+            self.assertEqual(user_only["mode"], "self_signed_user_only_trusted")
+            self.assertFalse(user_only["healthy"])
+
+            self.trust.update({"trusted_in_user_domain": False, "is_code_signing_trusted": False})
+            untrusted = signing.trust_status(cert=Path("cert.pem"), inspector=self._inspector())
+            self.assertEqual(untrusted["mode"], "self_signed_untrusted")
+            self.assertFalse(untrusted["healthy"])
+
+            self.trust.update(
+                {
+                    "trusted_in_admin_domain": True,
+                    "is_code_signing_trusted": True,
+                    "is_non_code_signing_blocked": False,
+                    "has_unscoped_trust": True,
+                }
+            )
+            unscoped = signing.trust_status(cert=Path("cert.pem"), inspector=self._inspector())
+            self.assertFalse(unscoped["healthy"])
+
+            self.trust["self_signed"] = False
+            non_ss = signing.trust_status(cert=Path("cert.pem"), inspector=self._inspector())
+            self.assertEqual(non_ss["mode"], "non_self_signed")
+            self.assertFalse(non_ss["healthy"])
+
+    def test_install_trust_rejects_non_self_signed_or_missing_codesign_eku(self):
+        with patch.object(signing.sys, "platform", "darwin"), patch.object(
+            signing, "_resolve_cert_der", return_value=b"DER"
+        ):
+            bad_ss = {**self.meta, "self_signed": False}
+            with patch.object(signing, "_parse_x509_metadata", return_value=bad_ss), self.assertRaisesRegex(
+                ValueError, "non-self-signed"
+            ):
+                signing.install_trust(cert=Path("cert.pem"), inspector=self._inspector())
+
+            bad_eku = {**self.meta, "has_code_signing_eku": False}
+            with patch.object(signing, "_parse_x509_metadata", return_value=bad_eku), self.assertRaisesRegex(
+                ValueError, "Code Signing"
+            ):
+                signing.install_trust(cert=Path("cert.pem"), inspector=self._inspector())
+
+    def test_install_trust_uses_admin_trust_root_code_sign_and_verifies(self):
+        recorded = {}
+
+        def fake_run(*args, **kwargs):
+            recorded["cmd"] = args
+            recorded["der_mode"] = os.stat(args[-1]).st_mode & 0o777
+            recorded["der_bytes"] = Path(args[-1]).read_bytes()
+            return subprocess.CompletedProcess(args, 0, b"", b"")
+
+        with patch.object(signing.sys, "platform", "darwin"), patch.object(
+            signing, "_resolve_cert_der", return_value=b"DERBYTES"
+        ), patch.object(signing, "_parse_x509_metadata", return_value=self.meta), patch.object(
+            signing.os, "geteuid", return_value=501
+        ), patch.object(
+            signing, "run", side_effect=fake_run
+        ):
+            result = signing.install_trust(cert=Path("cert.pem"), inspector=self._inspector())
+        self.assertTrue(result["healthy"])
+        cmd = recorded["cmd"]
+        self.assertEqual(cmd[0], "sudo")
+        self.assertIn("-d", cmd)
+        self.assertEqual(cmd[cmd.index("-r") + 1], "trustRoot")
+        self.assertEqual(cmd[cmd.index("-p") + 1], "codeSign")
+        self.assertEqual(cmd[cmd.index("-k") + 1], str(signing.ADMIN_SYSTEM_KEYCHAIN))
+        self.assertEqual(recorded["der_mode"], 0o600)
+        self.assertEqual(recorded["der_bytes"], b"DERBYTES")
+
+    def test_install_trust_user_opt_in_and_post_verify_failure(self):
+        recorded = {}
+
+        def fake_run(*args, **kwargs):
+            recorded["cmd"] = args
+            return subprocess.CompletedProcess(args, 0, b"", b"")
+
+        self.trust.update({"trusted_in_admin_domain": False, "trusted_in_user_domain": True})
+        with patch.object(signing.sys, "platform", "darwin"), patch.object(
+            signing, "_resolve_cert_der", return_value=b"DER"
+        ), patch.object(signing, "_parse_x509_metadata", return_value=self.meta), patch.object(
+            signing, "run", side_effect=fake_run
+        ), patch("sys.stderr") as stderr:
+            result = signing.install_trust(cert=Path("cert.pem"), user_only=True, inspector=self._inspector())
+        self.assertEqual(result["mode"], "self_signed_user_only_trusted")
+        self.assertNotIn("-d", recorded["cmd"])
+        self.assertNotIn("sudo", recorded["cmd"])
+        self.assertIn("Accessibility", "".join(str(c) for c in stderr.write.call_args_list))
+
+        self.trust["is_non_code_signing_blocked"] = False
+        with patch.object(signing.sys, "platform", "darwin"), patch.object(
+            signing, "_resolve_cert_der", return_value=b"DER"
+        ), patch.object(signing, "_parse_x509_metadata", return_value=self.meta), patch.object(
+            signing, "run", side_effect=fake_run
+        ), self.assertRaisesRegex(
+            ValueError, "post-install verification failed"
+        ):
+            signing.install_trust(cert=Path("cert.pem"), inspector=self._inspector())
+
+    def test_cli_trust_status_exit_codes_and_json(self):
+        import io
+        import json
+
+        unhealthy = {
+            "certificate_cn": "OMG Release Signing",
+            "certificate_sha1": PIN,
+            "self_signed": True,
+            "is_ca": False,
+            "has_code_signing_eku": True,
+            "trusted_in_admin_domain": False,
+            "trusted_in_user_domain": False,
+            "is_code_signing_trusted": False,
+            "is_non_code_signing_blocked": True,
+            "has_unscoped_trust": False,
+            "mode": "self_signed_untrusted",
+            "healthy": False,
+        }
+        stdout = io.StringIO()
+        with patch.object(sys, "argv", ["omg_signing.py", "trust-status", "--json"]), patch.object(
+            signing, "trust_status", return_value=unhealthy
+        ), patch("sys.stdout", stdout):
+            self.assertEqual(signing.main(), 1)
+        self.assertEqual(json.loads(stdout.getvalue())["mode"], "self_signed_untrusted")
+
+        healthy = {**unhealthy, "trusted_in_admin_domain": True, "is_code_signing_trusted": True, "mode": "self_signed_admin_trusted", "healthy": True}
+        with patch.object(sys, "argv", ["omg_signing.py", "trust-status"]), patch.object(
+            signing, "trust_status", return_value=healthy
+        ), patch("sys.stdout", io.StringIO()):
+            self.assertEqual(signing.main(), 0)
+
+
 @unittest.skipUnless(sys.platform == "darwin" and os.environ.get("OMG_RUN_SIGNING_SMOKE") == "1", "opt-in macOS static signing/launch smoke; no TCC desktop test")
 class NativeSigningSmokeTests(unittest.TestCase):
     def test_same_certificate_survives_code_change_and_rejects_impostor(self):
+        import json
         import secrets
         with tempfile.TemporaryDirectory(prefix="omg-signing-smoke-") as temp:
             temp = Path(temp)
@@ -170,12 +410,36 @@ class NativeSigningSmokeTests(unittest.TestCase):
                     source = temp / f"probe-{index}.c"
                     source.write_text(f'#include <stdio.h>\nint main(void) {{ puts("probe-{index}"); return 0; }}\n')
                     subprocess.run(["/usr/bin/clang", str(source), "-o", str(app / "Contents/MacOS/omg")], check=True, capture_output=True)
+                    dylib_src = temp / f"lib-{index}.c"
+                    dylib_src.write_text(f"int omg_vt_probe_{index}(void) {{ return {index}; }}\n")
+                    runtime = app / "Contents/Resources/session-runtime"
+                    (runtime / "macos-aarch64").mkdir(parents=True)
+                    for exe in (runtime / "omgd", runtime / "omg-mobile-support", runtime / "macos-aarch64/omgd"):
+                        subprocess.run(["/usr/bin/clang", str(source), "-o", str(exe)], check=True, capture_output=True)
+                    libvt = runtime / "libghostty-vt.0.1.0.dylib"
+                    subprocess.run(["/usr/bin/clang", "-dynamiclib", str(dylib_src), "-o", str(libvt)], check=True, capture_output=True)
+                    askpass = runtime / "askpass"
+                    askpass.write_text("#!/bin/sh\nexit 0\n")
+                    askpass.chmod(0o755)
+                    manifest = runtime / "macos-aarch64/manifest.json"
+                    manifest.write_text(json.dumps({"files": [{"name": "omgd", "sha256": "stale"}]}) + "\n")
+                    sparkle_ver = app / "Contents/Frameworks/Sparkle.framework/Versions/B"
+                    (sparkle_ver / "Resources").mkdir(parents=True)
+                    subprocess.run(["/usr/bin/clang", "-dynamiclib", str(dylib_src), "-o", str(sparkle_ver / "Sparkle")], check=True, capture_output=True)
+                    subprocess.run(["/usr/bin/clang", str(source), "-o", str(sparkle_ver / "Autoupdate")], check=True, capture_output=True)
+                    with (sparkle_ver / "Resources/Info.plist").open("wb") as stream:
+                        plistlib.dump({"CFBundleIdentifier": "org.sparkle-project.Sparkle", "CFBundleExecutable": "Sparkle", "CFBundlePackageType": "FMWK", "CFBundleVersion": "2.0", "CFBundleShortVersionString": "2.0"}, stream)
+                    (sparkle_ver.parent / "Current").symlink_to("B")
+                    (sparkle_ver.parents[1] / "Resources").symlink_to("Versions/Current/Resources")
+                    (sparkle_ver.parents[1] / "Sparkle").symlink_to("Versions/Current/Sparkle")
                     with (app / "Contents/Info.plist").open("wb") as stream:
                         plistlib.dump({"CFBundleIdentifier": signing.RELEASE_ID, "CFBundleExecutable": "omg", "CFBundlePackageType": "APPL", "CFBundleVersion": str(index + 1)}, stream)
                     result = subprocess.run(["/bin/bash", str(ROOT / "dist/macos/sign_omg_app.sh"), str(app)], env={**os.environ, **env}, capture_output=True)
                     self.assertEqual(result.returncode, 0, result.stderr.decode())
                     with patch.dict(os.environ, env):
                         drs.append(signing.verify(app))
+                    updated_manifest = json.loads(manifest.read_text())
+                    self.assertNotEqual(updated_manifest["files"][0]["sha256"], "stale")
                     self.assertEqual(subprocess.check_output([str(app / "Contents/MacOS/omg")]).decode().strip(), f"probe-{index}")
                     apps.append(app)
                 self.assertEqual(drs[0], drs[1])

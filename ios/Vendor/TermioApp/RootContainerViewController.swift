@@ -87,6 +87,7 @@ final class RootContainerViewController: UIViewController {
             destination.nav.tabBarItem = item
         }
         controller.setViewControllers(destinations.map(\.nav), animated: false)
+        controller.delegate = self
         controller.tabBar.tintColor = .label
         controller.tabBar.unselectedItemTintColor = .secondaryLabel
         return controller
@@ -268,6 +269,10 @@ final class RootContainerViewController: UIViewController {
     /// cache. One conversation at a time, like Messages.
     func open(_ screen: UIViewController, sessionKey: String? = nil, animated: Bool = true) {
         loadViewIfNeeded()
+        // Terminal overlays slide above `homeTabs.view` without removing `homeTabs`
+        // from the window, so `viewWillDisappear` / `viewWillAppear` never fire on
+        // the home lists. End any open swipe-action row and flush deferred reloads first.
+        endHomeListsSwipeEditing()
         if activeScreen === screen {
             if let sessionKey {
                 for cold in recentTerminals.recordOpen(screen, forKey: sessionKey) {
@@ -358,6 +363,7 @@ final class RootContainerViewController: UIViewController {
         if interactiveBackScreen === screen {
             interactiveBackScreen = nil
         }
+        endHomeListsSwipeEditing()
         store.currentSessionKey = nil
         refreshHomeLists()
 
@@ -438,6 +444,7 @@ final class RootContainerViewController: UIViewController {
     /// The opener beside the page title, and the rail's own dismissals. An edge
     /// gesture on its own is undiscoverable, so the tap is not a convenience.
     private func showWorkspacePicker() {
+        endHomeListsSwipeEditing()
         let picker = WorkspaceRailViewController(store: store, scope: workspaceScope)
         let nav = UINavigationController(rootViewController: picker)
         picker.title = localized("Workspaces")
@@ -502,6 +509,7 @@ final class RootContainerViewController: UIViewController {
     /// every open, including the first frame of a drag, so a roster push while
     /// it was away can never be shown stale.
     private func presentRailContainer() {
+        endHomeListsSwipeEditing()
         workspaceRail.reload()
         railContainer.isHidden = false
         view.bringSubviewToFront(railContainer)
@@ -653,6 +661,7 @@ final class RootContainerViewController: UIViewController {
             (screen as? TerminalViewController)?.suspendForParking()
             // Teardown deferred from goHome to here (only once the drag commits).
             if activeScreen === screen { activeScreen = nil }
+            endHomeListsSwipeEditing()
             store.currentSessionKey = nil
             refreshHomeLists()
             let offscreen = view.bounds.offsetBy(dx: width, dy: 0)
@@ -728,17 +737,21 @@ final class RootContainerViewController: UIViewController {
         return true
     }
 
+    private var homeListControllers: [HomeSessionListController] {
+        (projectsNav.viewControllers + chatsNav.viewControllers + terminalsNav.viewControllers)
+            .compactMap { $0 as? HomeSessionListController }
+    }
+
+    private func endHomeListsSwipeEditing() {
+        for list in homeListControllers {
+            list.endSwipeEditingIfNeeded()
+        }
+    }
+
     /// Repaint the current-session pill on whichever home screens are up.
     private func refreshHomeLists() {
-        for screen in projectsNav.viewControllers {
-            (screen as? ProjectListViewController)?.refresh()
-            (screen as? ProjectDetailViewController)?.refresh()
-        }
-        for screen in chatsNav.viewControllers {
-            (screen as? OMGAgentListViewController)?.refresh()
-        }
-        for screen in terminalsNav.viewControllers {
-            (screen as? TerminalListViewController)?.refresh()
+        for list in homeListControllers {
+            list.refresh()
         }
     }
 
@@ -763,6 +776,15 @@ final class RootContainerViewController: UIViewController {
         screen.view.removeFromSuperview()
         (screen as? TerminalViewController)?.releaseOrphanedSurfaceLayers()
         screen.removeFromParent()
+    }
+}
+
+extension RootContainerViewController: UITabBarControllerDelegate {
+    func tabBarController(
+        _ tabBarController: UITabBarController,
+        didSelect viewController: UIViewController
+    ) {
+        endHomeListsSwipeEditing()
     }
 }
 

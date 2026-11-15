@@ -401,6 +401,18 @@ public enum MobileStreamDisplayLinkPolicy {
 /// (`tableView.isEditing`) is open so background pushes never cancel swipe-to-close,
 /// while allowing explicit user-initiated swipe-close commits through immediately.
 public struct MobileSwipeReloadGate: Sendable {
+    public enum RefreshDisposition: Equatable, Sendable {
+        /// Swipe editing is active; reload is deferred so `UITableView` row counts and
+        /// open swipe actions stay undisturbed. Caller must not mutate snapshotted state.
+        case deferred
+        /// An earlier reload was deferred while swipe editing and can now execute; caller
+        /// must run its full snapshot rebuild (`refilter()` / `reload()`).
+        case reloadFullSnapshot
+        /// No deferred snapshot rebuild is pending; caller may update `renderedCurrentSessionKey`
+        /// and call `tableView.reloadData()`.
+        case reloadSelectionOnly
+    }
+
     public private(set) var hasDeferredReload = false
     public private(set) var isPerformingSwipeAction = false
 
@@ -413,6 +425,17 @@ public struct MobileSwipeReloadGate: Sendable {
         }
         hasDeferredReload = false
         return true
+    }
+
+    public mutating func evaluateSelectionRefresh(isTableEditing: Bool) -> RefreshDisposition {
+        if isTableEditing && !isPerformingSwipeAction {
+            hasDeferredReload = true
+            return .deferred
+        }
+        if hasDeferredReload {
+            return .reloadFullSnapshot
+        }
+        return .reloadSelectionOnly
     }
 
     public mutating func beginSwipeAction() {
@@ -429,5 +452,79 @@ public struct MobileSwipeReloadGate: Sendable {
         }
         hasDeferredReload = false
         return true
+    }
+}
+
+/// Pure row-partitioning and row-count layout for `TerminalListViewController` sections.
+/// Consumes only the controller's snapshotted `renderedCurrentSessionKey` (updated strictly
+/// when `MobileSwipeReloadGate` permits a reload) so `numberOfRowsInSection` and `cellForRowAt`
+/// never desync if `store.currentSessionKey` changes while `tableView.isEditing` defers reload.
+public enum MobileTerminalSectionLayout {
+    public enum RowKind: Equatable, Sendable {
+        case active(Int)
+        case backgroundHeader
+        case detached(Int)
+    }
+
+    public static func isActiveSession(
+        isBackground: Bool,
+        isMobileCreated: Bool,
+        sessionKey: String,
+        renderedCurrentSessionKey: String?
+    ) -> Bool {
+        !isBackground || isMobileCreated || sessionKey == renderedCurrentSessionKey
+    }
+
+    public static func partition<Session>(
+        _ sessions: [Session],
+        renderedCurrentSessionKey: String?,
+        isBackground: (Session) -> Bool,
+        isMobileCreated: (Session) -> Bool,
+        key: (Session) -> String
+    ) -> (active: [Session], detached: [Session]) {
+        var active: [Session] = []
+        var detached: [Session] = []
+        for session in sessions {
+            if isActiveSession(
+                isBackground: isBackground(session),
+                isMobileCreated: isMobileCreated(session),
+                sessionKey: key(session),
+                renderedCurrentSessionKey: renderedCurrentSessionKey
+            ) {
+                active.append(session)
+            } else {
+                detached.append(session)
+            }
+        }
+        return (active, detached)
+    }
+
+    public static func numberOfRows(
+        activeCount: Int,
+        detachedCount: Int,
+        isBackgroundExpanded: Bool
+    ) -> Int {
+        guard detachedCount > 0 else { return activeCount }
+        return activeCount + 1 + (isBackgroundExpanded ? detachedCount : 0)
+    }
+
+    public static func rowKind(
+        at row: Int,
+        activeCount: Int,
+        detachedCount: Int,
+        isBackgroundExpanded: Bool
+    ) -> RowKind? {
+        guard row >= 0 else { return nil }
+        if row < activeCount {
+            return .active(row)
+        }
+        guard detachedCount > 0 else { return nil }
+        if row == activeCount {
+            return .backgroundHeader
+        }
+        guard isBackgroundExpanded else { return nil }
+        let childIndex = row - activeCount - 1
+        guard childIndex >= 0, childIndex < detachedCount else { return nil }
+        return .detached(childIndex)
     }
 }

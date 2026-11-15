@@ -14,12 +14,14 @@ import UIKit
 /// Sectioned by workspace, like the Projects list: there is one loose funnel per
 /// workspace, so with two machines paired a flat list would show both boxes'
 /// shells as one column with nothing saying which is which.
-final class TerminalListViewController: UIViewController {
+final class TerminalListViewController: UIViewController, HomeSessionListController {
     private let store: RosterStore
 
     /// The store's loose terminal containers, grouped by workspace in roster
     /// order — one section each.
     private var groups: [WorkspaceGroup] = []
+    /// Snapshotted `store.currentSessionKey` as of the last executed `tableView.reloadData()`.
+    private var renderedCurrentSessionKey: String?
     /// Workspaces whose detached "Background Sessions" drawer is currently expanded.
     private var expandedBackgroundWorkspaces: Set<String> = []
 
@@ -41,6 +43,11 @@ final class TerminalListViewController: UIViewController {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         flushDeferredReloadIfReady()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        endSwipeEditingIfNeeded()
     }
 
     override func viewDidLayoutSubviews() {
@@ -78,8 +85,29 @@ final class TerminalListViewController: UIViewController {
     }
 
     func refresh() {
-        guard swipeReloadGate.shouldReloadNow(isTableEditing: tableView.isEditing) else { return }
-        tableView.reloadData()
+        guard isViewLoaded else { return }
+        switch swipeReloadGate.evaluateSelectionRefresh(isTableEditing: tableView.isEditing) {
+        case .deferred:
+            return
+        case .reloadFullSnapshot:
+            refilter()
+        case .reloadSelectionOnly:
+            renderedCurrentSessionKey = store.currentSessionKey
+            tableView.reloadData()
+        }
+    }
+
+    func endSwipeEditingIfNeeded() {
+        guard isViewLoaded, !swipeReloadGate.isPerformingSwipeAction else { return }
+        if tableView.isEditing {
+            tableView.setEditing(false, animated: false)
+        }
+        flushDeferredReloadIfReady()
+        if swipeReloadGate.hasDeferredReload {
+            DispatchQueue.main.async { [weak self] in
+                self?.flushDeferredReloadIfReady()
+            }
+        }
     }
 
     // MARK: - Top bar (large title)
@@ -133,6 +161,7 @@ final class TerminalListViewController: UIViewController {
     }
 
     private func composeMenuItems() -> [UIMenuElement] {
+        endSwipeEditingIfNeeded()
         var items: [UIMenuElement] = [
             UIAction(
                 title: newTerminalTitle,
@@ -208,6 +237,7 @@ final class TerminalListViewController: UIViewController {
     private func refilter() {
         guard swipeReloadGate.shouldReloadNow(isTableEditing: tableView.isEditing) else { return }
         groups = store.terminalGroups
+        renderedCurrentSessionKey = store.currentSessionKey
         // Shown whenever paired: New Terminal is project-less, so it no longer
         // needs an existing terminals container to land in (it seeds the first).
         newTerminalButton.isHidden = store.deviceEndpoint == nil
@@ -262,18 +292,13 @@ final class TerminalListViewController: UIViewController {
 
 extension TerminalListViewController: UITableViewDataSource, UITableViewDelegate {
     private func splitSessions(in section: Int) -> (active: [MockSession], detached: [MockSession]) {
-        let all = groups[section].sessions
-        let currentKey = store.currentSessionKey
-        var active: [MockSession] = []
-        var detached: [MockSession] = []
-        for session in all {
-            if !session.isBackground || session.isMobileCreated || session.key == currentKey {
-                active.append(session)
-            } else {
-                detached.append(session)
-            }
-        }
-        return (active, detached)
+        MobileTerminalSectionLayout.partition(
+            groups[section].sessions,
+            renderedCurrentSessionKey: renderedCurrentSessionKey,
+            isBackground: \.isBackground,
+            isMobileCreated: \.isMobileCreated,
+            key: \.key
+        )
     }
 
     private func isBackgroundExpanded(in section: Int) -> Bool {
@@ -294,16 +319,19 @@ extension TerminalListViewController: UITableViewDataSource, UITableViewDelegate
 
     private func session(at indexPath: IndexPath) -> MockSession? {
         let (active, detached) = splitSessions(in: indexPath.section)
-        if indexPath.row < active.count {
-            return active[indexPath.row]
-        }
-        guard !detached.isEmpty else { return nil }
-        if indexPath.row == active.count {
+        switch MobileTerminalSectionLayout.rowKind(
+            at: indexPath.row,
+            activeCount: active.count,
+            detachedCount: detached.count,
+            isBackgroundExpanded: isBackgroundExpanded(in: indexPath.section)
+        ) {
+        case .active(let index):
+            return active[index]
+        case .detached(let childIndex):
+            return detached[childIndex]
+        case .backgroundHeader, nil:
             return nil
         }
-        let childIndex = indexPath.row - active.count - 1
-        guard detached.indices.contains(childIndex) else { return nil }
-        return detached[childIndex]
     }
 
     func numberOfSections(in tableView: UITableView) -> Int {
@@ -312,9 +340,11 @@ extension TerminalListViewController: UITableViewDataSource, UITableViewDelegate
 
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
         let (active, detached) = splitSessions(in: section)
-        guard !detached.isEmpty else { return active.count }
-        let expandedCount = isBackgroundExpanded(in: section) ? detached.count : 0
-        return active.count + 1 + expandedCount
+        return MobileTerminalSectionLayout.numberOfRows(
+            activeCount: active.count,
+            detachedCount: detached.count,
+            isBackgroundExpanded: isBackgroundExpanded(in: section)
+        )
     }
 
     func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
@@ -349,14 +379,19 @@ extension TerminalListViewController: UITableViewDataSource, UITableViewDelegate
         let group = groups[indexPath.section]
         let (active, detached) = splitSessions(in: indexPath.section)
         let expanded = isBackgroundExpanded(in: indexPath.section)
-        let totalRows = active.count + (detached.isEmpty ? 0 : (1 + (expanded ? detached.count : 0)))
+        let currentKey = renderedCurrentSessionKey
+        let totalRows = MobileTerminalSectionLayout.numberOfRows(
+            activeCount: active.count,
+            detachedCount: detached.count,
+            isBackgroundExpanded: expanded
+        )
 
         if indexPath.row < active.count {
             let session = active[indexPath.row]
             cell.contentConfiguration = UIHostingConfiguration {
                 SessionRow(
                     session: session,
-                    isCurrent: session.key == store.currentSessionKey,
+                    isCurrent: session.key == currentKey,
                     showsProject: false,
                     isFirst: indexPath.row == 0,
                     isLast: indexPath.row == totalRows - 1
@@ -389,7 +424,7 @@ extension TerminalListViewController: UITableViewDataSource, UITableViewDelegate
         cell.contentConfiguration = UIHostingConfiguration {
             SessionRow(
                 session: session,
-                isCurrent: session.key == store.currentSessionKey,
+                isCurrent: session.key == currentKey,
                 showsProject: false,
                 isTreeChild: true,
                 isLastTreeChild: isLastChild,

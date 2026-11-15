@@ -59,9 +59,10 @@ struct OMGAgentMark: View {
 /// The Agent tab: project-grouped agent sessions styled with the same theme
 /// backdrop, scrolling large title, rounded `ListCard` rows, and bottom-right
 /// glass `+` FAB as the Projects and Terminals tabs.
-final class OMGAgentListViewController: UIViewController {
+final class OMGAgentListViewController: UIViewController, HomeSessionListController {
     private let store: RosterStore
     private var projects: [MockProject] = []
+    private var renderedCurrentSessionKey: String?
     private var expandedProjects: Set<String> = []
     private let newAgentButton = UIButton(type: .system)
     private let tableView = UITableView(frame: .zero, style: .grouped)
@@ -90,6 +91,11 @@ final class OMGAgentListViewController: UIViewController {
         flushDeferredReloadIfReady()
     }
 
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        endSwipeEditingIfNeeded()
+    }
+
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         tableView.sizeScrollingHeaderToFit()
@@ -112,16 +118,31 @@ final class OMGAgentListViewController: UIViewController {
     }
 
     func refresh() {
+        guard isViewLoaded else { return }
         guard swipeReloadGate.shouldReloadNow(isTableEditing: tableView.isEditing) else { return }
         projects = store.scopedProjects.filter { $0.kind != "terminals" }.map {
             var project = $0
             project.sessions = project.sessions.filter { $0.agent.id != "terminal" }
             return project
         }.filter { !$0.sessions.isEmpty || $0.kind != "chats" }
+        renderedCurrentSessionKey = store.currentSessionKey
         let canStart = store.deviceEndpoint != nil && !targetProjectsForNewSession.isEmpty
         newAgentButton.isHidden = !canStart
         tableView.reloadData()
         updateEmptyState(canStart: canStart)
+    }
+
+    func endSwipeEditingIfNeeded() {
+        guard isViewLoaded, !swipeReloadGate.isPerformingSwipeAction else { return }
+        if tableView.isEditing {
+            tableView.setEditing(false, animated: false)
+        }
+        flushDeferredReloadIfReady()
+        if swipeReloadGate.hasDeferredReload {
+            DispatchQueue.main.async { [weak self] in
+                self?.flushDeferredReloadIfReady()
+            }
+        }
     }
 
     private func flushDeferredReloadIfReady() {
@@ -179,6 +200,7 @@ final class OMGAgentListViewController: UIViewController {
     }
 
     private func composeMenuItems() -> [UIMenuElement] {
+        endSwipeEditingIfNeeded()
         let targets = targetProjectsForNewSession
         guard !targets.isEmpty else { return [] }
         if targets.count == 1 {
@@ -299,10 +321,11 @@ extension OMGAgentListViewController: UITableViewDataSource, UITableViewDelegate
             let sessionIndex = indexPath.row - 1
             let session = project.sessions[sessionIndex]
             let isLast = sessionIndex == project.sessions.count - 1
+            let currentKey = renderedCurrentSessionKey
             cell.contentConfiguration = UIHostingConfiguration {
                 SessionRow(
                     session: session,
-                    isCurrent: store.currentSessionKey == session.key,
+                    isCurrent: currentKey == session.key,
                     showsProject: false,
                     isTreeChild: true,
                     isLastTreeChild: isLast,

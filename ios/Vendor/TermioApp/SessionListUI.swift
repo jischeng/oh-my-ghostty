@@ -12,9 +12,17 @@ extension Color {
     })
 }
 
-// Pieces shared by the two home levels (the Projects root and a pushed
-// project page): the session row, the zero state, and the floating glass
-// chrome they both draw.
+// Pieces shared by the home session lists: the session row, the zero state,
+// swipe-editing lifecycle hooks, and the floating glass chrome they draw.
+
+/// Adopted by every `UITableView`-backed home list controller so `RootContainerViewController`
+/// can repaint selection state and end active swipe-to-close editing before sliding a full-screen
+/// terminal overlay above `homeTabs` (where `viewWillAppear` / `viewWillDisappear` do not fire).
+@MainActor
+protocol HomeSessionListController: AnyObject {
+    func refresh()
+    func endSwipeEditingIfNeeded()
+}
 
 // MARK: - Session row
 

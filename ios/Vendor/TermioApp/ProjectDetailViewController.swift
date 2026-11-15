@@ -7,7 +7,7 @@ import UIKit
 /// tapping a session slides its terminal in over everything, so coming back
 /// lands here. Tracks the live roster by the project's stable key and pops
 /// itself if the Mac closes the project.
-final class ProjectDetailViewController: UIViewController {
+final class ProjectDetailViewController: UIViewController, HomeSessionListController {
     private let store: RosterStore
     private let projectKey: String
     /// The latest roster snapshot of this project, replaced on every push
@@ -15,6 +15,7 @@ final class ProjectDetailViewController: UIViewController {
     /// keeps its last roster, so this page shows the stale snapshot too —
     /// same as the root list.
     private var project: MockProject
+    private var renderedCurrentSessionKey: String?
 
     private let tableView = UITableView(frame: .zero, style: .plain)
     private let addButton = UIButton(type: .system)
@@ -36,6 +37,11 @@ final class ProjectDetailViewController: UIViewController {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         flushDeferredReloadIfReady()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        endSwipeEditingIfNeeded()
     }
 
     override func viewDidLoad() {
@@ -64,8 +70,29 @@ final class ProjectDetailViewController: UIViewController {
     }
 
     func refresh() {
-        guard swipeReloadGate.shouldReloadNow(isTableEditing: tableView.isEditing) else { return }
-        tableView.reloadData()
+        guard isViewLoaded else { return }
+        switch swipeReloadGate.evaluateSelectionRefresh(isTableEditing: tableView.isEditing) {
+        case .deferred:
+            return
+        case .reloadFullSnapshot:
+            reload()
+        case .reloadSelectionOnly:
+            renderedCurrentSessionKey = store.currentSessionKey
+            tableView.reloadData()
+        }
+    }
+
+    func endSwipeEditingIfNeeded() {
+        guard isViewLoaded, !swipeReloadGate.isPerformingSwipeAction else { return }
+        if tableView.isEditing {
+            tableView.setEditing(false, animated: false)
+        }
+        flushDeferredReloadIfReady()
+        if swipeReloadGate.hasDeferredReload {
+            DispatchQueue.main.async { [weak self] in
+                self?.flushDeferredReloadIfReady()
+            }
+        }
     }
 
     /// Re-read this project from the store. Missing means it's really gone —
@@ -79,6 +106,7 @@ final class ProjectDetailViewController: UIViewController {
             return
         }
         project = live
+        renderedCurrentSessionKey = store.currentSessionKey
         addButton.isHidden = store.deviceEndpoint == nil || project.rosterID == nil
         tableView.reloadData()
         updateEmptyState()
@@ -182,6 +210,7 @@ final class ProjectDetailViewController: UIViewController {
         addButton.menu = UIMenu(children: [
             UIDeferredMenuElement.uncached { [weak self] completion in
                 guard let self else { return completion([]) }
+                self.endSwipeEditingIfNeeded()
                 completion(store.newSessionActions(in: project))
             },
         ])
@@ -261,12 +290,14 @@ extension ProjectDetailViewController: UITableViewDataSource, UITableViewDelegat
         cell.selectionStyle = .none
         cell.backgroundColor = .clear
         let session = project.sessions[indexPath.row]
+        let sessionCount = project.sessions.count
+        let currentKey = renderedCurrentSessionKey
         cell.contentConfiguration = UIHostingConfiguration {
             SessionRow(
                 session: session,
-                isCurrent: session.key == store.currentSessionKey,
+                isCurrent: session.key == currentKey,
                 isFirst: indexPath.row == 0,
-                isLast: indexPath.row == project.sessions.count - 1
+                isLast: indexPath.row == sessionCount - 1
             )
         }
         .margins(.horizontal, ListCard.outerMargin)

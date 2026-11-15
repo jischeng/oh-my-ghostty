@@ -11,12 +11,13 @@ import UIKit
 /// Sectioned by workspace, like the Projects list and the Terminals tab: there
 /// is one loose funnel per workspace, so with two machines paired a flat list
 /// would show both boxes' chats as one column with nothing saying which is which.
-final class ChatListViewController: UIViewController {
+final class ChatListViewController: UIViewController, HomeSessionListController {
     private let store: RosterStore
 
     /// The store's loose chat containers, grouped by workspace in roster order —
     /// one section each.
     private var groups: [WorkspaceGroup] = []
+    private var renderedCurrentSessionKey: String?
 
     private let newChatButton = UIButton(type: .system)
     private let tableView = UITableView(frame: .zero, style: .grouped)
@@ -35,6 +36,11 @@ final class ChatListViewController: UIViewController {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         flushDeferredReloadIfReady()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        endSwipeEditingIfNeeded()
     }
 
     override func viewDidLayoutSubviews() {
@@ -68,8 +74,29 @@ final class ChatListViewController: UIViewController {
     }
 
     func refresh() {
-        guard swipeReloadGate.shouldReloadNow(isTableEditing: tableView.isEditing) else { return }
-        tableView.reloadData()
+        guard isViewLoaded else { return }
+        switch swipeReloadGate.evaluateSelectionRefresh(isTableEditing: tableView.isEditing) {
+        case .deferred:
+            return
+        case .reloadFullSnapshot:
+            refilter()
+        case .reloadSelectionOnly:
+            renderedCurrentSessionKey = store.currentSessionKey
+            tableView.reloadData()
+        }
+    }
+
+    func endSwipeEditingIfNeeded() {
+        guard isViewLoaded, !swipeReloadGate.isPerformingSwipeAction else { return }
+        if tableView.isEditing {
+            tableView.setEditing(false, animated: false)
+        }
+        flushDeferredReloadIfReady()
+        if swipeReloadGate.hasDeferredReload {
+            DispatchQueue.main.async { [weak self] in
+                self?.flushDeferredReloadIfReady()
+            }
+        }
     }
 
     // MARK: - Top bar (large title)
@@ -122,6 +149,7 @@ final class ChatListViewController: UIViewController {
     }
 
     private func composeMenuItems() -> [UIMenuElement] {
+        endSwipeEditingIfNeeded()
         guard let chatsProject = store.chatsProject else { return [] }
         var items: [UIMenuElement] = [
             UIMenu(
@@ -176,6 +204,7 @@ final class ChatListViewController: UIViewController {
     private func refilter() {
         guard swipeReloadGate.shouldReloadNow(isTableEditing: tableView.isEditing) else { return }
         groups = store.chatGroups
+        renderedCurrentSessionKey = store.currentSessionKey
         newChatButton.isHidden = store.chatsProject?.rosterID == nil
         tableView.reloadData()
         updateEmptyState()
@@ -262,10 +291,11 @@ extension ChatListViewController: UITableViewDataSource, UITableViewDelegate {
         cell.backgroundColor = .clear
         let sessions = groups[indexPath.section].sessions
         let session = sessions[indexPath.row]
+        let currentKey = renderedCurrentSessionKey
         cell.contentConfiguration = UIHostingConfiguration {
             SessionRow(
                 session: session,
-                isCurrent: session.key == store.currentSessionKey,
+                isCurrent: session.key == currentKey,
                 showsProject: false,
                 isFirst: indexPath.row == 0,
                 isLast: indexPath.row == sessions.count - 1

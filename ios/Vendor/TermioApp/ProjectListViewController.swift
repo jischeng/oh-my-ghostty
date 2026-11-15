@@ -16,7 +16,7 @@ import UIKit
 ///
 /// Tapping a project pushes its page (sessions + new-session). Lives at the root
 /// of the home navigation stack inside RootContainerViewController.
-final class ProjectListViewController: UIViewController {
+final class ProjectListViewController: UIViewController, HomeSessionListController {
     private let store: RosterStore
     /// The workspace on screen. The strip above the list ignores it — see
     /// `refilter`.
@@ -37,6 +37,8 @@ final class ProjectListViewController: UIViewController {
     /// The workspace's projects, in roster order. Chats- and Terminals-kind
     /// containers are excluded: they have their own tabs.
     private var projects: [MockProject] = []
+    /// Snapshotted `store.currentSessionKey` as of the last executed `tableView.reloadData()`.
+    private var renderedCurrentSessionKey: String?
     /// Projects whose session drawers are currently unfolded inline.
     private var expandedProjects: Set<String> = []
 
@@ -83,6 +85,11 @@ final class ProjectListViewController: UIViewController {
         flushDeferredReloadIfReady()
     }
 
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        endSwipeEditingIfNeeded()
+    }
+
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         tableView.sizeScrollingHeaderToFit()
@@ -100,6 +107,7 @@ final class ProjectListViewController: UIViewController {
         configureFab()
         navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .add, primaryAction: UIAction { [weak self] _ in
             guard let self else { return }
+            self.endSwipeEditingIfNeeded()
             OMGProjectPicker.present(from: self, store: store)
         })
         refilter()
@@ -131,8 +139,29 @@ final class ProjectListViewController: UIViewController {
     }
 
     func refresh() {
-        guard swipeReloadGate.shouldReloadNow(isTableEditing: tableView.isEditing) else { return }
-        tableView.reloadData()
+        guard isViewLoaded else { return }
+        switch swipeReloadGate.evaluateSelectionRefresh(isTableEditing: tableView.isEditing) {
+        case .deferred:
+            return
+        case .reloadFullSnapshot:
+            refilter()
+        case .reloadSelectionOnly:
+            renderedCurrentSessionKey = store.currentSessionKey
+            tableView.reloadData()
+        }
+    }
+
+    func endSwipeEditingIfNeeded() {
+        guard isViewLoaded, !swipeReloadGate.isPerformingSwipeAction else { return }
+        if tableView.isEditing {
+            tableView.setEditing(false, animated: false)
+        }
+        flushDeferredReloadIfReady()
+        if swipeReloadGate.hasDeferredReload {
+            DispatchQueue.main.async { [weak self] in
+                self?.flushDeferredReloadIfReady()
+            }
+        }
     }
 
     // MARK: - Top bar (large title + sort)
@@ -222,6 +251,7 @@ final class ProjectListViewController: UIViewController {
         add.accessibilityIdentifier = "projects.add"
         add.addAction(UIAction { [weak self] _ in
             guard let self else { return }
+            self.endSwipeEditingIfNeeded()
             OMGProjectPicker.present(from: self, store: store)
         }, for: .touchUpInside)
         let bar = UIStackView(arrangedSubviews: [titleStack, spacer, add, filterButton])
@@ -238,7 +268,8 @@ final class ProjectListViewController: UIViewController {
 
     /// The same two orders as the Mac's sort menu, checkmarked like it too.
     private func sortMenuItems() -> [UIMenuElement] {
-        [
+        endSwipeEditingIfNeeded()
+        return [
             UIAction(title: localized("Recent Activity"), state: sortByName ? .off : .on) { [weak self] _ in
                 self?.setSortByName(false)
             },
@@ -324,6 +355,7 @@ final class ProjectListViewController: UIViewController {
             projects.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         }
         sections = (attention.isEmpty ? [] : [.needsYou]) + projects.map(Section.project)
+        renderedCurrentSessionKey = store.currentSessionKey
         newSessionButton.isHidden = store.deviceEndpoint == nil || projects.filter({ $0.rosterID != nil }).isEmpty
         updateTitle()
         tableView.reloadData()
@@ -362,6 +394,7 @@ final class ProjectListViewController: UIViewController {
     }
 
     private func composeMenuItems() -> [UIMenuElement] {
+        endSwipeEditingIfNeeded()
         let targets = projects.filter { $0.rosterID != nil }
         guard !targets.isEmpty else { return [] }
         if targets.count == 1 {
@@ -585,6 +618,7 @@ extension ProjectListViewController: UITableViewDataSource, UITableViewDelegate 
     }
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        let currentKey = renderedCurrentSessionKey
         switch sections[indexPath.section] {
         case .needsYou:
             let cell = tableView.dequeueReusableCell(withIdentifier: "sessionRow", for: indexPath)
@@ -594,13 +628,14 @@ extension ProjectListViewController: UITableViewDataSource, UITableViewDelegate 
             cell.transform = .identity
             cell.layer.zPosition = 0
             let session = attention[indexPath.row]
+            let attentionCount = attention.count
             cell.contentConfiguration = UIHostingConfiguration {
                 SessionRow(
                     session: session,
-                    isCurrent: session.key == store.currentSessionKey,
+                    isCurrent: session.key == currentKey,
                     showsProject: true,
                     isFirst: indexPath.row == 0,
-                    isLast: indexPath.row == attention.count - 1
+                    isLast: indexPath.row == attentionCount - 1
                 )
             }
             .margins(.horizontal, ListCard.outerMargin)
@@ -630,7 +665,7 @@ extension ProjectListViewController: UITableViewDataSource, UITableViewDelegate 
                 cell.contentConfiguration = UIHostingConfiguration {
                     SessionRow(
                         session: session,
-                        isCurrent: session.key == store.currentSessionKey,
+                        isCurrent: session.key == currentKey,
                         showsProject: false,
                         isTreeChild: true,
                         isLastTreeChild: isLast,

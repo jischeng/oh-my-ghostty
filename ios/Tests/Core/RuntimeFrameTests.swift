@@ -570,4 +570,137 @@ final class RuntimeFrameTests: XCTestCase {
         XCTAssertFalse(gate.isPerformingSwipeAction)
         XCTAssertFalse(gate.hasDeferredReload)
     }
+
+    func testSwipeReloadGateSelectionRefreshPreservesDeferredFullSnapshotAndRecoversOnOverlayOpen() {
+        var gate = MobileSwipeReloadGate()
+
+        // Idle selection refresh updates only `renderedCurrentSessionKey`.
+        XCTAssertEqual(gate.evaluateSelectionRefresh(isTableEditing: false), .reloadSelectionOnly)
+        XCTAssertFalse(gate.hasDeferredReload)
+
+        // Roster push arrives while a row is swiped open (`isTableEditing == true`): deferred.
+        XCTAssertFalse(gate.shouldReloadNow(isTableEditing: true))
+        XCTAssertTrue(gate.hasDeferredReload)
+
+        // Selection change also arrives while still swipe-editing: stays `.deferred`.
+        XCTAssertEqual(gate.evaluateSelectionRefresh(isTableEditing: true), .deferred)
+        XCTAssertTrue(gate.hasDeferredReload)
+
+        // If `refresh()` runs right after `setEditing(false, animated: false)` before
+        // `flushDeferredReloadIfReady()`, `evaluateSelectionRefresh` MUST demand `.reloadFullSnapshot`
+        // rather than `.reloadSelectionOnly` so deferred roster rows are never dropped!
+        XCTAssertEqual(gate.evaluateSelectionRefresh(isTableEditing: false), .reloadFullSnapshot)
+        XCTAssertTrue(gate.shouldReloadNow(isTableEditing: false))
+        XCTAssertFalse(gate.hasDeferredReload)
+
+        // Terminal overlay open (`RootContainerViewController.open(_:)`) ends swipe-editing
+        // (`isTableEditing = false`) and flushes any deferred reload, so subsequent roster pushes
+        // during the terminal session and after `goHome()` apply immediately.
+        XCTAssertEqual(gate.evaluateSelectionRefresh(isTableEditing: true), .deferred)
+        XCTAssertTrue(gate.consumeDeferredReloadIfReady(isTableEditing: false))
+        XCTAssertTrue(gate.shouldReloadNow(isTableEditing: false))
+        XCTAssertEqual(gate.evaluateSelectionRefresh(isTableEditing: false), .reloadSelectionOnly)
+    }
+
+    func testTerminalSectionLayoutSnapshotsCurrentSessionKeyAcrossDeferredSwipeReload() {
+        struct StubSession: Equatable {
+            let key: String
+            let isBackground: Bool
+            let isMobileCreated: Bool
+        }
+
+        // Scenario A: 1 detached background session with drawer expanded (`0 + 1 + 1 = 2` rows).
+        // If `liveCurrentSessionKey` changes to `"bg-1"` while `tableView.isEditing == true`,
+        // reading live `currentSessionKey` would flip row count from 2 -> 1 without `reloadData()`.
+        let singleDetached = [StubSession(key: "bg-1", isBackground: true, isMobileCreated: false)]
+        var gate = MobileSwipeReloadGate()
+        var renderedSessions = singleDetached
+        var renderedCurrentKey: String? = nil
+        var liveSessions = singleDetached
+        var liveCurrentKey: String? = nil
+
+        func currentRowCount(expanded: Bool) -> Int {
+            let (active, detached) = MobileTerminalSectionLayout.partition(
+                renderedSessions,
+                renderedCurrentSessionKey: renderedCurrentKey,
+                isBackground: \.isBackground,
+                isMobileCreated: \.isMobileCreated,
+                key: \.key
+            )
+            return MobileTerminalSectionLayout.numberOfRows(
+                activeCount: active.count,
+                detachedCount: detached.count,
+                isBackgroundExpanded: expanded
+            )
+        }
+
+        func refilter(isTableEditing: Bool) {
+            guard gate.shouldReloadNow(isTableEditing: isTableEditing) else { return }
+            renderedSessions = liveSessions
+            renderedCurrentKey = liveCurrentKey
+        }
+
+        func refresh(isTableEditing: Bool) {
+            switch gate.evaluateSelectionRefresh(isTableEditing: isTableEditing) {
+            case .deferred:
+                return
+            case .reloadFullSnapshot:
+                refilter(isTableEditing: isTableEditing)
+            case .reloadSelectionOnly:
+                renderedCurrentKey = liveCurrentKey
+            }
+        }
+
+        XCTAssertEqual(currentRowCount(expanded: true), 2)
+        XCTAssertEqual(
+            MobileTerminalSectionLayout.rowKind(at: 0, activeCount: 0, detachedCount: 1, isBackgroundExpanded: true),
+            .backgroundHeader
+        )
+        XCTAssertEqual(
+            MobileTerminalSectionLayout.rowKind(at: 1, activeCount: 0, detachedCount: 1, isBackgroundExpanded: true),
+            .detached(0)
+        )
+
+        // Mutate live `currentSessionKey` while swipe-editing (`isTableEditing == true`):
+        // row count MUST remain 2 until editing ends and flushes!
+        liveCurrentKey = "bg-1"
+        refresh(isTableEditing: true)
+        XCTAssertTrue(gate.hasDeferredReload)
+        XCTAssertNil(renderedCurrentKey)
+        XCTAssertEqual(currentRowCount(expanded: true), 2)
+
+        // Ending swipe-editing flushes `refilter()` and atomically updates row count to 1 (`active[0]`).
+        XCTAssertTrue(gate.consumeDeferredReloadIfReady(isTableEditing: false))
+        refilter(isTableEditing: false)
+        XCTAssertEqual(renderedCurrentKey, "bg-1")
+        XCTAssertEqual(currentRowCount(expanded: true), 1)
+        XCTAssertEqual(
+            MobileTerminalSectionLayout.rowKind(at: 0, activeCount: 1, detachedCount: 0, isBackgroundExpanded: true),
+            .active(0)
+        )
+
+        // Scenario B: 2 detached background sessions with drawer collapsed (`0 + 1 + 0 = 1` row)
+        // plus 1 mobile-created background session (`active`: `1 + 1 + 0 = 2` rows).
+        liveSessions = [
+            StubSession(key: "mobile-bg", isBackground: true, isMobileCreated: true),
+            StubSession(key: "bg-1", isBackground: true, isMobileCreated: false),
+            StubSession(key: "bg-2", isBackground: true, isMobileCreated: false),
+        ]
+        liveCurrentKey = nil
+        refilter(isTableEditing: false)
+        XCTAssertEqual(currentRowCount(expanded: false), 2)
+        XCTAssertNil(
+            MobileTerminalSectionLayout.rowKind(at: 2, activeCount: 1, detachedCount: 2, isBackgroundExpanded: false)
+        )
+
+        // Selecting `"bg-2"` while swipe-editing would change collapsed rows from 2 -> 3 if un-snapshotted;
+        // gated snapshot keeps row count at 2 until swipe-editing ends.
+        liveCurrentKey = "bg-2"
+        refresh(isTableEditing: true)
+        XCTAssertEqual(currentRowCount(expanded: false), 2)
+
+        XCTAssertTrue(gate.consumeDeferredReloadIfReady(isTableEditing: false))
+        refilter(isTableEditing: false)
+        XCTAssertEqual(currentRowCount(expanded: false), 3)
+    }
 }

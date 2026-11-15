@@ -32,6 +32,8 @@ fn background_signal_dispositions_do_not_disable_ctrl_c() {
         });
     }
     let mut child = command.spawn().unwrap();
+    let session_pid = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let session_pid_ref = session_pid.clone();
     let result = std::panic::catch_unwind(|| {
         let start = Instant::now();
         let mut socket = loop {
@@ -46,7 +48,13 @@ fn background_signal_dispositions_do_not_disable_ctrl_c() {
         socket
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
-        assert_eq!(Frame::read(&mut socket).unwrap().kind, INFO);
+        let info = Frame::read(&mut socket).unwrap();
+        assert_eq!(info.kind, INFO);
+        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&info.data) {
+            if let Some(pid) = val["pid"].as_u64() {
+                session_pid_ref.store(pid as u32, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
         let snapshot = Frame::read(&mut socket).unwrap();
         assert_eq!(snapshot.kind, SNAPSHOT);
         Frame::new(ACK, snapshot.seq, &[])
@@ -65,8 +73,27 @@ fn background_signal_dispositions_do_not_disable_ctrl_c() {
             }
         }
     });
+    if matches!(child.try_wait(), Ok(None)) {
+        unsafe {
+            libc::kill(child.id() as i32, libc::SIGTERM);
+        }
+        let deadline = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < deadline {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(15));
+        }
+    }
     let _ = child.kill();
     let _ = child.wait();
+    let spid = session_pid.load(std::sync::atomic::Ordering::SeqCst);
+    if spid > 1 {
+        unsafe {
+            libc::kill(-(spid as i32), libc::SIGKILL);
+            libc::kill(spid as i32, libc::SIGKILL);
+        }
+    }
     let _ = fs::remove_dir_all(dir);
     if let Err(e) = result {
         std::panic::resume_unwind(e);

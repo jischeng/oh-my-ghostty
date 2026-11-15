@@ -261,6 +261,16 @@ class DurableCloseTests(unittest.TestCase):
                     id=s_ttl_id, policy=ttl_policy, create=False, cwd=None, resurrect_launch=resurrect_launch
                 ))
             finally:
+                for sid_file in (host_dir / 'sessions').glob('*.json'):
+                    try:
+                        sid_file.with_suffix('.closed').write_text('')
+                    except OSError:
+                        pass
+                from test_local_runtime import wait_holders_stopped
+                try:
+                    wait_holders_stopped(host_dir)
+                except AssertionError:
+                    pass
                 daemon.terminate()
                 daemon.wait(timeout=5)
                 for pid in pids:

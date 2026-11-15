@@ -109,11 +109,32 @@ struct HolderStatus {
     session_pid: Option<u32>,
 }
 
-struct ControlSocketGuard(PathBuf);
+struct ControlSocketGuard {
+    path: PathBuf,
+    identity: Option<(u64, u64)>,
+}
+
+impl ControlSocketGuard {
+    fn new(path: PathBuf) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        let identity = fs::symlink_metadata(&path)
+            .ok()
+            .map(|meta| (meta.dev(), meta.ino()));
+        Self { path, identity }
+    }
+}
 
 impl Drop for ControlSocketGuard {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+        use std::os::unix::fs::MetadataExt;
+        let should_remove = match (self.identity, fs::symlink_metadata(&self.path)) {
+            (Some(expected), Ok(meta)) => (meta.dev(), meta.ino()) == expected,
+            (None, Ok(_)) => true,
+            (_, Err(_)) => false,
+        };
+        if should_remove {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -257,7 +278,7 @@ pub fn run_from_stdin() -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&control, fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;
-    let _control_guard = ControlSocketGuard(control);
+    let _control_guard = ControlSocketGuard::new(control);
     let confirmed = Record::load(&request.record_path)?;
     if confirmed.id != request.record.id
         || confirmed.generation != request.record.generation
@@ -323,9 +344,12 @@ pub fn run_from_stdin() -> io::Result<()> {
                 .map_err(|_| io::Error::other("local session holder actor panicked"))?;
             if result.is_err() {
                 if let Ok(mut record) = Record::load(&record_path) {
-                    record.pid = None;
-                    record.ended = Some(crate::lifecycle::EndReason::Lost);
-                    let _ = record.save(&record_path);
+                    if record.id == id && record.generation == generation && record.ended.is_none()
+                    {
+                        record.pid = None;
+                        record.ended = Some(crate::lifecycle::EndReason::Lost);
+                        let _ = record.save(&record_path);
+                    }
                 }
             }
             return result;

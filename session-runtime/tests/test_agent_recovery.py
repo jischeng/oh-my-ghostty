@@ -415,9 +415,23 @@ class AgentRecoveryTests(unittest.TestCase):
                         elif data[:1] == b'W':
                             break
                 s6.sendall(encode(b'D', 6, encode(b'K')))
+                while True:
+                    kind, stream, data = frame(s6)
+                    if kind == b'D' and stream == 6 and data[:1] == b'X':
+                        break
             finally:
                 for client in clients:
                     client.close()
+                for sid_file in (root / 'sessions').glob('*.json'):
+                    try:
+                        sid_file.with_suffix('.closed').write_text('')
+                    except OSError:
+                        pass
+                from test_local_runtime import wait_holders_stopped
+                try:
+                    wait_holders_stopped(root)
+                except AssertionError:
+                    pass
                 for pid in pids:
                     try:
                         os.killpg(pid, signal.SIGKILL)

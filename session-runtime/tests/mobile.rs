@@ -10,45 +10,306 @@ use std::{
 };
 use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest, http::HeaderValue, Message};
 
+use sha2::{Digest, Sha256};
+
+fn pid_is_gone(pid: u32) -> bool {
+    if pid <= 1 {
+        return true;
+    }
+    let rc = unsafe { libc::kill(pid as i32, 0) };
+    rc != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+fn wait_pid_gone(pid: u32, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if pid_is_gone(pid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    pid_is_gone(pid)
+}
+
+fn ctl_peer_pid(ctl_path: &std::path::Path) -> Option<u32> {
+    use std::os::fd::AsRawFd;
+    let probe = UnixStream::connect(ctl_path).ok()?;
+    #[cfg(target_os = "macos")]
+    {
+        let mut peer_pid: libc::pid_t = 0;
+        let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                probe.as_raw_fd(),
+                0,
+                libc::LOCAL_PEERPID,
+                (&mut peer_pid as *mut libc::pid_t).cast(),
+                &mut len,
+            )
+        };
+        if rc == 0 && peer_pid > 1 {
+            return Some(peer_pid as u32);
+        }
+        None
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                probe.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&mut cred as *mut libc::ucred).cast(),
+                &mut len,
+            )
+        };
+        if rc == 0 && cred.pid > 1 {
+            return Some(cred.pid as u32);
+        }
+        None
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = probe;
+        None
+    }
+}
+
+fn session_socket_for_id(state_dir: &std::path::Path, id: &str) -> std::path::PathBuf {
+    let hash: String = Sha256::digest(id.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    state_dir.join(format!("{}.sock", &hash[..16]))
+}
+
 struct Fixture {
     children: Vec<Child>,
     dir: std::path::PathBuf,
+    cleanup_dirs: Vec<std::path::PathBuf>,
+    mobile_state_dirs: Vec<std::path::PathBuf>,
     owned: Vec<(String, String)>,
 }
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let host = self.dir.join("host.sock");
-        let mut confirmed = true;
-        for (id, generation) in &self.owned {
-            let path = self.dir.join("sessions").join(format!("{id}.json"));
-            if let Ok(record) = omg_session_runtime::record::Record::load(&path) {
-                if record.generation == *generation && record.ended.is_none() {
-                    if let Ok(mut socket) = UnixStream::connect(&host) {
-                        let _ = Frame::new(b'K', 9, id.as_bytes()).send(&mut socket);
+
+impl Fixture {
+    fn new(dir: std::path::PathBuf) -> Self {
+        Self {
+            children: vec![],
+            dir,
+            cleanup_dirs: vec![],
+            mobile_state_dirs: vec![],
+            owned: vec![],
+        }
+    }
+
+    fn stop_mobile_gateways(&self) {
+        for state_dir in &self.mobile_state_dirs {
+            let record_path = state_dir.join("mobile-gateway.json");
+            let gateway_pid = fs::read(&record_path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|val| val["pid"].as_u64())
+                .map(|pid| pid as u32);
+            let _ = Command::new(env!("CARGO_BIN_EXE_omgd"))
+                .args(["mobile", "stop", "--state-dir"])
+                .arg(state_dir)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            if let Some(pid) = gateway_pid.filter(|&p| p > 1) {
+                if !wait_pid_gone(pid, Duration::from_millis(500)) {
+                    unsafe {
+                        libc::kill(pid as i32, libc::SIGTERM);
+                    }
+                    if !wait_pid_gone(pid, Duration::from_secs(1)) {
+                        unsafe {
+                            libc::kill(pid as i32, libc::SIGKILL);
+                        }
+                        let _ = wait_pid_gone(pid, Duration::from_secs(1));
                     }
                 }
             }
-            let deadline = std::time::Instant::now() + Duration::from_secs(7);
-            loop {
-                let ended = omg_session_runtime::record::Record::load(&path).is_ok_and(|r| {
-                    r.generation == *generation && r.ended.is_some() && r.pid.is_none()
-                });
-                if ended {
-                    break;
+        }
+    }
+
+    fn drain_state_dir_sessions(state_dir: &std::path::Path) -> bool {
+        let sessions_dir = state_dir.join("sessions");
+        let host_sock = state_dir.join("host.sock");
+        let mut holder_pids = std::collections::BTreeSet::new();
+        let mut session_pids = std::collections::BTreeSet::new();
+        let mut session_ids = std::collections::BTreeSet::new();
+
+        if let Ok(entries) = fs::read_dir(state_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("ctl") {
+                    if let Some(pid) = ctl_peer_pid(&path) {
+                        holder_pids.insert(pid);
+                    }
                 }
-                if std::time::Instant::now() >= deadline {
-                    confirmed = false;
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(20));
             }
         }
+
+        if let Ok(entries) = fs::read_dir(&sessions_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                if let Ok(record) = omg_session_runtime::record::Record::load(&path) {
+                    session_ids.insert(record.id.clone());
+                    if let Some(pid) = record.pid.filter(|&p| p > 1) {
+                        session_pids.insert(pid);
+                    }
+                    let sock = session_socket_for_id(state_dir, &record.id);
+                    if let Some(cap) = record.holder_capability.as_deref() {
+                        if let Ok(view) = omg_session_runtime::holder::probe_with_timeout(
+                            &sock,
+                            &record.id,
+                            &record.generation,
+                            cap,
+                            Duration::from_millis(250),
+                        ) {
+                            if view.holder_pid > 1 {
+                                holder_pids.insert(view.holder_pid);
+                            }
+                            if let Some(spid) = view.session_pid.filter(|&p| p > 1) {
+                                session_pids.insert(spid);
+                            }
+                        }
+                    }
+                    let ctl = omg_session_runtime::holder::control_path(&sock);
+                    if let Some(pid) = ctl_peer_pid(&ctl) {
+                        holder_pids.insert(pid);
+                    }
+                    if record.ended.is_none() {
+                        let _ = fs::write(sessions_dir.join(format!("{}.closed", record.id)), b"");
+                        if let Ok(mut socket) = UnixStream::connect(&host_sock) {
+                            let _ = Frame::new(b'K', 9, record.id.as_bytes()).send(&mut socket);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Wait up to 7s for graceful `.closed` shutdown of all holders and PTY leaders
+        // (covers `Policy::default().terminate_grace_seconds == 5` for login shells)
+        // BEFORE removing any directory entries.
+        let deadline = std::time::Instant::now() + Duration::from_secs(7);
+        while std::time::Instant::now() < deadline {
+            let records_done = session_ids.iter().all(|id| {
+                let path = sessions_dir.join(format!("{id}.json"));
+                let sock = session_socket_for_id(state_dir, id);
+                let ctl = omg_session_runtime::holder::control_path(&sock);
+                if let Ok(rec) = omg_session_runtime::record::Record::load(&path) {
+                    if let Some(pid) = rec.pid.filter(|&p| p > 1) {
+                        session_pids.insert(pid);
+                    }
+                    rec.ended.is_some() && rec.pid.is_none() && !ctl.exists()
+                } else {
+                    !ctl.exists()
+                }
+            });
+            let holders_done = holder_pids.iter().copied().all(pid_is_gone);
+            let sessions_done = session_pids.iter().copied().all(pid_is_gone);
+            if records_done && holders_done && sessions_done {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // Escalate deterministically so even wedged test daemons never leak on the host.
+        for &hpid in &holder_pids {
+            if !pid_is_gone(hpid) {
+                unsafe {
+                    libc::kill(hpid as i32, libc::SIGTERM);
+                }
+            }
+        }
+        for &spid in &session_pids {
+            if !pid_is_gone(spid) {
+                unsafe {
+                    libc::kill(-(spid as i32), libc::SIGTERM);
+                    libc::kill(spid as i32, libc::SIGTERM);
+                }
+            }
+        }
+        let term_deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while std::time::Instant::now() < term_deadline {
+            if holder_pids.iter().copied().all(pid_is_gone)
+                && session_pids.iter().copied().all(pid_is_gone)
+            {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        for &hpid in &holder_pids {
+            if !pid_is_gone(hpid) {
+                unsafe {
+                    libc::kill(hpid as i32, libc::SIGKILL);
+                }
+            }
+        }
+        for &spid in &session_pids {
+            if !pid_is_gone(spid) {
+                unsafe {
+                    libc::kill(-(spid as i32), libc::SIGKILL);
+                    libc::kill(spid as i32, libc::SIGKILL);
+                }
+            }
+        }
+        let kill_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < kill_deadline {
+            if holder_pids.iter().copied().all(pid_is_gone)
+                && session_pids.iter().copied().all(pid_is_gone)
+            {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        holder_pids.iter().copied().all(pid_is_gone)
+            && session_pids.iter().copied().all(pid_is_gone)
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        self.stop_mobile_gateways();
+        for (id, _) in &self.owned {
+            let _ = fs::write(self.dir.join("sessions").join(format!("{id}.closed")), b"");
+        }
+        // Stop foreground gateway and `host-local` broker children first so:
+        // 1) no in-flight broker request can spawn a new holder mid-teardown, and
+        // 2) `setsid()` `session-holder` children of `host-local` are reparented to PID 1
+        //    and reaped immediately on exit instead of lingering as un-reaped zombies.
         for child in self.children.iter_mut().rev() {
+            if matches!(child.try_wait(), Ok(None)) {
+                unsafe {
+                    libc::kill(child.id() as i32, libc::SIGTERM);
+                }
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                while std::time::Instant::now() < deadline {
+                    if matches!(child.try_wait(), Ok(Some(_))) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
             let _ = child.kill();
             let _ = child.wait();
         }
-        if confirmed {
+        let mut all_stopped = Self::drain_state_dir_sessions(&self.dir);
+        for extra in &self.cleanup_dirs {
+            all_stopped &= Self::drain_state_dir_sessions(extra);
+        }
+        if all_stopped {
             let _ = fs::remove_dir_all(&self.dir);
+            for extra in &self.cleanup_dirs {
+                let _ = fs::remove_dir_all(extra);
+            }
         } else {
             eprintln!(
                 "Unconfirmed test-holder cleanup; retained {}",
@@ -104,11 +365,7 @@ fn lan_gateway_authenticates_and_restores_same_session_across_reconnect() {
     let dir = std::env::temp_dir().join(format!("omg-mobile-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
-    let mut fixture = Fixture {
-        children: vec![],
-        dir,
-        owned: vec![],
-    };
+    let mut fixture = Fixture::new(dir);
     let host = fixture.dir.join("host.sock");
     fixture.children.push(
         Command::new(env!("CARGO_BIN_EXE_omgd"))
@@ -301,11 +558,7 @@ fn full_ui_control_projects_roster_without_taking_input_and_serves_real_files() 
         .status()
         .unwrap()
         .success());
-    let mut fixture = Fixture {
-        children: vec![],
-        dir,
-        owned: vec![],
-    };
+    let mut fixture = Fixture::new(dir);
     let binary = env!("CARGO_BIN_EXE_omgd");
     fixture.children.push(
         Command::new(binary)
@@ -623,11 +876,9 @@ fn cli_pair_status_revoke_and_stop_manage_standalone_or_ssh_gateway() {
     fs::set_permissions(base.join(".omg/run"), fs::Permissions::from_mode(0o700)).unwrap();
     fs::set_permissions(&run_dir, fs::Permissions::from_mode(0o700)).unwrap();
     let state_dir = base.join(".omg/mobile");
-    let mut fixture = Fixture {
-        children: vec![],
-        dir: run_dir.clone(),
-        owned: vec![],
-    };
+    let mut fixture = Fixture::new(run_dir.clone());
+    fixture.cleanup_dirs.push(base.clone());
+    fixture.mobile_state_dirs.push(state_dir.clone());
     let binary = env!("CARGO_BIN_EXE_omgd");
     fixture.children.push(
         Command::new(binary)
@@ -750,11 +1001,7 @@ fn post_reboot_lost_local_session_appears_in_roster_and_resurrects_on_ws_attach(
     fs::create_dir_all(&sessions_dir).unwrap();
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
     fs::set_permissions(&sessions_dir, fs::Permissions::from_mode(0o700)).unwrap();
-    let mut fixture = Fixture {
-        children: vec![],
-        dir: dir.clone(),
-        owned: vec![],
-    };
+    let mut fixture = Fixture::new(dir.clone());
 
     // Simulate a persisted local session lost across reboot: ended = "lost", pid = null, dead socket
     let id = "77777777-8888-9999-aaaa-bbbbbbbbbbbb";
@@ -853,12 +1100,14 @@ fn post_reboot_lost_local_session_appears_in_roster_and_resurrects_on_ws_attach(
     ))
     .unwrap();
     let mut rotated_gen = String::new();
+    let mut resurrected_session_pid = 0u32;
     loop {
         let wrapped = receive(&mut ws, &mut pending, b'D');
         let inner = Frame::read(&mut wrapped.data.as_slice()).unwrap();
         if inner.kind == b'J' {
             let meta: serde_json::Value = serde_json::from_slice(&inner.data).unwrap();
             rotated_gen = meta["generation"].as_str().unwrap().to_owned();
+            resurrected_session_pid = meta["pid"].as_u64().unwrap() as u32;
         }
         if inner.kind == b'S' {
             break;
@@ -866,10 +1115,189 @@ fn post_reboot_lost_local_session_appears_in_roster_and_resurrects_on_ws_attach(
     }
     assert!(!rotated_gen.is_empty());
     assert_ne!(rotated_gen, old_gen);
+    assert!(resurrected_session_pid > 1);
+    fixture.owned.push((id.into(), rotated_gen.clone()));
+
+    let live_record =
+        omg_session_runtime::record::Record::load(&sessions_dir.join(format!("{id}.json")))
+            .unwrap();
+    let sock = session_socket_for_id(&dir, id);
+    let holder_status = omg_session_runtime::holder::probe(
+        &sock,
+        id,
+        &rotated_gen,
+        live_record.holder_capability.as_deref().unwrap(),
+    )
+    .unwrap();
+    let holder_pid = holder_status.holder_pid;
+    assert!(holder_pid > 1);
+    assert_eq!(holder_status.session_pid, Some(resurrected_session_pid));
+
     ws.close(None).unwrap();
-    let mut host_ctrl = UnixStream::connect(&host_sock).unwrap();
-    Frame::new(b'K', 1, id.as_bytes())
-        .send(&mut host_ctrl)
+
+    // Poll confirmed close until both the PTY leader and detached session-holder exit cleanly.
+    let close_deadline = std::time::Instant::now() + Duration::from_secs(6);
+    loop {
+        let mut host_ctrl = UnixStream::connect(&host_sock).unwrap();
+        Frame::new(b'K', 1, id.as_bytes())
+            .send(&mut host_ctrl)
+            .unwrap();
+        let outer = Frame::read(&mut host_ctrl).unwrap();
+        assert_eq!(outer.kind, b'D');
+        let inner = Frame::read(&mut outer.data.as_slice()).unwrap();
+        assert_eq!(inner.kind, b'K');
+        if inner.data == b"closed" {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < close_deadline,
+            "resurrected session did not confirm close within deadline"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        wait_pid_gone(holder_pid, Duration::from_secs(3)),
+        "resurrected session-holder PID {holder_pid} must exit before directory cleanup"
+    );
+    assert!(
+        wait_pid_gone(resurrected_session_pid, Duration::from_secs(3)),
+        "resurrected shell PID {resurrected_session_pid} must exit before directory cleanup"
+    );
+    drop(fixture);
+    assert!(!dir.exists());
+    assert!(pid_is_gone(holder_pid));
+    assert!(pid_is_gone(resurrected_session_pid));
+}
+
+#[test]
+fn dropping_fixture_with_resurrected_holder_without_explicit_close_leaves_zero_orphans() {
+    let dir = std::env::temp_dir().join(format!(
+        "omg-mobile-drop-{}",
+        &omg_session_runtime::record::nonce().unwrap()[..12]
+    ));
+    let sessions_dir = dir.join("sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&sessions_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let id = "77777777-8888-9999-aaaa-cccccccccccc";
+    let mut rec = omg_session_runtime::record::Record::new(
+        id,
+        omg_session_runtime::lifecycle::Policy::default(),
+    )
+    .unwrap();
+    let old_gen = rec.generation.clone();
+    rec.ended = Some(omg_session_runtime::lifecycle::EndReason::Lost);
+    rec.cwd = Some("/tmp".into());
+    rec.save(&sessions_dir.join(format!("{id}.json"))).unwrap();
+
+    let (holder_pid, session_pid) = {
+        let mut fixture = Fixture::new(dir.clone());
+        let host_sock = dir.join("host.sock");
+        fixture.children.push(
+            Command::new(env!("CARGO_BIN_EXE_omgd"))
+                .args(["host-local"])
+                .arg(&fixture.dir)
+                .args(["--", "/bin/sh"])
+                .env("HOME", &fixture.dir)
+                .env("SHELL", "/bin/sh")
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        assert!((0..300).any(|_| {
+            if host_sock.exists() && UnixStream::connect(&host_sock).is_ok() {
+                true
+            } else {
+                std::thread::sleep(Duration::from_millis(10));
+                false
+            }
+        }));
+
+        let key = dir.join("pair.token");
+        let mut gateway = Command::new(env!("CARGO_BIN_EXE_omgd"))
+            .args(["mobile", "--listen", "127.0.0.1:0", "--socket"])
+            .arg(&host_sock)
+            .arg("--token-file")
+            .arg(&key)
+            .arg("--no-qr")
+            .env("HOME", &fixture.dir)
+            .env("SHELL", "/bin/sh")
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stderr = gateway.stderr.take().unwrap();
+        fixture.children.push(gateway);
+        let (send_address, recv_address) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if let Some(value) = line.strip_prefix("OMG mobile listening on ws://") {
+                    let _ = send_address.send(value.trim_end_matches("/catalogue").to_owned());
+                }
+            }
+        });
+        let addr = recv_address.recv_timeout(Duration::from_secs(5)).unwrap();
+        let token_raw = fs::read_to_string(&key).unwrap();
+        let token = token_raw.trim();
+
+        let mut cat_ws = connect(&addr, "/catalogue", token).unwrap();
+        let cat_msg = match cat_ws.read().unwrap() {
+            Message::Text(text) => serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+            other => panic!("unexpected catalogue message: {other:?}"),
+        };
+        let ep_id = cat_msg["endpoints"][0]["id"].as_str().unwrap().to_owned();
+        let _ = cat_ws.close(None);
+
+        let mut ws = connect(&addr, &format!("/ws/{ep_id}"), token).unwrap();
+        let open = serde_json::json!({"id": id, "generation": old_gen, "replay": false});
+        ws.send(Message::Binary(
+            Frame::new(b'U', 1, &serde_json::to_vec(&open).unwrap())
+                .encode()
+                .into(),
+        ))
         .unwrap();
-    let _ = Frame::read(&mut host_ctrl);
+        let mut pending = Vec::new();
+        let mut rotated_gen = String::new();
+        let mut spid = 0u32;
+        loop {
+            let wrapped = receive(&mut ws, &mut pending, b'D');
+            let inner = Frame::read(&mut wrapped.data.as_slice()).unwrap();
+            if inner.kind == b'J' {
+                let meta: serde_json::Value = serde_json::from_slice(&inner.data).unwrap();
+                rotated_gen = meta["generation"].as_str().unwrap().to_owned();
+                spid = meta["pid"].as_u64().unwrap() as u32;
+            }
+            if inner.kind == b'S' {
+                break;
+            }
+        }
+        let live_record =
+            omg_session_runtime::record::Record::load(&sessions_dir.join(format!("{id}.json")))
+                .unwrap();
+        let sock = session_socket_for_id(&dir, id);
+        let holder_status = omg_session_runtime::holder::probe(
+            &sock,
+            id,
+            &rotated_gen,
+            live_record.holder_capability.as_deref().unwrap(),
+        )
+        .unwrap();
+        let _ = ws.close(None);
+        // Intentionally do NOT add to `fixture.owned` and do NOT send `b'K'`!
+        // Dropping `fixture` here simulates an assertion panic or abrupt teardown.
+        (holder_status.holder_pid, spid)
+    };
+
+    assert!(
+        !dir.exists(),
+        "Fixture::drop must remove temp runtime dir after confirming holder exit"
+    );
+    assert!(
+        pid_is_gone(holder_pid),
+        "detached session-holder {holder_pid} must be terminated and reaped by Fixture::drop"
+    );
+    assert!(
+        pid_is_gone(session_pid),
+        "resurrected PTY leader {session_pid} must be terminated by Fixture::drop"
+    );
 }

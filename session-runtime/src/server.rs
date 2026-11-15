@@ -30,9 +30,11 @@ static SNAPSHOT_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 const SNAPSHOT_MAGIC: &[u8] = b"OMGSNAP1\0";
 const SNAPSHOT_DEBOUNCE: Duration = Duration::from_secs(3);
 const SNAPSHOT_MAX_INTERVAL: Duration = Duration::from_secs(30);
+const SNAPSHOT_RETRY_INITIAL: Duration = Duration::from_secs(3);
 // Exit alternate screen (?1049l) only when actually on the alternate screen so
 // DECRC inside ?1049l never rewinds the primary-screen cursor over saved rows.
-const HYGIENE_RESET: &str = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[>0u\x1b]8;;\x1b\\\x1b[0m";
+const HYGIENE_RESET: &str =
+    "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[>0u\x1b]8;;\x1b\\\x1b[0m";
 
 extern "C" fn handle_shutdown_signal(_sig: libc::c_int) {
     SHUTDOWN_SIGNALED.store(true, Ordering::SeqCst);
@@ -189,32 +191,138 @@ pub fn load_snapshot(record_path: &Path, record_revision: Option<&str>) -> Optio
     Some(buf)
 }
 
-fn flush_vt_snapshot(
-    vt: &Vt,
-    managed: Option<&ManagedSession>,
-    dirty_rev: u64,
-    last_persisted_rev: &mut u64,
-    last_snapshot_at: &mut Instant,
-) {
+struct SnapshotSchedule {
+    output_dirty_rev: u64,
+    last_persisted_rev: u64,
+    last_output_at: Instant,
+    last_snapshot_at: Instant,
+    retry_after: Option<Instant>,
+    consecutive_failures: u32,
+}
+
+impl SnapshotSchedule {
+    fn new(now: Instant) -> Self {
+        Self {
+            output_dirty_rev: 0,
+            last_persisted_rev: 0,
+            last_output_at: now,
+            last_snapshot_at: now,
+            retry_after: None,
+            consecutive_failures: 0,
+        }
+    }
+
+    fn mark_dirty(&mut self, now: Instant) {
+        self.output_dirty_rev = self.output_dirty_rev.wrapping_add(1);
+        self.last_output_at = now;
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.output_dirty_rev != self.last_persisted_rev
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        if !self.is_dirty() {
+            return None;
+        }
+        let base_due = (self.last_output_at + SNAPSHOT_DEBOUNCE)
+            .min(self.last_snapshot_at + SNAPSHOT_MAX_INTERVAL);
+        Some(match self.retry_after {
+            Some(retry_at) => base_due.max(retry_at),
+            None => base_due,
+        })
+    }
+
+    fn should_flush(&self, now: Instant) -> bool {
+        self.next_deadline().is_some_and(|deadline| now >= deadline)
+    }
+
+    fn record_persisted(&mut self, rev: u64, now: Instant) {
+        self.last_persisted_rev = rev;
+        self.last_snapshot_at = now;
+        self.retry_after = None;
+        self.consecutive_failures = 0;
+    }
+
+    fn record_failure(&mut self, now: Instant) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        let shift = self.consecutive_failures.saturating_sub(1).min(4);
+        let backoff = SNAPSHOT_RETRY_INITIAL
+            .saturating_mul(1u32 << shift)
+            .min(SNAPSHOT_MAX_INTERVAL);
+        self.last_snapshot_at = now;
+        self.retry_after = Some(now + backoff);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecordSlotDisposition {
+    Owned,
+    AlreadyReconciled,
+    Superseded,
+}
+
+fn record_slot_disposition(m: &ManagedSession, orphaned: bool) -> RecordSlotDisposition {
+    match Record::load(&m.path) {
+        Ok(on_disk) => {
+            if on_disk.id != m.record.id || on_disk.generation != m.record.generation {
+                RecordSlotDisposition::Superseded
+            } else if orphaned && on_disk.ended.is_some() {
+                RecordSlotDisposition::AlreadyReconciled
+            } else {
+                RecordSlotDisposition::Owned
+            }
+        }
+        Err(_) => RecordSlotDisposition::Owned,
+    }
+}
+
+fn file_identity(path: &Path) -> Option<(u64, u64)> {
+    fs::symlink_metadata(path)
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()))
+}
+
+fn socket_missing_or_replaced(path: &Path, expected: Option<(u64, u64)>) -> bool {
+    let Some(expected_id) = expected else {
+        return false;
+    };
+    match fs::symlink_metadata(path) {
+        Ok(meta) => (meta.dev(), meta.ino()) != expected_id,
+        Err(err) => err.kind() == io::ErrorKind::NotFound,
+    }
+}
+
+fn flush_vt_snapshot(vt: &Vt, managed: Option<&ManagedSession>, schedule: &mut SnapshotSchedule) {
+    let dirty_rev = schedule.output_dirty_rev;
     let Some(m) = managed else {
+        schedule.record_persisted(dirty_rev, Instant::now());
         return;
     };
     if m.path.with_extension("closed").exists() {
-        remove_snapshot_files(&m.path);
+        if record_slot_disposition(m, false) == RecordSlotDisposition::Owned {
+            remove_snapshot_files(&m.path);
+        }
+        schedule.record_persisted(dirty_rev, Instant::now());
+        return;
+    }
+    if record_slot_disposition(m, false) == RecordSlotDisposition::Superseded {
+        schedule.record_persisted(dirty_rev, Instant::now());
         return;
     }
     let revision = crate::current_snapshot_revision();
     let encoded = match encode_snapshot(vt, revision.as_deref()) {
         Ok(bytes) => bytes,
         Err(_) => {
-            *last_snapshot_at = Instant::now();
+            schedule.record_failure(Instant::now());
             return;
         }
     };
     if save_snapshot_atomic(&m.path, &encoded).is_ok() {
-        *last_persisted_rev = dirty_rev;
+        schedule.record_persisted(dirty_rev, Instant::now());
+    } else {
+        schedule.record_failure(Instant::now());
     }
-    *last_snapshot_at = Instant::now();
 }
 
 fn format_local_timestamp() -> String {
@@ -424,10 +532,33 @@ impl Drop for ChildGuard {
         }
     }
 }
-struct SocketGuard(std::path::PathBuf);
+struct SocketGuard {
+    path: PathBuf,
+    identity: Option<(u64, u64)>,
+}
+
+impl SocketGuard {
+    fn new(path: PathBuf) -> Self {
+        let identity = file_identity(&path);
+        Self { path, identity }
+    }
+
+    fn remove_now(&mut self) {
+        let should_remove = match (self.identity, file_identity(&self.path)) {
+            (Some(expected), Some(current)) => current == expected,
+            (None, Some(_)) => true,
+            (_, None) => false,
+        };
+        if should_remove {
+            let _ = fs::remove_file(&self.path);
+        }
+        self.identity = Some((u64::MAX, u64::MAX));
+    }
+}
+
 impl Drop for SocketGuard {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+        self.remove_now();
     }
 }
 
@@ -551,11 +682,12 @@ pub fn serve_managed(
         ));
     }
     let events = UnixDatagram::bind(&event_path)?;
-    let _event_guard = SocketGuard(event_path.clone());
+    let _event_guard = SocketGuard::new(event_path.clone());
     fs::set_permissions(&event_path, fs::Permissions::from_mode(0o600))?;
     events.set_nonblocking(true)?;
     let listener = UnixListener::bind(path)?;
-    let _guard = SocketGuard(path.to_owned());
+    let mut socket_guard = SocketGuard::new(path.to_owned());
+    let bound_socket_id = socket_guard.identity;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;
     let mut listener = Some(listener);
@@ -567,7 +699,9 @@ pub fn serve_managed(
     let mut master = -1;
     let mut slave = -1;
     let mut local_launch = managed.as_mut().and_then(|value| value.local_launch.take());
-    let shutdown_wake = managed.as_mut().and_then(|value| value.shutdown_wake.take());
+    let shutdown_wake = managed
+        .as_mut()
+        .and_then(|value| value.shutdown_wake.take());
     let is_resurrect = managed.as_ref().is_some_and(|value| value.resurrect);
     let local_mode = local_launch.is_some();
     let scrollback_max_bytes = local_launch
@@ -790,10 +924,7 @@ pub fn serve_managed(
         (&mut *input as *mut ReplyBuffer).cast(),
     )?;
     let mut seq = 0u64;
-    let mut output_dirty_rev = 0u64;
-    let mut last_persisted_rev = 0u64;
-    let mut last_output_at = Instant::now();
-    let mut last_snapshot_at = Instant::now();
+    let mut snapshot_schedule = SnapshotSchedule::new(Instant::now());
     if is_resurrect {
         if let Some(m) = managed
             .as_ref()
@@ -828,8 +959,7 @@ pub fn serve_managed(
             input.unclaimed.clear();
             let _ = vt.activity_mut().take_last_change_sync_restore();
             seq = seq.saturating_add(banner.len() as u64);
-            output_dirty_rev = 1;
-            last_output_at = Instant::now();
+            snapshot_schedule.mark_dirty(Instant::now());
         }
     }
     vt.activity_mut().local = local_mode;
@@ -850,6 +980,7 @@ pub fn serve_managed(
     let mut end_reason = EndReason::ProcessExited;
     let mut shutdown_interrupted = false;
     let mut shutdown_handled = false;
+    let mut orphaned = false;
     let mut agent_done = false;
     let mut completed_group = None;
     let mut recovery_checked_at = Instant::now() - Duration::from_secs(5);
@@ -913,17 +1044,13 @@ pub fn serve_managed(
                 end_reason = EndReason::Lost;
                 shutdown_interrupted = true;
                 if local_mode {
-                    flush_vt_snapshot(
-                        &vt,
-                        managed.as_ref(),
-                        output_dirty_rev,
-                        &mut last_persisted_rev,
-                        &mut last_snapshot_at,
-                    );
+                    flush_vt_snapshot(&vt, managed.as_ref(), &mut snapshot_schedule);
                 }
                 if let Some(m) = &mut managed {
-                    m.record.ended = Some(EndReason::Lost);
-                    let _ = m.record.save(&m.path);
+                    if record_slot_disposition(m, false) == RecordSlotDisposition::Owned {
+                        m.record.ended = Some(EndReason::Lost);
+                        let _ = m.record.save(&m.path);
+                    }
                 }
                 if exited.is_none() {
                     terminate_group(master, child.id(), libc::SIGTERM);
@@ -932,6 +1059,24 @@ pub fn serve_managed(
             }
         }
         if exited.is_none() && cwd_checked.elapsed() >= Duration::from_millis(500) {
+            if closing.is_none()
+                && peers.is_empty()
+                && listener.is_some()
+                && socket_missing_or_replaced(path, bound_socket_id)
+            {
+                orphaned = true;
+                shutdown_interrupted = true;
+                if managed
+                    .as_ref()
+                    .is_some_and(|m| m.path.with_extension("closed").exists())
+                {
+                    end_reason = EndReason::ExplicitClose;
+                } else {
+                    end_reason = EndReason::Lost;
+                }
+                terminate_group(master, child.id(), libc::SIGTERM);
+                closing = Some(Instant::now());
+            }
             let cur_fg = unsafe { libc::tcgetpgrp(master) };
             vt.activity_mut().foreground = (cur_fg > 1).then_some(cur_fg);
             let _ = vt.activity_mut().prune(child.id() as i32);
@@ -945,10 +1090,16 @@ pub fn serve_managed(
                 last_foreground = foreground;
                 last_ssh = ssh;
                 if let Some(session) = &mut managed {
-                    if session.record.cwd != last_cwd || session.record.ssh != last_ssh {
-                        session.record.cwd = last_cwd.clone();
-                        session.record.ssh = last_ssh.clone();
-                        session.record.save(&session.path)?;
+                    if (session.record.cwd != last_cwd || session.record.ssh != last_ssh)
+                        && record_slot_disposition(session, orphaned)
+                            == RecordSlotDisposition::Owned
+                    {
+                        let mut updated = session.record.clone();
+                        updated.cwd = last_cwd.clone();
+                        updated.ssh = last_ssh.clone();
+                        if updated.save(&session.path).is_ok() {
+                            session.record = updated;
+                        }
                     }
                 }
                 let metadata = serde_json::to_vec(&serde_json::json!({
@@ -1257,8 +1408,7 @@ pub fn serve_managed(
                             {
                                 return Err(io::Error::last_os_error());
                             }
-                            output_dirty_rev = output_dirty_rev.wrapping_add(1);
-                            last_output_at = Instant::now();
+                            snapshot_schedule.mark_dirty(Instant::now());
                         }
                         resizes.push(f.data);
                     }
@@ -1317,9 +1467,15 @@ pub fn serve_managed(
                 if ssh != last_ssh {
                     last_ssh = ssh;
                     if let Some(session) = &mut managed {
-                        if session.record.ssh != last_ssh {
-                            session.record.ssh = last_ssh.clone();
-                            session.record.save(&session.path)?;
+                        if session.record.ssh != last_ssh
+                            && record_slot_disposition(session, orphaned)
+                                == RecordSlotDisposition::Owned
+                        {
+                            let mut updated = session.record.clone();
+                            updated.ssh = last_ssh.clone();
+                            if updated.save(&session.path).is_ok() {
+                                session.record = updated;
+                            }
                         }
                     }
                 }
@@ -1350,8 +1506,7 @@ pub fn serve_managed(
                         &bytes[..n],
                     );
                     if n > 0 {
-                        output_dirty_rev = output_dirty_rev.wrapping_add(1);
-                        last_output_at = Instant::now();
+                        snapshot_schedule.mark_dirty(Instant::now());
                     }
                     if let Some(prefix) = &mut initial_output {
                         if prefix.len() + visible.len() <= 8 * 1024 {
@@ -1502,31 +1657,32 @@ pub fn serve_managed(
                         | EndReason::ProcessExited
                 ) {
                     if let Some(m) = managed.as_ref() {
-                        remove_snapshot_files(&m.path);
+                        if record_slot_disposition(m, orphaned) == RecordSlotDisposition::Owned {
+                            remove_snapshot_files(&m.path);
+                        }
                     }
                 }
                 if let Some(m) = &mut managed {
-                    m.record.ended = Some(reason);
-                    m.record.save(&m.path)?;
+                    if record_slot_disposition(m, orphaned) == RecordSlotDisposition::Owned {
+                        m.record.ended = Some(reason);
+                        if let Err(err) = m.record.save(&m.path) {
+                            if !orphaned && err.kind() != io::ErrorKind::NotFound {
+                                return Err(err);
+                            }
+                        }
+                    }
                 }
                 terminate_group(master, child.id(), libc::SIGTERM);
                 closing = Some(Instant::now());
             }
         }
         if local_mode
+            && managed.is_some()
             && closing.is_none()
             && exited.is_none()
-            && output_dirty_rev != last_persisted_rev
-            && (last_output_at.elapsed() >= SNAPSHOT_DEBOUNCE
-                || last_snapshot_at.elapsed() >= SNAPSHOT_MAX_INTERVAL)
+            && snapshot_schedule.should_flush(Instant::now())
         {
-            flush_vt_snapshot(
-                &vt,
-                managed.as_ref(),
-                output_dirty_rev,
-                &mut last_persisted_rev,
-                &mut last_snapshot_at,
-            );
+            flush_vt_snapshot(&vt, managed.as_ref(), &mut snapshot_schedule);
         }
         if exited.is_some() && closing.is_none() {
             closing = Some(Instant::now());
@@ -1553,7 +1709,7 @@ pub fn serve_managed(
                 // state before notifying peers so a fast reattach attempt after
                 // EXIT never connects to a dying listener.
                 listener = None;
-                let _ = fs::remove_file(path);
+                socket_guard.remove_now();
                 let _ = child.wait();
                 if let Some(group) = &group {
                     group.finish()?;
@@ -1573,30 +1729,28 @@ pub fn serve_managed(
                         end_reason = EndReason::Lost;
                         shutdown_interrupted = true;
                     }
-                    if end_reason == EndReason::Lost && local_mode {
-                        if output_dirty_rev != last_persisted_rev
-                            || !snapshot_path(&m.path).exists()
-                        {
-                            flush_vt_snapshot(
-                                &vt,
-                                Some(m),
-                                output_dirty_rev,
-                                &mut last_persisted_rev,
-                                &mut last_snapshot_at,
-                            );
+                    if record_slot_disposition(m, orphaned) == RecordSlotDisposition::Owned {
+                        if end_reason == EndReason::Lost && local_mode {
+                            if snapshot_schedule.is_dirty() || !snapshot_path(&m.path).exists() {
+                                flush_vt_snapshot(&vt, Some(m), &mut snapshot_schedule);
+                            }
+                        } else if matches!(
+                            end_reason,
+                            EndReason::ExplicitClose
+                                | EndReason::ProcessExited
+                                | EndReason::DetachedTimeout
+                                | EndReason::Deadline
+                        ) {
+                            remove_snapshot_files(&m.path);
                         }
-                    } else if matches!(
-                        end_reason,
-                        EndReason::ExplicitClose
-                            | EndReason::ProcessExited
-                            | EndReason::DetachedTimeout
-                            | EndReason::Deadline
-                    ) {
-                        remove_snapshot_files(&m.path);
+                        m.record.pid = None;
+                        m.record.ended = Some(end_reason);
+                        if let Err(err) = m.record.save(&m.path) {
+                            if !orphaned && err.kind() != io::ErrorKind::NotFound {
+                                return Err(err);
+                            }
+                        }
                     }
-                    m.record.pid = None;
-                    m.record.ended = Some(end_reason);
-                    m.record.save(&m.path)?;
                 }
                 let metadata = serde_json::to_vec(&serde_json::json!({
                     "cwd": last_cwd,
@@ -1656,12 +1810,11 @@ pub fn serve_managed(
             });
         }
         let mut poll_timeout_ms: libc::c_int = if shutdown_interrupted { 50 } else { 200 };
-        if local_mode && closing.is_none() && exited.is_none() && output_dirty_rev != last_persisted_rev
-        {
-            let next_snapshot = (last_output_at + SNAPSHOT_DEBOUNCE)
-                .min(last_snapshot_at + SNAPSHOT_MAX_INTERVAL);
-            poll_timeout_ms =
-                poll_timeout_ms.min(deadline_poll_ms(Instant::now(), next_snapshot));
+        if local_mode && managed.is_some() && closing.is_none() && exited.is_none() {
+            if let Some(next_snapshot) = snapshot_schedule.next_deadline() {
+                poll_timeout_ms =
+                    poll_timeout_ms.min(deadline_poll_ms(Instant::now(), next_snapshot));
+            }
         }
         let result = unsafe {
             libc::poll(
@@ -1900,5 +2053,214 @@ mod tests {
         assert!(!snap.exists());
 
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn snapshot_schedule_backs_off_after_failures_and_never_clamps_poll_to_zero() {
+        let t0 = Instant::now();
+        let mut sched = SnapshotSchedule::new(t0);
+        assert!(!sched.is_dirty());
+        assert_eq!(sched.next_deadline(), None);
+        assert!(!sched.should_flush(t0));
+
+        sched.mark_dirty(t0);
+        assert!(sched.is_dirty());
+        assert!(!sched.should_flush(t0 + Duration::from_secs(2)));
+        assert_eq!(
+            deadline_poll_ms(t0 + Duration::from_secs(2), sched.next_deadline().unwrap()),
+            1001
+        );
+
+        // Debounce reached at t0 + 3s, then save fails: must back off, NOT stay due at t0 + 3s.
+        let t_fail1 = t0 + SNAPSHOT_DEBOUNCE;
+        assert!(sched.should_flush(t_fail1));
+        sched.record_failure(t_fail1);
+        assert!(sched.is_dirty());
+        assert!(!sched.should_flush(t_fail1));
+        assert!(!sched.should_flush(t_fail1 + Duration::from_millis(2999)));
+        assert!(
+            deadline_poll_ms(t_fail1, sched.next_deadline().unwrap()) >= 3000,
+            "first failure must schedule a >=3s retry instead of a 0ms poll spin"
+        );
+
+        // Exponential backoff: 3s -> 6s -> 12s -> 24s -> 30s (capped).
+        let expected_backoffs = [6u64, 12, 24, 30, 30];
+        let mut cursor = t_fail1 + Duration::from_secs(3);
+        for secs in expected_backoffs {
+            assert!(sched.should_flush(cursor));
+            sched.record_failure(cursor);
+            assert!(!sched.should_flush(cursor));
+            let expected_deadline = cursor + Duration::from_secs(secs);
+            assert_eq!(sched.next_deadline(), Some(expected_deadline));
+            assert!(deadline_poll_ms(cursor, expected_deadline) >= (secs as i32) * 1000);
+            cursor = expected_deadline;
+        }
+
+        // Recovery clears dirty state and resets failure counter.
+        assert!(sched.should_flush(cursor));
+        let rev = sched.output_dirty_rev;
+        sched.record_persisted(rev, cursor);
+        assert!(!sched.is_dirty());
+        assert_eq!(sched.next_deadline(), None);
+        assert_eq!(sched.consecutive_failures, 0);
+
+        // Continuous output remains bounded by SNAPSHOT_MAX_INTERVAL (30s).
+        let mut stream_now = cursor;
+        for _ in 0..15 {
+            stream_now += Duration::from_secs(2);
+            sched.mark_dirty(stream_now);
+        }
+        assert!(
+            sched.should_flush(cursor + SNAPSHOT_MAX_INTERVAL),
+            "continuous output must still checkpoint at SNAPSHOT_MAX_INTERVAL"
+        );
+    }
+
+    #[test]
+    fn flush_vt_snapshot_backs_off_on_missing_or_blocked_target_and_recovers_when_writable() {
+        let base = PathBuf::from(format!("/tmp/omg-snap-recover-{}", &nonce().unwrap()[..8]));
+        let sessions = base.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&sessions, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let id = "22222222-2222-2222-2222-222222222222";
+        let record_path = sessions.join(format!("{id}.json"));
+        let mut record = Record::new(id, crate::lifecycle::Policy::default()).unwrap();
+        record.save(&record_path).unwrap();
+
+        let managed = ManagedSession {
+            path: record_path.clone(),
+            record,
+            containment_root: None,
+            initial_cwd: None,
+            local_launch: None,
+            presentation: None,
+            resurrect: false,
+            shutdown_wake: None,
+        };
+        let mut vt = Vt::new(80, 24).unwrap();
+        vt.write(b"RECOVERED_AFTER_TRANSIENT_FAILURE\r\n");
+
+        // 1. Missing sessions/ directory (ENOENT): backs off cleanly and keeps dirty tracking.
+        fs::remove_dir_all(&sessions).unwrap();
+        let mut schedule = SnapshotSchedule::new(Instant::now() - Duration::from_secs(10));
+        schedule.mark_dirty(Instant::now() - Duration::from_secs(5));
+        assert!(schedule.should_flush(Instant::now()));
+
+        flush_vt_snapshot(&vt, Some(&managed), &mut schedule);
+        assert!(
+            schedule.is_dirty(),
+            "dirty state must be preserved on ENOENT"
+        );
+        assert!(
+            !schedule.should_flush(Instant::now()),
+            "must not immediately re-trigger flush after ENOENT"
+        );
+        let poll_ms = deadline_poll_ms(Instant::now(), schedule.next_deadline().unwrap());
+        assert!(
+            poll_ms > 2000,
+            "poll timeout after failed snapshot must back off (>2000ms), got {poll_ms}ms"
+        );
+
+        // 2. Recreate sessions/ but block the destination snapshot path with a directory (EISDIR).
+        fs::create_dir_all(&sessions).unwrap();
+        fs::set_permissions(&sessions, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut restored_record = managed.record.clone();
+        restored_record.save(&record_path).unwrap();
+        let snap = snapshot_path(&record_path);
+        fs::create_dir_all(snap.join("blocker")).unwrap();
+
+        flush_vt_snapshot(&vt, Some(&managed), &mut schedule);
+        assert!(schedule.is_dirty());
+        assert_eq!(schedule.consecutive_failures, 2);
+        let poll_ms_2 = deadline_poll_ms(Instant::now(), schedule.next_deadline().unwrap());
+        assert!(
+            poll_ms_2 > 5000,
+            "second consecutive failure must double backoff (>5000ms), got {poll_ms_2}ms"
+        );
+
+        // 3. Remove blocker -> next flush succeeds and clears dirty tracking.
+        fs::remove_dir_all(&snap).unwrap();
+        flush_vt_snapshot(&vt, Some(&managed), &mut schedule);
+        assert!(
+            !schedule.is_dirty(),
+            "snapshot flush must clear dirty tracking once target is writable"
+        );
+        assert_eq!(schedule.consecutive_failures, 0);
+        assert!(snap.is_file());
+
+        let loaded = load_snapshot(&record_path, managed.record.snapshot_revision.as_deref())
+            .expect("recovered snapshot must load");
+        let mut restored = Vt::new(80, 24).unwrap();
+        restored.restore(&loaded).unwrap();
+        assert!(restored
+            .text()
+            .unwrap()
+            .contains("RECOVERED_AFTER_TRANSIENT_FAILURE"));
+
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn socket_guard_and_superseded_record_preserve_replacement_session_files() {
+        let dir = PathBuf::from(format!("/tmp/omg-sock-guard-{}", &nonce().unwrap()[..8]));
+        let sessions = dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&sessions, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let sock_path = dir.join("test.sock");
+        let listener_1 = UnixListener::bind(&sock_path).unwrap();
+        let guard_1 = SocketGuard::new(sock_path.clone());
+        drop(listener_1);
+        fs::remove_file(&sock_path).unwrap();
+        let _listener_2 = UnixListener::bind(&sock_path).unwrap();
+        let id_2 = file_identity(&sock_path);
+        drop(guard_1);
+        assert_eq!(
+            file_identity(&sock_path),
+            id_2,
+            "dropping stale SocketGuard must not unlink replacement socket"
+        );
+
+        let id = "33333333-3333-3333-3333-333333333333";
+        let record_path = sessions.join(format!("{id}.json"));
+        let stale_record = Record::new(id, crate::lifecycle::Policy::default()).unwrap();
+        let mut newer_record = Record::new(id, crate::lifecycle::Policy::default()).unwrap();
+        newer_record.save(&record_path).unwrap();
+
+        let mut newer_vt = Vt::new(80, 24).unwrap();
+        newer_vt.write(b"NEWER_GENERATION_SNAPSHOT\r\n");
+        let newer_encoded =
+            encode_snapshot(&newer_vt, newer_record.snapshot_revision.as_deref()).unwrap();
+        save_snapshot_atomic(&record_path, &newer_encoded).unwrap();
+
+        let stale_managed = ManagedSession {
+            path: record_path.clone(),
+            record: stale_record,
+            containment_root: None,
+            initial_cwd: None,
+            local_launch: None,
+            presentation: None,
+            resurrect: false,
+            shutdown_wake: None,
+        };
+        let mut stale_vt = Vt::new(80, 24).unwrap();
+        stale_vt.write(b"STALE_GENERATION_SNAPSHOT\r\n");
+        let mut schedule = SnapshotSchedule::new(Instant::now());
+        schedule.mark_dirty(Instant::now() - Duration::from_secs(5));
+        flush_vt_snapshot(&stale_vt, Some(&stale_managed), &mut schedule);
+        assert!(!schedule.is_dirty());
+
+        let loaded =
+            load_snapshot(&record_path, newer_record.snapshot_revision.as_deref()).unwrap();
+        let mut check_vt = Vt::new(80, 24).unwrap();
+        check_vt.restore(&loaded).unwrap();
+        let text = check_vt.text().unwrap();
+        assert!(text.contains("NEWER_GENERATION_SNAPSHOT"));
+        assert!(!text.contains("STALE_GENERATION_SNAPSHOT"));
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

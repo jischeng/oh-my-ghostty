@@ -11,8 +11,43 @@ struct Daemon {
 }
 impl Drop for Daemon {
     fn drop(&mut self) {
+        let sessions_dir = self.dir.join("sessions");
+        let mut session_pids = Vec::new();
+        if let Ok(entries) = fs::read_dir(&sessions_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                    if let Ok(rec) = record::Record::load(&path) {
+                        if let Some(pid) = rec.pid.filter(|&p| p > 1) {
+                            session_pids.push(pid);
+                        }
+                        if rec.ended.is_none() {
+                            let _ = fs::write(sessions_dir.join(format!("{}.closed", rec.id)), b"");
+                        }
+                    }
+                }
+            }
+        }
+        if matches!(self.child.try_wait(), Ok(None)) {
+            unsafe {
+                libc::kill(self.child.id() as i32, libc::SIGTERM);
+            }
+            let deadline = Instant::now() + Duration::from_millis(300);
+            while Instant::now() < deadline {
+                if matches!(self.child.try_wait(), Ok(Some(_))) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(15));
+            }
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
+        for spid in session_pids {
+            unsafe {
+                libc::kill(-(spid as i32), libc::SIGKILL);
+                libc::kill(spid as i32, libc::SIGKILL);
+            }
+        }
         let _ = fs::remove_dir_all(&self.dir);
     }
 }
@@ -543,7 +578,8 @@ while True:
     assert!(!outer_vt.activity_mut().take_last_change_sync_restore());
 
     Frame::new(INPUT, 0, b"QUIT\n").send(&mut client).unwrap();
-    let _ = daemon;
+    drop(client);
+    drop(daemon);
 }
 
 #[test]
@@ -716,7 +752,8 @@ while True:
     );
 
     Frame::new(INPUT, 0, b"QUIT\n").send(&mut client).unwrap();
-    let _ = daemon;
+    drop(client);
+    let _ = daemon.join();
 }
 
 #[test]
@@ -1121,4 +1158,229 @@ while True:
 
     Frame::new(INPUT, 0, b"exit\n").send(&mut client).unwrap();
     let _ = daemon.join();
+}
+
+#[cfg(target_os = "macos")]
+fn pid_cpu_nanos(pid: u32) -> Option<u64> {
+    let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        libc::proc_pid_rusage(
+            pid as libc::c_int,
+            libc::RUSAGE_INFO_V2,
+            (&mut info as *mut libc::rusage_info_v2).cast(),
+        )
+    };
+    (rc == 0).then_some(info.ri_user_time.saturating_add(info.ri_system_time))
+}
+
+#[cfg(target_os = "linux")]
+fn pid_cpu_nanos(pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after = stat.rsplit_once(") ")?.1;
+    let mut fields = after.split_whitespace();
+    let utime: u64 = fields.nth(11)?.parse().ok()?;
+    let stime: u64 = fields.next()?.parse().ok()?;
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
+    Some(utime.saturating_add(stime).saturating_mul(1_000_000_000) / ticks)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn pid_cpu_nanos(_pid: u32) -> Option<u64> {
+    None
+}
+
+fn pid_gone(pid: u32) -> bool {
+    if pid <= 1 {
+        return true;
+    }
+    let rc = unsafe { libc::kill(pid as i32, 0) };
+    rc != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+#[test]
+fn local_holder_snapshot_failure_backs_off_without_cpu_spin_and_recovers_plus_orphaned_dir_exits() {
+    use sha2::{Digest, Sha256};
+    let dir = std::path::PathBuf::from("/tmp").join(format!(
+        "omg-holder-snap-{}",
+        &record::nonce().unwrap()[..10]
+    ));
+    let sessions_dir = dir.join("sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&sessions_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let host_child = Command::new(env!("CARGO_BIN_EXE_omgd"))
+        .args(["host-local", dir.to_str().unwrap(), "--", "/bin/sh"])
+        .env("HOME", &dir)
+        .env("SHELL", "/bin/sh")
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut daemon = Daemon {
+        child: host_child,
+        dir: dir.clone(),
+    };
+    let host_sock = dir.join("host.sock");
+    for _ in 0..300 {
+        if host_sock.exists() && UnixStream::connect(&host_sock).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let id = "12121212-3434-5656-7878-909090909090";
+    let mut env_map: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    env_map.insert("HOME".into(), dir.to_string_lossy().into_owned());
+    env_map.insert("PATH".into(), "/usr/bin:/bin".into());
+    env_map.insert("SHELL".into(), "/bin/sh".into());
+    env_map.insert("TERM".into(), "xterm-256color".into());
+    let req = serde_json::json!({
+        "id": id,
+        "policy": lifecycle::Policy::default(),
+        "create": true,
+        "cwd": "/tmp",
+        "launch": {
+            "argv": ["/bin/sh", "-i"],
+            "env": env_map,
+            "cwd": "/tmp",
+            "cols": 80,
+            "rows": 24,
+            "pixel_width": 640,
+            "pixel_height": 384,
+        }
+    });
+
+    let mut client = UnixStream::connect(&host_sock).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(8)))
+        .unwrap();
+    Frame::new(b'C', 1, &serde_json::to_vec(&req).unwrap())
+        .send(&mut client)
+        .unwrap();
+
+    let mut session_pid = 0u32;
+    let mut generation = String::new();
+    loop {
+        let outer = Frame::read(&mut client).unwrap();
+        assert_eq!(outer.kind, b'D');
+        let inner = Frame::read(&mut outer.data.as_slice()).unwrap();
+        match inner.kind {
+            INFO => {
+                let meta: serde_json::Value = serde_json::from_slice(&inner.data).unwrap();
+                session_pid = meta["pid"].as_u64().unwrap() as u32;
+                generation = meta["generation"].as_str().unwrap().to_owned();
+            }
+            SNAPSHOT => {
+                Frame::new(b'D', 1, &Frame::new(ACK, inner.seq, &[]).encode())
+                    .send(&mut client)
+                    .unwrap();
+                Frame::new(b'D', 1, &Frame::new(CLAIM, 0, &[]).encode())
+                    .send(&mut client)
+                    .unwrap();
+            }
+            CLAIM => break,
+            _ => {}
+        }
+    }
+
+    let rec_path = sessions_dir.join(format!("{id}.json"));
+    let loaded_rec = record::Record::load(&rec_path).unwrap();
+    let sock_hash: String = Sha256::digest(id.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let session_sock = dir.join(format!("{}.sock", &sock_hash[..16]));
+    let holder_status = holder::probe(
+        &session_sock,
+        id,
+        &generation,
+        loaded_rec.holder_capability.as_deref().unwrap(),
+    )
+    .unwrap();
+    let holder_pid = holder_status.holder_pid;
+    assert!(holder_pid > 1);
+    assert!(session_pid > 1);
+
+    // Block snapshot target with a non-empty directory so save_snapshot_atomic fails deterministically.
+    let snap_file = server::snapshot_path(&rec_path);
+    fs::create_dir_all(snap_file.join("blocker")).unwrap();
+
+    Frame::new(
+        b'D',
+        1,
+        &Frame::new(INPUT, 0, b"printf 'LIVE_BACKOFF_RECOVER_OK\\n'\n").encode(),
+    )
+    .send(&mut client)
+    .unwrap();
+    let mut output = Vec::new();
+    let out_deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < out_deadline {
+        let outer = Frame::read(&mut client).unwrap();
+        if outer.kind == b'D' {
+            let inner = Frame::read(&mut outer.data.as_slice()).unwrap();
+            if inner.kind == OUTPUT {
+                output.extend_from_slice(&inner.data);
+                if output
+                    .windows(b"LIVE_BACKOFF_RECOVER_OK".len())
+                    .any(|w| w == b"LIVE_BACKOFF_RECOVER_OK")
+                {
+                    break;
+                }
+            }
+        }
+    }
+    drop(client);
+
+    // Wait 3.8s: crosses the 3s SNAPSHOT_DEBOUNCE (triggering the failed snapshot save) and sits
+    // for 0.8s inside the backoff window, where the old code spun at ~75% CPU (~600ms CPU in 0.8s).
+    let cpu_before = pid_cpu_nanos(holder_pid);
+    std::thread::sleep(Duration::from_millis(3800));
+    if let (Some(before), Some(after)) = (cpu_before, pid_cpu_nanos(holder_pid)) {
+        let delta_ms = after.saturating_sub(before) / 1_000_000;
+        assert!(
+            delta_ms < 250,
+            "holder burned {delta_ms}ms CPU during 3.8s snapshot failure window (poll(0) spin regression)"
+        );
+    }
+
+    // Unblock snapshot target -> retry after backoff writes the snapshot cleanly.
+    fs::remove_dir_all(&snap_file).unwrap();
+    let recover_deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < recover_deadline {
+        if snap_file.is_file() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        snap_file.is_file(),
+        "holder must recover and persist VT snapshot after path becomes writable"
+    );
+    let snap_bytes =
+        server::load_snapshot(&rec_path, loaded_rec.snapshot_revision.as_deref()).unwrap();
+    let mut restored = Vt::new(80, 24).unwrap();
+    restored.restore(&snap_bytes).unwrap();
+    assert!(restored.text().unwrap().contains("LIVE_BACKOFF_RECOVER_OK"));
+
+    // Now stop broker and delete the runtime directory out from under the detached holder:
+    // the orphaned holder must detect its missing bound socket and exit cleanly without spinning.
+    let _ = daemon.child.kill();
+    let _ = daemon.child.wait();
+    fs::remove_dir_all(&dir).unwrap();
+
+    let orphan_deadline = Instant::now() + Duration::from_secs(4);
+    while Instant::now() < orphan_deadline {
+        if pid_gone(holder_pid) && pid_gone(session_pid) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        pid_gone(holder_pid),
+        "orphaned session-holder {holder_pid} must self-terminate when its runtime dir is deleted"
+    );
+    assert!(
+        pid_gone(session_pid),
+        "orphaned PTY leader {session_pid} must terminate with its session-holder"
+    );
 }

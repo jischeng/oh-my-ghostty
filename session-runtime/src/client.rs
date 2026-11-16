@@ -18,6 +18,7 @@ use std::{
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(45);
 const PEER_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const PARENT_ALIVE_PEER_IDLE_TIMEOUT: Duration = Duration::from_secs(3600);
 const STABLE_RESET: Duration = Duration::from_secs(60);
 const MAX_PEERS: usize = 512;
 const MAX_LIST_WAITERS: usize = 3;
@@ -341,9 +342,44 @@ fn advance_peer_generations(peers: &mut HashMap<u64, LocalPeer>, generation_coun
     }
 }
 
+fn effective_idle_timeout(initial_ppid: libc::pid_t) -> Duration {
+    #[cfg(unix)]
+    let parent_alive = initial_ppid > 1 && unsafe { libc::getppid() } == initial_ppid;
+    #[cfg(not(unix))]
+    let parent_alive = {
+        let _ = initial_ppid;
+        false
+    };
+    if parent_alive {
+        PARENT_ALIVE_PEER_IDLE_TIMEOUT
+    } else {
+        PEER_IDLE_TIMEOUT
+    }
+}
+
 /// Bind the stable local endpoint before starting any network or deployment
 /// work. Local Ghostty surfaces therefore survive every SSH transport attempt.
 pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) -> io::Result<()> {
+    supervise_with_timeouts(
+        local,
+        connector,
+        interactive_first,
+        HEARTBEAT_INTERVAL,
+        HEARTBEAT_TIMEOUT,
+    )
+}
+
+fn supervise_with_timeouts(
+    local: &Path,
+    connector: Connector,
+    interactive_first: bool,
+    heartbeat_interval: Duration,
+    heartbeat_timeout: Duration,
+) -> io::Result<()> {
+    #[cfg(unix)]
+    let initial_ppid = unsafe { libc::getppid() };
+    #[cfg(not(unix))]
+    let initial_ppid: libc::pid_t = 0;
     host::private(
         local
             .parent()
@@ -377,7 +413,7 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
     let mut attempt = 0u32;
     let mut retry_at = Instant::now();
     let mut stable_since: Option<Instant> = None;
-    let mut last_heartbeat = Instant::now() - HEARTBEAT_INTERVAL;
+    let mut last_heartbeat = Instant::now() - heartbeat_interval;
     let mut last_pong = Instant::now();
     let mut had_transport = false;
     let mut interactive_next = interactive_first;
@@ -389,6 +425,7 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
 
     loop {
         wake.drain();
+        let idle_timeout = effective_idle_timeout(initial_ppid);
         if peers.values().any(|p| {
             !p.ended
                 && (!p.control
@@ -396,7 +433,7 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
                     || p.list_requested && !p.control_done)
         }) {
             idle_since = Instant::now();
-        } else if idle_since.elapsed() > PEER_IDLE_TIMEOUT {
+        } else if idle_since.elapsed() > idle_timeout {
             return Ok(());
         }
 
@@ -409,7 +446,7 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
             }
         }
 
-        if remote.is_some() && last_pong.elapsed() > HEARTBEAT_TIMEOUT {
+        if remote.is_some() && last_pong.elapsed() > heartbeat_timeout {
             remote = None;
             _transport_guard = None;
             remote_streams.clear();
@@ -873,7 +910,7 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
             if capabilities_received && durable_close {
                 begin_controls(remote, &mut peers, &mut remote_streams, &mut next_stream);
             }
-            if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
+            if last_heartbeat.elapsed() >= heartbeat_interval {
                 remote.push(Frame::new(b'P', 0, &[]));
                 last_heartbeat = Instant::now();
             }
@@ -888,9 +925,9 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
             match remote_frames {
                 Ok(frames) => {
                     for frame in frames {
+                        last_pong = Instant::now();
                         if frame.kind == b'P' && frame.seq == 0 {
                             let first_capabilities = !capabilities_received;
-                            last_pong = Instant::now();
                             capabilities_received = true;
                             strict_open = has_capability(&frame.data, "strict-open/1");
                             durable_close = has_capability(&frame.data, "durable-close/1");
@@ -1266,20 +1303,21 @@ pub fn supervise(local: &Path, connector: Connector, interactive_first: bool) ->
         });
         let mut timeout_ms: libc::c_int = 60_000;
         if !has_active_peers {
+            let idle_timeout = effective_idle_timeout(initial_ppid);
             timeout_ms = timeout_ms.min(crate::deadline_poll_ms(
                 now,
-                idle_since + PEER_IDLE_TIMEOUT + Duration::from_nanos(1),
+                idle_since + idle_timeout + Duration::from_nanos(1),
             ));
         }
         if remote.is_some() {
             timeout_ms = timeout_ms
                 .min(crate::deadline_poll_ms(
                     now,
-                    last_pong + HEARTBEAT_TIMEOUT + Duration::from_nanos(1),
+                    last_pong + heartbeat_timeout + Duration::from_nanos(1),
                 ))
                 .min(crate::deadline_poll_ms(
                     now,
-                    last_heartbeat + HEARTBEAT_INTERVAL,
+                    last_heartbeat + heartbeat_interval,
                 ));
             if let Some(since) = stable_since {
                 timeout_ms = timeout_ms.min(crate::deadline_poll_ms(now, since + STABLE_RESET));
@@ -2167,6 +2205,171 @@ mod error_classification_tests {
         retry_local(&sock, false).unwrap();
         retry_local(&sock, true).unwrap();
         handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn effective_idle_timeout_tracks_parent_liveness() {
+        use super::{effective_idle_timeout, PARENT_ALIVE_PEER_IDLE_TIMEOUT, PEER_IDLE_TIMEOUT};
+
+        assert_eq!(effective_idle_timeout(0), PEER_IDLE_TIMEOUT);
+        assert_eq!(effective_idle_timeout(1), PEER_IDLE_TIMEOUT);
+
+        #[cfg(unix)]
+        {
+            let ppid = unsafe { libc::getppid() };
+            if ppid > 1 {
+                assert_eq!(effective_idle_timeout(ppid), PARENT_ALIVE_PEER_IDLE_TIMEOUT);
+                let mismatched = if ppid == 2 { 3 } else { 2 };
+                assert_eq!(effective_idle_timeout(mismatched), PEER_IDLE_TIMEOUT);
+            }
+        }
+    }
+
+    #[test]
+    fn incoming_data_frames_refresh_remote_liveness_without_pong() {
+        use super::{supervise_with_timeouts, ACK, SNAPSHOT};
+        use crate::OUTPUT;
+        use std::sync::atomic::AtomicBool;
+
+        let dir = PathBuf::from(format!(
+            "/tmp/omg-client-liveness-{}",
+            &crate::record::nonce().unwrap()[..8]
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let socket_path = dir.join("relay.sock");
+        let conn_count = Arc::new(AtomicUsize::new(0));
+        let conn_srv = conn_count.clone();
+        let stop_stream = Arc::new(AtomicBool::new(false));
+        let stop_srv = stop_stream.clone();
+        let (opened_tx, opened_rx) = mpsc::channel();
+        let (reconnected_tx, reconnected_rx) = mpsc::channel();
+
+        let connector: Connector = Arc::new(move |_| {
+            let n = conn_srv.fetch_add(1, Ordering::SeqCst);
+            if n > 0 {
+                let _ = reconnected_tx.send(n);
+                return Err(io::Error::other("simulated reconnect trigger"));
+            }
+            let (client_side, mut server_side) = UnixStream::pair()?;
+            let stop_stream = stop_srv.clone();
+            let opened_tx = opened_tx.clone();
+            thread::spawn(move || {
+                let caps = b"strict-open/1,durable-close/1";
+                Frame::new(b'P', 0, caps).send(&mut server_side).unwrap();
+                let stream_id = loop {
+                    let Ok(frame) = Frame::read(&mut server_side) else {
+                        return;
+                    };
+                    if frame.kind == b'C' {
+                        break frame.seq;
+                    }
+                };
+                let snap = Frame::new(SNAPSHOT, 1, b"init").encode();
+                Frame::new(b'D', stream_id, &snap)
+                    .send(&mut server_side)
+                    .unwrap();
+                let _ = opened_tx.send(());
+
+                // Drain incoming pings without sending any b'P' pongs back.
+                let mut reader = server_side.try_clone().unwrap();
+                let drain_handle = thread::spawn(move || while Frame::read(&mut reader).is_ok() {});
+
+                let mut seq = 1u64;
+                while !stop_stream.load(Ordering::SeqCst) {
+                    let out = Frame::new(OUTPUT, seq + 2, b"ok").encode();
+                    seq += 2;
+                    if Frame::new(b'D', stream_id, &out)
+                        .send(&mut server_side)
+                        .is_err()
+                    {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(25));
+                }
+                thread::sleep(Duration::from_millis(500));
+                drop(server_side);
+                let _ = drain_handle.join();
+            });
+            Ok(RelayTransport {
+                socket: client_side,
+                guard: Box::new(()),
+            })
+        });
+
+        let socket_clone = socket_path.clone();
+        thread::spawn(move || {
+            let _ = supervise_with_timeouts(
+                &socket_clone,
+                connector,
+                false,
+                Duration::from_millis(20),
+                Duration::from_millis(120),
+            );
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut peer = loop {
+            match UnixStream::connect(&socket_path) {
+                Ok(s) => break s,
+                Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+                Err(err) => panic!("connect failed: {err}"),
+            }
+        };
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let req = OpenRequest {
+            id: "d2956168-0ade-4c3e-ade4-3bc908d7dfdc".into(),
+            policy: Policy::default(),
+            create: false,
+            cwd: None,
+            launch: None,
+            resurrect_launch: None,
+            inline_viewer: false,
+            recreate_if_gone: false,
+        };
+        Frame::new(b'H', 0, &serde_json::to_vec(&req).unwrap())
+            .send(&mut peer)
+            .unwrap();
+        let mut peer_gen = 0u64;
+        let snap_seq = loop {
+            let frame = Frame::read(&mut peer).unwrap();
+            if frame.kind == b'T' {
+                peer_gen = frame.seq;
+            } else if frame.kind == SNAPSHOT {
+                break frame.seq;
+            }
+        };
+        Frame::new(ACK, snap_seq, &peer_gen.to_be_bytes())
+            .send(&mut peer)
+            .unwrap();
+        opened_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        let stream_until = Instant::now() + Duration::from_millis(320);
+        let mut output_frames = 0usize;
+        while Instant::now() < stream_until || output_frames < 8 {
+            let frame = Frame::read(&mut peer).unwrap();
+            assert_ne!(
+                frame.kind,
+                b'T',
+                "unexpected status frame while receiving b'D' traffic: {}",
+                String::from_utf8_lossy(&frame.data)
+            );
+            if frame.kind == OUTPUT {
+                output_frames += 1;
+            }
+        }
+        assert_eq!(conn_count.load(Ordering::SeqCst), 1);
+
+        stop_stream.store(true, Ordering::SeqCst);
+        assert_eq!(
+            reconnected_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            1
+        );
+        drop(peer);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

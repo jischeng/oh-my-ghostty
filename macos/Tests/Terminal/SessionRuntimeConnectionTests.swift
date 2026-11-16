@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import CryptoKit
 import Foundation
 import Testing
@@ -299,6 +300,125 @@ struct SessionRuntimeConnectionTests {
         #expect(view.runtimeConnectionState == .failed(message: "authentication failed"))
         #expect(controller.surfaceTree.first === view)
         #expect(view.contextSignal?.id == "omg-runtime-state")
+    }
+
+    @MainActor
+    @Test(.enabled(if: FileManager.default.isExecutableFile(atPath:
+        Bundle.main.resourceURL!.appendingPathComponent("session-runtime/omgd").path),
+        "Requires the bundled Session Runtime helper"))
+    func midSessionDisconnectEmitsReconnectingInsteadOfFailureAndRecovers() async throws {
+        let root = URL(fileURLWithPath: "/tmp/omg-reconn-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let socket = root.appendingPathComponent("s")
+        let dropMarker = root.appendingPathComponent("drop")
+        let helper = Bundle.main.resourceURL!.appendingPathComponent("session-runtime/omgd")
+        let server = Process()
+        let python = try #require(LocalPythonInterpreter.cached())
+        server.executableURL = URL(fileURLWithPath: python.executablePath)
+        server.arguments = ["-c", """
+        import json,os,pathlib,signal,socket,struct,subprocess,sys,time,uuid
+        root=pathlib.Path(sys.argv[1]); state=root/'host'; state.mkdir(mode=0o700)
+        pane_id=sys.argv[3]
+        host=subprocess.Popen([sys.argv[2],'host',str(state),'--','/bin/sleep','30'])
+        def stop(*args): raise SystemExit()
+        signal.signal(signal.SIGTERM,stop)
+        def packet(kind,seq,data=b''): return struct.pack('>cQI',kind,seq,len(data))+data
+        def exact(s,n):
+            data=b''
+            while len(data)<n:
+                chunk=s.recv(n-len(data))
+                if not chunk: raise EOFError()
+                data+=chunk
+            return data
+        def frame(s):
+            kind,seq,size=struct.unpack('>cQI',exact(s,13))
+            return kind,seq,exact(s,size)
+        def relay_once(listener, gen):
+            client,_=listener.accept(); client.settimeout(5)
+            frame(client)
+            status=json.dumps(dict(state='connecting',attempt=0)).encode()
+            client.sendall(packet(b'T',gen,status))
+            with socket.socket(socket.AF_UNIX) as upstream:
+                upstream.settimeout(5)
+                upstream.connect(str(state/'host.sock'))
+                upstream.sendall(packet(b'H',1,pane_id.encode()))
+                while True:
+                    kind,_,data=frame(upstream)
+                    if kind!=b'D': continue
+                    inner,_,_=struct.unpack('>cQI',data[:13])
+                    if inner in (b'J',b'S'): client.sendall(data)
+                    if inner==b'S': break
+                client.sendall(packet(b'W',gen))
+                return client
+        try:
+            for _ in range(200):
+                if (state/'host.sock').exists(): break
+                time.sleep(.01)
+            with socket.socket(socket.AF_UNIX) as listener:
+                listener.bind(str(root/'s')); listener.listen(4)
+                first=relay_once(listener, 1)
+                for _ in range(300):
+                    if (root/'drop').exists(): break
+                    time.sleep(.01)
+                first.close()
+                second=relay_once(listener, 2)
+                for _ in range(300):
+                    if (root/'done').exists(): break
+                    time.sleep(.01)
+                second.close()
+        finally:
+            host.terminate(); host.wait(timeout=5)
+        """, root.path, helper.path, UUID().uuidString.lowercased()]
+        try server.run()
+        defer {
+            if server.isRunning {
+                server.terminate()
+                server.waitUntilExit()
+            }
+            try? FileManager.default.removeItem(at: root)
+        }
+        for _ in 0..<200 where !FileManager.default.fileExists(atPath: socket.path) {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let native = try #require(app.app)
+        var config = Ghostty.SurfaceConfiguration()
+        config.environmentVariables["OMG_RUNTIME_SOCKET"] = socket.path
+        config.environmentVariables["OMG_RUNTIME_PANE_ID"] = UUID().uuidString.lowercased()
+        let view = Ghostty.SurfaceView(native, baseConfig: config)
+        view.runtimeDescriptor = .init(connection: try GitSSHConnection(destination: "host"), revision: "test", policy: .init())
+        var observed: [SessionRuntimeConnectionState] = []
+        let cancellable = view.$runtimeConnectionState.sink { state in
+            if let state { observed.append(state) }
+        }
+        defer { cancellable.cancel() }
+        let controller = TerminalController(app, withSurfaceTree: .init(view: view))
+        defer { controller.window?.delegate = nil; controller.window?.close() }
+        for _ in 0..<250 where view.runtimeConnectionState != .ready {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(view.runtimeConnectionState == .ready)
+        observed.removeAll()
+        try Data().write(to: dropMarker)
+        for _ in 0..<250 where !observed.contains(.ready) {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try? Data().write(to: root.appendingPathComponent("done"))
+        #expect(observed.contains(.reconnecting(attempt: 1, retryInMilliseconds: 100)))
+        #expect(observed.contains(.ready))
+        #expect(!observed.contains { if case .failed = $0 { return true }; return false })
+    }
+
+    @MainActor
+    @Test func relayRespawnMatchesRecoverableStatesOnly() {
+        #expect(TerminalController.shouldRespawnRelay(for: .reconnecting(attempt: 1, retryInMilliseconds: 100)))
+        #expect(TerminalController.shouldRespawnRelay(for: .reconnecting(attempt: 2, retryInMilliseconds: nil)))
+        #expect(TerminalController.shouldRespawnRelay(for: .failed(message: "disconnected", retryable: true)))
+        #expect(!TerminalController.shouldRespawnRelay(for: .failed(message: "closed", retryable: false)))
+        #expect(!TerminalController.shouldRespawnRelay(for: .ready))
+        #expect(!TerminalController.shouldRespawnRelay(for: .connecting(attempt: 0)))
+        #expect(!TerminalController.shouldRespawnRelay(for: .attention(attempt: 1, message: "auth")))
+        #expect(!TerminalController.shouldRespawnRelay(for: .exited(exitCode: 0)))
     }
 
     @MainActor

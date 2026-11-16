@@ -84,8 +84,8 @@ struct GitSSHConnection: Hashable, Codable, Sendable {
 
     func arguments(controlSocket: String?) -> [String] {
         // These options precede user config/replay options: OpenSSH uses the first value.
-        ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-         "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2",
+        ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+         "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
          "-o", "ClearAllForwardings=yes", "-o", "PermitLocalCommand=no", "-o", "SessionType=default",
          "-o", "RemoteCommand=none", "-o", "RequestTTY=no", "-o", "StdinNull=no",
          "-o", controlSocket == nil ? "ControlMaster=no" : "ControlMaster=auto",

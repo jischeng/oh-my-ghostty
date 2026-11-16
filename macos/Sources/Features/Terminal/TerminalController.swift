@@ -1080,6 +1080,17 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
     }
 
+    static func shouldRespawnRelay(for state: SessionRuntimeConnectionState) -> Bool {
+        switch state {
+        case .reconnecting:
+            return true
+        case .failed(_, let retryable):
+            return retryable
+        case .connecting, .attention, .ready, .exited:
+            return false
+        }
+    }
+
     private func processContextSignal(
         _ signal: Ghostty.ContextSignal,
         for surface: Ghostty.SurfaceView
@@ -1105,11 +1116,15 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         if signal.id == "omg-runtime-state", let runtime = surface.runtimeDescriptor {
             guard let state = SessionRuntimeConnectionState.decode(signal.metadata) else { return }
             surface.runtimeConnectionState = state
-            if state == .ready, !OMGApplicationEnvironment.isRunningTests {
-                _ = SessionRuntimeHistoryStore.seedRestoredWorkingDirectoryIfNeeded(
-                    on: surface,
-                    descriptor: runtime
-                )
+            if !OMGApplicationEnvironment.isRunningTests {
+                if state == .ready {
+                    _ = SessionRuntimeHistoryStore.seedRestoredWorkingDirectoryIfNeeded(
+                        on: surface,
+                        descriptor: runtime
+                    )
+                } else if Self.shouldRespawnRelay(for: state) {
+                    _ = try? SessionRuntimeConnections.shared.prepareBatch(runtime)
+                }
             }
             var context = paneSessionContexts[surface.id] ?? .init(
                 workingDirectory: surface.pwd,

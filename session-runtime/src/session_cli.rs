@@ -741,6 +741,41 @@ fn home() -> io::Result<PathBuf> {
         .filter(|p| p.is_absolute())
         .ok_or_else(|| io::Error::other("HOME must be an absolute directory"))
 }
+fn ssh_transport_arguments(ssh: &Ssh) -> Vec<String> {
+    let mut arguments = [
+        "-T",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=15",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "-o",
+        "ClearAllForwardings=yes",
+        "-o",
+        "PermitLocalCommand=no",
+        "-o",
+        "SessionType=default",
+        "-o",
+        "RemoteCommand=none",
+        "-o",
+        "RequestTTY=no",
+        "-o",
+        "StdinNull=no",
+        "-o",
+        "ControlMaster=no",
+        "-o",
+        "ControlPersist=no",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    arguments.extend(ssh.options.clone());
+    arguments.extend(["--".into(), ssh.destination.clone()]);
+    arguments
+}
+
 impl Descriptor {
     fn name(&self) -> String {
         self.connection
@@ -779,37 +814,7 @@ impl Descriptor {
             {
                 return Err(io::Error::other("Invalid saved SSH endpoint"));
             }
-            let mut arguments = [
-                "-T",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=10",
-                "-o",
-                "ServerAliveInterval=5",
-                "-o",
-                "ServerAliveCountMax=2",
-                "-o",
-                "ClearAllForwardings=yes",
-                "-o",
-                "PermitLocalCommand=no",
-                "-o",
-                "SessionType=default",
-                "-o",
-                "RemoteCommand=none",
-                "-o",
-                "RequestTTY=no",
-                "-o",
-                "StdinNull=no",
-                "-o",
-                "ControlMaster=no",
-                "-o",
-                "ControlPersist=no",
-            ]
-            .map(str::to_owned)
-            .to_vec();
-            arguments.extend(ssh.options.clone());
-            arguments.extend(["--".into(), ssh.destination.clone()]);
+            let arguments = ssh_transport_arguments(ssh);
             let connection = deploy::Connection {
                 auto_install: false,
                 transport: deploy::TransportKind::Ssh,
@@ -1168,4 +1173,24 @@ pub fn run(arguments: &[String]) -> io::Result<u8> {
         }
     }
     Ok(if inventory.errors.is_empty() { 0 } else { 1 })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ssh_transport_arguments, Ssh};
+
+    #[test]
+    fn ssh_transport_arguments_match_heartbeat_tolerance() {
+        let ssh = Ssh {
+            destination: "devbox".into(),
+            options: vec!["-p".into(), "2222".into()],
+            workspace_id: "ssh:devbox".into(),
+            executable_path: "/usr/bin/ssh".into(),
+            local_working_directory: "/tmp".into(),
+        };
+        let args = ssh_transport_arguments(&ssh);
+        assert!(args.contains(&"ConnectTimeout=15".to_string()));
+        assert!(args.contains(&"ServerAliveInterval=15".to_string()));
+        assert!(args.contains(&"ServerAliveCountMax=3".to_string()));
+    }
 }

@@ -657,6 +657,7 @@ fn reader(self: *Self, io: *HostIO) void {
     var attached = false;
     var connected_once = false;
     var retry_delay_us: u32 = 100_000;
+    var reconnect_attempt: u32 = 1;
     while (self.waitForAttachment()) {
         const epoch = self.attachment_epoch.load(.acquire);
         self.openSocket() catch {
@@ -673,15 +674,22 @@ fn reader(self: *Self, io: *HostIO) void {
             if (err == error.SessionPaused) continue;
             if (connected_once) {
                 retry_delay_us = 100_000;
+                reconnect_attempt = 1;
                 connected_once = false;
             }
             self.updatePasswordInputForEpoch(io, false, epoch);
             std.log.warn("OMG session disconnected: {s}", .{@errorName(err)});
-            const recoverable = err == error.Disconnected or err == error.ConnectFailed or err == error.OutputGap;
-            self.publishFailure(io, if (recoverable)
-                "The session connection ended. Retry to reconnect to the existing session."
-            else
-                "The terminal protocol could not be restored. The session process is preserved; use a compatible app.", recoverable) catch {};
+            const action = disconnectActionForError(err, retry_delay_us);
+            const recoverable = switch (action) {
+                .reconnecting => |retry_in_ms| blk: {
+                    self.publishReconnecting(io, reconnect_attempt, retry_in_ms) catch {};
+                    break :blk true;
+                },
+                .failed => |failure| blk: {
+                    self.publishFailure(io, failure.message, failure.retryable) catch {};
+                    break :blk failure.retryable;
+                },
+            };
             // The GUI may restart a failed relay at the same socket path.
             // Keep this Surface and its last frame while waiting for it.
             if (recoverable) {
@@ -691,12 +699,49 @@ fn reader(self: *Self, io: *HostIO) void {
                     .stopped => return,
                 }
                 retry_delay_us = nextReconnectDelay(retry_delay_us);
+                reconnect_attempt +|= 1;
                 continue;
             }
             return;
         };
         return; // A real session exit is not a transport reconnect.
     }
+}
+
+const DisconnectAction = union(enum) {
+    reconnecting: u64,
+    failed: struct {
+        message: []const u8,
+        retryable: bool,
+    },
+};
+
+fn disconnectActionForError(err: anyerror, retry_delay_us: u32) DisconnectAction {
+    return switch (err) {
+        error.Disconnected, error.OutputGap => .{ .reconnecting = retry_delay_us / 1000 },
+        error.ConnectFailed => .{ .failed = .{
+            .message = "The session connection ended. Retry to reconnect to the existing session.",
+            .retryable = true,
+        } },
+        else => .{ .failed = .{
+            .message = "The terminal protocol could not be restored. The session process is preserved; use a compatible app.",
+            .retryable = false,
+        } },
+    };
+}
+
+fn reconnectingMetadata(alloc: std.mem.Allocator, attempt: u32, retry_in_ms: u64) ![]u8 {
+    return std.json.Stringify.valueAlloc(alloc, .{
+        .state = "reconnecting",
+        .attempt = attempt,
+        .retry_in_ms = retry_in_ms,
+    }, .{});
+}
+
+fn publishReconnecting(self: *Self, io: *HostIO, attempt: u32, retry_in_ms: u64) !void {
+    const metadata = try reconnectingMetadata(self.alloc, attempt, retry_in_ms);
+    defer self.alloc.free(metadata);
+    try self.publishState(io, metadata);
 }
 
 fn publishState(self: *Self, io: *HostIO, metadata: []const u8) !void {
@@ -1828,6 +1873,34 @@ test "applyResizeFrame ignores stale self-echoes while active writer and skips w
     // Duplicate 'R' with unchanged (cols, rows) does not wake renderer a second time.
     try std.testing.expect(!try backend.applyResizeFrame(&mock_io, &remote_resize));
     try std.testing.expectEqual(@as(usize, 1), mock_io.renderer_wakeup.count);
+}
+
+test "mid-session disconnect publishes reconnecting state while ConnectFailed and protocol errors publish failure" {
+    const alloc = std.testing.allocator;
+
+    const disconnected = disconnectActionForError(error.Disconnected, 100_000);
+    try std.testing.expectEqual(DisconnectAction{ .reconnecting = 100 }, disconnected);
+
+    const gap = disconnectActionForError(error.OutputGap, 400_000);
+    try std.testing.expectEqual(DisconnectAction{ .reconnecting = 400 }, gap);
+
+    const connect_failed = disconnectActionForError(error.ConnectFailed, 100_000);
+    try std.testing.expectEqualStrings(
+        "The session connection ended. Retry to reconnect to the existing session.",
+        connect_failed.failed.message,
+    );
+    try std.testing.expect(connect_failed.failed.retryable);
+
+    const protocol_err = disconnectActionForError(error.UnsupportedProtocol, 100_000);
+    try std.testing.expectEqualStrings(
+        "The terminal protocol could not be restored. The session process is preserved; use a compatible app.",
+        protocol_err.failed.message,
+    );
+    try std.testing.expect(!protocol_err.failed.retryable);
+
+    const json = try reconnectingMetadata(alloc, 1, 100);
+    defer alloc.free(json);
+    try std.testing.expectEqualStrings("{\"state\":\"reconnecting\",\"attempt\":1,\"retry_in_ms\":100}", json);
 }
 
 test {

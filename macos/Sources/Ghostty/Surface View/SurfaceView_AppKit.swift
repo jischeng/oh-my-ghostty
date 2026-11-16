@@ -67,6 +67,9 @@ extension Ghostty {
             guard runtimeDescriptor != nil,
                   runtimeAttachmentSuspended,
                   let surface else { return }
+            if let descriptor = runtimeDescriptor, !OMGApplicationEnvironment.isRunningTests {
+                _ = try? SessionRuntimeConnections.shared.prepareBatch(descriptor)
+            }
             guard ghostty_surface_set_session_attached(surface, true) else {
                 let message = SettingsStrings(language: OhMyGhosttySettings.shared.language).t(
                     "This session was explicitly closed and cannot be reopened.",

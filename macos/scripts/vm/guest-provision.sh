@@ -21,7 +21,7 @@ printf '%s\n' "$requirement" | csreq -r- -b /tmp/omg-provision.csreq
 app_csreq="$(xxd -p /tmp/omg-provision.csreq | tr -d '\n')"
 rm -f /tmp/omg-provision.csreq
 
-sql() { sudo sqlite3 "$db" "$1"; }
+sql() { sudo sqlite3 -cmd ".timeout 5000" "$db" "$1"; }
 
 grant() {
     local service="$1" client="$2" client_type="$3" csreq="$4" indirect="$5"

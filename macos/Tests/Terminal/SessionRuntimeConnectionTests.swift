@@ -316,9 +316,8 @@ struct SessionRuntimeConnectionTests {
         let python = try #require(LocalPythonInterpreter.cached())
         server.executableURL = URL(fileURLWithPath: python.executablePath)
         server.arguments = ["-c", """
-        import json,os,pathlib,signal,socket,struct,subprocess,sys,time,uuid
+        import json,os,pathlib,signal,socket,struct,subprocess,sys,time
         root=pathlib.Path(sys.argv[1]); state=root/'host'; state.mkdir(mode=0o700)
-        pane_id=sys.argv[3]
         host=subprocess.Popen([sys.argv[2],'host',str(state),'--','/bin/sleep','30'])
         def stop(*args): raise SystemExit()
         signal.signal(signal.SIGTERM,stop)
@@ -335,15 +334,16 @@ struct SessionRuntimeConnectionTests {
             return kind,seq,exact(s,size)
         def relay_once(listener, gen):
             client,_=listener.accept(); client.settimeout(5)
-            frame(client)
+            _,_,handshake=frame(client)
             status=json.dumps(dict(state='connecting',attempt=0)).encode()
             client.sendall(packet(b'T',gen,status))
             with socket.socket(socket.AF_UNIX) as upstream:
                 upstream.settimeout(5)
                 upstream.connect(str(state/'host.sock'))
-                upstream.sendall(packet(b'H',1,pane_id.encode()))
+                upstream.sendall(packet(b'C',1,handshake))
                 while True:
                     kind,_,data=frame(upstream)
+                    if kind==b'E': raise RuntimeError(data.decode('utf-8','replace'))
                     if kind!=b'D': continue
                     inner,_,_=struct.unpack('>cQI',data[:13])
                     if inner in (b'J',b'S'): client.sendall(data)
@@ -368,7 +368,7 @@ struct SessionRuntimeConnectionTests {
                 second.close()
         finally:
             host.terminate(); host.wait(timeout=5)
-        """, root.path, helper.path, UUID().uuidString.lowercased()]
+        """, root.path, helper.path]
         try server.run()
         defer {
             if server.isRunning {
@@ -382,11 +382,21 @@ struct SessionRuntimeConnectionTests {
         }
         let app = try #require(NSApp.delegate as? AppDelegate).ghostty
         let native = try #require(app.app)
+        let paneID = UUID()
+        let descriptor = SessionRuntimeDescriptor(
+            connection: try GitSSHConnection(destination: "host"),
+            revision: "test",
+            policy: .init()
+        )
+        defer { SessionRuntimeHistoryStore.remove(for: descriptor, paneID: paneID) }
         var config = Ghostty.SurfaceConfiguration()
         config.environmentVariables["OMG_RUNTIME_SOCKET"] = socket.path
-        config.environmentVariables["OMG_RUNTIME_PANE_ID"] = UUID().uuidString.lowercased()
-        let view = Ghostty.SurfaceView(native, baseConfig: config)
-        view.runtimeDescriptor = .init(connection: try GitSSHConnection(destination: "host"), revision: "test", policy: .init())
+        config.environmentVariables["OMG_RUNTIME_PANE_ID"] = try descriptor.openRequest(
+            pane: paneID,
+            attachExisting: false
+        )
+        let view = Ghostty.SurfaceView(native, baseConfig: config, uuid: paneID)
+        view.runtimeDescriptor = descriptor
         var observed: [SessionRuntimeConnectionState] = []
         let cancellable = view.$runtimeConnectionState.sink { state in
             if let state { observed.append(state) }

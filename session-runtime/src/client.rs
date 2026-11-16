@@ -1535,7 +1535,9 @@ pub fn list_local(socket: &Path) -> io::Result<Vec<SessionSummary>> {
 
 #[cfg(test)]
 mod error_classification_tests {
-    use super::{attention_required, retry_local, supervise, Connector, RelayTransport};
+    use super::{
+        attention_required, list_local, retry_local, supervise, Connector, RelayTransport,
+    };
     use crate::{lifecycle::Policy, registry::OpenRequest, Frame};
     use std::{
         collections::BTreeMap,
@@ -2590,6 +2592,9 @@ mod error_classification_tests {
                         b'P' => {
                             let _ = Frame::new(b'P', 0, caps).send(&mut server_side);
                         }
+                        b'L' => {
+                            let _ = Frame::new(b'L', 0, b"[]").send(&mut server_side);
+                        }
                         b'x' => {
                             let req: crate::host::ExecOpen =
                                 serde_json::from_slice(&frame.data).unwrap();
@@ -2612,7 +2617,20 @@ mod error_classification_tests {
                                 )
                                 .send(&mut server_side);
                                 let _ = Frame::new(b'Q', frame.seq, &[]).send(&mut server_side);
+                            } else if req.command == "stay-open" {
+                                let _ = Frame::new(
+                                    b'D',
+                                    frame.seq,
+                                    &Frame::new(b'o', 0, b"started").encode(),
+                                )
+                                .send(&mut server_side);
                             } else if req.command == "wait-disconnect" && n == 0 {
+                                let _ = Frame::new(
+                                    b'D',
+                                    frame.seq,
+                                    &Frame::new(b'o', 0, b"started").encode(),
+                                )
+                                .send(&mut server_side);
                                 // Wait for test to trigger sudden remote disconnect.
                                 let _ = trigger_drop_rx.recv_timeout(Duration::from_secs(2));
                                 break;
@@ -2649,6 +2667,16 @@ mod error_classification_tests {
         };
 
         let trigger_drop = drop_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let ready_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match list_local(&socket_path) {
+                Ok(_) => break,
+                Err(_) if Instant::now() < ready_deadline => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(err) => panic!("relay failed to become capability-ready: {err}"),
+            }
+        }
 
         // 1) Large (> 4 MiB) output followed immediately by b'x' must flush completely before close.
         let mut large_peer = connect_peer();
@@ -2684,7 +2712,14 @@ mod error_classification_tests {
         Frame::new(b'x', 0, &cancel_open)
             .send(&mut cancel_peer)
             .unwrap();
-        thread::sleep(Duration::from_millis(30));
+        let started = loop {
+            let f = Frame::read(&mut cancel_peer).unwrap();
+            if f.kind != b'T' {
+                break f;
+            }
+        };
+        assert_eq!(started.kind, b'o');
+        assert_eq!(started.data, b"started");
         drop(cancel_peer);
         let cancelled_stream = quit_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_ne!(cancelled_stream, 0);
@@ -2699,7 +2734,14 @@ mod error_classification_tests {
         Frame::new(b'x', 0, &inflight_open)
             .send(&mut inflight_peer)
             .unwrap();
-        thread::sleep(Duration::from_millis(30));
+        let started = loop {
+            let f = Frame::read(&mut inflight_peer).unwrap();
+            if f.kind != b'T' {
+                break f;
+            }
+        };
+        assert_eq!(started.kind, b'o');
+        assert_eq!(started.data, b"started");
         let _ = trigger_drop.send(());
         let disc_err = loop {
             let f = Frame::read(&mut inflight_peer).unwrap();

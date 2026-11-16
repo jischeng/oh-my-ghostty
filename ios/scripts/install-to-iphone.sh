@@ -690,8 +690,9 @@ PBX
         -target StubApp \
         -configuration Release \
         -destination "id=$DEVICE_UDID" \
-        -derivedDataPath "$stub_dir/derived" \
         -allowProvisioningUpdates \
+        "SYMROOT=$stub_dir/sym" \
+        "OBJROOT=$stub_dir/obj" \
         build
     ) >"$build_log" 2>&1
     local status=$?

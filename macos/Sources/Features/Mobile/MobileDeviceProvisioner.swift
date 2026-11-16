@@ -809,8 +809,9 @@ final class MobileDeviceProvisioner: ObservableObject {
                 "-target", "StubApp",
                 "-configuration", "Release",
                 "-destination", "id=\(deviceUDID)",
-                "-derivedDataPath", stubDir.appendingPathComponent("derived").path,
                 "-allowProvisioningUpdates",
+                "SYMROOT=\(stubDir.appendingPathComponent("sym").path)",
+                "OBJROOT=\(stubDir.appendingPathComponent("obj").path)",
                 "build",
             ]
         )

@@ -120,7 +120,7 @@ if [[ -x "$repo_root/ios/scripts/package-release.sh" ]]; then
     --clobber >/dev/null 2>&1; then
     prev_altstore_arg=(--previous-source "$prev_altstore_dir/altstore-source.json")
   fi
-  "$repo_root/ios/scripts/package-release.sh" "$omg_version" "$artifacts" "${prev_altstore_arg[@]}"
+  "$repo_root/ios/scripts/package-release.sh" "$omg_version" "$artifacts" ${prev_altstore_arg[@]+"${prev_altstore_arg[@]}"}
   rm -rf "$prev_altstore_dir"
   prev_altstore_dir=""
 fi

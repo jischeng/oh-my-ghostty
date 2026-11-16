@@ -11,8 +11,8 @@ use std::{
     },
 };
 pub const MAX_FRAME: usize = 16 * 1024 * 1024 + 13; // envelope includes one inner frame
-pub const MAX_QUEUE: usize = 32 * 1024 * 1024;
-pub const MAX_PROCESS_PEER_BUFFER: usize = 128 * 1024 * 1024;
+pub const MAX_QUEUE: usize = 64 * 1024 * 1024;
+pub const MAX_PROCESS_PEER_BUFFER: usize = 256 * 1024 * 1024;
 pub const DEFAULT_SCROLLBACK_MAX_BYTES: usize = 4 * 1024 * 1024;
 pub const SNAPSHOT: u8 = b'S';
 pub const OUTPUT: u8 = b'O';
@@ -279,9 +279,14 @@ pub fn valid_revision(value: &str) -> bool {
 
 pub fn canonical_snapshot_revision(raw: &str) -> &str {
     match raw.trim() {
-        "9c4d662347abb5857b04" | "28eb8860dee53f323499" | "fa3d1581b35d56a5313b" => {
-            "59c5cc7b4d1fe408faf5"
-        }
+        "c9147626cf9b9ba9a27e"
+        | "30858d155b39136be649"
+        | "78942cc9c20bfea0a90b"
+        | "9c4d662347abb5857b04"
+        | "28eb8860dee53f323499"
+        | "fa3d1581b35d56a5313b"
+        | "34029d65b7accbcca31c"
+        | "bea238dc09e4f1e07d09" => "59c5cc7b4d1fe408faf5",
         trimmed => trimmed,
     }
 }
@@ -543,6 +548,10 @@ impl Peer {
         self.queued = front.len().saturating_sub(self.offset);
         self.queue.push_back(front);
     }
+    pub fn queued_bytes(&self) -> usize {
+        self.queued
+    }
+
     pub fn wants_write(&self) -> bool {
         self.queued > 0
             && !(self.ack.is_some()
@@ -568,7 +577,7 @@ impl Peer {
 
     pub fn flush(&mut self) -> io::Result<()> {
         // Bound work per peer, preserving fairness for PTY draining.
-        let mut budget = 256 * 1024;
+        let mut budget = 4 * 1024 * 1024;
         while let Some(front) = self.queue.front() {
             if budget == 0 {
                 break;
@@ -764,8 +773,9 @@ mod tests {
         peer.ack = None;
         peer.flush().unwrap();
         assert_eq!(Frame::read(&mut remote).unwrap().data, b"x");
+        assert_eq!(peer.queued_bytes(), 0);
         let chunk = vec![0; 65536];
-        for _ in 0..1024 {
+        for _ in 0..2048 {
             peer.push(Frame::new(OUTPUT, 0, &chunk));
             if peer.dead {
                 break;
@@ -773,6 +783,29 @@ mod tests {
         }
         assert!(peer.dead);
         assert!(peer.queued <= MAX_QUEUE);
+    }
+
+    #[test]
+    fn canonical_snapshot_revision_maps_all_legacy_prefixes() {
+        for legacy in [
+            "c9147626cf9b9ba9a27e",
+            "30858d155b39136be649",
+            "78942cc9c20bfea0a90b",
+            "9c4d662347abb5857b04",
+            "28eb8860dee53f323499",
+            "fa3d1581b35d56a5313b",
+            "34029d65b7accbcca31c",
+            "bea238dc09e4f1e07d09",
+        ] {
+            assert_eq!(
+                canonical_snapshot_revision(&format!(" {legacy}\n")),
+                "59c5cc7b4d1fe408faf5"
+            );
+        }
+        assert_eq!(
+            canonical_snapshot_revision("deadbeefdeadbeef0000"),
+            "deadbeefdeadbeef0000"
+        );
     }
 
     #[test]

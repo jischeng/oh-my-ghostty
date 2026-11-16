@@ -1197,8 +1197,9 @@ final class SessionRuntimeBackgroundStore: ObservableObject {
             descriptors.append(local)
         }
         for endpoint in SessionRuntimeCatalog.shared.endpoints where endpoint.descriptor.isLocal {
-            if seenIdentities.insert(endpoint.descriptor.identity).inserted {
-                descriptors.append(endpoint.descriptor)
+            let normalized = SessionRuntimeConnections.normalizedForRestore(endpoint.descriptor)
+            if seenIdentities.insert(normalized.identity).inserted {
+                descriptors.append(normalized)
             }
         }
         for candidate in SessionRuntimeCatalog.compatibleLocalDescriptors(policy: SessionRuntimePolicy())
@@ -1228,40 +1229,23 @@ final class SessionRuntimeBackgroundStore: ObservableObject {
         }
         updateWatchedDirectories(watchPaths)
         let homePath = FileManager.default.homeDirectoryForCurrentUser.path
-        let currentRevision = (try? String(
-            contentsOf: SessionRuntimeConnections.resources.appendingPathComponent("revision"),
-            encoding: .utf8
-        ))?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let currentSnapshotRevision = (try? String(
-            contentsOf: SessionRuntimeConnections.resources.appendingPathComponent("snapshot-revision"),
-            encoding: .utf8
-        )).map(SessionRuntimeConnections.canonicalSnapshotRevision)
         refreshTask?.cancel()
-        refreshTask = Task.detached(priority: .utility) { [descriptors, supportURL, homePath, currentRevision, currentSnapshotRevision] in
+        refreshTask = Task.detached(priority: .utility) { [descriptors, supportURL, homePath] in
             let mobileFile = supportURL.appendingPathComponent("mobile-sessions.json")
             let mobileMap: [String: MobileSessionMeta] = (try? Data(contentsOf: mobileFile))
                 .flatMap { try? JSONDecoder().decode([String: MobileSessionMeta].self, from: $0) } ?? [:]
             var discovered: [(SessionRuntimeCatalogSession, SessionRuntimeDescriptor, MobileSessionMeta?)] = []
             var seenSessions = Set<String>()
+            var seenRoots = Set<URL>()
             let decoder = JSONDecoder()
 
             for descriptor in descriptors {
                 if Task.isCancelled { return }
-                if let currentSnapshotRevision, descriptor.revision != currentRevision {
-                    let snapURL = supportURL
-                        .appendingPathComponent("session-runtime/versions")
-                        .appendingPathComponent(descriptor.revision)
-                        .appendingPathComponent("snapshot-revision")
-                    let cachedSnap = (try? String(contentsOf: snapURL, encoding: .utf8))
-                        .map(SessionRuntimeConnections.canonicalSnapshotRevision)
-                    if cachedSnap != currentSnapshotRevision {
-                        continue
-                    }
-                }
                 let root = SessionRuntimeConnections.localStateDirectory(
                     for: descriptor,
                     applicationSupportRoot: supportURL
                 )
+                guard seenRoots.insert(root).inserted else { continue }
                 let sessionsDir = root.appendingPathComponent("sessions", isDirectory: true)
                 guard let entries = try? FileManager.default.contentsOfDirectory(
                     at: sessionsDir,

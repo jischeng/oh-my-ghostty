@@ -65,9 +65,12 @@ snapshot is reported as an error rather than restored partially.
 
 Closing a window or quitting OMG detaches sessions. Closing a tab/pane, or
 confirming End in the Session Library, durably ends the affected session.
-`restoreSessions` reconnects saved runtime UUIDs; `restoreTabs` opens fresh local
-processes in the saved layout, and `newTerminal` skips the old layout entirely.
-Inventory lookup is read-only and does not reset detached-session expiry.
+`restoreSessions` reconnects saved runtime UUIDs (preserving local `EndReason::Lost`
+snapshots when valid and cleanly recreating missing/ended shells via
+`recreate-if-gone/1`, while keeping Session Library reattach strict); `restoreTabs`
+opens fresh local processes in the saved layout, and `newTerminal` skips the old
+layout entirely. Inventory lookup is read-only and does not reset detached-session
+expiry.
 
 ## Host setup preferences
 
@@ -104,7 +107,8 @@ local and SSH sessions pinned to older revisions. Dev never silently includes
 release sessions. `--app-support PATH` explicitly selects a different catalogue
 for tooling and disposable fixtures. An absent catalogue returns an empty list
 without creating it. Inventory reuses or restarts the existing pinned broker
-without creating a terminal session; it never deploys remote artifacts.
+(falling back to the active binary if a pinned local helper is missing) without
+creating a terminal session; it never deploys remote artifacts.
 
 JSON output contains `sessions`, `errors` and `closed`. Exit 1 can accompany a
 partial inventory; callers must inspect errors and must not treat it as an empty

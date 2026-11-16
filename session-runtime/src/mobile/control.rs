@@ -733,6 +733,7 @@ fn read_session_activity(
             policy: Default::default(),
             cwd: None,
             inline_viewer: false,
+            recreate_if_gone: false,
             launch: None,
             resurrect_launch: None,
         };

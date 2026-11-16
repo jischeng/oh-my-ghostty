@@ -70,18 +70,37 @@ final class SessionRuntimeHandoff {
             .flatMap { try? JSONDecoder().decode(SessionRuntimeDescriptor.self, from: Data($0.utf8)) }
         if let descriptor {
             guard descriptor.isLocal else { return }
+            let resourceBundleRoot: URL? = resources.lastPathComponent == "session-runtime"
+                ? resources.deletingLastPathComponent()
+                : nil
+            let effectiveDescriptor = SessionRuntimeConnections.normalizedForRestore(
+                descriptor,
+                applicationSupportRoot: applicationSupportRoot,
+                resources: resourceBundleRoot
+            )
             do {
                 let bridge = try SessionRuntimeBridgeStorage.directory(
-                    for: descriptor,
+                    for: effectiveDescriptor,
                     pane: pane,
                     purpose: "handoff",
                     applicationSupportRoot: applicationSupportRoot,
                     homeDirectory: homeDirectory
                 )
-                let helper = try SessionRuntimeConnections.shared.cachedHelper(
-                    for: descriptor,
+                let bundledHelper = resources.appendingPathComponent("omgd")
+                let helper: URL
+                if let cached = try? SessionRuntimeConnections.shared.cachedHelper(
+                    for: effectiveDescriptor,
                     applicationSupportRoot: applicationSupportRoot
-                )
+                ) {
+                    helper = cached
+                } else if FileManager.default.isExecutableFile(atPath: bundledHelper.path) {
+                    helper = bundledHelper
+                } else {
+                    helper = try SessionRuntimeConnections.shared.cachedHelper(
+                        for: effectiveDescriptor,
+                        applicationSupportRoot: applicationSupportRoot
+                    )
+                }
                 let token = try SessionRuntimeBridgeStorage.capabilityToken(in: bridge)
                 config.environmentVariables["OMG_SSH_HANDOFF_HELPER"] = helper.path
                 config.environmentVariables["OMG_SSH_HANDOFF_DIRECTORY"] = bridge.path

@@ -341,12 +341,16 @@ if [ ! -d "$version" ]; then mv "$staging" "$version"; fi
             revision = quote(&manifest.revision)
         );
         // GUI helpers may inherit a short-lived agent/Finder TMPDIR. Keep the
-        // upload archive in the private runtime cache, which outlives the caller.
-        let cache = config
-            .bundle
-            .parent()
-            .ok_or_else(|| io::Error::other("runtime cache has no parent"))?;
-        let archive = cache.join(format!(".upload-{nonce}.tar"));
+        // upload archive in the private runtime cache when writable, falling
+        // back to a private temp file when running from a read-only bundle.
+        let archive = create_upload_archive_path(config.bundle.parent(), &nonce)?;
+        struct ArchiveGuard(PathBuf);
+        impl Drop for ArchiveGuard {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.0);
+            }
+        }
+        let _archive_guard = ArchiveGuard(archive.clone());
         let mut tar = Command::new("/usr/bin/tar");
         tar.env("COPYFILE_DISABLE", "1")
             .arg("--no-xattrs")
@@ -360,12 +364,14 @@ if [ ! -d "$version" ]; then mv "$staging" "$version"; fi
         if !tar.status()?.success() {
             return Err(io::Error::other("cannot package runtime"));
         }
-        let result = execute(
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&archive, fs::Permissions::from_mode(0o600));
+        }
+        execute(
             ssh(config, &script, interactive)?,
             fs::File::open(&archive)?,
-        );
-        let _ = fs::remove_file(archive);
-        result?;
+        )?;
     }
     if let Some(hooks) = &config.hooks {
         if hooks.len() > 1024 * 1024 {
@@ -415,6 +421,28 @@ printf '\nOMG_RUNTIME_READY\n'
     }
     Ok((format!("{version}/omgd"), state))
 }
+fn create_upload_archive_path(bundle_parent: Option<&Path>, nonce: &str) -> io::Result<PathBuf> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let name = format!(".upload-{nonce}.tar");
+    let try_create = |dir: &Path| -> io::Result<PathBuf> {
+        let path = dir.join(&name);
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        Ok(path)
+    };
+    if let Some(parent) = bundle_parent {
+        if let Ok(path) = try_create(parent) {
+            return Ok(path);
+        }
+    }
+    try_create(&std::env::temp_dir())
+}
+
 pub fn command(
     config: &Connection,
     binary: &str,
@@ -648,5 +676,26 @@ mod fast_tests {
             .and_then(|(_, value)| value);
         assert_eq!(automatic_policy, Some(std::ffi::OsStr::new("never")));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn upload_archive_falls_back_to_private_temp_dir_when_bundle_parent_is_unwritable() {
+        let nonce = crate::record::nonce().unwrap();
+        let root = std::env::temp_dir().join(format!("omg-deploy-ro-{}", &nonce[..8]));
+        let readonly_parent = root.join("readonly");
+        fs::create_dir_all(&readonly_parent).unwrap();
+        fs::set_permissions(&readonly_parent, fs::Permissions::from_mode(0o500)).unwrap();
+
+        let archive = create_upload_archive_path(Some(&readonly_parent), &nonce).unwrap();
+        if unsafe { libc::geteuid() } != 0 {
+            assert_eq!(archive.parent(), Some(std::env::temp_dir().as_path()));
+        }
+        assert_eq!(
+            fs::symlink_metadata(&archive).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let _ = fs::remove_file(&archive);
+        let _ = fs::set_permissions(&readonly_parent, fs::Permissions::from_mode(0o700));
+        let _ = fs::remove_dir_all(&root);
     }
 }

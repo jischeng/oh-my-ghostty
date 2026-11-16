@@ -170,44 +170,33 @@ final class SessionRuntimeCatalog: ObservableObject {
         policy: SessionRuntimePolicy,
         applicationSupportRoot: URL? = nil
     ) -> [SessionRuntimeDescriptor] {
-        let supportURL = applicationSupportRoot ?? OMGApplicationEnvironment.applicationSupportURL()
         let currentRevision = (try? String(
             contentsOf: SessionRuntimeConnections.resources.appendingPathComponent("revision"),
             encoding: .utf8
         ))?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let currentSnapshot = (try? String(
-            contentsOf: SessionRuntimeConnections.resources.appendingPathComponent("snapshot-revision"),
-            encoding: .utf8
-        )).map(SessionRuntimeConnections.canonicalSnapshotRevision)
-
-        var result: [SessionRuntimeDescriptor] = []
-        var seen = Set<String>()
         if let currentRevision, !currentRevision.isEmpty {
-            seen.insert(currentRevision)
-            result.append(SessionRuntimeDescriptor(connection: nil, revision: currentRevision, policy: policy))
+            return [SessionRuntimeDescriptor(connection: nil, revision: currentRevision, policy: policy)]
         }
+
+        let supportURL = applicationSupportRoot ?? OMGApplicationEnvironment.applicationSupportURL()
         let versionsDir = supportURL.appendingPathComponent("session-runtime/versions", isDirectory: true)
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: versionsDir,
             includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
         ) else {
-            return result
+            return []
         }
+        // All local revisions share one per-channel localStateDirectory.
         for entry in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
             let rev = entry.lastPathComponent
             guard !rev.isEmpty, rev.utf8.count <= 128,
-                  rev.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || "._-".contains($0)) }),
-                  seen.insert(rev).inserted else { continue }
-            if let currentSnapshot {
-                let snapURL = entry.appendingPathComponent("snapshot-revision")
-                let cachedSnap = (try? String(contentsOf: snapURL, encoding: .utf8))
-                    .map(SessionRuntimeConnections.canonicalSnapshotRevision)
-                guard cachedSnap == currentSnapshot else { continue }
+                  rev.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || "._-".contains($0)) }) else {
+                continue
             }
-            result.append(SessionRuntimeDescriptor(connection: nil, revision: rev, policy: policy))
+            return [SessionRuntimeDescriptor(connection: nil, revision: rev, policy: policy)]
         }
-        return result
+        return []
     }
 
     nonisolated static func resolveLocalRevisionDescriptor(
@@ -217,20 +206,10 @@ final class SessionRuntimeCatalog: ObservableObject {
     ) -> SessionRuntimeDescriptor {
         guard fallback.isLocal else { return fallback }
         let supportURL = applicationSupportRoot ?? OMGApplicationEnvironment.applicationSupportURL()
-        let fileName = "\(paneID.uuidString.lowercased()).json"
-        for candidate in [fallback] + compatibleLocalDescriptors(policy: fallback.policy, applicationSupportRoot: supportURL) {
-            let root = SessionRuntimeConnections.localStateDirectory(
-                for: candidate,
-                applicationSupportRoot: supportURL
-            )
-            let recordURL = root.appendingPathComponent("sessions/\(fileName)")
-            if FileManager.default.fileExists(atPath: recordURL.path) {
-                var resolved = fallback
-                resolved.revision = candidate.revision
-                return resolved
-            }
-        }
-        return fallback
+        return SessionRuntimeConnections.normalizedForRestore(
+            fallback,
+            applicationSupportRoot: supportURL
+        )
     }
 
     private static func normalized(_ values: [SessionRuntimeCatalogEndpoint]) -> [SessionRuntimeCatalogEndpoint] {
@@ -475,38 +454,9 @@ final class SessionRuntimeLibraryModel: ObservableObject {
         _ descriptor: SessionRuntimeDescriptor
     ) async throws -> [SessionRuntimeCatalogSession] {
         if descriptor.isLocal {
-            let candidates = SessionRuntimeCatalog.compatibleLocalDescriptors(policy: descriptor.policy)
-            let supportURL = OMGApplicationEnvironment.applicationSupportURL()
-            var merged: [SessionRuntimeCatalogSession] = []
-            var seen = Set<String>()
-            var firstError: Error?
-            var anyQueried = false
-            for (index, candidate) in candidates.enumerated() {
-                if index > 0 {
-                    let root = SessionRuntimeConnections.localStateDirectory(
-                        for: candidate,
-                        applicationSupportRoot: supportURL
-                    )
-                    let sessionsDir = root.appendingPathComponent("sessions", isDirectory: true)
-                    guard FileManager.default.fileExists(atPath: sessionsDir.path) else { continue }
-                }
-                do {
-                    let batch = try await loadSingleDescriptorSessions(candidate)
-                    anyQueried = true
-                    for item in batch {
-                        let key = "\(item.id.lowercased()):\(item.generation)"
-                        if seen.insert(key).inserted {
-                            merged.append(item)
-                        }
-                    }
-                } catch {
-                    if firstError == nil { firstError = error }
-                }
-            }
-            if !anyQueried, let firstError {
-                throw firstError
-            }
-            return merged
+            let candidate = SessionRuntimeCatalog.compatibleLocalDescriptors(policy: descriptor.policy).first
+                ?? SessionRuntimeConnections.normalizedForRestore(descriptor)
+            return try await loadSingleDescriptorSessions(candidate)
         }
         return try await loadSingleDescriptorSessions(descriptor)
     }

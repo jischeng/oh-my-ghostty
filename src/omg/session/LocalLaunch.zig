@@ -58,6 +58,7 @@ const OpenRequest = struct {
     policy: std.json.Value,
     create: bool,
     cwd: ?[]const u8 = null,
+    recreate_if_gone: ?bool = null,
 };
 
 pub fn createsSession(alloc: std.mem.Allocator, request: ?[]const u8) bool {
@@ -169,6 +170,7 @@ pub fn prepareResurrect(
         .policy = parsed.value.policy,
         .create = false,
         .cwd = parsed.value.cwd,
+        .recreate_if_gone = if (parsed.value.recreate_if_gone orelse false) true else null,
         .resurrect_launch = .{
             .argv = argv,
             .env = Environment{ .map = environment },
@@ -369,4 +371,46 @@ test "local session resurrect prepares resurrect_launch without input_base64 and
     defer alloc.free(attached);
     try std.testing.expect(std.mem.indexOf(u8, attached, "resurrect_launch") == null);
     try std.testing.expect(!createsSession(alloc, attached));
+}
+
+test "local session launch preserves recreate_if_gone in prepareResurrect and omits it in attachOnly" {
+    const alloc = std.testing.allocator;
+    var env = std.process.Environ.Map.init(alloc);
+    defer env.deinit();
+    try env.put("TERM", "xterm-ghostty");
+
+    const with_recreate = try prepareResurrect(
+        alloc,
+        "{\"id\":\"pane\",\"policy\":{},\"create\":false,\"cwd\":\"/tmp/saved\",\"recreate_if_gone\":true}",
+        &.{ "/bin/zsh", "-l" },
+        &env,
+        "/tmp/saved",
+        .{ .columns = 80, .rows = 24 },
+        .{ .width = 640, .height = 384 },
+        null,
+        null,
+    );
+    defer alloc.free(with_recreate);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, with_recreate, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("recreate_if_gone").?.bool);
+    try std.testing.expectEqualStrings("/tmp/saved", parsed.value.object.get("cwd").?.string);
+
+    const attached = try attachOnly(alloc, with_recreate);
+    defer alloc.free(attached);
+    try std.testing.expect(std.mem.indexOf(u8, attached, "recreate_if_gone") == null);
+
+    const without_recreate = try prepareResurrect(
+        alloc,
+        "{\"id\":\"pane\",\"policy\":{},\"create\":false,\"recreate_if_gone\":false}",
+        &.{ "/bin/zsh", "-l" },
+        &env,
+        "/tmp/saved",
+        .{ .columns = 80, .rows = 24 },
+        .{ .width = 640, .height = 384 },
+        null,
+        null,
+    );
+    defer alloc.free(without_recreate);
+    try std.testing.expect(std.mem.indexOf(u8, without_recreate, "recreate_if_gone") == null);
 }

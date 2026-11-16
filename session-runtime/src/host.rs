@@ -12,7 +12,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-const MAX_STREAMS: usize = 64;
+const MAX_STREAMS: usize = 512;
 const MAX_LIST_ENTRIES: usize = 2048;
 const MAX_LIST_BYTES: usize = 8 * 1024 * 1024;
 struct HostLock(fs::File);
@@ -168,7 +168,7 @@ fn serve_mode(directory: &Path, command: Vec<String>, local: bool) -> io::Result
             }
             Err(e) => return Err(e),
         };
-        if active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 8 {
+        if active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 64 {
             active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             continue;
         }
@@ -193,6 +193,14 @@ fn serve_mode(directory: &Path, command: Vec<String>, local: bool) -> io::Result
     }
 }
 fn host_connection(socket: UnixStream, registry: Arc<Mutex<Registry>>) -> io::Result<()> {
+    host_connection_with_limit(socket, registry, MAX_STREAMS)
+}
+
+fn host_connection_with_limit(
+    socket: UnixStream,
+    registry: Arc<Mutex<Registry>>,
+    max_streams: usize,
+) -> io::Result<()> {
     let mut transport = Peer::new(socket, 0)?;
     let mut streams: std::collections::HashMap<u64, Peer> = Default::default();
     let mut last_heartbeat = Instant::now();
@@ -201,17 +209,17 @@ fn host_connection(socket: UnixStream, registry: Arc<Mutex<Registry>>) -> io::Re
             return Err(io::Error::other("host connection lease expired"));
         }
         for f in transport.read()? {
+            last_heartbeat = Instant::now();
             match f.kind {
                 b'P' if f.seq == 0 => {
-                    last_heartbeat = Instant::now();
                     let is_local = registry
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
                         .is_local();
                     let capabilities = if is_local {
-                        b"durable-close/1,strict-open/1,local-launch/1,local-resurrect/1,inline-viewer/1,agent-state/1,holder-presentation/1".as_slice()
+                        b"durable-close/1,strict-open/1,local-launch/1,local-resurrect/1,inline-viewer/1,agent-state/1,holder-presentation/1,recreate-if-gone/1".as_slice()
                     } else {
-                        b"durable-close/1,strict-open/1,inline-viewer/1,agent-state/1".as_slice()
+                        b"durable-close/1,strict-open/1,inline-viewer/1,agent-state/1,recreate-if-gone/1".as_slice()
                     };
                     transport.push(Frame::new(b'P', 0, capabilities));
                 }
@@ -251,10 +259,14 @@ fn host_connection(socket: UnixStream, registry: Arc<Mutex<Registry>>) -> io::Re
                 b'L' if f.seq == 0 => {
                     transport.push(Frame::new(b'E', 0, b"invalid catalogue request"));
                 }
-                b'U' if f.seq != 0
-                    && !streams.contains_key(&f.seq)
-                    && streams.len() < MAX_STREAMS =>
+                b'U' | b'C' | b'H'
+                    if f.seq != 0
+                        && (streams.contains_key(&f.seq) || streams.len() >= max_streams) =>
                 {
+                    transport.push(Frame::new(b'E', f.seq, b"host stream limit reached"));
+                    let _ = transport.flush();
+                }
+                b'U' if f.seq != 0 => {
                     #[derive(serde::Deserialize)]
                     struct Request {
                         id: String,
@@ -272,11 +284,9 @@ fn host_connection(socket: UnixStream, registry: Arc<Mutex<Registry>>) -> io::Re
                         }
                         Err(e) => transport.push(Frame::new(b'E', f.seq, e.to_string().as_bytes())),
                     }
+                    let _ = transport.flush();
                 }
-                b'C' if f.seq != 0
-                    && !streams.contains_key(&f.seq)
-                    && streams.len() < MAX_STREAMS =>
-                {
+                b'C' if f.seq != 0 => {
                     let request: crate::registry::OpenRequest = serde_json::from_slice(&f.data)?;
                     let result = Registry::open_unlocked(&registry, &request);
                     match result {
@@ -285,11 +295,9 @@ fn host_connection(socket: UnixStream, registry: Arc<Mutex<Registry>>) -> io::Re
                         }
                         Err(e) => transport.push(Frame::new(b'E', f.seq, e.to_string().as_bytes())),
                     }
+                    let _ = transport.flush();
                 }
-                b'H' if f.seq != 0
-                    && !streams.contains_key(&f.seq)
-                    && streams.len() < MAX_STREAMS =>
-                {
+                b'H' if f.seq != 0 => {
                     let result = std::str::from_utf8(&f.data)
                         .map_err(io::Error::other)
                         .and_then(|id| Registry::connect_unlocked(&registry, id, None, true));
@@ -299,6 +307,7 @@ fn host_connection(socket: UnixStream, registry: Arc<Mutex<Registry>>) -> io::Re
                         }
                         Err(e) => transport.push(Frame::new(b'E', f.seq, e.to_string().as_bytes())),
                     }
+                    let _ = transport.flush();
                 }
                 b'D' => {
                     if let Some(p) = streams.get_mut(&f.seq) {
@@ -313,13 +322,15 @@ fn host_connection(socket: UnixStream, registry: Arc<Mutex<Registry>>) -> io::Re
             }
         }
         for (&id, p) in &mut streams {
-            match p.read() {
-                Ok(frames) => {
-                    for f in frames {
-                        transport.push(Frame::new(b'D', id, &f.encode()));
+            if transport.queued_bytes() < crate::MAX_QUEUE / 2 {
+                match p.read() {
+                    Ok(frames) => {
+                        for f in frames {
+                            transport.push(Frame::new(b'D', id, &f.encode()));
+                        }
                     }
+                    Err(_) => p.dead = true,
                 }
-                Err(_) => p.dead = true,
             }
             if p.flush().is_err() {
                 p.dead = true;
@@ -333,10 +344,17 @@ fn host_connection(socket: UnixStream, registry: Arc<Mutex<Registry>>) -> io::Re
         if transport.dead {
             return Err(io::Error::other("transport backlog exceeded"));
         }
+        let allow_stream_read = transport.queued_bytes() < crate::MAX_QUEUE / 2;
         let mut descriptors = Vec::with_capacity(streams.len() + 1);
         descriptors.push(transport.poll_fd());
         for p in streams.values() {
-            descriptors.push(p.poll_fd());
+            let mut pfd = p.poll_fd();
+            if !allow_stream_read {
+                pfd.events &= !libc::POLLIN;
+            }
+            if pfd.events != 0 {
+                descriptors.push(pfd);
+            }
         }
         let timeout_ms = deadline_poll_ms(
             Instant::now(),
@@ -462,6 +480,116 @@ mod tests {
         let _ = held_accept.join();
         let _ = h1.join();
         let _ = h2.join();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn host_connection_advertises_recreate_if_gone_and_rejects_stream_limit_without_killing_transport(
+    ) {
+        let nonce = crate::record::nonce().unwrap();
+        let root = std::env::temp_dir().join(format!("omg-host-limit-{}", &nonce[..8]));
+        let remote_sessions = root.join("remote/sessions");
+        let local_sessions = root.join("local/sessions");
+        fs::create_dir_all(&remote_sessions).unwrap();
+        fs::create_dir_all(&local_sessions).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(root.join("remote"), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&remote_sessions, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(root.join("local"), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&local_sessions, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let local_reg = Arc::new(Mutex::new(Registry::new_local(
+            local_sessions,
+            vec!["/bin/sh".into()],
+            Policy::default(),
+        )));
+        let (local_srv, mut local_cli) = UnixStream::pair().unwrap();
+        local_cli
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let local_handle = std::thread::spawn(move || host_connection(local_srv, local_reg));
+        Frame::new(b'P', 0, &[]).send(&mut local_cli).unwrap();
+        let local_caps = Frame::read(&mut local_cli).unwrap();
+        assert_eq!(local_caps.kind, b'P');
+        assert!(String::from_utf8_lossy(&local_caps.data).contains("recreate-if-gone/1"));
+        drop(local_cli);
+        let _ = local_handle.join();
+
+        let remote_reg = Arc::new(Mutex::new(Registry::new(
+            remote_sessions,
+            vec!["/bin/sh".into(), "-i".into()],
+            Policy::default(),
+        )));
+        let (srv, mut cli) = UnixStream::pair().unwrap();
+        cli.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let handle = std::thread::spawn(move || host_connection_with_limit(srv, remote_reg, 1));
+
+        Frame::new(b'P', 0, &[]).send(&mut cli).unwrap();
+        let caps = Frame::read(&mut cli).unwrap();
+        assert_eq!(caps.kind, b'P');
+        assert!(String::from_utf8_lossy(&caps.data).contains("recreate-if-gone/1"));
+
+        let id1 = "11111111-1111-4111-8111-111111111111";
+        let id2 = "22222222-2222-4222-8222-222222222222";
+        Frame::new(b'H', 10, id1.as_bytes()).send(&mut cli).unwrap();
+        loop {
+            let f = Frame::read(&mut cli).unwrap();
+            if f.kind == b'D' && f.seq == 10 {
+                let inner = inner_frame(&f.data).unwrap();
+                if inner.kind == SNAPSHOT {
+                    Frame::new(b'D', 10, &Frame::new(ACK, inner.seq, &[]).encode())
+                        .send(&mut cli)
+                        .unwrap();
+                    break;
+                }
+            }
+        }
+
+        // Duplicate seq 10 must return b'E' without breaking the transport.
+        Frame::new(b'H', 10, id2.as_bytes()).send(&mut cli).unwrap();
+        let dup_err = loop {
+            let f = Frame::read(&mut cli).unwrap();
+            if f.kind == b'E' && f.seq == 10 {
+                break f;
+            }
+        };
+        assert_eq!(dup_err.data, b"host stream limit reached");
+
+        // Reaching max_streams (1) on seq 11 must return b'E' without breaking stream 10.
+        Frame::new(b'H', 11, id2.as_bytes()).send(&mut cli).unwrap();
+        let limit_err = loop {
+            let f = Frame::read(&mut cli).unwrap();
+            if f.kind == b'E' && f.seq == 11 {
+                break f;
+            }
+        };
+        assert_eq!(limit_err.data, b"host stream limit reached");
+
+        // Stream 10 and transport heartbeat remain completely healthy.
+        Frame::new(b'P', 0, &[]).send(&mut cli).unwrap();
+        let pong = loop {
+            let f = Frame::read(&mut cli).unwrap();
+            if f.kind == b'P' {
+                break f;
+            }
+        };
+        assert_eq!(pong.seq, 0);
+
+        for _ in 0..20 {
+            Frame::new(b'K', 12, id1.as_bytes()).send(&mut cli).unwrap();
+            let reply = loop {
+                let f = Frame::read(&mut cli).unwrap();
+                if f.kind == b'D' && f.seq == 12 {
+                    break inner_frame(&f.data).unwrap();
+                }
+            };
+            if reply.kind == b'K' && reply.data == b"closed" {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        drop(cli);
+        let _ = handle.join();
         let _ = fs::remove_dir_all(root);
     }
 }

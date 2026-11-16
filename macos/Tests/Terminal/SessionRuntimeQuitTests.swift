@@ -228,19 +228,28 @@ struct SessionRuntimeQuitTests {
     @Test func unconfirmedFailedLocalCreatePersistsCreateOnRestoreAndUnrecordedLocalPaneSelfHeals() throws {
         let app = try #require(NSApp.delegate as? AppDelegate).ghostty
         let native = try #require(app.app)
-        let unavailableLocal = try descriptor(local: true)
+        let unavailableSSH = try descriptor(local: false)
         var createConfig = Ghostty.SurfaceConfiguration()
-        try unavailableLocal.configure(&createConfig)
+        try unavailableSSH.configure(&createConfig)
         let failedCreateView = Ghostty.SurfaceView(native, baseConfig: createConfig)
         #expect(failedCreateView.runtimeNeedsCreationOnRestore)
         let failedPane = TerminalWorkspaceSessionState.Pane(failedCreateView)
         #expect(failedPane.runtimeCreateOnRestore == true)
 
         var attachConfig = Ghostty.SurfaceConfiguration()
-        try unavailableLocal.configureAttachExisting(&attachConfig)
+        try unavailableSSH.configureAttachExisting(&attachConfig)
         let failedAttachView = Ghostty.SurfaceView(native, baseConfig: attachConfig)
-        #expect(!failedAttachView.runtimeNeedsCreationOnRestore)
-        #expect(TerminalWorkspaceSessionState.Pane(failedAttachView).runtimeCreateOnRestore == nil)
+        #expect(failedAttachView.runtimeNeedsCreationOnRestore)
+        #expect(TerminalWorkspaceSessionState.Pane(failedAttachView).runtimeCreateOnRestore == true)
+
+        let unavailableLocal = try descriptor(local: true)
+        var localCreateConfig = Ghostty.SurfaceConfiguration()
+        try unavailableLocal.configure(&localCreateConfig)
+        let localFallbackView = Ghostty.SurfaceView(native, baseConfig: localCreateConfig)
+        #expect(localFallbackView.surface != nil)
+        #expect(localFallbackView.error == nil)
+        #expect(localFallbackView.runtimeDescriptor == nil)
+        #expect(localFallbackView.runtimeConnectionState == nil)
 
         let tempHome = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let tempSupport = tempHome.appendingPathComponent("Support", isDirectory: true)

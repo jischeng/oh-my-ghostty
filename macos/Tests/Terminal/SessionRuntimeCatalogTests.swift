@@ -359,7 +359,7 @@ struct SessionRuntimeCatalogTests {
         try model.end(lost)
         #expect(queue.requests.count == 1)
         #expect(queue.requests.first?.pane == lost.paneID)
-        #expect(queue.requests.first?.descriptor == localDescriptor)
+        #expect(queue.requests.first?.descriptor == SessionRuntimeConnections.normalizedForRestore(localDescriptor))
     }
 
     private func endpoint(_ destination: String) throws -> SessionRuntimeDescriptor {

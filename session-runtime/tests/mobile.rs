@@ -1357,12 +1357,8 @@ fn idle_exited_broker_paused_session_auto_starts_host_local_and_watermarked_ack_
     ));
     let support = base.join("OMG Dev");
     let rev = env!("CARGO_PKG_VERSION");
-    let key_input = format!("{}\0{rev}", support.display());
-    let key_hex: String = Sha256::digest(key_input.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    let runtime_root = base.join(".omg/run").join(&key_hex[..20]);
+    let key = omg_session_runtime::registry::local_channel_run_dir_key(&support);
+    let runtime_root = base.join(".omg/run").join(&key);
     let sessions_dir = runtime_root.join("sessions");
     fs::create_dir_all(&sessions_dir).unwrap();
     fs::create_dir_all(support.join("session-runtime")).unwrap();

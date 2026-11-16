@@ -94,6 +94,7 @@ struct SessionRuntimeDescriptor: Codable, Equatable, Sendable {
     static let localRuntimeEnvironmentKey = "OMG_RUNTIME_LOCAL"
     static let attachExistingEnvironmentKey = "OMG_RUNTIME_ATTACH_EXISTING"
     static let resurrectWorkingDirectoryEnvironmentKey = "OMG_RUNTIME_RESURRECT_CWD"
+    static let recreateIfGoneEnvironmentKey = "OMG_RUNTIME_RECREATE_IF_GONE"
     /// Nil identifies a local host runtime. Older archives always contain an SSH connection.
     var connection: GitSSHConnection?
     var revision: String
@@ -117,8 +118,16 @@ struct SessionRuntimeDescriptor: Codable, Equatable, Sendable {
     }
 
     var identity: String {
-        let endpoint = connection?.identity ?? "local:\(OMGApplicationEnvironment.applicationSupportURL().path)"
-        return SHA256.hash(data: Data((endpoint + "\0" + revision).utf8))
+        let input: String
+        if let connection {
+            input = connection.identity + "\0" + revision
+        } else {
+            let supportPath = SessionRuntimeConnections.normalizedSupportPath(
+                OMGApplicationEnvironment.applicationSupportURL()
+            )
+            input = "local:\(supportPath)"
+        }
+        return SHA256.hash(data: Data(input.utf8))
             .map { String(format: "%02x", $0) }.joined()
     }
 
@@ -126,6 +135,7 @@ struct SessionRuntimeDescriptor: Codable, Equatable, Sendable {
         config.environmentVariables[Self.environmentKey] = String(data: try JSONEncoder().encode(self), encoding: .utf8)
         config.environmentVariables[Self.localRuntimeEnvironmentKey] = isLocal ? "1" : ""
         config.environmentVariables[Self.attachExistingEnvironmentKey] = ""
+        config.environmentVariables.removeValue(forKey: Self.recreateIfGoneEnvironmentKey)
     }
 
     func configureAttachExisting(_ config: inout Ghostty.SurfaceConfiguration) throws {
@@ -133,10 +143,15 @@ struct SessionRuntimeDescriptor: Codable, Equatable, Sendable {
         config.environmentVariables[Self.attachExistingEnvironmentKey] = "1"
     }
 
-    func configureSavedRestore(_ config: inout Ghostty.SurfaceConfiguration, createRuntime: Bool) throws {
+    func configureSavedRestore(
+        _ config: inout Ghostty.SurfaceConfiguration,
+        createRuntime: Bool,
+        recreateIfGone: Bool = true
+    ) throws {
         if createRuntime {
             try configure(&config)
             config.environmentVariables.removeValue(forKey: Self.resurrectWorkingDirectoryEnvironmentKey)
+            config.environmentVariables.removeValue(forKey: Self.recreateIfGoneEnvironmentKey)
             config.workingDirectory = isLocal
                 ? initialWorkingDirectory ?? config.workingDirectory ?? localWorkingDirectory
                 : nil
@@ -145,8 +160,14 @@ struct SessionRuntimeDescriptor: Codable, Equatable, Sendable {
                 config.workingDirectory ?? localWorkingDirectory
             )
             try configureAttachExisting(&config)
-            if isLocal, let savedWorkingDirectory {
-                config.environmentVariables[Self.resurrectWorkingDirectoryEnvironmentKey] = savedWorkingDirectory
+            config.environmentVariables[Self.recreateIfGoneEnvironmentKey] = recreateIfGone ? "1" : ""
+            if isLocal {
+                if let resurrectWorkingDirectory = savedWorkingDirectory
+                    ?? Self.validWorkingDirectory(FileManager.default.homeDirectoryForCurrentUser.path) {
+                    config.environmentVariables[Self.resurrectWorkingDirectoryEnvironmentKey] = resurrectWorkingDirectory
+                } else {
+                    config.environmentVariables.removeValue(forKey: Self.resurrectWorkingDirectoryEnvironmentKey)
+                }
             } else {
                 config.environmentVariables.removeValue(forKey: Self.resurrectWorkingDirectoryEnvironmentKey)
             }
@@ -154,16 +175,42 @@ struct SessionRuntimeDescriptor: Codable, Equatable, Sendable {
         }
     }
 
-    func openRequest(pane: UUID, attachExisting: Bool) throws -> String {
+    func openRequest(
+        pane: UUID,
+        attachExisting: Bool,
+        recreateIfGone: Bool = false,
+        fallbackWorkingDirectory: String? = nil
+    ) throws -> String {
         struct Request: Encodable {
             let id: String
             let policy: SessionRuntimePolicy
             let create: Bool
             let cwd: String?
+            let recreateIfGone: Bool?
+
+            enum CodingKeys: String, CodingKey {
+                case id, policy, create, cwd
+                case recreateIfGone = "recreate_if_gone"
+            }
         }
-        let directory = initialWorkingDirectory ?? (isLocal ? localWorkingDirectory : nil)
-        let data = try JSONEncoder().encode(Request(id: pane.uuidString.lowercased(), policy: policy,
-            create: !attachExisting, cwd: attachExisting ? nil : Self.validWorkingDirectory(directory)))
+        let directory: String? = if attachExisting {
+            recreateIfGone
+                ? Self.validWorkingDirectory(
+                    fallbackWorkingDirectory ?? initialWorkingDirectory ?? localWorkingDirectory
+                )
+                : nil
+        } else {
+            Self.validWorkingDirectory(
+                fallbackWorkingDirectory ?? initialWorkingDirectory ?? (isLocal ? localWorkingDirectory : nil)
+            )
+        }
+        let data = try JSONEncoder().encode(Request(
+            id: pane.uuidString.lowercased(),
+            policy: policy,
+            create: !attachExisting,
+            cwd: directory,
+            recreateIfGone: attachExisting && recreateIfGone ? true : nil
+        ))
         guard let result = String(data: data, encoding: .utf8) else { throw CocoaError(.fileReadCorruptFile) }
         return result
     }
@@ -623,16 +670,87 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
         return descriptor
     }
 
+    nonisolated static func normalizedSupportPath(_ url: URL) -> String {
+        var path = url.standardizedFileURL.path
+        while path.count > 1 && path.hasSuffix("/") {
+            path.removeLast()
+        }
+        return path
+    }
+
     nonisolated static func localStateDirectory(
         for descriptor: SessionRuntimeDescriptor,
         applicationSupportRoot: URL? = nil,
         homeDirectory: URL? = nil
     ) -> URL {
         let support = applicationSupportRoot ?? OMGApplicationEnvironment.applicationSupportURL()
-        let home = homeDirectory ?? FileManager.default.homeDirectoryForCurrentUser
-        let input = support.path + "\0" + descriptor.revision
+        let home = (homeDirectory ?? FileManager.default.homeDirectoryForCurrentUser).standardizedFileURL
+        let supportPath = normalizedSupportPath(support)
+        let input = "omg-local-v2\0" + supportPath
         let hash = SHA256.hash(data: Data(input.utf8)).map { String(format: "%02x", $0) }.joined().prefix(20)
         return home.appendingPathComponent(".omg/run/\(hash)")
+    }
+
+    nonisolated static func legacyLocalStateDirectory(
+        supportRoot: URL,
+        revision: String,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> URL {
+        let supportPath = normalizedSupportPath(supportRoot)
+        let home = homeDirectory.standardizedFileURL
+        let input = supportPath + "\0" + revision
+        let hash = SHA256.hash(data: Data(input.utf8)).map { String(format: "%02x", $0) }.joined().prefix(20)
+        return home.appendingPathComponent(".omg/run/\(hash)")
+    }
+
+    nonisolated static func normalizedForRestore(
+        _ descriptor: SessionRuntimeDescriptor,
+        applicationSupportRoot: URL? = nil,
+        resources: URL? = Bundle.main.resourceURL
+    ) -> SessionRuntimeDescriptor {
+        guard let resources,
+              let currentRevision = try? String(
+                contentsOf: resources.appendingPathComponent("session-runtime/revision"),
+                encoding: .utf8
+              ).trimmingCharacters(in: .whitespacesAndNewlines),
+              !currentRevision.isEmpty else {
+            return descriptor
+        }
+        var updated = descriptor
+        if descriptor.isLocal {
+            updated.revision = currentRevision
+            return updated
+        }
+        if descriptor.revision == currentRevision {
+            return descriptor
+        }
+        let rev = descriptor.revision
+        let validRevision = !rev.isEmpty && rev.count <= 128 &&
+            rev.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "._-".contains($0)) }
+        guard validRevision else {
+            updated.revision = currentRevision
+            return updated
+        }
+        let supportRoot = applicationSupportRoot ?? OMGApplicationEnvironment.applicationSupportURL()
+        let versionDir = supportRoot
+            .appendingPathComponent("session-runtime/versions", isDirectory: true)
+            .appendingPathComponent(rev, isDirectory: true)
+        let revisionFile = versionDir.appendingPathComponent("revision")
+        let cachedSnapshotFile = versionDir.appendingPathComponent("snapshot-revision")
+        let currentSnapshotFile = resources.appendingPathComponent("session-runtime/snapshot-revision")
+        guard FileManager.default.fileExists(atPath: revisionFile.path),
+              let cachedSnapshot = try? String(contentsOf: cachedSnapshotFile, encoding: .utf8),
+              let currentSnapshot = try? String(contentsOf: currentSnapshotFile, encoding: .utf8) else {
+            updated.revision = currentRevision
+            return updated
+        }
+        let canonicalCached = canonicalSnapshotRevision(cachedSnapshot)
+        let canonicalCurrent = canonicalSnapshotRevision(currentSnapshot)
+        guard !canonicalCached.isEmpty, canonicalCached == canonicalCurrent else {
+            updated.revision = currentRevision
+            return updated
+        }
+        return descriptor
     }
 
     nonisolated static func shouldCreateUnrecordedLocalSessionOnRestore(
@@ -708,7 +826,14 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
     nonisolated static func canonicalSnapshotRevision(_ raw: String) -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         switch trimmed {
-        case "9c4d662347abb5857b04", "28eb8860dee53f323499", "fa3d1581b35d56a5313b":
+        case "c9147626cf9b9ba9a27e",
+             "30858d155b39136be649",
+             "78942cc9c20bfea0a90b",
+             "9c4d662347abb5857b04",
+             "28eb8860dee53f323499",
+             "fa3d1581b35d56a5313b",
+             "34029d65b7accbcca31c",
+             "bea238dc09e4f1e07d09":
             return "59c5cc7b4d1fe408faf5"
         default:
             return trimmed
@@ -836,16 +961,34 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
         defer { try? diagnostics.close() }
         process.standardError = diagnostics
         var environment = SessionRuntimeHostLauncher.applyingHostBundleEnvironment(ProcessInfo.processInfo.environment)
+        environment["OMG_APP_SUPPORT"] = OMGApplicationEnvironment.applicationSupportURL().path
         environment["SSH_ASKPASS"] = artifacts.appendingPathComponent("askpass").path
         environment["SSH_ASKPASS_REQUIRE"] = interactive ? "force" : "never"
         environment["DISPLAY"] = environment["DISPLAY"] ?? "omg:0"
         process.environment = environment
+        let identity = descriptor.identity
+        process.terminationHandler = { [weak self] terminatedProcess in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if self.relays[identity]?.process === terminatedProcess {
+                    self.relays.removeValue(forKey: identity)
+                }
+            }
+        }
         try process.run()
-        relays[descriptor.identity] = .init(
-            process: process,
-            socket: socket,
-            allowsInteractiveFirstAttempt: interactive
-        )
+        for _ in 0..<50 {
+            if FileManager.default.fileExists(atPath: socket.path) || !process.isRunning {
+                break
+            }
+            usleep(10_000)
+        }
+        if process.isRunning {
+            relays[identity] = .init(
+                process: process,
+                socket: socket,
+                allowsInteractiveFirstAttempt: interactive
+            )
+        }
         SessionRuntimeCatalog.shared.remember(descriptor)
         return socket
     }

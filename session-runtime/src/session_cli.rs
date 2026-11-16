@@ -239,12 +239,26 @@ fn resolve_local_broker_binary(
             return Some(current_installed);
         }
         if let Ok(exe) = env::current_exe() {
-            if exe.file_name().and_then(|s| s.to_str()) == Some("omgd") {
-                return Some(exe);
-            }
+            return Some(exe);
         }
     }
     None
+}
+
+fn resolve_local_run_dir(run_root: &Path, support: &Path, revision: &str) -> PathBuf {
+    let channel_dir = run_root.join(omg_session_runtime::registry::local_channel_run_dir_key(
+        support,
+    ));
+    if channel_dir.exists() {
+        return channel_dir;
+    }
+    let legacy_dir = run_root.join(omg_session_runtime::registry::legacy_local_run_dir_key(
+        support, revision,
+    ));
+    if legacy_dir.exists() {
+        return legacy_dir;
+    }
+    channel_dir
 }
 
 fn ensure_runtime_root_socket(
@@ -297,11 +311,11 @@ pub(crate) fn mobile_targets(support: &Path) -> io::Result<Vec<(String, PathBuf)
     let run_root = home()?.join(".omg/run");
     let revision = current_revision();
     let expected_snapshot = current_snapshot_revision();
-    let current_key = omg_session_runtime::registry::local_run_dir_key(&support, &revision);
+    let current_root = resolve_local_run_dir(&run_root, &support, &revision);
     if let Some(socket) = ensure_runtime_root_socket(
         &support,
         Some(&revision),
-        &run_root.join(&current_key),
+        &current_root,
         expected_snapshot.as_deref(),
     )? {
         if seen.insert(socket.clone()) {
@@ -335,18 +349,24 @@ pub(crate) fn mobile_targets(support: &Path) -> io::Result<Vec<(String, PathBuf)
                     }
                 }
             }
-            let root = run_root.join(omg_session_runtime::registry::local_run_dir_key(
-                &support,
-                &d.revision,
-            ));
-            if let Some(socket) = ensure_runtime_root_socket(
-                &support,
-                Some(&d.revision),
-                &root,
-                expected_snapshot.as_deref(),
-            )? {
-                if seen.insert(socket.clone()) {
-                    ordered.push((format!("This Machine · {}", d.revision), socket));
+            for candidate_root in [
+                run_root.join(omg_session_runtime::registry::local_channel_run_dir_key(
+                    &support,
+                )),
+                run_root.join(omg_session_runtime::registry::legacy_local_run_dir_key(
+                    &support,
+                    &d.revision,
+                )),
+            ] {
+                if let Some(socket) = ensure_runtime_root_socket(
+                    &support,
+                    Some(&d.revision),
+                    &candidate_root,
+                    expected_snapshot.as_deref(),
+                )? {
+                    if seen.insert(socket.clone()) {
+                        ordered.push((format!("This Machine · {}", d.revision), socket));
+                    }
                 }
             }
         }
@@ -373,17 +393,23 @@ pub(crate) fn mobile_targets(support: &Path) -> io::Result<Vec<(String, PathBuf)
                     }
                 }
             }
-            let root = run_root.join(omg_session_runtime::registry::local_run_dir_key(
-                &support, &rev,
-            ));
-            if let Some(socket) = ensure_runtime_root_socket(
-                &support,
-                Some(&rev),
-                &root,
-                expected_snapshot.as_deref(),
-            )? {
-                if seen.insert(socket.clone()) {
-                    ordered.push((format!("This Machine · {rev}"), socket));
+            for candidate_root in [
+                run_root.join(omg_session_runtime::registry::local_channel_run_dir_key(
+                    &support,
+                )),
+                run_root.join(omg_session_runtime::registry::legacy_local_run_dir_key(
+                    &support, &rev,
+                )),
+            ] {
+                if let Some(socket) = ensure_runtime_root_socket(
+                    &support,
+                    Some(&rev),
+                    &candidate_root,
+                    expected_snapshot.as_deref(),
+                )? {
+                    if seen.insert(socket.clone()) {
+                        ordered.push((format!("This Machine · {rev}"), socket));
+                    }
                 }
             }
         }
@@ -724,7 +750,7 @@ impl Descriptor {
     }
     fn identity(&self, support: &Path) -> String {
         let support = omg_session_runtime::registry::normalize_support_path(support);
-        let endpoint = if let Some(ssh) = &self.connection {
+        if let Some(ssh) = &self.connection {
             let mut fields = vec![
                 ssh.destination.as_str(),
                 ssh.workspace_id.as_str(),
@@ -732,11 +758,10 @@ impl Descriptor {
                 ssh.local_working_directory.as_str(),
             ];
             fields.extend(ssh.options.iter().map(String::as_str));
-            fields.join("\0")
+            digest(&format!("{}\0{}", fields.join("\0"), self.revision))
         } else {
-            format!("local:{}", support.display())
-        };
-        digest(&format!("{endpoint}\0{}", self.revision))
+            digest(&format!("local:{}", support.display()))
+        }
     }
     fn connect(&self, support: &Path) -> io::Result<Option<RelayTransport>> {
         if !valid_revision(&self.revision) {
@@ -802,8 +827,8 @@ impl Descriptor {
             return super::tunnel_child(deploy::fast_connect(&connection, false)?).map(Some);
         }
         let support = omg_session_runtime::registry::normalize_support_path(support);
-        let key = omg_session_runtime::registry::local_run_dir_key(&support, &self.revision);
-        let root = home()?.join(".omg/run").join(&key);
+        let run_root = home()?.join(".omg/run");
+        let root = resolve_local_run_dir(&run_root, &support, &self.revision);
         if !root.exists() {
             return Ok(None);
         }
@@ -822,19 +847,16 @@ impl Descriptor {
         let _ = omg_session_runtime::registry::write_support_root_stamp(&root, &support);
         let socket = root.join("host.sock");
         if UnixStream::connect(&socket).is_err() {
-            // Re-adopt existing holders with their pinned broker, never create
-            // a session or upgrade a live daemon as part of listing.
-            let binary = resolve_local_broker_binary(
-                &support,
-                Some(&self.revision),
-                self.revision == current_revision(),
-            )
-            .unwrap_or_else(|| {
-                support
-                    .join("session-runtime/versions")
-                    .join(&self.revision)
-                    .join("omgd")
-            });
+            // Re-adopt existing holders with their pinned broker, falling back to
+            // the active helper binary if a historical pinned copy is missing.
+            let binary = resolve_local_broker_binary(&support, Some(&self.revision), true)
+                .or_else(|| env::current_exe().ok())
+                .unwrap_or_else(|| {
+                    support
+                        .join("session-runtime/versions")
+                        .join(&self.revision)
+                        .join("omgd")
+                });
             super::ensure_host_with(
                 &root.to_string_lossy(),
                 Some("/bin/sh"),
@@ -995,8 +1017,8 @@ pub fn run(arguments: &[String]) -> io::Result<u8> {
             connection: None,
             revision: cur_rev.clone(),
         };
-        let cur_key = omg_session_runtime::registry::local_run_dir_key(&support, &cur_rev);
-        if run_root.join(&cur_key).exists() {
+        let cur_root = resolve_local_run_dir(&run_root, &support, &cur_rev);
+        if cur_root.exists() {
             selected
                 .entry(cur_desc.identity(&support))
                 .or_insert(cur_desc);
@@ -1011,8 +1033,8 @@ pub fn run(arguments: &[String]) -> io::Result<u8> {
                 if !valid_revision(&rev) {
                     continue;
                 }
-                let key = omg_session_runtime::registry::local_run_dir_key(&support, &rev);
-                if run_root.join(&key).exists() {
+                let rev_root = resolve_local_run_dir(&run_root, &support, &rev);
+                if rev_root.exists() {
                     let desc = Descriptor {
                         connection: None,
                         revision: rev,

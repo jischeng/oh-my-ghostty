@@ -45,11 +45,10 @@ extension Ghostty {
         var runtimeInlineSession: SessionRuntimeInlineSession?
         @Published var runtimeConnectionError: String?
         private(set) var runtimeAttachmentSuspended = false
-        private var runtimeStartedWithCreate = false
         private var runtimeConfirmedSession = false
 
         var runtimeNeedsCreationOnRestore: Bool {
-            guard runtimeDescriptor != nil, runtimeStartedWithCreate, !runtimeConfirmedSession else {
+            guard runtimeDescriptor != nil, !runtimeConfirmedSession else {
                 return false
             }
             if case .failed = runtimeConnectionState { return true }
@@ -564,13 +563,19 @@ extension Ghostty {
             // Setup our surface. This will also initialize all the terminal IO.
             var surface_cfg = baseConfig ?? SurfaceConfiguration()
             if let encoded = surface_cfg.environmentVariables[SessionRuntimeDescriptor.environmentKey] {
+                let resurrectCwd = SessionRuntimeDescriptor.validWorkingDirectory(
+                    surface_cfg.environmentVariables[SessionRuntimeDescriptor.resurrectWorkingDirectoryEnvironmentKey]
+                )
+                let recreateIfGone =
+                    surface_cfg.environmentVariables.removeValue(
+                        forKey: SessionRuntimeDescriptor.recreateIfGoneEnvironmentKey
+                    ) == "1"
                 do {
                     let descriptor = try JSONDecoder().decode(SessionRuntimeDescriptor.self, from: Data(encoded.utf8))
                     runtimeDescriptor = descriptor
                     runtimeConnectionState = .connecting(attempt: 0)
                     let attachExisting =
                         surface_cfg.environmentVariables[SessionRuntimeDescriptor.attachExistingEnvironmentKey] == "1"
-                    runtimeStartedWithCreate = !attachExisting
                     let socket: URL
                     if attachExisting {
                         socket = try SessionRuntimeConnections.shared.prepareBatch(descriptor)
@@ -580,14 +585,35 @@ extension Ghostty {
                     surface_cfg.environmentVariables["OMG_RUNTIME_SOCKET"] = socket.path
                     surface_cfg.environmentVariables["OMG_RUNTIME_PANE_ID"] = try descriptor.openRequest(
                         pane: id,
-                        attachExisting: attachExisting
+                        attachExisting: attachExisting,
+                        recreateIfGone: recreateIfGone,
+                        fallbackWorkingDirectory: resurrectCwd
                     )
                 } catch {
-                    self.runtimeConnectionError = error.localizedDescription
-                    self.runtimeConnectionState = .failed(message: error.localizedDescription)
-                    self.error = Ghostty.Error.apiFailed
-                    Ghostty.logger.error("Session runtime connection setup failed: \(error.localizedDescription, privacy: .public)")
-                    return
+                    if runtimeDescriptor?.isLocal != false {
+                        let fallbackWorkingDirectory = resurrectCwd
+                            ?? surface_cfg.workingDirectory
+                            ?? runtimeDescriptor?.localWorkingDirectory
+                        runtimeDescriptor = nil
+                        runtimeConnectionState = nil
+                        runtimeConnectionError = nil
+                        surface_cfg.environmentVariables.removeValue(forKey: SessionRuntimeDescriptor.environmentKey)
+                        for key in Array(surface_cfg.environmentVariables.keys) where key.hasPrefix("OMG_RUNTIME_") {
+                            surface_cfg.environmentVariables.removeValue(forKey: key)
+                        }
+                        if let fallbackWorkingDirectory {
+                            surface_cfg.workingDirectory = fallbackWorkingDirectory
+                        }
+                        Ghostty.logger.error(
+                            "Local session runtime setup failed; falling back to local PTY: \(error.localizedDescription, privacy: .public)"
+                        )
+                    } else {
+                        self.runtimeConnectionError = error.localizedDescription
+                        self.runtimeConnectionState = .failed(message: error.localizedDescription)
+                        self.error = Ghostty.Error.apiFailed
+                        Ghostty.logger.error("Session runtime connection setup failed: \(error.localizedDescription, privacy: .public)")
+                        return
+                    }
                 }
             }
             SessionRuntimeHandoff.shared.configure(&surface_cfg, pane: self.id)
@@ -2408,15 +2434,16 @@ extension Ghostty {
                 AcknowledgedAgentStatus.self,
                 forKey: .acknowledgedAgentStatus
             )
-            if let runtime = try container.decodeIfPresent(SessionRuntimeDescriptor.self, forKey: .runtimeDescriptor),
-               !(archivedCreateRuntime && runtime.isLocal && !OhMyGhosttySettings.shared.localRuntimeEnabled) {
+            if let decodedRuntime = try container.decodeIfPresent(SessionRuntimeDescriptor.self, forKey: .runtimeDescriptor),
+               !(archivedCreateRuntime && decodedRuntime.isLocal && !OhMyGhosttySettings.shared.localRuntimeEnabled) {
+                let runtime = SessionRuntimeConnections.normalizedForRestore(decodedRuntime)
                 let createRuntime = archivedCreateRuntime || SessionRuntimeConnections.shouldCreateUnrecordedLocalSessionOnRestore(
                     for: runtime,
                     pane: uuid
                 )
                 let attachesSavedRuntime = SessionRuntimeRestorationPolicy.attachesSavedRuntime(for: startupMode)
                 if attachesSavedRuntime {
-                    try runtime.configureSavedRestore(&config, createRuntime: createRuntime)
+                    try runtime.configureSavedRestore(&config, createRuntime: createRuntime, recreateIfGone: true)
                     self.init(app, baseConfig: config, uuid: uuid)
                 } else {
                     config.environmentVariables.removeValue(forKey: SessionRuntimeDescriptor.environmentKey)
@@ -2424,6 +2451,9 @@ extension Ghostty {
                     config.environmentVariables[SessionRuntimeDescriptor.attachExistingEnvironmentKey] = ""
                     config.environmentVariables.removeValue(
                         forKey: SessionRuntimeDescriptor.resurrectWorkingDirectoryEnvironmentKey
+                    )
+                    config.environmentVariables.removeValue(
+                        forKey: SessionRuntimeDescriptor.recreateIfGoneEnvironmentKey
                     )
                     config.environmentVariables.removeValue(forKey: "OMG_RUNTIME_SOCKET")
                     config.environmentVariables.removeValue(forKey: "OMG_RUNTIME_PANE_ID")

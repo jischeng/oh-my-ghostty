@@ -23,7 +23,7 @@ class SessionCLITests(unittest.TestCase):
             def host(channel):
                 support = home / channel
                 revision = "pinned-fixture"
-                key = hashlib.sha256((str(support) + "\0" + revision).encode()).hexdigest()[:20]
+                key = hashlib.sha256(("omg-local-v2\0" + str(support)).encode()).hexdigest()[:20]
                 state = home / ".omg/run" / key
                 state.mkdir(parents=True, mode=0o700)
                 daemon = subprocess.Popen([str(BINARY), "host-local", str(state), "--", "/bin/sh"],
@@ -162,7 +162,7 @@ class SessionCLITests(unittest.TestCase):
             cached_exe.chmod(0o755)
             (version_dir / "revision").write_text(revision + "\n")
 
-            key = hashlib.sha256((str(logical_support) + "\0" + revision).encode()).hexdigest()[:20]
+            key = hashlib.sha256(("omg-local-v2\0" + str(logical_support)).encode()).hexdigest()[:20]
             state = logical_home / ".omg/run" / key
             (logical_home / ".omg/run").mkdir(parents=True, mode=0o700)
             (logical_home / ".omg/run").chmod(0o700)
@@ -280,6 +280,102 @@ class SessionCLITests(unittest.TestCase):
                     pass
                 daemon.terminate()
                 daemon.wait(timeout=5)
+
+    def test_missing_pinned_local_binary_falls_back_to_current_exe(self):
+        with tempfile.TemporaryDirectory(prefix="omg-cli-fallback-", dir="/tmp") as directory:
+            home = Path(directory)
+            environment = dict(os.environ, HOME=directory)
+            support = home / "OMG"
+            revision = "missing-pinned-rev"
+            key = hashlib.sha256(("omg-local-v2\0" + str(support)).encode()).hexdigest()[:20]
+            state = home / ".omg/run" / key
+            state.mkdir(parents=True, mode=0o700)
+
+            # Start a live session holder, then stop host-local so `sessions list` must re-bootstrap
+            # using a fallback to current_exe() because versions/<rev>/omgd does not exist on disk.
+            daemon = subprocess.Popen(
+                [str(BINARY), "host-local", str(state), "--", "/bin/sh"],
+                env=environment,
+            )
+            identity = str(uuid.uuid4())
+            try:
+                wait_socket(state / "host.sock", daemon)
+                with socket.socket(socket.AF_UNIX) as stream:
+                    stream.settimeout(8)
+                    stream.connect(str(state / "host.sock"))
+                    launch = dict(
+                        argv=["/bin/sh", "-c", "sleep 600"],
+                        env={"PATH": "/usr/bin:/bin", "HOME": directory},
+                        cwd=directory,
+                        cols=80,
+                        rows=24,
+                        pixel_width=640,
+                        pixel_height=384,
+                        input_base64="",
+                    )
+                    stream.sendall(
+                        encode(
+                            b"C",
+                            1,
+                            json.dumps(
+                                dict(id=identity, create=True, launch=launch, policy={})
+                            ).encode(),
+                        )
+                    )
+                    inner_event(stream, 1, b"J")
+            finally:
+                daemon.terminate()
+                daemon.wait(timeout=5)
+
+            archive = support / "session-runtime/endpoints.json"
+            archive.parent.mkdir(parents=True)
+            endpoint = dict(descriptor=dict(revision=revision, policy={}), lastUsedAt=0)
+            archive.write_text(json.dumps(dict(version=1, endpoints=[endpoint])))
+            self.assertFalse((support / "session-runtime/versions" / revision / "omgd").exists())
+
+            try:
+                listed = subprocess.run(
+                    [str(BINARY), "sessions", "list", "--app-support", str(support), "--json"],
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+                self.assertEqual(listed.returncode, 0, listed.stderr)
+                report = json.loads(listed.stdout)
+                self.assertEqual([s["id"] for s in report["sessions"]], [identity])
+                self.assertEqual(report["errors"], [])
+
+                closed = subprocess.run(
+                    [
+                        str(BINARY),
+                        "sessions",
+                        "close",
+                        "--all",
+                        "--yes",
+                        "--local",
+                        "--app-support",
+                        str(support),
+                        "--json",
+                    ],
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=25,
+                )
+                self.assertEqual(closed.returncode, 0, closed.stderr + closed.stdout)
+                self.assertEqual(json.loads(closed.stdout)["closed"], 1)
+                wait_holders_stopped(state)
+            finally:
+                try:
+                    with socket.socket(socket.AF_UNIX) as stream:
+                        stream.settimeout(2)
+                        stream.connect(str(state / "host.sock"))
+                        stream.sendall(encode(b"K", 1, identity.encode()))
+                        frame(stream)
+                    wait_holders_stopped(state)
+                except Exception:
+                    pass
 
 
 if __name__ == "__main__":

@@ -81,19 +81,45 @@ class RuntimeBundleTests(unittest.TestCase):
         )
         build_mod = importlib.util.module_from_spec(build_spec)
         build_spec.loader.exec_module(build_mod)
-        digest = hashlib.sha256()
-        for base in ("include/ghostty/vt", "src/terminal"):
-            for path in sorted((repo_root / base).rglob("*")):
-                if path.is_file():
-                    digest.update(str(path.relative_to(repo_root)).encode())
-                    digest.update(path.read_bytes())
         compatibility = json.loads(
             (repo_root / "dist/macos/session-runtime-snapshot-compatibility.json").read_text()
         )
         self.assertEqual(
-            build_mod.snapshot_revision(digest.hexdigest(), compatibility),
+            build_mod.snapshot_revision(build_mod.compute_snapshot_source_digest(repo_root), compatibility),
             "59c5cc7b4d1fe408faf5",
         )
+
+    def test_snapshot_source_digest_ignores_non_wire_files(self):
+        build_spec = importlib.util.spec_from_file_location(
+            "build_runtime", Path(__file__).parent / "macos/build-session-runtime.py"
+        )
+        build_mod = importlib.util.module_from_spec(build_spec)
+        build_spec.loader.exec_module(build_mod)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snap = root / "src/terminal/snapshot"
+            (snap / "testdata").mkdir(parents=True)
+            (root / "include/ghostty/vt").mkdir(parents=True)
+            (root / "src/terminal/other").mkdir(parents=True)
+            (snap / "envelope.zig").write_text("wire")
+            (snap / "AGENTS.md").write_text("docs")
+            (snap / "fixture.zig").write_text("fixture")
+            (snap / "verify-kaitai.py").write_text("tool")
+            (snap / "testdata/case.hex").write_text("data")
+            (root / "include/ghostty/vt/header.h").write_text("header")
+            (root / "src/terminal/other/page.zig").write_text("other")
+            baseline = build_mod.compute_snapshot_source_digest(root)
+
+            (snap / "AGENTS.md").write_text("docs-v2")
+            (snap / "fixture.zig").write_text("fixture-v2")
+            (snap / "verify-kaitai.py").write_text("tool-v2")
+            (snap / "testdata/case.hex").write_text("data-v2")
+            (root / "include/ghostty/vt/header.h").write_text("header-v2")
+            (root / "src/terminal/other/page.zig").write_text("other-v2")
+            self.assertEqual(build_mod.compute_snapshot_source_digest(root), baseline)
+
+            (snap / "envelope.zig").write_text("wire-v2")
+            self.assertNotEqual(build_mod.compute_snapshot_source_digest(root), baseline)
 
 
 if __name__ == "__main__":

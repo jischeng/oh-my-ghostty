@@ -71,6 +71,24 @@ def sign_adhoc(paths):
         run(['/usr/bin/codesign', '--force', '--sign', '-', '--timestamp=none', str(path)])
 
 
+SNAPSHOT_EXCLUDED_FILES = {"AGENTS.md", "fixture.zig", "verify-kaitai.py"}
+
+
+def compute_snapshot_source_digest(root: Path = ROOT) -> str:
+    """Hash only the wire snapshot format sources under src/terminal/snapshot."""
+    snapshot_root = root / "src/terminal/snapshot"
+    snapshot_digest = hashlib.sha256()
+    for path in sorted(snapshot_root.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(snapshot_root)
+        if "testdata" in rel.parts or path.name in SNAPSHOT_EXCLUDED_FILES:
+            continue
+        snapshot_digest.update(str(path.relative_to(root)).encode())
+        snapshot_digest.update(path.read_bytes())
+    return snapshot_digest.hexdigest()
+
+
 def snapshot_revision(source_digest, compatibility):
     """Only exact, verified source trees may share an earlier snapshot epoch."""
     hexadecimal = set("0123456789abcdef")
@@ -96,16 +114,11 @@ def main():
     use_cache = not args.no_cache and os.environ.get('OMG_RELEASE_NO_CACHE') != '1'
     # Content-derived revision also distinguishes uncommitted development builds.
     digest = hashlib.sha256()
-    snapshot_digest = hashlib.sha256()
     for base in ['session-runtime/src', 'session-runtime/mobile-support', 'include/ghostty/vt', 'src/terminal']:
         for path in sorted((ROOT / base).rglob('*')):
             if path.is_file():
                 digest.update(str(path.relative_to(ROOT)).encode())
-                contents = path.read_bytes()
-                digest.update(contents)
-                if base in ['include/ghostty/vt', 'src/terminal']:
-                    snapshot_digest.update(str(path.relative_to(ROOT)).encode())
-                    snapshot_digest.update(contents)
+                digest.update(path.read_bytes())
     for path in [
         ROOT/'dist/macos/build-mobile-support.py',
         ROOT/'session-runtime/Cargo.toml', ROOT/'session-runtime/Cargo.lock',
@@ -225,7 +238,7 @@ def main():
     (output/'askpass').chmod(0o755)
     (output/'revision').write_text(revision+'\n')
     compatibility = json.loads((ROOT/'dist/macos/session-runtime-snapshot-compatibility.json').read_text())
-    (output/'snapshot-revision').write_text(snapshot_revision(snapshot_digest.hexdigest(), compatibility)+'\n')
+    (output/'snapshot-revision').write_text(snapshot_revision(compute_snapshot_source_digest(ROOT), compatibility)+'\n')
     validate(output, native, all_macos=(args.macos == 'all'), linux_archs=linux_archs)
     if use_cache:
         CACHE_ROOT.mkdir(parents=True, exist_ok=True)

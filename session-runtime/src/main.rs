@@ -200,6 +200,59 @@ fn ensure_host(directory: &str, shell_override: Option<&str>) -> io::Result<()> 
     ensure_host_with(directory, shell_override, &env::current_exe()?, false, None)
 }
 
+struct BootstrapLock(std::fs::File);
+
+impl BootstrapLock {
+    fn acquire(root: &Path) -> io::Result<Self> {
+        use std::os::{
+            fd::AsRawFd,
+            unix::fs::{OpenOptionsExt, PermissionsExt},
+        };
+        let lock_path = root.join("bootstrap.lock");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&lock_path)?;
+        std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600))?;
+        loop {
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+            if rc == 0 {
+                return Ok(Self(file));
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+}
+
+impl Drop for BootstrapLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        unsafe {
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+fn wait_for_socket_after_early_exit(socket: &Path) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        if UnixStream::connect(socket).is_ok() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 fn ensure_host_with(
     directory: &str,
     shell_override: Option<&str>,
@@ -207,10 +260,11 @@ fn ensure_host_with(
     local: bool,
     support_override: Option<&Path>,
 ) -> io::Result<()> {
-    use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+    use std::os::{unix::fs::PermissionsExt, unix::process::CommandExt};
     let root = Path::new(directory);
     std::fs::create_dir_all(root)?;
     std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
+    let _bootstrap_lock = BootstrapLock::acquire(root)?;
     let inferred_support = if local {
         let current_exe = env::current_exe().ok();
         let sup = support_override
@@ -301,6 +355,9 @@ fn ensure_host_with(
                     return Ok(());
                 }
                 if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+                    if wait_for_socket_after_early_exit(&socket) {
+                        return Ok(());
+                    }
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -334,6 +391,9 @@ fn ensure_host_with(
             return Ok(());
         }
         if child.try_wait()?.is_some() {
+            if wait_for_socket_after_early_exit(&socket) {
+                return Ok(());
+            }
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -632,5 +692,91 @@ fn main() -> io::Result<()> {
             eprintln!("usage: omgd sessions --help | mobile --help | host DIRECTORY -- SHELL... | host-local DIRECTORY -- SHELL... | session-holder | serve SOCKET -- COMMAND... | bridge SOCKET | install-runtime CONNECTION_JSON | connect LOCAL_SOCKET CONNECTION_JSON | retry-local SOCKET [--interactive] | close-local SOCKET UUID | list-local SOCKET");
             std::process::exit(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_host_with;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn ensure_host_with_serializes_concurrent_cold_start_and_handles_early_exit() {
+        let nonce = omg_session_runtime::record::nonce().unwrap();
+        let base = std::env::temp_dir().join(format!("omg-bootstrap-{}", &nonce[..8]));
+        let state = base.join("state");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let count_file = base.join("spawns");
+        let helper = base.join("fake-helper.sh");
+        let pid_file = base.join("listener.pid");
+        // Spawn a Python listener that starts after 150ms while the launcher exits immediately,
+        // exercising both bootstrap.lock serialization and early-exit socket polling!
+        std::fs::write(
+            &helper,
+            format!(
+                r#"#!/bin/sh
+echo x >> {count:?}
+python3 -c '
+import os, socket, sys, time
+root = sys.argv[1]
+pid_path = sys.argv[2]
+if os.fork() != 0:
+    os._exit(0)
+os.setsid()
+open(pid_path, "w").write(str(os.getpid()))
+time.sleep(0.15)
+sock = socket.socket(socket.AF_UNIX)
+sock.bind(os.path.join(root, "host.sock"))
+sock.listen(16)
+deadline = time.monotonic() + 5
+while time.monotonic() < deadline:
+    sock.settimeout(0.1)
+    try:
+        conn, _ = sock.accept()
+        conn.close()
+    except OSError:
+        pass
+' "$2" {pid_file:?}
+"#,
+                count = count_file,
+                pid_file = pid_file,
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let mut handles = Vec::new();
+        for _ in 0..6 {
+            let dir = state.to_string_lossy().into_owned();
+            let exe = helper.clone();
+            handles.push(std::thread::spawn(move || {
+                ensure_host_with(&dir, Some("/bin/sh"), &exe, false, None)
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+
+        let lock_meta = std::fs::symlink_metadata(state.join("bootstrap.lock")).unwrap();
+        assert_eq!(lock_meta.permissions().mode() & 0o777, 0o600);
+        let spawn_count = std::fs::read_to_string(&count_file)
+            .unwrap()
+            .lines()
+            .count();
+        assert_eq!(
+            spawn_count, 1,
+            "bootstrap.lock must serialize concurrent cold-starts to a single spawn"
+        );
+
+        if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
+            if let Ok(pid) = pid_str.trim().parse::<libc::pid_t>() {
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

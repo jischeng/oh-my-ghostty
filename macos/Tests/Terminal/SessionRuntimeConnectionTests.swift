@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Foundation
 import Testing
 @testable import Ghostty
@@ -814,6 +815,11 @@ struct SessionRuntimeConnectionTests {
             applicationSupportRoot: URL(fileURLWithPath: "/tmp/OMG", isDirectory: true),
             homeDirectory: URL(fileURLWithPath: "/tmp/local-runtime-user-b", isDirectory: true)
         )
+        let otherChannelSameUser = SessionRuntimeConnections.localStateDirectory(
+            for: descriptor,
+            applicationSupportRoot: URL(fileURLWithPath: "/tmp/OMG", isDirectory: true),
+            homeDirectory: home
+        )
         var older = descriptor
         older.revision = "older"
         let olderRevision = SessionRuntimeConnections.localStateDirectory(
@@ -821,9 +827,184 @@ struct SessionRuntimeConnectionTests {
             applicationSupportRoot: support,
             homeDirectory: home
         )
+        let expectedHash = SHA256.hash(data: Data("omg-local-v2\0/tmp/OMG Dev".utf8))
+            .map { String(format: "%02x", $0) }.joined().prefix(20)
         #expect(first == same)
+        #expect(first == olderRevision)
+        #expect(first.lastPathComponent == String(expectedHash))
         #expect(first != otherUser)
-        #expect(first != olderRevision)
+        #expect(first != otherChannelSameUser)
+
+        let legacyCurrent = SessionRuntimeConnections.legacyLocalStateDirectory(
+            supportRoot: support,
+            revision: "current",
+            homeDirectory: home
+        )
+        let legacyOlder = SessionRuntimeConnections.legacyLocalStateDirectory(
+            supportRoot: support,
+            revision: "older",
+            homeDirectory: home
+        )
+        #expect(legacyCurrent != legacyOlder)
+        #expect(legacyCurrent != first)
+    }
+
+    @Test func canonicalSnapshotRevisionMapsAllEightLegacyPrefixes() {
+        let legacyPrefixes = [
+            "c9147626cf9b9ba9a27e",
+            "30858d155b39136be649",
+            "78942cc9c20bfea0a90b",
+            "9c4d662347abb5857b04",
+            "28eb8860dee53f323499",
+            "fa3d1581b35d56a5313b",
+            "34029d65b7accbcca31c",
+            "bea238dc09e4f1e07d09",
+        ]
+        for prefix in legacyPrefixes {
+            #expect(SessionRuntimeConnections.canonicalSnapshotRevision("\(prefix)\n") == "59c5cc7b4d1fe408faf5")
+        }
+        #expect(SessionRuntimeConnections.canonicalSnapshotRevision("59c5cc7b4d1fe408faf5\n") == "59c5cc7b4d1fe408faf5")
+        #expect(SessionRuntimeConnections.canonicalSnapshotRevision("custom-snapshot-epoch\n") == "custom-snapshot-epoch")
+    }
+
+    @Test func normalizedForRestoreUpgradesLocalAlwaysAndSSHWhenCachedVersionIncompatible() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let resources = root.appendingPathComponent("Resources", isDirectory: true)
+        let bundledRuntime = resources.appendingPathComponent("session-runtime", isDirectory: true)
+        let support = root.appendingPathComponent("Support", isDirectory: true)
+        try FileManager.default.createDirectory(at: bundledRuntime, withIntermediateDirectories: true)
+        try Data("rev-current\n".utf8).write(to: bundledRuntime.appendingPathComponent("revision"))
+        try Data("59c5cc7b4d1fe408faf5\n".utf8).write(to: bundledRuntime.appendingPathComponent("snapshot-revision"))
+
+        let localOld = SessionRuntimeDescriptor(
+            connection: nil,
+            revision: "rev-old-local",
+            policy: .init(),
+            localWorkingDirectory: "/tmp"
+        )
+        let normalizedLocal = SessionRuntimeConnections.normalizedForRestore(
+            localOld,
+            applicationSupportRoot: support,
+            resources: resources
+        )
+        #expect(normalizedLocal.revision == "rev-current")
+
+        let connection = try GitSSHConnection(destination: "devbox")
+        let compatibleSSH = SessionRuntimeDescriptor(connection: connection, revision: "rev-ssh-compat", policy: .init())
+        let compatDir = support.appendingPathComponent("session-runtime/versions/rev-ssh-compat", isDirectory: true)
+        try FileManager.default.createDirectory(at: compatDir, withIntermediateDirectories: true)
+        try Data("rev-ssh-compat\n".utf8).write(to: compatDir.appendingPathComponent("revision"))
+        try Data("34029d65b7accbcca31c\n".utf8).write(to: compatDir.appendingPathComponent("snapshot-revision"))
+        #expect(SessionRuntimeConnections.normalizedForRestore(
+            compatibleSSH,
+            applicationSupportRoot: support,
+            resources: resources
+        ).revision == "rev-ssh-compat")
+
+        let incompatibleSSH = SessionRuntimeDescriptor(connection: connection, revision: "rev-ssh-incompat", policy: .init())
+        let incompatDir = support.appendingPathComponent("session-runtime/versions/rev-ssh-incompat", isDirectory: true)
+        try FileManager.default.createDirectory(at: incompatDir, withIntermediateDirectories: true)
+        try Data("rev-ssh-incompat\n".utf8).write(to: incompatDir.appendingPathComponent("revision"))
+        try Data("different-snapshot-rev\n".utf8).write(to: incompatDir.appendingPathComponent("snapshot-revision"))
+        #expect(SessionRuntimeConnections.normalizedForRestore(
+            incompatibleSSH,
+            applicationSupportRoot: support,
+            resources: resources
+        ).revision == "rev-current")
+
+        let missingSSH = SessionRuntimeDescriptor(connection: connection, revision: "rev-ssh-missing", policy: .init())
+        #expect(SessionRuntimeConnections.normalizedForRestore(
+            missingSSH,
+            applicationSupportRoot: support,
+            resources: resources
+        ).revision == "rev-current")
+    }
+
+    @Test func openRequestSupportsRecreateIfGoneOnlyWhenRequested() throws {
+        let local = SessionRuntimeDescriptor(
+            connection: nil,
+            revision: "current",
+            policy: .init(),
+            localWorkingDirectory: "/tmp/fallback"
+        )
+        let id = UUID()
+
+        let defaultAttach = try local.openRequest(pane: id, attachExisting: true)
+        let defaultJSON = try #require(
+            try JSONSerialization.jsonObject(with: Data(defaultAttach.utf8)) as? [String: Any]
+        )
+        #expect(defaultJSON["create"] as? Bool == false)
+        #expect(defaultJSON["recreate_if_gone"] == nil)
+        #expect(defaultJSON["cwd"] == nil)
+
+        let recreateAttach = try local.openRequest(
+            pane: id,
+            attachExisting: true,
+            recreateIfGone: true,
+            fallbackWorkingDirectory: "/tmp/saved-pane-cwd"
+        )
+        let recreateJSON = try #require(
+            try JSONSerialization.jsonObject(with: Data(recreateAttach.utf8)) as? [String: Any]
+        )
+        #expect(recreateJSON["create"] as? Bool == false)
+        #expect(recreateJSON["recreate_if_gone"] as? Bool == true)
+        #expect(recreateJSON["cwd"] as? String == "/tmp/saved-pane-cwd")
+
+        var restoreConfig = Ghostty.SurfaceConfiguration()
+        try local.configureSavedRestore(&restoreConfig, createRuntime: false, recreateIfGone: true)
+        #expect(restoreConfig.environmentVariables[SessionRuntimeDescriptor.recreateIfGoneEnvironmentKey] == "1")
+        #expect(restoreConfig.environmentVariables[SessionRuntimeDescriptor.resurrectWorkingDirectoryEnvironmentKey] == "/tmp/fallback")
+
+        try local.configureSavedRestore(&restoreConfig, createRuntime: true)
+        #expect(restoreConfig.environmentVariables[SessionRuntimeDescriptor.recreateIfGoneEnvironmentKey] == nil)
+        #expect(restoreConfig.environmentVariables[SessionRuntimeDescriptor.resurrectWorkingDirectoryEnvironmentKey] == nil)
+
+        let noCwdLocal = SessionRuntimeDescriptor(connection: nil, revision: "current", policy: .init())
+        var homeFallbackConfig = Ghostty.SurfaceConfiguration()
+        try noCwdLocal.configureSavedRestore(&homeFallbackConfig, createRuntime: false, recreateIfGone: true)
+        #expect(noCwdLocal.launchWorkingDirectory == FileManager.default.homeDirectoryForCurrentUser.path)
+        #expect(
+            homeFallbackConfig.environmentVariables[SessionRuntimeDescriptor.resurrectWorkingDirectoryEnvironmentKey]
+                == FileManager.default.homeDirectoryForCurrentUser.path
+        )
+    }
+
+    @MainActor
+    @Test func handoffNormalizesStaleLocalRevisionDescriptor() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runtimeResources = root.appendingPathComponent("Resources/session-runtime", isDirectory: true)
+        let support = root.appendingPathComponent("Support", isDirectory: true)
+        let home = root.appendingPathComponent("Home", isDirectory: true)
+        try FileManager.default.createDirectory(at: runtimeResources, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        try Data("rev-bundled\n".utf8).write(to: runtimeResources.appendingPathComponent("revision"))
+        try Data("snap-bundled\n".utf8).write(to: runtimeResources.appendingPathComponent("snapshot-revision"))
+        let helper = runtimeResources.appendingPathComponent("omgd")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: helper)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+
+        let staleLocal = SessionRuntimeDescriptor(
+            connection: nil,
+            revision: "rev-stale-removed",
+            policy: .init(),
+            localWorkingDirectory: "/tmp"
+        )
+        var config = Ghostty.SurfaceConfiguration()
+        try staleLocal.configure(&config)
+        let handoff = SessionRuntimeHandoff(
+            resources: runtimeResources,
+            applicationSupportRoot: support,
+            homeDirectory: home
+        )
+        handoff.configure(&config, pane: UUID())
+        let configuredHelper = try #require(config.environmentVariables["OMG_SSH_HANDOFF_HELPER"])
+        #expect(!configuredHelper.isEmpty)
+        #expect(FileManager.default.isExecutableFile(atPath: configuredHelper))
+        let configuredToken = try #require(config.environmentVariables["OMG_SSH_HANDOFF_TOKEN"])
+        #expect(configuredToken.count == 64)
     }
 
     @Test func localRuntimeBridgeCapabilityIsStablePrivateAndRejectsSymlinks() throws {
@@ -1024,6 +1205,9 @@ struct SessionRuntimeConnectionTests {
         let second = SessionRuntimeDescriptor(connection: b, revision: "abc", policy: .init())
         #expect(first.identity != second.identity)
         #expect(first.identity != SessionRuntimeDescriptor(connection: a, revision: "def", policy: .init()).identity)
+        let localFirst = SessionRuntimeDescriptor(connection: nil, revision: "abc", policy: .init())
+        let localSecond = SessionRuntimeDescriptor(connection: nil, revision: "def", policy: .init())
+        #expect(localFirst.identity == localSecond.identity)
         let decoded = try JSONDecoder().decode(SessionRuntimeDescriptor.self, from: JSONEncoder().encode(first))
         #expect(decoded == first)
     }

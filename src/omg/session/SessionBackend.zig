@@ -803,7 +803,7 @@ fn readLoop(self: *Self, io: *HostIO, epoch: u64, attached: *bool, connected_onc
         try self.readExact(&h);
         const seq = std.mem.readInt(u64, h[1..9], .big);
         const len = std.mem.readInt(u32, h[9..13], .big);
-        if (len > 16 * 1024 * 1024) return error.FrameTooLarge;
+        if (len > 16 * 1024 * 1024 + 13) return error.FrameTooLarge;
         const bytes = try self.alloc.alloc(u8, len);
         defer self.alloc.free(bytes);
         try self.readExact(bytes);
@@ -860,7 +860,9 @@ fn readLoop(self: *Self, io: *HostIO, epoch: u64, attached: *bool, connected_onc
                     self.activity_revision.store(0, .release);
                     self.clearTakeoverInputLocked();
                 }
-                try self.restore(io, bytes);
+                self.restore(io, bytes) catch |err| {
+                    std.log.warn("OMG session snapshot restore failed, continuing attachment: {s}", .{@errorName(err)});
+                };
                 attached.* = true;
                 try self.confirmCreation();
                 sequence = seq;

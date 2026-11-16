@@ -19,11 +19,15 @@ cell-size form and the version-two eight-byte cell-plus-pixel form.
 
 `connect LOCAL_SOCKET CONNECTION_JSON` supports `transport: "ssh"` (also the
 default for old JSON) and `transport: "local"`. The local transport uses a private,
-stable `local_state_directory`; it bypasses SSH but shares the host protocol.
+stable per-channel `local_state_directory` (`omg-local-v2` key) across releases while
+still discovering unlocked legacy revision-scoped siblings; it bypasses SSH but shares
+the host protocol. Local broker bootstrap serializes concurrent callers with
+`<root>/bootstrap.lock` before racing `host.sock`.
 The relay owns the listener and pane sockets independently from its replaceable
 host connection. `retry-local LOCAL_SOCKET --interactive` requests an immediate
 retry with explicit interactive authentication; healthy streams remain attached.
-Local startup uses the helper from the descriptor's versioned bundle. A broker
+Local startup prefers the helper from the descriptor's versioned bundle when present
+and falls back to the active binary if a pinned historical helper is absent. A broker
 can exit while its holders continue running. A later broker verifies each holder
 with its UUID, generation and private capability before adopting it. Persisted
 numeric PIDs are metadata only and are never signalled.
@@ -34,6 +38,15 @@ Optional initial input is sent to the new PTY once, then discarded. Launch data
 is never stored in session records or replayed on transport reconnect. SSH
 requests reject local launch data. `local-launch/1` advertises this support; an
 older local host reports a clear error without creating a replacement shell.
+
+Restored workspace panes (`recreate_if_gone: true`) negotiate `recreate-if-gone/1`:
+live sessions attach normally and local `EndReason::Lost` sessions with a valid
+snapshot still resurrect via `resurrect_launch`, whereas missing/ended/closed or
+corrupt-snapshot sessions retire stale artifacts and open a fresh shell in the
+saved directory. When talking to an older remote SSH host lacking `recreate-if-gone/1`,
+the relay omits the field on the wire and performs a one-time `create=true` fallback
+if the host reports the session unknown or ended. Calls with `recreate_if_gone: false`
+(such as the Session Library) preserve strict attach/error behavior.
 
 `list-local SOCKET` sends the read-only L sequence-zero request through an
 already running relay. It does not create or attach a session and does not
@@ -50,8 +63,10 @@ big-endian bytes. A single-pane retry changes only its generation; a transport
 loss retires every affected attachment. Relay startup uses a fresh random seed
 so delayed input cannot match a restarted relay. The relay rejects stale frames and never replays disconnected
 input. The remote host protocol and snapshot output offsets stay independent.
-Session-level errors retain the pane; only an explicit retry reopens that stream
-with `create=false`. A confirmed UUID is never silently recreated.
+Session-level errors retain the pane; only an explicit retry reopens that stream.
+Confirmed sessions always retry with `create=false` and are never silently recreated,
+while an unconfirmed initial `create=true` retains its launch data across transient
+pre-open `E`/`Q` failures until snapshot confirmation (`S`) or an inner actor `E`.
 Before any session open, heartbeat capability negotiation must confirm
 `strict-open/1`. Old runtimes without this guarantee remain running but cannot
 be attached by the new supervisor. `durable-close/1` remains independently
@@ -61,10 +76,15 @@ negotiated so pending closes do not depend on opening a session.
 daemon/testing operations. The fixed VPS launcher and per-process experimental
 routing variables have been removed.
 
-Output queues and active-session counts are bounded per peer and by a shared
-128 MiB process budget covering queued and partial input buffers. Slow readers
+Output queues and active-session counts are bounded (`MAX_STREAMS = 512` and
+`64` host connections; `MAX_PEERS = 512` per relay) with a `64 MiB` per-peer output
+queue limit and `256 MiB` buffer budget, plus host-side read backpressure when the
+transport queue reaches half capacity (`queued_bytes() >= MAX_QUEUE / 2`). Slow readers
 disconnect when either budget is exhausted; PTY reading and lifetime enforcement
-continue. Runtime revision upgrades never
+continue. Exceeding `MAX_STREAMS` rejects only the extra open with stream `E`
+instead of tearing down the shared host transport. Snapshot format compatibility
+hashes only the wire snapshot sources (`src/terminal/snapshot`) while keeping the
+full binary `revision` unchanged. Runtime revision upgrades never
 restart a daemon with active sessions. Host crash, escaped descendants and
 cross-core snapshot migration still have the limits documented in
 RELEASE_PROGRESS.md.

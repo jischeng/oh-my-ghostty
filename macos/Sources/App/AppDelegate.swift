@@ -293,6 +293,7 @@ class AppDelegate: NSObject,
     // MARK: - NSApplicationDelegate
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        SessionRuntimeUpgradeCutover.runIfNeeded()
         TerminalWorkspaceSessionStore.shared.prepare()
         MainActor.assumeIsolated { applyMenuLocalization() }
         OhMyGhosttySettings.shared.activateDefaultPortableStoresIfNeeded()

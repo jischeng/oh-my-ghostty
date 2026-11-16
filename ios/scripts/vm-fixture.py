@@ -127,7 +127,7 @@ def main():
             current = (binary.parent / "revision").read_text().strip()
             if session["revision"] != current:
                 raise RuntimeError("The GUI session is not using the newly packaged runtime")
-            namespace = hashlib.sha256(f'{support}\0{current}'.encode()).hexdigest()[:20]
+            namespace = hashlib.sha256(f"omg-local-v2\0{support}".encode()).hexdigest()[:20]
             host = Path.home() / ".omg/run" / namespace / "host.sock"
             control = socket.socket(socket.AF_UNIX)
             control.settimeout(5)

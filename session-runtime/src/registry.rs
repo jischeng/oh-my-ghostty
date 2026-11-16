@@ -1139,12 +1139,11 @@ impl Registry {
                     if !valid_id(id) {
                         continue;
                     }
-                    if self.is_closed_in_any_root(id) {
-                        let _ = fs::remove_file(&entry_path);
-                    } else if !sibling.join(format!("{id}.json")).exists()
-                        && file_modified_unix(&entry_path).is_some_and(|m| {
-                            now.saturating_sub(m) > LOCAL_HOLDER_STARTUP_GRACE_SECONDS
-                        })
+                    if self.is_closed_in_any_root(id)
+                        || (!sibling.join(format!("{id}.json")).exists()
+                            && file_modified_unix(&entry_path).is_some_and(|m| {
+                                now.saturating_sub(m) > LOCAL_HOLDER_STARTUP_GRACE_SECONDS
+                            }))
                     {
                         let _ = fs::remove_file(&entry_path);
                     }
@@ -2403,12 +2402,11 @@ impl Registry {
                         if !valid_id(id) {
                             continue;
                         }
-                        if state.is_closed_in_any_root(id) {
-                            let _ = fs::remove_file(&entry_path);
-                        } else if !sibling.join(format!("{id}.json")).exists()
-                            && file_modified_unix(&entry_path).is_some_and(|m| {
-                                now.saturating_sub(m) > LOCAL_HOLDER_STARTUP_GRACE_SECONDS
-                            })
+                        if state.is_closed_in_any_root(id)
+                            || (!sibling.join(format!("{id}.json")).exists()
+                                && file_modified_unix(&entry_path).is_some_and(|m| {
+                                    now.saturating_sub(m) > LOCAL_HOLDER_STARTUP_GRACE_SECONDS
+                                }))
                         {
                             let _ = fs::remove_file(&entry_path);
                         }

@@ -24,6 +24,7 @@ final class EditorWorkspaceIntelligenceBridge {
     private var focusCheckTask: Task<Void, Never>?
     private(set) var hasSuspendedDocuments = false
     private(set) var reclaimGeneration: UInt64 = 0
+    var onWillCloseDocumentDuringHiddenReclaim: (@MainActor () async -> Void)?
     private var reclaimTouchedDocumentIDs: Set<EditorDocumentID> = []
     private var lspOpenedDocumentIDs: Set<EditorDocumentID> = []
     private nonisolated(unsafe) var windowKeyObserver: NSObjectProtocol?
@@ -167,6 +168,7 @@ final class EditorWorkspaceIntelligenceBridge {
 
     func tearDown() {
         reclaimGeneration &+= 1
+        onWillCloseDocumentDuringHiddenReclaim = nil
         focusCheckTask?.cancel()
         focusCheckTask = nil
         hasSuspendedDocuments = false
@@ -258,6 +260,9 @@ final class EditorWorkspaceIntelligenceBridge {
             reclaimTouchedDocumentIDs.insert(docID)
 
             await coordinator.removeOpenDocumentFromSymbolIndex(ctx)
+            if let hook = onWillCloseDocumentDuringHiddenReclaim {
+                await hook()
+            }
             guard shouldContinue(), workspace.documents.contains(where: { $0.id == document.id }) else {
                 if self.reclaimGeneration == generation {
                     self.hasSuspendedDocuments = false

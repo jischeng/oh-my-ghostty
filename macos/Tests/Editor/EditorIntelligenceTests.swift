@@ -1075,20 +1075,77 @@ struct EditorIntelligenceTests {
         await symbolIndex.updateOpenDocument(path: secondDoc.path, text: secondDoc.text, languageID: "python")
         emptyDiagnosticWipes.removeAll()
 
-        // Case 1: Uncollapse while `reclaimIdleWorkbenchNow()` is suspended mid-`suspendDocumentsForHiddenReclaim()`.
+        @MainActor
+        final class ReclaimSuspendGate {
+            private var pausedContinuation: CheckedContinuation<Void, Never>?
+            private var arrivedContinuation: CheckedContinuation<Void, Never>?
+            private var hasArrived = false
+            private var didPauseOnce = false
+            private(set) var wasCancelled = false
+
+            func reset() {
+                pausedContinuation?.resume()
+                pausedContinuation = nil
+                arrivedContinuation?.resume()
+                arrivedContinuation = nil
+                hasArrived = false
+                didPauseOnce = false
+                wasCancelled = false
+            }
+
+            func pauseOnce() async {
+                guard !didPauseOnce else { return }
+                didPauseOnce = true
+                hasArrived = true
+                arrivedContinuation?.resume()
+                arrivedContinuation = nil
+                await withCheckedContinuation { continuation in
+                    pausedContinuation = continuation
+                }
+            }
+
+            func waitUntilPaused() async {
+                if hasArrived { return }
+                await withCheckedContinuation { continuation in
+                    arrivedContinuation = continuation
+                }
+            }
+
+            func resumeIfWaiting() {
+                pausedContinuation?.resume()
+                pausedContinuation = nil
+            }
+
+            func markCancelledAndResume() {
+                wasCancelled = true
+                resumeIfWaiting()
+            }
+        }
+
+        let suspendGate = ReclaimSuspendGate()
+        defer {
+            workspace.intelligenceBridge.onWillCloseDocumentDuringHiddenReclaim = nil
+            suspendGate.reset()
+        }
+
+        // Case 1: Uncollapse while `reclaimIdleWorkbenchNow()` is deterministically paused mid-close
+        // (right after `firstDoc` was evicted from `symbolIndex`, before LSP close / diagnostic wipe).
+        workspace.intelligenceBridge.onWillCloseDocumentDuringHiddenReclaim = {
+            await suspendGate.pauseOnce()
+        }
         let genBeforeReclaim = workspace.intelligenceBridge.reclaimGeneration
         workspace.isVisible = false
         let manualReclaimTask = Task { @MainActor in
             await workspace.reclaimIdleWorkbenchNow()
         }
-        while !workspace.intelligenceBridge.hasSuspendedDocuments {
-            await Task.yield()
-        }
+        await suspendGate.waitUntilPaused()
         let genDuringSuspend = workspace.intelligenceBridge.reclaimGeneration
         #expect(genDuringSuspend > genBeforeReclaim)
+        #expect(workspace.intelligenceBridge.hasSuspendedDocuments)
 
-        // Uncollapse right while `suspendDocumentsForHiddenReclaim()` is in-flight!
+        // Uncollapse right while `suspendDocumentsForHiddenReclaim()` is paused mid-flight, then release gate!
         workspace.isVisible = true
+        suspendGate.resumeIfWaiting()
         let manualReclaimed = await manualReclaimTask.value
         #expect(!manualReclaimed)
         #expect(workspace.intelligenceBridge.reclaimGeneration > genDuringSuspend)
@@ -1115,18 +1172,33 @@ struct EditorIntelligenceTests {
         }
         #expect(recoveredManual)
 
-        // Case 2: Uncollapse while scheduled `workbenchReapTask` is mid-`suspendDocumentsForHiddenReclaim()`,
-        // verifying `cancelWorkbenchReap()` cancels the still-assigned `workbenchReapTask`.
+        // Case 2: Uncollapse while scheduled `workbenchReapTask` is deterministically paused mid-close,
+        // verifying `cancelWorkbenchReap()` cancels the still-assigned `workbenchReapTask`!
+        suspendGate.reset()
+        workspace.intelligenceBridge.onWillCloseDocumentDuringHiddenReclaim = {
+            await withTaskCancellationHandler {
+                await suspendGate.pauseOnce()
+            } onCancel: {
+                Task { @MainActor in
+                    suspendGate.markCancelledAndResume()
+                }
+            }
+        }
         emptyDiagnosticWipes.removeAll()
         let genBeforeScheduled = workspace.intelligenceBridge.reclaimGeneration
         workspace.isVisible = false
-        let enteredScheduledSuspend = await waitForMainCondition(timeoutMs: 2_000) {
-            workspace.intelligenceBridge.reclaimGeneration > genBeforeScheduled
-        }
-        #expect(enteredScheduledSuspend)
-        workspace.isVisible = true
-        try? await Task.sleep(for: .milliseconds(80))
+        await suspendGate.waitUntilPaused()
+        #expect(workspace.intelligenceBridge.reclaimGeneration > genBeforeScheduled)
 
+        // Uncollapsing must cancel `workbenchReapTask` (waking `onCancel` -> `suspendGate.wasCancelled == true`).
+        workspace.isVisible = true
+        let cancelledPromptly = await waitForMainCondition(timeoutMs: 1_000) {
+            suspendGate.wasCancelled && !workspace.intelligenceBridge.hasSuspendedDocuments
+        }
+        suspendGate.resumeIfWaiting()
+        workspace.intelligenceBridge.onWillCloseDocumentDuringHiddenReclaim = nil
+        #expect(cancelledPromptly)
+        #expect(suspendGate.wasCancelled)
         #expect(!workspace.intelligenceBridge.hasSuspendedDocuments)
         #expect(emptyDiagnosticWipes.isEmpty)
         let recoveredScheduled = await waitForAsyncCondition(timeoutMs: 2_000) {

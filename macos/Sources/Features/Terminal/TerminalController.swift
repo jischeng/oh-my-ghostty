@@ -3502,11 +3502,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     func updateQuickInputHeight(_ proposedHeight: CGFloat, persist: Bool) {
-        let contentHeight = window?.contentLayoutRect.height ??
-            AgentQuickInputMetrics.maximumHeight * 2
         quickInputModel.updateDockHeight(
             proposedHeight,
-            availableHeight: contentHeight,
+            availableHeight: quickInputAvailableHeight(),
             persist: persist
         )
     }
@@ -5575,10 +5573,19 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             }
         }
         if changedKey == nil || changedKey == "keyboard.quickInputHeight" {
-            quickInputModel.applyConfiguredDockHeight(
-                CGFloat(workspaceCoordinator.store.presentation(for: workspaceID).quickInputHeight),
-                availableHeight: window?.contentLayoutRect.height ?? 720
-            )
+            let ignoreForeignSettings = (notification.object as? OhMyGhosttySettings)
+                .map { $0 !== settings } ?? false
+            if !ignoreForeignSettings {
+                let storedHeight = workspaceCoordinator.store.presentation(for: workspaceID).quickInputHeight
+                if settings.quickInputHeight != storedHeight {
+                    workspaceCoordinator.store.quickInputPresentation(for: workspaceID)
+                        .setHeight(settings.quickInputHeight)
+                }
+                quickInputModel.applyConfiguredDockHeight(
+                    CGFloat(settings.quickInputHeight),
+                    availableHeight: quickInputAvailableHeight(defaultHeight: 720)
+                )
+            }
         }
         guard supportsSidebar,
               window?.tabGroup?.selectedWindow === window else { return }

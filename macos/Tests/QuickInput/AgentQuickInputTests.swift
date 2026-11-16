@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import GhosttyKit
 import SwiftUI
 import Testing
 @testable import Ghostty
@@ -426,44 +427,40 @@ struct AgentQuickInputTests {
     }
 
     @Test func accessoryHeightReservesFinalLayoutWithoutAnimationSteps() {
+        #expect(AgentQuickInputMetrics.minimumHeight == 96)
+        #expect(AgentQuickInputMetrics.defaultHeight == 148)
         let divider = TerminalShellStyle.dividerWidth
-        for (presented, hasQueue) in [(false, false), (true, false), (false, true), (true, true)] {
+        for pinned in [false, true] {
             #expect(AgentQuickInputMetrics.reservedAccessoryHeight(
-                dockHeight: 252,
-                isDockPresented: presented,
-                hasQueue: hasQueue
+                dockHeight: 148,
+                isDockPresented: false,
+                hasQueue: false,
+                isPinned: pinned
             ) == 0)
             #expect(AgentQuickInputMetrics.reservedAccessoryHeight(
-                dockHeight: 252,
-                isDockPresented: presented,
-                hasQueue: hasQueue,
-                isPinned: false
-            ) == 0)
+                dockHeight: 148,
+                isDockPresented: true,
+                hasQueue: false,
+                isPinned: pinned
+            ) == 148 + divider)
+            #expect(AgentQuickInputMetrics.reservedAccessoryHeight(
+                dockHeight: 148,
+                isDockPresented: false,
+                hasQueue: true,
+                isPinned: pinned
+            ) == AgentQuickInputMetrics.queueLaneHeight + divider)
+            #expect(AgentQuickInputMetrics.reservedAccessoryHeight(
+                dockHeight: 148,
+                isDockPresented: true,
+                hasQueue: true,
+                isPinned: pinned
+            ) == 148 + AgentQuickInputMetrics.queueLaneHeight + divider * 2)
         }
         #expect(AgentQuickInputMetrics.reservedAccessoryHeight(
-            dockHeight: 252,
-            isDockPresented: false,
-            hasQueue: false,
-            isPinned: true
-        ) == 0)
-        #expect(AgentQuickInputMetrics.reservedAccessoryHeight(
-            dockHeight: 252,
+            dockHeight: 148,
             isDockPresented: true,
-            hasQueue: false,
-            isPinned: true
-        ) == 252 + divider)
-        #expect(AgentQuickInputMetrics.reservedAccessoryHeight(
-            dockHeight: 252,
-            isDockPresented: false,
-            hasQueue: true,
-            isPinned: true
-        ) == AgentQuickInputMetrics.queueLaneHeight + divider)
-        #expect(AgentQuickInputMetrics.reservedAccessoryHeight(
-            dockHeight: 252,
-            isDockPresented: true,
-            hasQueue: true,
-            isPinned: true
-        ) == 252 + AgentQuickInputMetrics.queueLaneHeight + divider * 2)
+            hasQueue: false
+        ) == 148 + divider)
     }
 
     @Test @MainActor func placeholderUsesRealWindowCaretGeometry() throws {
@@ -494,10 +491,11 @@ struct AgentQuickInputTests {
             from: nil
         )
         let origin = editor.placeholderDrawingOrigin()
-        let expected = localCaretRect.maxX + 1 / window.backingScaleFactor
+        let expected = localCaretRect.maxX + ComposerTextView.placeholderCaretGap
 
+        #expect(ComposerTextView.placeholderCaretGap == 3)
         #expect(abs(origin.x - expected) < 0.01)
-        #expect(origin.x > localCaretRect.maxX)
+        #expect(origin.x >= localCaretRect.maxX + 3)
         #expect(origin.y == editor.textContainerOrigin.y)
         Self.retainedTestWindows.append(window)
     }
@@ -630,7 +628,7 @@ struct AgentQuickInputTests {
     }
 
     @Test @MainActor
-    func unpinnedQuickInputRoundTripEmitsZeroSIGWINCHZeroCtrlGAndZeroDEC1004FocusChatter() async throws {
+    func unpinnedQuickInputDocksInFlowWithZeroCtrlGAndZeroDEC1004FocusChatter() async throws {
         let app = try #require(NSApp.delegate as? AppDelegate).ghostty
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -638,19 +636,11 @@ struct AgentQuickInputTests {
         let script = root.appendingPathComponent("probe.py")
         let ready = root.appendingPathComponent("ready")
         let captured = root.appendingPathComponent("captured")
-        let sigwinchFile = root.appendingPathComponent("sigwinch")
         try #"""
-        import os, pathlib, signal, tty
+        import os, pathlib, tty
         tty.setraw(0)
         root = pathlib.Path(__file__).parent
-        sigwinches = 0
-        def on_winch(signum, frame):
-            global sigwinches
-            sigwinches += 1
-            (root / "sigwinch").write_text(str(sigwinches))
-        signal.signal(signal.SIGWINCH, on_winch)
         os.write(1, b"\x1b[?1004h")
-        (root / "sigwinch").write_text("0")
         (root / "ready").touch()
         buf = bytearray()
         while True:
@@ -685,15 +675,17 @@ struct AgentQuickInputTests {
         try await Task.sleep(for: .milliseconds(100))
 
         let baselineBytes = (try? Data(contentsOf: captured))?.count ?? 0
-        let baselineWinch = Int((try? String(contentsOf: sigwinchFile, encoding: .utf8)) ?? "0") ?? 0
         let initialSurfaceFrame = surface.frame
         #expect(!controller.quickInputModel.isPinned)
         #expect(surface.focused)
 
-        // 1. Open unpinned Quick Input (⌘⇧E) and transfer focus to ComposerTextView.
+        // 1. Open unpinned Quick Input (⌘⇧E); it docks in-flow above the bottom edge and transfers focus cleanly.
         controller.toggleQuickInput()
         #expect(controller.quickInputModel.isPresented)
-        window.contentView?.layoutSubtreeIfNeeded()
+        try await waitForAppKit {
+            window.contentView?.layoutSubtreeIfNeeded()
+            return surface.frame.height < initialSurfaceFrame.height
+        }
         func findEditor(_ view: NSView) -> ComposerTextView? {
             (view as? ComposerTextView) ?? view.subviews.lazy.compactMap(findEditor).first
         }
@@ -703,7 +695,10 @@ struct AgentQuickInputTests {
         #expect(surface.hasCompanionQuickInputFocus)
         #expect(surface.focused)
         #expect(surface.layer?.opacity == 1)
-        #expect(surface.frame == initialSurfaceFrame)
+        #expect(surface.frame.height < initialSurfaceFrame.height)
+        #expect(!surface.isPointOccludedByFloatingAccessory(
+            inWindow: surface.convert(NSPoint(x: 40, y: 12), to: nil)
+        ))
 
         // 2. Round-trip focus between ComposerTextView and SurfaceView (⌘⌥↑ / ⌘⌥↓).
         controller.restoreTerminalFocus(surfaceID: surface.id)
@@ -715,42 +710,40 @@ struct AgentQuickInputTests {
         #expect(surface.hasCompanionQuickInputFocus)
         #expect(surface.focused)
 
-        // 3. Queue a message while unpinned; queue bar appears as floating overlay with 0 resize.
+        // 3. Queue a message while unpinned; queue bar stays in-flow below the terminal viewport.
         controller.quickInputModel.draft = "queued while unpinned"
         controller.queueQuickInputDraft()
         window.contentView?.layoutSubtreeIfNeeded()
         try await Task.sleep(for: .milliseconds(50))
         window.contentView?.layoutSubtreeIfNeeded()
         #expect(controller.quickInputModel.state(for: surface.id)?.queue.count == 1)
-        #expect(surface.frame == initialSurfaceFrame)
+        #expect(surface.frame.height < initialSurfaceFrame.height)
         #expect(surface.focused)
 
         // 4. Open again, send a draft, and dismiss on completion.
         controller.toggleQuickInput()
         window.contentView?.layoutSubtreeIfNeeded()
         controller.focusQuickInputEditor(editor, for: surface.id)
-        controller.quickInputModel.draft = "direct overlay send"
+        controller.quickInputModel.draft = "direct in-flow send"
         controller.sendQuickInputDraft()
 
         for _ in 0..<80 {
             let allData = (try? Data(contentsOf: captured)) ?? Data()
             let delta = allData.dropFirst(min(baselineBytes, allData.count))
-            if let text = String(data: delta, encoding: .utf8), text.contains("direct overlay send"), text.hasSuffix("\r") {
+            if let text = String(data: delta, encoding: .utf8), text.contains("direct in-flow send"), text.hasSuffix("\r") {
                 break
             }
             try await Task.sleep(for: .milliseconds(50))
         }
         window.contentView?.layoutSubtreeIfNeeded()
-        let postSendWinch = Int((try? String(contentsOf: sigwinchFile, encoding: .utf8)) ?? "0") ?? 0
-        #expect(postSendWinch == baselineWinch, "Unpinned Quick Input open/queue/send/dismiss must emit 0 SIGWINCH")
-        #expect(surface.frame == initialSurfaceFrame)
+        #expect(surface.frame.height < initialSurfaceFrame.height)
         #expect(surface.layer?.opacity == 1)
         #expect(surface.focused)
 
         let allData = try Data(contentsOf: captured)
         let roundTripSlice = Data(allData.dropFirst(min(baselineBytes, allData.count)))
         let roundTripText = try #require(String(data: roundTripSlice, encoding: .utf8))
-        #expect(roundTripText.contains("direct overlay send"))
+        #expect(roundTripText.contains("direct in-flow send"))
         #expect(!roundTripSlice.contains(0x07), "Default Quick Input open/send must not inject Ctrl+G (0x07)")
         #expect(!roundTripText.contains("\u{1B}[103;5u"), "Default Quick Input open/send must not inject Kitty Ctrl+G")
         #expect(!roundTripText.contains("\u{1B}[O"), "Companion focus transfer must suppress DEC 1004 focus-out")
@@ -775,7 +768,7 @@ struct AgentQuickInputTests {
     }
 
     @Test @MainActor
-    func floatingQuickInputUsesOpaqueBackgroundWhenWindowIsTranslucentOrGlass() throws {
+    func inFlowQuickInputAlwaysUsesChromeBackgroundForBothPinnedAndUnpinned() throws {
         let themeColor = Color(.sRGB, red: 0.12, green: 0.13, blue: 0.19, opacity: 1)
 
         // 1. Translucent background-opacity < 1.0
@@ -785,7 +778,7 @@ struct AgentQuickInputTests {
             windowIsOpaque: false,
             usesWindowGlass: false
         )
-        let floatingTranslucent = TerminalController.quickInputAccessoryBackground(
+        let unpinnedTranslucent = TerminalController.quickInputAccessoryBackground(
             isPinned: false,
             chromeBackground: translucentChrome,
             color: themeColor,
@@ -797,8 +790,9 @@ struct AgentQuickInputTests {
             color: themeColor,
             opacity: 0.62
         )
-        #expect(NSColor(floatingTranslucent).cgColor.alpha == 1)
+        let unpinnedTranslucentColor = try #require(NSColor(unpinnedTranslucent).usingColorSpace(.sRGB))
         let pinnedTranslucentColor = try #require(NSColor(pinnedTranslucent).usingColorSpace(.sRGB))
+        #expect(abs(unpinnedTranslucentColor.alphaComponent - 0.62) < 0.02)
         #expect(abs(pinnedTranslucentColor.alphaComponent - 0.62) < 0.02)
 
         // 2. macOS glass style (usesWindowGlass = true -> terminalChromeBackground is .clear)
@@ -808,7 +802,7 @@ struct AgentQuickInputTests {
             windowIsOpaque: false,
             usesWindowGlass: true
         )
-        let floatingGlass = TerminalController.quickInputAccessoryBackground(
+        let unpinnedGlass = TerminalController.quickInputAccessoryBackground(
             isPinned: false,
             chromeBackground: glassChrome,
             color: themeColor,
@@ -820,7 +814,7 @@ struct AgentQuickInputTests {
             color: themeColor,
             opacity: 0.62
         )
-        #expect(NSColor(floatingGlass).cgColor.alpha == 1)
+        #expect(NSColor(unpinnedGlass).alphaComponent == 0)
         #expect(NSColor(pinnedGlass).alphaComponent == 0)
     }
 
@@ -929,7 +923,7 @@ struct AgentQuickInputTests {
     }
 
     @Test @MainActor
-    func hoveringOverFloatingQuickInputSuppressesSGRMouseMotionAndFocusFollowsMouse() async throws {
+    func inFlowQuickInputDoesNotOccludeTerminalAndPreservesMouseHover() async throws {
         let app = try #require(NSApp.delegate as? AppDelegate).ghostty
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -971,12 +965,20 @@ struct AgentQuickInputTests {
             try await Task.sleep(for: .milliseconds(50))
         }
         try #require(FileManager.default.fileExists(atPath: ready.path))
+        window.contentView?.layoutSubtreeIfNeeded()
+        let initialSurfaceHeight = surface.frame.height
 
         controller.keyWindowOverrideForTesting = true
         controller.focusFollowsMouseOverrideForTesting = true
         controller.presentQuickInput(for: surface, requestFocus: false)
-        window.contentView?.layoutSubtreeIfNeeded()
-        try await Task.sleep(for: .milliseconds(50))
+        try await waitForAppKit {
+            window.contentView?.layoutSubtreeIfNeeded()
+            return surface.frame.height < initialSurfaceHeight
+        }
+
+        #expect(surface.frame.height < initialSurfaceHeight)
+        let dockHit = try #require(window.contentView?.hitTest(NSPoint(x: 120, y: 40)))
+        #expect(dockHit !== surface && !dockHit.isDescendant(of: surface))
 
         let externalField = NSTextField(frame: NSRect(x: 0, y: 560, width: 80, height: 24))
         window.contentView?.addSubview(externalField)
@@ -985,8 +987,8 @@ struct AgentQuickInputTests {
         #expect(!surface.focused)
         #expect(window.firstResponder !== surface)
 
-        let occludedPoint = surface.convert(NSPoint(x: 120, y: 40), to: nil)
-        #expect(surface.isPointOccludedByFloatingAccessory(inWindow: occludedPoint))
+        let surfaceBottomPoint = surface.convert(NSPoint(x: 120, y: 20), to: nil)
+        #expect(!surface.isPointOccludedByFloatingAccessory(inWindow: surfaceBottomPoint))
         let baselineCount = (try? Data(contentsOf: captured))?.count ?? 0
 
         let makeMouseMoveEvent = { (location: NSPoint) throws -> NSEvent in
@@ -1002,54 +1004,359 @@ struct AgentQuickInputTests {
                 pressure: 0
             ))
         }
-        let makeEnterExitEvent = { (type: NSEvent.EventType, location: NSPoint) throws -> NSEvent in
-            try #require(NSEvent.enterExitEvent(
-                with: type,
-                location: location,
-                modifierFlags: [],
-                timestamp: ProcessInfo.processInfo.systemUptime,
-                windowNumber: window.windowNumber,
-                context: nil,
-                eventNumber: 0,
-                trackingNumber: 0,
-                userData: nil
-            ))
-        }
-
-        let previousCursor = NSCursor.current
-        defer { previousCursor.set() }
-        NSCursor.pointingHand.set()
-        surface.cursorUpdate(with: try makeEnterExitEvent(.cursorUpdate, occludedPoint))
-        #expect(NSCursor.current == NSCursor.pointingHand)
-        surface.mouseEntered(with: try makeEnterExitEvent(.mouseEntered, occludedPoint))
-        surface.mouseMoved(with: try makeMouseMoveEvent(occludedPoint))
-        try await Task.sleep(for: .milliseconds(100))
-
-        #expect(!surface.mouseOverSurface)
-        #expect(!surface.focused, "Hovering over floating Quick Input must not trigger focusFollowsMouse")
-        #expect(window.firstResponder !== surface)
-        let afterOccludedData = (try? Data(contentsOf: captured)) ?? Data()
-        let occludedSlice = Data(afterOccludedData.dropFirst(min(baselineCount, afterOccludedData.count)))
-        let occludedText = String(data: occludedSlice, encoding: .utf8) ?? ""
-        #expect(!occludedText.contains("\u{1B}[<35;"), "Occluded hover must emit zero SGR mouse motion")
-
-        // Moving into the unoccluded upper terminal region still delivers SGR motion normally,
-        // and moving back over floating Quick Input exits cleanly.
-        let visiblePoint = surface.convert(NSPoint(x: 120, y: surface.bounds.height - 30), to: nil)
-        #expect(!surface.isPointOccludedByFloatingAccessory(inWindow: visiblePoint))
-        surface.mouseMoved(with: try makeMouseMoveEvent(visiblePoint))
+        surface.mouseMoved(with: try makeMouseMoveEvent(surfaceBottomPoint))
         #expect(surface.mouseOverSurface)
         for _ in 0..<40 {
             let data = (try? Data(contentsOf: captured)) ?? Data()
-            let slice = Data(data.dropFirst(min(afterOccludedData.count, data.count)))
+            let slice = Data(data.dropFirst(min(baselineCount, data.count)))
             if String(data: slice, encoding: .utf8)?.contains("\u{1B}[<35;") == true { break }
             try await Task.sleep(for: .milliseconds(25))
         }
-        let afterVisibleData = try Data(contentsOf: captured)
-        let visibleText = String(data: Data(afterVisibleData.dropFirst(min(afterOccludedData.count, afterVisibleData.count))), encoding: .utf8) ?? ""
-        #expect(visibleText.contains("\u{1B}[<35;"))
+        let afterData = try Data(contentsOf: captured)
+        let text = String(data: Data(afterData.dropFirst(min(baselineCount, afterData.count))), encoding: .utf8) ?? ""
+        #expect(text.contains("\u{1B}[<35;"))
+    }
 
-        surface.mouseMoved(with: try makeMouseMoveEvent(occludedPoint))
-        #expect(!surface.mouseOverSurface)
+    @Test func presentCancelsQueueEditAcrossPaneSwitchesWithoutCorruptingTargetDraft() throws {
+        let global = QuickInputGlobalPresentation()
+        var currentPane = UUID()
+        let paneA = currentPane
+        let paneB = UUID()
+        let model = AgentQuickInputModel(globalPresentation: global)
+        model.bindGlobalTarget { currentPane }
+
+        model.present(for: paneA)
+        model.draft = "queued item"
+        let queued = try #require(model.enqueueDraft())
+        model.draft = "pane A original"
+
+        model.present(for: paneB)
+        model.draft = "pane B original"
+
+        model.editQueuedItem(queued.id, for: paneA)
+        #expect(model.isEditingQueuedItem)
+        #expect(model.targetSurfaceID == paneA)
+        model.draft = "unsaved queue edit"
+
+        // Direct switch via present(for:)
+        model.present(for: paneB, requestFocus: false)
+        #expect(!model.isEditingQueuedItem)
+        #expect(model.isPresented)
+        #expect(model.targetSurfaceID == paneB)
+        #expect(model.draft == "pane B original")
+        #expect(model.state(for: paneA)?.draft == "pane A original")
+        #expect(model.state(for: paneA)?.queue == [queued])
+
+        // Global target switch while editing queued item on Pane A
+        model.editQueuedItem(queued.id, for: paneA)
+        model.draft = "another unsaved queue edit"
+        currentPane = paneB
+        model.bindGlobalTarget { currentPane }
+        #expect(!model.isEditingQueuedItem)
+        #expect(model.isPresented)
+        #expect(model.targetSurfaceID == paneB)
+        #expect(model.draft == "pane B original")
+        #expect(model.state(for: paneA)?.draft == "pane A original")
+    }
+
+    @Test func dockHeightSyncsBidirectionallyBetweenWorkspaceStoreAndSettingsWithoutCycles() throws {
+        let settings = OhMyGhosttySettings.shared
+        let previousHeight = settings.quickInputHeight
+        defer { settings.quickInputHeight = previousHeight }
+
+        let defaultGlobal = QuickInputGlobalPresentation()
+        #expect(defaultGlobal.height == 148)
+        defaultGlobal.setHeight(50)
+        #expect(defaultGlobal.height == 96)
+
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let store = TerminalWorkspaceStore(fileURL: nil)
+        let coordinator = TerminalWorkspaceCoordinator(store: store)
+        coordinator.finishRestoring()
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 30"
+        let controller = TerminalController(app, withBaseConfig: config, workspaceCoordinator: coordinator)
+        let window = try #require(controller.window)
+        window.setContentSize(NSSize(width: 800, height: 600))
+        defer {
+            window.delegate = nil
+            window.close()
+        }
+
+        // 1. Divider persist updates both workspace store and OhMyGhosttySettings.shared.
+        controller.updateQuickInputHeight(220, persist: true)
+        #expect(controller.quickInputModel.dockHeight == 220)
+        #expect(store.quickInputPresentation(for: controller.workspaceID).height == 220)
+        #expect(store.presentation(for: controller.workspaceID).quickInputHeight == 220)
+        #expect(settings.quickInputHeight == 220)
+
+        // 2. Settings height change pushes into workspace store presentation and model without cycling back.
+        settings.quickInputHeight = 188
+        #expect(store.quickInputPresentation(for: controller.workspaceID).height == 188)
+        #expect(store.presentation(for: controller.workspaceID).quickInputHeight == 188)
+        #expect(controller.quickInputModel.dockHeight == 188)
+        #expect(settings.quickInputHeight == 188)
+
+        // 3. Visible queue reservation is subtracted from available height during divider resize.
+        let surface = try #require(controller.focusedSurface)
+        controller.quickInputModel.present(for: surface.id, requestFocus: false)
+        controller.quickInputModel.draft = "queued"
+        _ = controller.quickInputModel.enqueueDraft()
+        window.setContentSize(NSSize(width: 800, height: 420))
+        let contentHeight = window.contentLayoutRect.height
+        controller.updateQuickInputHeight(400, persist: true)
+        let queueReserve = AgentQuickInputMetrics.queueLaneHeight + TerminalShellStyle.dividerWidth
+        let expectedMax = max(
+            AgentQuickInputMetrics.minimumHeight,
+            contentHeight - queueReserve - AgentQuickInputMetrics.minimumTerminalHeight
+        )
+        #expect(abs(controller.quickInputModel.dockHeight - expectedMax) < 0.01)
+    }
+
+    @Test func imeMarkedTextPreventsOptionArrowMovementInterception() throws {
+        #expect(AgentQuickInputMovementCommand.resolve(
+            keyCode: 123,
+            modifiers: [.option],
+            hasMarkedText: false
+        ) == .wordBackward(modifySelection: false))
+        #expect(AgentQuickInputMovementCommand.resolve(
+            keyCode: 123,
+            modifiers: [.option],
+            hasMarkedText: true
+        ) == nil)
+        #expect(AgentQuickInputMovementCommand.resolve(
+            keyCode: 124,
+            modifiers: [.option, .shift],
+            hasMarkedText: true
+        ) == nil)
+        #expect(AgentQuickInputMovementCommand.resolve(
+            keyCode: 126,
+            modifiers: [.option],
+            hasMarkedText: true
+        ) == nil)
+        #expect(AgentQuickInputMovementCommand.resolve(
+            keyCode: 125,
+            modifiers: [.option],
+            hasMarkedText: true
+        ) == nil)
+
+        var performedMovementSelectors: [Selector] = []
+        let editor = ComposerTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 80))
+        editor.performMovementSelector = {
+            performedMovementSelectors.append($0)
+            return true
+        }
+        editor.string = "hello"
+        editor.setSelectedRange(NSRange(location: 5, length: 0))
+        editor.setMarkedText(
+            "ni",
+            selectedRange: NSRange(location: 2, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        #expect(editor.hasMarkedText())
+        let optionLeft = try #require(keyEvent(keyCode: 123, modifiers: [.option]))
+        editor.keyDown(with: optionLeft)
+        #expect(performedMovementSelectors.isEmpty,
+                "Option+Left during IME composition must not be intercepted by ComposerTextView")
+
+        editor.unmarkText()
+        #expect(!editor.hasMarkedText())
+        editor.keyDown(with: optionLeft)
+        #expect(performedMovementSelectors == [
+            #selector(NSStandardKeyBindingResponding.moveWordBackward(_:)),
+        ])
+    }
+
+    @Test func composerCommandsRequireExactCommandModifiers() throws {
+        let editor = ComposerTextView()
+        var sent = 0
+        var queued = 0
+        editor.onSend = { sent += 1 }
+        editor.onQueue = { queued += 1 }
+
+        let send = try #require(keyEvent(keyCode: 36, modifiers: [.command]))
+        #expect(editor.performKeyEquivalent(with: send))
+        #expect(sent == 1 && queued == 0)
+
+        let keypadSend = try #require(keyEvent(keyCode: 76, modifiers: [.command, .numericPad, .capsLock]))
+        #expect(editor.performKeyEquivalent(with: keypadSend))
+        #expect(sent == 2 && queued == 0)
+
+        let queue = try #require(keyEvent(keyCode: 36, modifiers: [.command, .option]))
+        #expect(editor.performKeyEquivalent(with: queue))
+        #expect(sent == 2 && queued == 1)
+
+        for extraModifiers in [
+            NSEvent.ModifierFlags([.command, .shift]),
+            [.command, .control],
+            [.command, .option, .shift],
+            [.command, .option, .control],
+        ] {
+            let ignored = try #require(keyEvent(keyCode: 36, modifiers: extraModifiers))
+            #expect(!editor.performKeyEquivalent(with: ignored))
+        }
+        #expect(sent == 2 && queued == 1)
+    }
+
+    @Test func programmaticHistoryAndDraftInsertionPreservesLocalUndoOnSamePaneAndResetsOnPaneSwitchOrClear() async throws {
+        struct ComposerHostWrapper: View {
+            @ObservedObject var model: AgentQuickInputModel
+            let font: NSFont
+
+            var body: some View {
+                AgentQuickInputTextEditor(
+                    text: $model.draft,
+                    placeholder: "Type here…",
+                    isPresented: model.isPresented,
+                    focusRequestID: model.focusRequestID,
+                    font: font,
+                    onPasteImage: nil,
+                    onSend: {},
+                    onQueue: {},
+                    onCancel: {},
+                    companionSurfaceID: model.targetSurfaceID
+                )
+            }
+        }
+
+        let paneA = UUID()
+        let paneB = UUID()
+        let model = AgentQuickInputModel()
+        model.togglePinned()
+        model.present(for: paneB, requestFocus: false)
+        model.draft = "pane B draft"
+        model.present(for: paneA, requestFocus: false)
+
+        let font = QuickInputTypography.font(family: "Menlo", size: 13)
+        let host = NSHostingView(rootView: ComposerHostWrapper(model: model, font: font))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 120),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { window.contentView = nil; window.close() }
+        host.layoutSubtreeIfNeeded()
+
+        func find(_ view: NSView) -> ComposerTextView? {
+            (view as? ComposerTextView) ?? view.subviews.lazy.compactMap(find).first
+        }
+        let editor = try #require(find(host))
+        #expect(window.makeFirstResponder(editor))
+
+        // 1. User types initial draft.
+        editor.insertText("typed", replacementRange: editor.selectedRange())
+        #expect(model.draft == "typed")
+        #expect(editor.undoManager?.canUndo == true)
+
+        // 2. Programmatic history/draft insertion on the SAME pane preserves undo stack.
+        model.useHistoryText("from history", mode: .append)
+        try await waitForAppKit {
+            host.layoutSubtreeIfNeeded()
+            return editor.string == "typed\nfrom history"
+        }
+        #expect(editor.undoManager?.canUndo == true)
+
+        let undoEvent = try #require(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [.command],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: "z",
+            charactersIgnoringModifiers: "z",
+            isARepeat: false,
+            keyCode: 6
+        ))
+        #expect(editor.performKeyEquivalent(with: undoEvent))
+        #expect(editor.string == "typed")
+        #expect(editor.performKeyEquivalent(with: undoEvent))
+        #expect(editor.string.isEmpty)
+
+        // 3. Switching panes resets localUndoManager.
+        editor.insertText("pane A draft", replacementRange: editor.selectedRange())
+        #expect(editor.undoManager?.canUndo == true)
+        model.present(for: paneB, requestFocus: false)
+        try await waitForAppKit {
+            host.layoutSubtreeIfNeeded()
+            return editor.string == "pane B draft"
+        }
+        #expect(editor.undoManager?.canUndo == false)
+
+        // 4. Post-submit clear (empty text) resets localUndoManager.
+        editor.insertText(" edited", replacementRange: editor.selectedRange())
+        #expect(editor.undoManager?.canUndo == true)
+        model.completeSubmittedDraft(model.draft, for: paneB)
+        try await waitForAppKit {
+            host.layoutSubtreeIfNeeded()
+            return editor.string.isEmpty
+        }
+        #expect(editor.undoManager?.canUndo == false)
+    }
+
+    @Test func settleDelayAppliesOnlyToMultilineNonEditorSends() {
+        #expect(!TerminalController.quickInputRequiresSettleDelay(
+            text: "single line prompt",
+            usesEditorReplacement: false
+        ))
+        #expect(!TerminalController.quickInputRequiresSettleDelay(
+            text: "line1\nline2",
+            usesEditorReplacement: true
+        ))
+        #expect(TerminalController.quickInputRequiresSettleDelay(
+            text: "line1\nline2",
+            usesEditorReplacement: false
+        ))
+        #expect(TerminalController.quickInputRequiresSettleDelay(
+            text: "line1\rline2",
+            usesEditorReplacement: false
+        ))
+    }
+
+    @Test func surfaceScrollViewClampsPaddingNonNegativeAndSynchronizesOnShrink() throws {
+        let scrollbar = Ghostty.Action.Scrollbar(
+            c: ghostty_action_scrollbar_s(total: 100, offset: 70, len: 30)
+        )
+        // Shrunk contentHeight before .ghosttyDidUpdateScrollbar arrives:
+        // padding = max(0, 451 - 30*20) = 0 -> documentHeight = 100 * 20 = 2000 (not 1851).
+        #expect(SurfaceScrollView.documentHeight(
+            contentHeight: 451,
+            cellHeight: 20,
+            scrollbar: scrollbar
+        ) == 2000)
+        // Taller contentHeight preserves positive alignment padding.
+        #expect(SurfaceScrollView.documentHeight(
+            contentHeight: 620,
+            cellHeight: 20,
+            scrollbar: Ghostty.Action.Scrollbar(
+                c: ghostty_action_scrollbar_s(total: 30, offset: 0, len: 30)
+            )
+        ) == 620)
+
+        let native = try #require((NSApp.delegate as? AppDelegate)?.ghostty.app)
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 30"
+        let surface = Ghostty.SurfaceView(native, baseConfig: config)
+        let lease = SurfacePresentationLease()
+        surface.presentation.authorize(lease)
+        let wrapper = SurfaceScrollView(
+            contentSize: CGSize(width: 800, height: 600),
+            surfaceView: surface,
+            lease: lease
+        )
+        wrapper.setFrameSize(NSSize(width: 800, height: 600))
+        wrapper.layoutSubtreeIfNeeded()
+        surface.cellSize = CGSize(width: 10, height: 20)
+        surface.scrollbar = scrollbar
+        wrapper.setFrameSize(NSSize(width: 800, height: 400))
+        wrapper.layoutSubtreeIfNeeded()
+
+        let innerScroll = try #require(wrapper.subviews.first as? NSScrollView)
+        let docView = try #require(innerScroll.documentView)
+        #expect(docView.frame.height >= 2000)
+        #expect(surface.frame.size == CGSize(width: 800, height: 400))
     }
 }

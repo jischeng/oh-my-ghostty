@@ -265,9 +265,9 @@ class SurfaceScrollView: NSView {
         documentView.frame.size.width = scrollView.bounds.width
 
         // When our scrollview changes make sure our scroller and surface views are synchronized
+        synchronizeCoreSurface()
         synchronizeScrollView()
         synchronizeSurfaceView()
-        synchronizeCoreSurface()
 
         if needsPostMountSync, window != nil {
             needsPostMountSync = false
@@ -454,14 +454,24 @@ class SurfaceScrollView: NSView {
 
     /// Calculate the appropriate document view height given a scrollbar state
     private func documentHeight() -> CGFloat {
-        let contentHeight = scrollView.contentSize.height
-        let cellHeight = surfaceView.cellSize.height
-        if cellHeight > 0, let scrollbar = surfaceView.scrollbar {
+        Self.documentHeight(
+            contentHeight: scrollView.contentSize.height,
+            cellHeight: surfaceView.cellSize.height,
+            scrollbar: surfaceView.scrollbar
+        )
+    }
+
+    static func documentHeight(
+        contentHeight: CGFloat,
+        cellHeight: CGFloat,
+        scrollbar: Ghostty.Action.Scrollbar?
+    ) -> CGFloat {
+        if cellHeight > 0, let scrollbar {
             // The document view must have the same vertical padding around the
             // scrollback grid as the content view has around the terminal grid
             // otherwise the content view loses alignment with the surface.
             let documentGridHeight = CGFloat(scrollbar.total) * cellHeight
-            let padding = contentHeight - (CGFloat(scrollbar.len) * cellHeight)
+            let padding = max(0, contentHeight - (CGFloat(scrollbar.len) * cellHeight))
             return documentGridHeight + padding
         }
         return contentHeight

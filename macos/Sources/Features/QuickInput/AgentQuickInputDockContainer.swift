@@ -41,15 +41,7 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
         private(set) var isPinned: Bool = false
 
         func occludesContentPoint(inWindow pointInWindow: NSPoint) -> Bool {
-            guard !isPinned else { return false }
-            let local = convert(pointInWindow, from: nil)
-            if !composerHost.isHidden, composerHost.frame.contains(local) {
-                return true
-            }
-            if !queueHost.isHidden, queueHost.frame.contains(local) {
-                return true
-            }
-            return false
+            false
         }
 
         override init(frame frameRect: NSRect) {
@@ -104,18 +96,23 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0
                 context.allowsImplicitAnimation = false
-                let nextQueueHeight = min(requestedQueueHeight, max(0, bounds.height))
-                let nextComposerHeight = min(requestedComposerHeight, max(0, bounds.height - nextQueueHeight))
-                let contentFrame: NSRect = if isPinned {
-                    .init(
-                        x: 0,
-                        y: nextQueueHeight + nextComposerHeight,
-                        width: bounds.width,
-                        height: max(0, bounds.height - nextQueueHeight - nextComposerHeight)
-                    )
-                } else {
-                    .init(x: 0, y: 0, width: bounds.width, height: max(0, bounds.height))
-                }
+                let safeHeight = max(0, bounds.height)
+                let minContentHeight = min(
+                    AgentQuickInputMetrics.minimumTerminalHeight,
+                    safeHeight * 0.5
+                )
+                let availableAccessory = max(0, safeHeight - minContentHeight)
+                let nextQueueHeight = min(requestedQueueHeight, availableAccessory)
+                let nextComposerHeight = min(
+                    requestedComposerHeight,
+                    max(0, availableAccessory - nextQueueHeight)
+                )
+                let contentFrame = NSRect(
+                    x: 0,
+                    y: nextQueueHeight + nextComposerHeight,
+                    width: bounds.width,
+                    height: max(0, safeHeight - nextQueueHeight - nextComposerHeight)
+                )
                 let frames: [(NSView, NSRect)] = [
                     (queueHost, .init(x: 0, y: 0, width: bounds.width, height: nextQueueHeight)),
                     (composerHost, .init(x: 0, y: nextQueueHeight, width: bounds.width, height: nextComposerHeight)),

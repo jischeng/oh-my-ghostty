@@ -218,8 +218,8 @@ enum AgentQuickInputFocusDirection: Equatable {
 }
 
 enum AgentQuickInputMetrics {
-    static let minimumHeight: CGFloat = 140
-    static let defaultHeight: CGFloat = 252
+    static let minimumHeight: CGFloat = 96
+    static let defaultHeight: CGFloat = 148
     static let maximumHeight: CGFloat = 480
     static let minimumTerminalHeight: CGFloat = 160
     static let queueLaneHeight: CGFloat = 60
@@ -249,7 +249,7 @@ enum AgentQuickInputMetrics {
         hasQueue: Bool,
         isPinned: Bool = false
     ) -> CGFloat {
-        guard isPinned else { return 0 }
+        _ = isPinned
         let dock = isDockPresented
             ? dockHeight + TerminalShellStyle.dividerWidth
             : 0
@@ -520,6 +520,12 @@ final class AgentQuickInputModel: ObservableObject {
             if requestFocus { self.requestFocus() }
             return
         }
+        if isEditingQueuedItem, targetSurfaceID != surfaceID {
+            let wasSynchronizingGlobal = isSynchronizingGlobal
+            isSynchronizingGlobal = true
+            cancelQueuedItemEdit()
+            isSynchronizingGlobal = wasSynchronizingGlobal
+        }
         historyNavigation.edited()
         if targetSurfaceID != surfaceID { historyPresentation.close() }
         targetSurfaceID = surfaceID
@@ -662,9 +668,8 @@ final class AgentQuickInputModel: ObservableObject {
             dockResizeWorkItem?.cancel()
             dockResizeWorkItem = nil
             applyPendingDockHeight()
-            if let globalPresentation {
-                globalPresentation.setHeight(Double(height))
-            } else {
+            globalPresentation?.setHeight(Double(height))
+            if OhMyGhosttySettings.shared.quickInputHeight != Double(height) {
                 OhMyGhosttySettings.shared.quickInputHeight = Double(height)
             }
             return
@@ -906,7 +911,7 @@ private struct AgentQuickInputResizeHandle: View {
             currentExtent: { model.dockHeight },
             resize: controller.updateQuickInputHeight,
             accessibilityLabel: "Resize Agent Quick Input",
-            defersTerminalResize: model.isPinned
+            defersTerminalResize: true
         )
     }
 }
@@ -1150,8 +1155,7 @@ private struct AgentQuickInputComposer: View {
         isPasswordLocked && !model.isEditingQueuedItem
     }
 
-    /// Opaque theme background when floating over live terminal text; matches
-    /// window/glass chrome when pinned in-flow below the terminal viewport.
+    /// Always matches the in-flow window/glass chrome below the terminal viewport.
     private var chromeBackground: Color {
         controller.quickInputAccessoryBackground(isPinned: model.isPinned)
     }

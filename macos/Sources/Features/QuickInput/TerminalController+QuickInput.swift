@@ -22,15 +22,26 @@ extension TerminalController {
         colorspaceIsDisplayP3: Bool = false,
         linearBlending: Bool = false
     ) -> Color {
-        guard !isPinned else { return chromeBackground }
-        return Self.chromeBackground(
-            color: color,
-            opacity: opacity,
-            windowIsOpaque: true,
-            colorspaceIsDisplayP3: colorspaceIsDisplayP3,
-            linearBlending: linearBlending,
-            usesWindowGlass: false
-        )
+        _ = isPinned
+        _ = color
+        _ = opacity
+        _ = colorspaceIsDisplayP3
+        _ = linearBlending
+        return chromeBackground
+    }
+
+    func quickInputAvailableHeight(
+        defaultHeight: CGFloat = AgentQuickInputMetrics.maximumHeight * 2
+    ) -> CGFloat {
+        let baseHeight = window?.contentLayoutRect.height ?? defaultHeight
+        let queueSurfaceID = quickInputModel.isPresented
+            ? quickInputModel.targetSurfaceID
+            : (focusedSurface ?? surfaceTree.first)?.id
+        let hasQueue = queueSurfaceID.flatMap { quickInputModel.state(for: $0)?.queue.isEmpty } == false
+        let queueHeight = hasQueue
+            ? AgentQuickInputMetrics.queueLaneHeight + TerminalShellStyle.dividerWidth
+            : 0
+        return max(0, baseHeight - queueHeight)
     }
 
     func toggleQuickInput() {
@@ -368,6 +379,14 @@ extension TerminalController {
         quickInputLastTerminalSurfaceID = focusedSurface?.id ?? anchorID
     }
 
+    static func quickInputRequiresSettleDelay(
+        text: String,
+        usesEditorReplacement: Bool
+    ) -> Bool {
+        guard !usesEditorReplacement else { return false }
+        return text.contains(where: \.isNewline)
+    }
+
     @discardableResult
     func submitQuickInputText(
         _ text: String,
@@ -446,13 +465,21 @@ extension TerminalController {
                 return
             }
             do {
+                let usesEditorReplacement: Bool
                 if let shortcut = self.quickInputModel.agentDraftShortcut(
                     for: surfaceID, foregroundPID: terminal.foregroundPID) {
+                    usesEditorReplacement = true
                     try await self.replaceQuickInputAgentDraft(text, for: surface, shortcut: shortcut)
                 } else {
+                    usesEditorReplacement = false
                     terminal.sendText(text)
                 }
-                try await Task.sleep(for: .milliseconds(250))
+                if Self.quickInputRequiresSettleDelay(
+                    text: text,
+                    usesEditorReplacement: usesEditorReplacement
+                ) {
+                    try await Task.sleep(for: .milliseconds(250))
+                }
             } catch {
                 let currentStrings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
                 if surface.blocksProgrammaticInput {

@@ -6,11 +6,14 @@ final class QuickInputGlobalPresentation: ObservableObject {
     static let shared = QuickInputGlobalPresentation()
     @Published private(set) var isPresented = false
     @Published private(set) var isPinned = false
-    @Published private(set) var height = 252.0
+    @Published private(set) var height = Double(AgentQuickInputMetrics.defaultHeight)
     var onChange: (() -> Void)?
 
     func setHeight(_ value: Double) {
-        let value = min(max(value, 140), 480)
+        let value = min(
+            max(value, Double(AgentQuickInputMetrics.minimumHeight)),
+            Double(AgentQuickInputMetrics.maximumHeight)
+        )
         guard value != height else { return }
         height = value
         onChange?()

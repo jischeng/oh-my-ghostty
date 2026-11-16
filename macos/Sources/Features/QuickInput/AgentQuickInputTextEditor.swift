@@ -66,6 +66,7 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
         scrollView.documentView = editor
         scrollView.isHidden = !isPresented
         context.coordinator.editor = editor
+        context.coordinator.lastCompanionSurfaceID = companionSurfaceID
         return scrollView
     }
 
@@ -87,10 +88,20 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
         editor.onNavigateHistory = onNavigateHistory
         editor.onHistoryCaretMoved = onHistoryCaretMoved
         editor.companionSurfaceID = companionSurfaceID
+        let paneChanged = context.coordinator.lastCompanionSurfaceID != companionSurfaceID
+        if paneChanged {
+            context.coordinator.lastCompanionSurfaceID = companionSurfaceID
+            editor.resetLocalUndoManager()
+        }
         var needsTypographyRefresh = false
         if !editor.hasMarkedText(), editor.string != text {
-            editor.restoreHistorySnapshot(.init(text: text,
-                selection: NSRange(location: (text as NSString).length, length: 0)))
+            editor.restoreHistorySnapshot(
+                .init(
+                    text: text,
+                    selection: NSRange(location: (text as NSString).length, length: 0)
+                ),
+                resetUndo: paneChanged || text.isEmpty
+            )
             needsTypographyRefresh = true
         }
         configureTypography(for: editor, coordinator: context.coordinator, force: needsTypographyRefresh)
@@ -137,6 +148,7 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
         weak var editor: ComposerTextView?
         var handledFocusRequestID = 0
         var pendingFocusRequestID: Int?
+        var lastCompanionSurfaceID: UUID?
         private var appliedFont: NSFont?
         private var appliedTextColor: NSColor?
         private var deferredTypography: (font: NSFont, textColor: NSColor)?
@@ -216,8 +228,10 @@ enum AgentQuickInputMovementCommand: Equatable {
 
     static func resolve(
         keyCode: UInt16,
-        modifiers: NSEvent.ModifierFlags
+        modifiers: NSEvent.ModifierFlags,
+        hasMarkedText: Bool = false
     ) -> Self? {
+        guard !hasMarkedText else { return nil }
         let relevant = modifiers.intersection([.option, .shift, .command, .control])
         guard relevant == [.option] || relevant == [.option, .shift] else {
             return nil
@@ -259,6 +273,8 @@ enum AgentQuickInputMovementCommand: Equatable {
 }
 
 final class ComposerTextView: NSTextView, TerminalCompanionResponder {
+    static let placeholderCaretGap: CGFloat = 3
+
     var controlJNewlineEnabled: () -> Bool = { OhMyGhosttySettings.shared.quickInputControlJNewline }
     var pasteboard = NSPasteboard.general
     var placeholder = "" {
@@ -272,6 +288,7 @@ final class ComposerTextView: NSTextView, TerminalCompanionResponder {
     var onNavigateHistory: ((QuickInputHistoryDirection, QuickInputDraftSnapshot, Bool, Bool)
         -> QuickInputHistoryNavigationResult)?
     var onHistoryCaretMoved: (() -> Void)?
+    var performMovementSelector: ((Selector) -> Bool)?
     var companionSurfaceID: UUID?
     private(set) var isRestoringHistory = false
 
@@ -295,13 +312,32 @@ final class ComposerTextView: NSTextView, TerminalCompanionResponder {
         return result
     }
 
-    func restoreHistorySnapshot(_ snapshot: QuickInputDraftSnapshot) {
+    func restoreHistorySnapshot(
+        _ snapshot: QuickInputDraftSnapshot,
+        resetUndo: Bool = false
+    ) {
         isRestoringHistory = true
-        string = snapshot.text
+        if resetUndo {
+            string = snapshot.text
+            resetLocalUndoManager()
+        } else {
+            let fullRange = NSRange(location: 0, length: (string as NSString).length)
+            breakUndoCoalescing()
+            if localUndoManager.groupsByEvent, localUndoManager.groupingLevel > 0 {
+                localUndoManager.endUndoGrouping()
+                localUndoManager.beginUndoGrouping()
+            }
+            if allowsUndo,
+               shouldChangeText(in: fullRange, replacementString: snapshot.text) {
+                textStorage?.replaceCharacters(in: fullRange, with: snapshot.text)
+                didChangeText()
+            } else {
+                string = snapshot.text
+            }
+        }
         let length = (string as NSString).length
         let location = min(snapshot.selection.location, length)
         setSelectedRange(NSRange(location: location, length: min(snapshot.selection.length, length - location)))
-        resetLocalUndoManager()
         scrollRangeToVisible(selectedRange())
         isRestoringHistory = false
     }
@@ -377,9 +413,8 @@ final class ComposerTextView: NSTextView, TerminalCompanionResponder {
                 y: containerOrigin.y
             )
         }
-        let devicePixel = 1 / max(window.backingScaleFactor, 1)
         return NSPoint(
-            x: localCaretRect.maxX + devicePixel,
+            x: localCaretRect.maxX + Self.placeholderCaretGap,
             y: containerOrigin.y
         )
     }
@@ -436,9 +471,12 @@ final class ComposerTextView: NSTextView, TerminalCompanionResponder {
         }
         if let movement = AgentQuickInputMovementCommand.resolve(
             keyCode: event.keyCode,
-            modifiers: event.modifierFlags
-        ), tryToPerform(movement.selector, with: nil) {
-            return
+            modifiers: event.modifierFlags,
+            hasMarkedText: hasMarkedText()
+        ) {
+            let handled = performMovementSelector?(movement.selector)
+                ?? tryToPerform(movement.selector, with: nil)
+            if handled { return }
         }
         if handleComposerCommand(event) { return }
         super.keyDown(with: event)
@@ -469,14 +507,16 @@ final class ComposerTextView: NSTextView, TerminalCompanionResponder {
         let modifiers = event.modifierFlags.intersection([
             .command, .shift, .option, .control,
         ])
-        if event.keyCode == 36 || event.keyCode == 76,
-           modifiers.contains(.command) {
-            if modifiers.contains(.option) {
-                onQueue?()
-            } else {
+        if event.keyCode == 36 || event.keyCode == 76 {
+            if modifiers == [.command] {
                 onSend?()
+                return true
             }
-            return true
+            if modifiers == [.command, .option] {
+                onQueue?()
+                return true
+            }
+            return false
         }
 
         guard let key = event.charactersIgnoringModifiers?.lowercased() else {

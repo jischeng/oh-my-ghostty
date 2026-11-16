@@ -486,8 +486,8 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Agent draft import: auto selects the external-editor shortcut; empty disables; other values override it. Comma separates chords.",
             requiresNewWindow: true, category: "keyboard"),
         .init(
-            id: "keyboard.quickInputHeight", type: .number, defaultValue: "252",
-            allowedValues: nil, minimum: 140, maximum: 480,
+            id: "keyboard.quickInputHeight", type: .number, defaultValue: "148",
+            allowedValues: nil, minimum: 96, maximum: 480,
             description: "Last committed Agent Quick Input dock height in points.",
             requiresNewWindow: false, category: "keyboard"),
         .init(
@@ -921,7 +921,10 @@ final class OhMyGhosttySettings: ObservableObject {
     }
     @Published var quickInputHeight = Double(AgentQuickInputMetrics.defaultHeight) {
         didSet {
-            let clamped = min(max(quickInputHeight, 140), 480)
+            let clamped = min(
+                max(quickInputHeight, Double(AgentQuickInputMetrics.minimumHeight)),
+                Double(AgentQuickInputMetrics.maximumHeight)
+            )
             if quickInputHeight != clamped {
                 quickInputHeight = clamped
             } else {
@@ -1434,7 +1437,7 @@ final class OhMyGhosttySettings: ObservableObject {
             quickInputHeight = numberValue(
                 "keyboard.quickInputHeight",
                 fallback: Double(AgentQuickInputMetrics.defaultHeight),
-                range: 140...480
+                range: Double(AgentQuickInputMetrics.minimumHeight)...Double(AgentQuickInputMetrics.maximumHeight)
             )
             quickInputHistoryScope = enumValue("keyboard.quickInputHistoryScope", fallback: .tab)
             quickInputHistoryInsertionMode = enumValue("keyboard.quickInputHistoryInsertionMode", fallback: .append)

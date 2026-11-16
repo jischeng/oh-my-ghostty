@@ -80,9 +80,9 @@ struct QuickInputPresentationTests {
 
     @Test func importedDraftNoticeUsesSelectedLanguage() {
         #expect(SettingsStrings(language: .english).quickInputDraftImported ==
-            "Draft imported. Sending will append only text after the original prefix.")
+            "Draft imported. Sending will replace the agent's current input.")
         #expect(SettingsStrings(language: .simplifiedChinese).quickInputDraftImported ==
-            "草稿已导入。发送时只会追加原有内容之后新增的文字。")
+            "草稿已导入。发送时会替换 Agent 当前输入。")
     }
 
     @Test func inputUsesRegularFaceAndConfiguredForegroundForTextAndCaret() async throws {

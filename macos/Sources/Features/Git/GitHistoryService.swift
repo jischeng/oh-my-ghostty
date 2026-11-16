@@ -28,7 +28,8 @@ struct GitHistoryService: Sendable {
     func captureSnapshot(
         for repository: GitRepositoryIdentity,
         scope: GitHistoryScope,
-        favoriteRefs: Set<String> = []
+        favoriteRefs: Set<String> = [],
+        worktrees: [GitWorktreeInfo] = []
     ) async throws -> GitHistorySnapshot {
         async let refsResult = (executor ?? repository.executor).execute(
             arguments: [
@@ -129,31 +130,13 @@ struct GitHistoryService: Sendable {
             }
         }
 
-        let branchRefs = refsByName.filter { $0.kind == .localBranch || $0.kind == .remoteBranch }
-        var tipIDs: [GitCommitID]
-        switch scope {
-        case .currentBranch:
-            tipIDs = headID.map { [$0] } ?? []
-        case .favorites:
-            tipIDs = branchRefs.filter { ref in
-                let prefix = ref.kind == .remoteBranch ? "refs/remotes/" : "refs/heads/"
-                return favoriteRefs.contains(prefix + ref.name)
-            }.sorted { $0.name < $1.name }.map(\.id)
-            if favoriteRefs.contains("HEAD"), let headID {
-                tipIDs.append(headID)
-            }
-        case .allBranches:
-            tipIDs = branchRefs
-                .sorted { $0.name < $1.name }
-                .map(\.id)
-            if let headID, !tipIDs.contains(headID) {
-                tipIDs.append(headID)
-            }
-        }
-
-        // Keep the order deterministic and avoid asking git to walk the same tip twice.
-        var seen = Set<GitCommitID>()
-        tipIDs = tipIDs.filter { seen.insert($0).inserted }
+        let tipIDs = GitHistorySnapshot.tipCommitIDs(
+            for: scope,
+            headCommitID: headID,
+            decorationsByCommitID: decorations,
+            favoriteRefs: favoriteRefs,
+            worktrees: worktrees
+        )
         for key in decorations.keys {
             decorations[key]?.sort {
                 if $0.name == $1.name {

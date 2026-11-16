@@ -315,11 +315,13 @@ enum GitCollectionBuilder {
     }
 
     private static func grouped(_ entries: [(String, GitCollectionItem)], category: String, mode: GitCollectionMode) -> [GitCollectionNode] {
-        let sorted = entries.sorted { $0.0.localizedStandardCompare($1.0) == .orderedAscending }
-        guard mode == .tree else { return sorted.map { GitCollectionNode($0.1) } }
+        guard mode == .tree else {
+            return entries.sorted { $0.0.localizedStandardCompare($1.0) == .orderedAscending }
+                .map { GitCollectionNode($0.1) }
+        }
         let root = GitCollectionNode(.init(id: category, title: "", kind: .category(entries.count)))
         var folders: [String: GitCollectionNode] = [:]
-        for (path, value) in sorted {
+        for (path, value) in entries {
             let parts = path.split(separator: "/").map(String.init)
             var parent = root
             var prefix = ""

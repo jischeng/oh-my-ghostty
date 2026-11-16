@@ -280,14 +280,28 @@ final class BuiltInGitInspectorProvider {
             let key = currentWorktreeKey(for: action.context)
             var state = state(for: action.context.tabID, worktreeKey: key)
             guard scope == .favorites || state.historyScope != scope || state.browsedBranch != nil || state.browsedWorktree != nil else { return }
+            let baseSnapshot = state.history.snapshot ?? state.unfilteredHistory?.snapshot
             state.browsedBranch = nil
             state.unfilteredHistory = nil
             state.browsedWorktree = nil
-            state.historyScope = scope; state.selectedCommitID = nil; state.history = InspectorGitHistoryContent(scope: scope, isLoading: true)
+            state.historyScope = scope
+            state.selectedCommitID = nil
             OhMyGhosttySettings.shared.gitHistoryScope = scope.rawValue
+            let current = lastPublishedContent[action.context.tabID]
+            let derived = baseSnapshot.flatMap { snapshot in
+                current?.repository.map { repository in
+                    let favoriteRefs = scope == .favorites ? GitHistoryBranchFavorites(repository: repository).refs : []
+                    return snapshot.recontextualized(
+                        for: scope,
+                        favoriteRefs: favoriteRefs,
+                        worktrees: current?.workingTree.worktrees ?? []
+                    )
+                }
+            }
+            state.history = InspectorGitHistoryContent(scope: scope, isLoading: true, snapshot: derived)
             save(state, tabID: action.context.tabID, worktreeKey: key)
-            if let current = lastPublishedContent[action.context.tabID] { publish(makeContent(from: current, history: state.history), tabID: action.context.tabID) }
-            loadHistory(context: action.context, force: true)
+            if let current { publish(makeContent(from: current, history: state.history), tabID: action.context.tabID) }
+            loadHistory(context: action.context, force: true, reuseSnapshot: derived != nil)
         case .searchHistory(let query):
             let key = currentWorktreeKey(for: action.context)
             var value = state(for: action.context.tabID, worktreeKey: key)
@@ -341,32 +355,36 @@ final class BuiltInGitInspectorProvider {
         case .browseBranch(let name), .browseRef(let name):
             guard let content = lastPublishedContent[action.context.tabID],
                   (content.workingTree.branchesError == nil && content.workingTree.branches.contains(where: { $0.id == name })) ||
-                    content.history.snapshot?.decorationsByCommitID.values.joined().contains(where: { $0.kind == .tag && $0.fullRef == name }) == true else { return }
+                    content.history.snapshot?.sortedTags.contains(where: { $0.fullRef == name }) == true else { return }
             let key = currentWorktreeKey(for: action.context)
             var state = state(for: action.context.tabID, worktreeKey: key)
+            let baseSnapshot = state.history.snapshot ?? state.unfilteredHistory?.snapshot
+            let derived = baseSnapshot?.browsingBranch(ref: name, branches: content.workingTree.branches)
             state.activeTab = .history
             state.browsedBranch = name
             state.unfilteredHistory = nil
             state.browsedWorktree = nil
             state.selectedCommitID = nil
-            state.history = InspectorGitHistoryContent(scope: state.historyScope)
+            state.history = InspectorGitHistoryContent(scope: state.historyScope, isLoading: true, snapshot: derived)
             save(state, tabID: action.context.tabID, worktreeKey: key)
             publish(makeContent(from: content, activeTab: .history, history: state.history), tabID: action.context.tabID)
-            loadHistory(context: action.context, force: true)
+            loadHistory(context: action.context, force: true, reuseSnapshot: derived != nil)
         case .browseWorktree(let path):
             guard let content = lastPublishedContent[action.context.tabID], let repository = content.repository,
                   content.workingTree.worktreesError == nil,
                   content.workingTree.worktrees.contains(where: { $0.path == path && !$0.isBare }) else { return }
             var state = state(for: action.context.tabID, worktreeKey: repository.stateKey)
+            let baseSnapshot = state.history.snapshot ?? state.unfilteredHistory?.snapshot
+            let derived = baseSnapshot?.browsingWorktree(path: path, worktrees: content.workingTree.worktrees)
             state.activeTab = .history
             state.browsedBranch = nil
             state.browsedWorktree = path
             state.unfilteredHistory = nil
             state.selectedCommitID = nil
-            state.history = InspectorGitHistoryContent(scope: state.historyScope)
+            state.history = InspectorGitHistoryContent(scope: state.historyScope, isLoading: true, snapshot: derived)
             save(state, tabID: action.context.tabID, worktreeKey: repository.stateKey)
             publish(makeContent(from: content, activeTab: .history, history: state.history), tabID: action.context.tabID)
-            loadHistory(context: action.context, force: true)
+            loadHistory(context: action.context, force: true, reuseSnapshot: derived != nil)
         case .commitOperation(let operation, let commit):
             handleCommit(operation, id: commit, context: action.context)
         case .createWorktree, .openWorktree, .removeWorktree:
@@ -545,7 +563,7 @@ final class BuiltInGitInspectorProvider {
         }
     }
 
-    private func loadHistory(context: InspectorPaneContext, force: Bool, refreshing: Bool = false) {
+    private func loadHistory(context: InspectorPaneContext, force: Bool, refreshing: Bool = false, reuseSnapshot: Bool = false) {
         guard let current = lastPublishedContent[context.tabID], let repository = current.repository else { return }
         if refreshing, historyTasks[context.tabID] != nil {
             pendingHistoryRefreshes[context.tabID] = force || (pendingHistoryRefreshes[context.tabID] ?? false)
@@ -561,7 +579,7 @@ final class BuiltInGitInspectorProvider {
         let offset = replacing || refreshing ? 0 : oldCommits.count
         let loading = InspectorGitHistoryContent(scope: stateBefore.historyScope, commits: oldCommits,
             selectedCommitID: replacing ? nil : stateBefore.selectedCommitID, hasMore: stateBefore.history.hasMore,
-            isLoading: true, snapshot: replacing ? nil : stateBefore.history.snapshot)
+            isLoading: true, snapshot: (replacing && !reuseSnapshot) ? nil : stateBefore.history.snapshot)
         var loadingState = stateBefore
         loadingState.history = loading
         if replacing { loadingState.selectedCommitID = nil }
@@ -569,6 +587,7 @@ final class BuiltInGitInspectorProvider {
         if !refreshing || force || stateBefore.history.snapshot == nil {
             publish(makeContent(from: current, history: loading), tabID: context.tabID)
         }
+        let worktrees = current.workingTree.worktrees
         historyTasks[context.tabID] = Task { [weak self] in
             guard let self else { return }
             defer {
@@ -581,8 +600,12 @@ final class BuiltInGitInspectorProvider {
                 }
             }
             do {
-                let snapshot = force || refreshing || stateBefore.history.snapshot == nil
-                    ? try await self.captureSnapshot(repository: repository, state: stateBefore) : stateBefore.history.snapshot!
+                let snapshot: GitHistorySnapshot
+                if let existing = stateBefore.history.snapshot, (reuseSnapshot && !refreshing) || (!force && !refreshing) {
+                    snapshot = existing
+                } else {
+                    snapshot = try await self.captureSnapshot(repository: repository, state: stateBefore, worktrees: worktrees)
+                }
                 var loaded = stateBefore.history
                 if !refreshing || force || snapshot != stateBefore.history.snapshot {
                     let page = try await self.historyService.loadPage(snapshot: snapshot, repository: repository, offset: offset,
@@ -661,29 +684,26 @@ final class BuiltInGitInspectorProvider {
         }
     }
 
-    private func captureSnapshot(repository: GitRepositoryIdentity, state: WorktreeUIState) async throws -> GitHistorySnapshot {
+    private func captureSnapshot(repository: GitRepositoryIdentity, state: WorktreeUIState, worktrees: [GitWorktreeInfo]) async throws -> GitHistorySnapshot {
         let favoriteRefs = state.historyScope == .favorites ? GitHistoryBranchFavorites(repository: repository).refs : []
         let snapshot = try await historyService.captureSnapshot(for: repository, scope: state.historyScope,
-                                                                favoriteRefs: favoriteRefs)
+                                                                favoriteRefs: favoriteRefs, worktrees: worktrees)
         if let path = state.browsedWorktree {
             let trees = try await repositoryService.worktrees(for: repository)
-            guard let tree = trees.first(where: { $0.path == path && !$0.isBare }) else {
+            guard let derived = snapshot.browsingWorktree(path: path, worktrees: trees) else {
                 throw GitDiffServiceError.gitFailed(GitL10n.format("Worktree no longer exists: {0}", String(describing: path)))
             }
-            return GitHistorySnapshot(scope: snapshot.scope, branchName: snapshot.branchName,
-                headCommitID: tree.head, tipCommitIDs: tree.head.map { [$0] } ?? [],
-                decorationsByCommitID: snapshot.decorationsByCommitID,
-                remoteOnlyCommitIDs: snapshot.remoteOnlyCommitIDs,
-                browsedBranch: tree.branchRef == nil ? tree.head?.shortSHA ?? GitL10n.text("No commits") : tree.branchName,
-                browsedWorktree: path)
+            return derived
         }
         guard let branch = state.browsedBranch else { return snapshot }
         if branch.hasPrefix("refs/tags/") {
             let result = try await (repositoryService.executor ?? repository.executor).execute(arguments: ["--no-optional-locks", "rev-parse", "--verify", branch + "^{commit}"], workingDirectory: repository.worktreePath)
             guard result.isSuccess else { throw GitDiffServiceError.gitFailed(result.stderrString) }
             return GitHistorySnapshot(scope: snapshot.scope, branchName: snapshot.branchName,
-                headCommitID: snapshot.headCommitID, tipCommitIDs: [.init(result.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines))],
+                headCommitID: snapshot.headCommitID, repositoryHeadCommitID: snapshot.repositoryHeadCommitID,
+                tipCommitIDs: [.init(result.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines))],
                 decorationsByCommitID: snapshot.decorationsByCommitID, remoteOnlyCommitIDs: snapshot.remoteOnlyCommitIDs,
+                sortedTags: snapshot.sortedTags,
                 browsedBranch: String(branch.dropFirst("refs/tags/".count)), browsedRef: branch)
         }
         let branches = try await repositoryService.branches(for: repository)
@@ -691,9 +711,12 @@ final class BuiltInGitInspectorProvider {
             throw GitDiffServiceError.gitFailed(GitL10n.format("Branch no longer exists: {0}", String(describing: branch)))
         }
         return GitHistorySnapshot(scope: snapshot.scope, branchName: snapshot.branchName,
-                                  headCommitID: snapshot.headCommitID, tipCommitIDs: [tip.commit],
+                                  headCommitID: snapshot.headCommitID, repositoryHeadCommitID: snapshot.repositoryHeadCommitID,
+                                  tipCommitIDs: [tip.commit],
                                   decorationsByCommitID: snapshot.decorationsByCommitID,
-                                  remoteOnlyCommitIDs: snapshot.remoteOnlyCommitIDs, browsedBranch: tip.name, browsedRef: tip.id)
+                                  remoteOnlyCommitIDs: snapshot.remoteOnlyCommitIDs,
+                                  sortedTags: snapshot.sortedTags,
+                                  browsedBranch: tip.name, browsedRef: tip.id)
     }
 
     private func ensurePollingTimer() {

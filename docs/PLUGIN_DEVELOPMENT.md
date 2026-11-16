@@ -3031,12 +3031,16 @@ through matching entries, Enter activates the full ref/worktree identity and Esc
 closes the popover. Background ref refreshes and mode switches preserve the
 keyboard candidate. Browsing a worktree reads its HEAD (including detached HEAD)
 without opening a terminal or changing Git refs. Ref selection refreshes history
-only. Worktrees remain physical checkout rows with visible paths; branch rows
+only. Switching scopes (`Current` / `Favorites` / `All`) or browsing another
+branch, tag, or worktree reuses the existing in-memory `GitHistorySnapshot`
+(preserving the repository `HEAD`, pre-sorted tags, and decorations) so only
+the commit page `git log` runs until an explicit refresh or repository change.
+Worktrees remain physical checkout rows with visible paths; branch rows
 mark associated worktrees. Branch rows in the History picker have a star button
 that toggles a favorite without selecting a ref or closing the popover. The
 single Current / Favorites / All control changes the history scope without closing
 the popover. Favorites displays the combined commit graph reachable from every
-starred ref, and filters the picker list to those refs. Star changes refresh this
+starred ref and non-bare worktree `HEAD`, and filters the picker list to those refs. Star changes refresh this
 graph while the Favorites scope is active. Unfavorited stars follow the same row
 hover as the row highlight, or remain visible while keyboard-focused; favorited
 stars remain visible. HEAD can also be starred and resolves to the current

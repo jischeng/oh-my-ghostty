@@ -10,6 +10,7 @@ final class GitHistoryScopePopoverController: NSViewController, NSSearchFieldDel
     private let modeControl = GitPopoverSegments()
     private let defaults: UserDefaults
     private var favorites: GitHistoryBranchFavorites?
+    private var cachedFavoriteIDs: Set<String>
     private var favoritesOnly = false
     private let collectionCoordinator = GitCollectionView.Coordinator()
     private let collectionController = GitCollectionController()
@@ -24,7 +25,9 @@ final class GitHistoryScopePopoverController: NSViewController, NSSearchFieldDel
         self.colors = content.nativeColors
         self.closePopover = close
         self.defaults = defaults
-        self.favorites = content.repository.map { GitHistoryBranchFavorites(repository: $0, defaults: defaults) }
+        let favorites = content.repository.map { GitHistoryBranchFavorites(repository: $0, defaults: defaults) }
+        self.favorites = favorites
+        self.cachedFavoriteIDs = favorites?.refs ?? []
         self.favoritesOnly = content.selectedID == "scope:favorites"
         super.init(nibName: nil, bundle: nil)
         preferredContentSize = GitRefPopoverStyle.pickerSize(
@@ -77,9 +80,12 @@ final class GitHistoryScopePopoverController: NSViewController, NSSearchFieldDel
         configureScopeControl()
         scopeControl.onSelect = { [weak self] id in
             guard let self else { return }
-            self.collectionCoordinator.saveAnchor()
-            self.favoritesOnly = id == GitHistoryScope.favorites.rawValue
-            self.collectionCoordinator.update(self.makeCollection())
+            let nextFavoritesOnly = id == GitHistoryScope.favorites.rawValue
+            if nextFavoritesOnly != self.favoritesOnly {
+                self.collectionCoordinator.saveAnchor()
+                self.favoritesOnly = nextFavoritesOnly
+                self.collectionCoordinator.update(self.makeCollection())
+            }
             self.selectScope(id)
         }
         let collection = makeCollection()
@@ -130,8 +136,10 @@ final class GitHistoryScopePopoverController: NSViewController, NSSearchFieldDel
     }
 
     func updateContent(_ content: GitHistoryScopePicker) {
-        if self.content.repository != content.repository {
-            favorites = content.repository.map { GitHistoryBranchFavorites(repository: $0, defaults: defaults) }
+        if self.content.repository != content.repository || favorites == nil {
+            let nextFavorites = content.repository.map { GitHistoryBranchFavorites(repository: $0, defaults: defaults) }
+            favorites = nextFavorites
+            cachedFavoriteIDs = nextFavorites?.refs ?? []
         }
         self.content = content
         guard isViewLoaded else { return }
@@ -230,11 +238,12 @@ final class GitHistoryScopePopoverController: NSViewController, NSSearchFieldDel
             selectedID: selected,
             extraRefs: content.tags,
             includesHead: true,
-            favoriteBranchIDs: favorites?.refs ?? [],
+            favoriteBranchIDs: cachedFavoriteIDs,
             favoritesOnly: favoritesOnly,
             toggleBranchFavorite: favorites.map { store in { [weak self] ref in
                 store.toggle(ref)
                 guard let self else { return }
+                self.cachedFavoriteIDs = store.refs
                 self.collectionCoordinator.update(self.makeCollection())
                 if self.favoritesOnly { self.content.perform(.selectHistoryScope(.favorites)) }
             } },

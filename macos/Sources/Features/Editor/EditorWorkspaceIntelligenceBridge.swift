@@ -11,14 +11,27 @@ final class EditorWorkspaceIntelligenceBridge {
     let fileWatcher: EditorFileWatcher
     let gitGutter: EditorGitGutterService
 
+    enum HiddenReclaimSuspendOutcome: Equatable {
+        case skipped
+        case suspended
+        case aborted(startedClosing: Bool)
+    }
+
     private weak var workspace: EditorWorkspace?
     private var debouncedChangeTasks: [EditorDocumentID: Task<Void, Never>] = [:]
     private var gutterTasks: [EditorDocumentID: Task<Void, Never>] = [:]
     private var lifecycleTasks: [EditorDocumentID: Task<Void, Never>] = [:]
     private var focusCheckTask: Task<Void, Never>?
     private(set) var hasSuspendedDocuments = false
+    private(set) var reclaimGeneration: UInt64 = 0
+    private var reclaimTouchedDocumentIDs: Set<EditorDocumentID> = []
+    private var lspOpenedDocumentIDs: Set<EditorDocumentID> = []
     private nonisolated(unsafe) var windowKeyObserver: NSObjectProtocol?
     private nonisolated(unsafe) var trustChangeObserver: NSObjectProtocol?
+
+    var needsWorkbenchRehydration: Bool {
+        hasSuspendedDocuments || !reclaimTouchedDocumentIDs.isEmpty
+    }
 
     init(
         workspace: EditorWorkspace,
@@ -94,12 +107,21 @@ final class EditorWorkspaceIntelligenceBridge {
             )
         }
 
-        guard !hasSuspendedDocuments else { return }
+        if hasSuspendedDocuments {
+            reclaimTouchedDocumentIDs.insert(docID)
+            return
+        }
+        reclaimTouchedDocumentIDs.remove(docID)
         let ctx = documentContext(for: document)
         let initialText = document.text
+        let generation = reclaimGeneration
         lifecycleTasks[docID]?.cancel()
         lifecycleTasks[docID] = Task { @MainActor [weak self] in
-            guard let self, !self.hasSuspendedDocuments else { return }
+            guard let self, !Task.isCancelled, !self.hasSuspendedDocuments,
+                  self.reclaimGeneration == generation else { return }
+            if self.canOpenInLSP(ctx) {
+                _ = self.lspOpenedDocumentIDs.insert(docID)
+            }
             await self.coordinator.documentDidOpen(ctx, text: initialText)
         }
 
@@ -115,6 +137,8 @@ final class EditorWorkspaceIntelligenceBridge {
         debouncedChangeTasks.removeValue(forKey: docID)?.cancel()
         gutterTasks.removeValue(forKey: docID)?.cancel()
         lifecycleTasks.removeValue(forKey: docID)?.cancel()
+        reclaimTouchedDocumentIDs.remove(docID)
+        let wasOpenInLSP = lspOpenedDocumentIDs.remove(docID) != nil
 
         let hasOtherDocuments = workspace?.documents.contains { $0.id != docID } ?? false
         if !hasOtherDocuments {
@@ -133,14 +157,22 @@ final class EditorWorkspaceIntelligenceBridge {
         let ctx = documentContext(for: document)
         let coordinator = self.coordinator
         Task { @MainActor in
-            await coordinator.documentDidClose(ctx)
+            await coordinator.removeOpenDocumentFromSymbolIndex(ctx)
+            if wasOpenInLSP {
+                await coordinator.closeOpenDocumentInLSP(ctx)
+            }
+            coordinator.clearDiagnostics(for: ctx)
         }
     }
 
     func tearDown() {
+        reclaimGeneration &+= 1
         focusCheckTask?.cancel()
         focusCheckTask = nil
         hasSuspendedDocuments = false
+        reclaimTouchedDocumentIDs.removeAll()
+        let openedLSPIDs = lspOpenedDocumentIDs
+        lspOpenedDocumentIDs.removeAll()
         for (_, task) in debouncedChangeTasks { task.cancel() }
         debouncedChangeTasks.removeAll()
         for (_, task) in gutterTasks { task.cancel() }
@@ -148,11 +180,15 @@ final class EditorWorkspaceIntelligenceBridge {
         for (_, task) in lifecycleTasks { task.cancel() }
         lifecycleTasks.removeAll()
         fileWatcher.stopAll()
-        let openContexts = (workspace?.documents ?? []).map { documentContext(for: $0) }
+        let openEntries = (workspace?.documents ?? []).map { ($0.id, documentContext(for: $0)) }
         let coordinator = self.coordinator
         Task { @MainActor in
-            for ctx in openContexts {
-                await coordinator.documentDidClose(ctx)
+            for (docID, ctx) in openEntries {
+                await coordinator.removeOpenDocumentFromSymbolIndex(ctx)
+                if openedLSPIDs.contains(docID) {
+                    await coordinator.closeOpenDocumentInLSP(ctx)
+                }
+                coordinator.clearDiagnostics(for: ctx)
             }
             await coordinator.shutdown()
         }
@@ -162,6 +198,7 @@ final class EditorWorkspaceIntelligenceBridge {
     func activateTrustedOpenDocuments() {
         guard let workspace, !hasSuspendedDocuments else { return }
         let store = coordinator.lspManager.trustStore
+        let generation = reclaimGeneration
         for document in workspace.documents where document.id.endpoint == .local {
             let ctx = documentContext(for: document)
             guard let root = ctx.effectiveLocalRoot, store.isTrusted(workspaceRoot: root) else { continue }
@@ -169,16 +206,26 @@ final class EditorWorkspaceIntelligenceBridge {
             let currentText = document.text
             lifecycleTasks[docID]?.cancel()
             lifecycleTasks[docID] = Task { @MainActor [weak self] in
-                guard let self, !self.hasSuspendedDocuments else { return }
-                await self.coordinator.documentDidOpen(ctx, text: currentText)
+                guard let self, !Task.isCancelled,
+                      !self.hasSuspendedDocuments,
+                      self.reclaimGeneration == generation else { return }
+                self.reclaimTouchedDocumentIDs.remove(docID)
+                if self.lspOpenedDocumentIDs.insert(docID).inserted {
+                    await self.coordinator.documentDidOpen(ctx, text: currentText)
+                } else {
+                    await self.coordinator.documentDidChange(ctx, text: currentText)
+                }
             }
         }
     }
 
     @discardableResult
-    func suspendDocumentsForHiddenReclaim() async -> Bool {
+    func suspendDocumentsForHiddenReclaim() async -> HiddenReclaimSuspendOutcome {
         guard let workspace, !workspace.documents.isEmpty, !hasSuspendedDocuments else {
-            return false
+            return .skipped
+        }
+        guard !Task.isCancelled, !workspace.isVisible else {
+            return .aborted(startedClosing: false)
         }
         for (_, task) in debouncedChangeTasks { task.cancel() }
         debouncedChangeTasks.removeAll()
@@ -186,19 +233,66 @@ final class EditorWorkspaceIntelligenceBridge {
         lifecycleTasks.removeAll()
         for (_, task) in gutterTasks { task.cancel() }
         gutterTasks.removeAll()
+
+        reclaimGeneration &+= 1
+        let generation = reclaimGeneration
         hasSuspendedDocuments = true
-        for document in workspace.documents {
-            let ctx = documentContext(for: document)
-            await coordinator.documentDidClose(ctx)
+
+        let shouldContinue: @MainActor () -> Bool = { [weak self] in
+            guard let self, let workspace = self.workspace else { return false }
+            return !Task.isCancelled && !workspace.isVisible && self.reclaimGeneration == generation
         }
-        return true
+
+        var startedClosing = false
+        let documentsSnapshot = workspace.documents
+        for document in documentsSnapshot {
+            guard shouldContinue(), workspace.documents.contains(where: { $0.id == document.id }) else {
+                if self.reclaimGeneration == generation {
+                    self.hasSuspendedDocuments = false
+                }
+                return .aborted(startedClosing: startedClosing)
+            }
+            let docID = document.id
+            let ctx = documentContext(for: document)
+            startedClosing = true
+            reclaimTouchedDocumentIDs.insert(docID)
+
+            await coordinator.removeOpenDocumentFromSymbolIndex(ctx)
+            guard shouldContinue(), workspace.documents.contains(where: { $0.id == document.id }) else {
+                if self.reclaimGeneration == generation {
+                    self.hasSuspendedDocuments = false
+                }
+                return .aborted(startedClosing: true)
+            }
+
+            if lspOpenedDocumentIDs.remove(docID) != nil {
+                await coordinator.closeOpenDocumentInLSP(ctx)
+            }
+            guard shouldContinue() else {
+                if self.reclaimGeneration == generation {
+                    self.hasSuspendedDocuments = false
+                }
+                return .aborted(startedClosing: true)
+            }
+
+            coordinator.clearDiagnostics(for: ctx)
+        }
+
+        guard shouldContinue() else {
+            if self.reclaimGeneration == generation {
+                self.hasSuspendedDocuments = false
+            }
+            return .aborted(startedClosing: startedClosing)
+        }
+        return .suspended
     }
 
     /// Restores git gutter bars and language-server diagnostics after an idle-reaped workbench
     /// recreates its `WKWebView` while open documents remained preserved in `EditorWorkspace`.
     func rehydrateWorkbenchDecorations() {
         guard let workspace else { return }
-        let reopenSuspended = hasSuspendedDocuments
+        reclaimGeneration &+= 1
+        let generation = reclaimGeneration
         hasSuspendedDocuments = false
         for document in workspace.documents {
             refreshGitGutter(for: document)
@@ -207,14 +301,22 @@ final class EditorWorkspaceIntelligenceBridge {
             let docID = document.id
             lifecycleTasks[docID]?.cancel()
             lifecycleTasks[docID] = Task { @MainActor [weak self] in
-                guard let self, !self.hasSuspendedDocuments else { return }
-                if reopenSuspended {
+                guard let self, !Task.isCancelled,
+                      !self.hasSuspendedDocuments,
+                      self.reclaimGeneration == generation else { return }
+                self.reclaimTouchedDocumentIDs.remove(docID)
+                if self.canOpenInLSP(ctx), self.lspOpenedDocumentIDs.insert(docID).inserted {
                     await self.coordinator.documentDidOpen(ctx, text: currentText)
                 } else {
                     await self.coordinator.documentDidChange(ctx, text: currentText)
                 }
             }
         }
+    }
+
+    private func canOpenInLSP(_ context: EditorIntelligenceDocumentContext) -> Bool {
+        guard let localRoot = context.effectiveLocalRoot else { return false }
+        return coordinator.lspManager.trustStore.isTrusted(workspaceRoot: localRoot)
     }
 
     func refreshGitGutter(for document: EditorDocument, remoteExecutor: (any GitExecutor)? = nil) {

@@ -18,6 +18,28 @@ struct SessionRuntimeOverviewEntry: Decodable, Identifiable {
         revision = try values.decode(String.self, forKey: .revision)
         session = try SessionRuntimeCatalogSession(from: decoder)
     }
+
+    static func isValidRevision(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 128 &&
+            value.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "._-".contains($0)) }
+    }
+
+    @MainActor
+    func resolvedDescriptor(
+        in endpoints: [SessionRuntimeCatalogEndpoint]? = nil,
+        policy: SessionRuntimePolicy? = nil
+    ) -> SessionRuntimeDescriptor? {
+        let catalogEndpoints = endpoints ?? SessionRuntimeCatalog.shared.endpoints
+        if let endpoint = catalogEndpoints.first(where: { $0.id == endpointID }) {
+            return endpoint.descriptor
+        }
+        guard isLocalEndpoint, Self.isValidRevision(revision) else { return nil }
+        return SessionRuntimeDescriptor(
+            connection: nil,
+            revision: revision,
+            policy: policy ?? OhMyGhosttySettings.shared.runtimePolicy
+        )
+    }
 }
 
 struct SessionRuntimeOverviewReport: Decodable {
@@ -117,8 +139,13 @@ private final class OverviewWindow: NSWindowController, NSWindowDelegate {
 }
 
 @MainActor
-private final class OverviewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+final class OverviewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+    typealias OpenHandler = @MainActor (SessionRuntimeCatalogSession, SessionRuntimeDescriptor) throws -> Void
+
     private let model: SessionRuntimeOverviewModel
+    private let catalog: SessionRuntimeCatalog
+    private let policyProvider: @MainActor () -> SessionRuntimePolicy
+    private let openHandler: OpenHandler
     private let table = NSTableView()
     private let status = NSTextField(wrappingLabelWithString: "")
     private let refresh = SettingsActionButton("") {}
@@ -126,7 +153,20 @@ private final class OverviewController: NSViewController, NSTableViewDataSource,
     private let open = SettingsActionButton("") {}
     private var token: AnyCancellable?
     private var strings: SettingsStrings { .init(language: OhMyGhosttySettings.shared.language) }
-    init(model: SessionRuntimeOverviewModel) { self.model = model; super.init(nibName: nil, bundle: nil) }
+    init(
+        model: SessionRuntimeOverviewModel,
+        catalog: SessionRuntimeCatalog = .shared,
+        policyProvider: @escaping @MainActor () -> SessionRuntimePolicy = { OhMyGhosttySettings.shared.runtimePolicy },
+        openHandler: @escaping OpenHandler = { session, descriptor in
+            _ = try SessionRuntimeLibrary.openExisting(session, descriptor: descriptor)
+        }
+    ) {
+        self.model = model
+        self.catalog = catalog
+        self.policyProvider = policyProvider
+        self.openHandler = openHandler
+        super.init(nibName: nil, bundle: nil)
+    }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func loadView() {
         view = NativeSettingsCanvas()
@@ -205,11 +245,21 @@ private final class OverviewController: NSViewController, NSTableViewDataSource,
         open.isEnabled = !model.busy && model.report.sessions.indices.contains(table.selectedRow) &&
             model.report.sessions[table.selectedRow].isAttachable
     }
-    private func openSelected() {
+    var isOpenButtonEnabled: Bool { open.isEnabled }
+    func selectRow(_ row: Int) {
+        if row >= 0, row < model.report.sessions.count {
+            table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        } else {
+            table.deselectAll(nil)
+        }
+        open.isEnabled = !model.busy && model.report.sessions.indices.contains(table.selectedRow) &&
+            model.report.sessions[table.selectedRow].isAttachable
+    }
+    func openSelected() {
         guard model.report.sessions.indices.contains(table.selectedRow) else { return }
         let entry = model.report.sessions[table.selectedRow]
-        guard let endpoint = SessionRuntimeCatalog.shared.endpoints.first(where: { $0.id == entry.endpointID }) else { return }
-        do { _ = try SessionRuntimeLibrary.openExisting(entry.session, descriptor: endpoint.descriptor) } catch {
+        guard let descriptor = entry.resolvedDescriptor(in: catalog.endpoints, policy: policyProvider()) else { return }
+        do { try openHandler(entry.session, descriptor) } catch {
             if let window = view.window { NSAlert(error: error).beginSheetModal(for: window) }
         }
     }

@@ -37,6 +37,7 @@ final class EditorWorkspace: ObservableObject {
     private let idleReapDelay: Duration
     private var openTask: Task<Void, Never>?
     private var workbenchReapTask: Task<Void, Never>?
+    private var workbenchReapGeneration: UInt64 = 0
     private var documentCancellables: [EditorDocumentID: AnyCancellable] = [:]
     private var wasReapedWhileHidden = false
     private var reapedActiveDiff: MonacoWorkbenchController.ActiveDiffSnapshot?
@@ -89,8 +90,7 @@ final class EditorWorkspace: ObservableObject {
     }
 
     func cancelAndClear() {
-        workbenchReapTask?.cancel()
-        workbenchReapTask = nil
+        cancelWorkbenchReap()
         documentCancellables.removeAll()
         wasReapedWhileHidden = false
         reapedActiveDiff = nil
@@ -131,9 +131,20 @@ final class EditorWorkspace: ObservableObject {
         let hadWebView = workbenchController.webView != nil
         let suspendedDocs: Bool
         if !isVisible && !documents.isEmpty {
-            suspendedDocs = await intelligenceBridge.suspendDocumentsForHiddenReclaim()
+            let outcome = await intelligenceBridge.suspendDocumentsForHiddenReclaim()
+            switch outcome {
+            case .suspended:
+                suspendedDocs = true
+            case .skipped:
+                suspendedDocs = false
+            case .aborted(let startedClosing):
+                if isVisible && (startedClosing || intelligenceBridge.needsWorkbenchRehydration) {
+                    intelligenceBridge.rehydrateWorkbenchDecorations()
+                }
+                return false
+            }
             guard isIdleForWorkbenchReap else {
-                if isVisible && intelligenceBridge.hasSuspendedDocuments {
+                if isVisible && (suspendedDocs || intelligenceBridge.needsWorkbenchRehydration) {
                     intelligenceBridge.rehydrateWorkbenchDecorations()
                 }
                 return false
@@ -164,6 +175,7 @@ final class EditorWorkspace: ObservableObject {
     }
 
     private func cancelWorkbenchReap() {
+        workbenchReapGeneration &+= 1
         workbenchReapTask?.cancel()
         workbenchReapTask = nil
     }
@@ -182,20 +194,36 @@ final class EditorWorkspace: ObservableObject {
             return
         }
         let delay = idleReapDelay
+        let reapGeneration = workbenchReapGeneration
         workbenchReapTask = Task { @MainActor [weak self] in
+            defer {
+                if let self, self.workbenchReapGeneration == reapGeneration {
+                    self.workbenchReapTask = nil
+                }
+            }
             do {
                 try await Task.sleep(for: delay)
             } catch {
                 return
             }
             guard let self, !Task.isCancelled, self.isIdleForWorkbenchReap else { return }
-            self.workbenchReapTask = nil
             let hadWebView = self.workbenchController.webView != nil
             var suspendedDocs = false
             if !self.isVisible && !self.documents.isEmpty {
-                suspendedDocs = await self.intelligenceBridge.suspendDocumentsForHiddenReclaim()
+                let outcome = await self.intelligenceBridge.suspendDocumentsForHiddenReclaim()
+                switch outcome {
+                case .suspended:
+                    suspendedDocs = true
+                case .skipped:
+                    suspendedDocs = false
+                case .aborted(let startedClosing):
+                    if self.isVisible && (startedClosing || self.intelligenceBridge.needsWorkbenchRehydration) {
+                        self.intelligenceBridge.rehydrateWorkbenchDecorations()
+                    }
+                    return
+                }
                 guard !Task.isCancelled, self.isIdleForWorkbenchReap else {
-                    if self.isVisible && self.intelligenceBridge.hasSuspendedDocuments {
+                    if self.isVisible && (suspendedDocs || self.intelligenceBridge.needsWorkbenchRehydration) {
                         self.intelligenceBridge.rehydrateWorkbenchDecorations()
                     }
                     return
@@ -276,14 +304,14 @@ final class EditorWorkspace: ObservableObject {
                 activateDocumentInWorkbench(activeDoc)
             }
 
-            if workbenchController.webView != nil || intelligenceBridge.hasSuspendedDocuments {
+            if workbenchController.webView != nil || intelligenceBridge.needsWorkbenchRehydration {
                 intelligenceBridge.rehydrateWorkbenchDecorations()
             }
             workbenchRehydrationRevision &+= 1
             return
         }
 
-        if intelligenceBridge.hasSuspendedDocuments {
+        if intelligenceBridge.needsWorkbenchRehydration {
             intelligenceBridge.rehydrateWorkbenchDecorations()
         }
         guard workbenchController.webView != nil else { return }

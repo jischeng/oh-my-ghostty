@@ -2191,8 +2191,11 @@ final class EditorIntelligenceCoordinator {
         }
     }
 
-    func documentDidClose(_ context: EditorIntelligenceDocumentContext) async {
+    func removeOpenDocumentFromSymbolIndex(_ context: EditorIntelligenceDocumentContext) async {
         await symbolIndex.removeOpenDocument(path: context.path)
+    }
+
+    func closeOpenDocumentInLSP(_ context: EditorIntelligenceDocumentContext) async {
         if let localRoot = context.effectiveLocalRoot {
             await lspManager.didClose(
                 path: context.path,
@@ -2200,7 +2203,16 @@ final class EditorIntelligenceCoordinator {
                 workspaceRoot: localRoot
             )
         }
+    }
+
+    func clearDiagnostics(for context: EditorIntelligenceDocumentContext) {
         onDiagnostics?(context.path, [])
+    }
+
+    func documentDidClose(_ context: EditorIntelligenceDocumentContext) async {
+        await removeOpenDocumentFromSymbolIndex(context)
+        await closeOpenDocumentInLSP(context)
+        clearDiagnostics(for: context)
     }
 
     func shutdown() async {

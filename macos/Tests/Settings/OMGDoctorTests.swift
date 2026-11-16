@@ -584,4 +584,161 @@ struct OMGDoctorTests {
         #expect(probe.memoryCalls == 1)
         #expect(probe.trustRanOffMainThread)
     }
+
+    @Test func concurrentStaleRefreshNeverOverwritesPostMutationTrustOrAccessibilityState() async throws {
+        let certDER = Data("concurrent-self-signed-der".utf8)
+
+        final class StalledTrustGate: @unchecked Sendable {
+            private let lock = NSLock()
+            private let stalledFirstInspection = DispatchSemaphore(value: 0)
+            private let enteredFirstInspection = DispatchSemaphore(value: 0)
+            private var callIndex = 0
+            private var mode: OMGSignerTrustMode = .selfSignedUntrusted
+            let certDER: Data
+
+            init(certDER: Data) {
+                self.certDER = certDER
+            }
+
+            func setMode(_ next: OMGSignerTrustMode) {
+                lock.lock()
+                mode = next
+                lock.unlock()
+            }
+
+            func inspect(stallCall targetCall: Int?) -> OMGDoctorSignerTrustCheck {
+                lock.lock()
+                callIndex += 1
+                let myCall = callIndex
+                let capturedMode = mode
+                lock.unlock()
+
+                let admin = capturedMode == .selfSignedAdminTrusted
+                let snapshot = OMGDoctorSignerTrustCheck(
+                    status: admin ? .healthy : .warning,
+                    mode: capturedMode,
+                    bundleIdentifier: "com.jischeng.omg",
+                    teamIdentifier: nil,
+                    certificateCommonName: "OMG Release Signing",
+                    certificateSHA1: "9B2E176C03E5458E6FDAF73392CD9D79203972C6",
+                    isSelfSignedLeaf: true,
+                    trustedInAdminDomain: admin,
+                    trustedInUserDomain: false,
+                    isCodeSigningTrusted: admin,
+                    isNonCodeSigningBlocked: true,
+                    hasUnscopedTrust: false,
+                    leafCertificateDER: certDER
+                )
+
+                if myCall == targetCall {
+                    enteredFirstInspection.signal()
+                    _ = stalledFirstInspection.wait(timeout: .now() + 5.0)
+                }
+                return snapshot
+            }
+
+            func waitUntilStalledCallEntered() async {
+                await Task.detached {
+                    _ = self.enteredFirstInspection.wait(timeout: .now() + 5.0)
+                }.value
+            }
+
+            func releaseStalledCall() {
+                stalledFirstInspection.signal()
+            }
+        }
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-doctor-race-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Part A: Slow pre-install `refresh()` (#2) finishing AFTER `installReleaseSignerTrust()` (#3)
+        // must never overwrite `report` back to `.warning` or cause post-install verification failure.
+        let gateA = StalledTrustGate(certDER: certDER)
+        var accessibilityTrusted = false
+        let doctorA = OMGDoctorService(
+            dependencies: .init(
+                hasGlobalKeybinds: { true },
+                isAccessibilityTrusted: { accessibilityTrusted },
+                isEventTapEnabled: { accessibilityTrusted },
+                requestAccessibility: {
+                    accessibilityTrusted = true
+                    return true
+                },
+                resourcesURL: nil,
+                homeDirectory: dir,
+                sshControlDirectoryPath: dir.appendingPathComponent("no-ssh").path,
+                surfaceCounter: { .init(visible: 1, occluded: 0) },
+                residentMemoryProvider: { 64 * 1_048_576 },
+                inspectSignerTrust: { gateA.inspect(stallCall: 2) },
+                installSignerTrust: { _ in
+                    gateA.setMode(.selfSignedAdminTrusted)
+                    return .success(())
+                }
+            )
+        )
+
+        // Call #1 seeds `report` with `leafCertificateDER` (`.warning`).
+        await doctorA.refresh()
+        #expect(doctorA.report.signerTrust.status == .warning)
+        #expect(doctorA.report.accessibility.status == .warning)
+
+        // Launch slow pre-mutation `refresh()` (call #2), which captures `.selfSignedUntrusted` and `isTrusted = false`,
+        // then blocks on `gateA` while the user grants Accessibility AND installs Signer Trust!
+        let slowRefreshTask = Task { await doctorA.refresh() }
+        await gateA.waitUntilStalledCallEntered()
+
+        #expect(doctorA.grantAccessibilityPermission())
+        let installSucceeded = await doctorA.installReleaseSignerTrust()
+        #expect(installSucceeded)
+        #expect(doctorA.lastSignerTrustError == nil)
+        #expect(doctorA.report.signerTrust.status == .healthy)
+        #expect(doctorA.report.accessibility.isTrusted)
+        #expect(doctorA.report.accessibility.status == .healthy)
+
+        // Now release slow pre-mutation refresh #2 and wait for it to finish; `report` must stay `.healthy`!
+        gateA.releaseStalledCall()
+        await slowRefreshTask.value
+        for _ in 0..<4 {
+            try? await Task.sleep(for: .milliseconds(15))
+        }
+        #expect(doctorA.report.signerTrust.status == .healthy)
+        #expect(doctorA.report.signerTrust.mode == .selfSignedAdminTrusted)
+        #expect(doctorA.report.accessibility.isTrusted)
+        #expect(doctorA.report.accessibility.status == .healthy)
+        #expect(doctorA.report.overallStatus == .healthy)
+
+        // Part B: Slow pre-install `refresh()` released right during `installSignerTrust` (finishing before
+        // post-install `refresh()` completes) must also be invalidated and never flip `report` stale.
+        let gateB = StalledTrustGate(certDER: certDER)
+        let doctorB = OMGDoctorService(
+            dependencies: .init(
+                hasGlobalKeybinds: { false },
+                isAccessibilityTrusted: { true },
+                isEventTapEnabled: { true },
+                resourcesURL: nil,
+                homeDirectory: dir,
+                sshControlDirectoryPath: dir.appendingPathComponent("no-ssh").path,
+                surfaceCounter: { .init(visible: 1, occluded: 0) },
+                residentMemoryProvider: { 64 * 1_048_576 },
+                inspectSignerTrust: { gateB.inspect(stallCall: 2) },
+                installSignerTrust: { _ in
+                    gateB.setMode(.selfSignedAdminTrusted)
+                    gateB.releaseStalledCall()
+                    return .success(())
+                }
+            )
+        )
+        await doctorB.refresh()
+        #expect(doctorB.report.signerTrust.status == .warning)
+
+        let slowRefreshB = Task { await doctorB.refresh() }
+        await gateB.waitUntilStalledCallEntered()
+        #expect(await doctorB.installReleaseSignerTrust())
+        await slowRefreshB.value
+        #expect(doctorB.lastSignerTrustError == nil)
+        #expect(doctorB.report.signerTrust.status == .healthy)
+        #expect(doctorB.report.overallStatus == .healthy)
+    }
 }

@@ -327,6 +327,8 @@ final class OMGDoctorService: ObservableObject {
 
     private let dependencies: Dependencies
     private var tapObserver: AnyCancellable?
+    private var refreshGeneration: UInt64 = 0
+    private var appliedRefreshGeneration: UInt64 = 0
 
     init(dependencies: Dependencies = .init()) {
         self.dependencies = dependencies
@@ -341,7 +343,13 @@ final class OMGDoctorService: ObservableObject {
             }
     }
 
+    private func invalidateInFlightRefreshes() {
+        appliedRefreshGeneration = refreshGeneration
+    }
+
     func refresh() async {
+        refreshGeneration &+= 1
+        let generation = refreshGeneration
         let hasGlobal = dependencies.hasGlobalKeybinds()
         let trusted = dependencies.isAccessibilityTrusted()
         let tapActive = dependencies.isEventTapEnabled()
@@ -390,6 +398,9 @@ final class OMGDoctorService: ObservableObject {
             return (signerTrust, runtimeSSH, agentBackups, residentMemoryBytes)
         }.value
 
+        guard !Task.isCancelled, generation > appliedRefreshGeneration else { return }
+        appliedRefreshGeneration = generation
+
         let resources = OMGDoctorResourceCheck(
             status: .healthy,
             residentMemoryBytes: background.3,
@@ -413,6 +424,7 @@ final class OMGDoctorService: ObservableObject {
     @discardableResult
     func grantAccessibilityPermission() -> Bool {
         let trusted = dependencies.requestAccessibility()
+        invalidateInFlightRefreshes()
         Task { @MainActor [weak self] in
             await self?.refresh()
         }
@@ -429,6 +441,7 @@ final class OMGDoctorService: ObservableObject {
         }
         switch await dependencies.installSignerTrust(derData) {
         case .success:
+            invalidateInFlightRefreshes()
             await refresh()
             if report.signerTrust.status != .healthy {
                 lastSignerTrustError = .executionFailed(
@@ -439,6 +452,7 @@ final class OMGDoctorService: ObservableObject {
             return true
         case .failure(let error):
             lastSignerTrustError = error
+            invalidateInFlightRefreshes()
             await refresh()
             return false
         }
@@ -453,6 +467,7 @@ final class OMGDoctorService: ObservableObject {
             reclaimedLSPServers: reclaimedLSPServers
         )
         lastReclaimResult = result
+        invalidateInFlightRefreshes()
         await refresh()
         return result
     }

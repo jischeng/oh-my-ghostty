@@ -989,6 +989,174 @@ struct EditorIntelligenceTests {
         await lspManager.shutdownAll()
     }
 
+    @Test
+    @MainActor
+    func uncollapseDuringInFlightHiddenSuspendAbortsClosePreservesDiagnosticsAndRecoversSymbolIndex() async throws {
+        guard let pythonPath = Self.resolveRealPython3Executable() else {
+            Issue.record("Python 3 executable not found on test machine")
+            return
+        }
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-lsp-uncollapse-race-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let scriptURL = tempDir.appendingPathComponent("mock_lsp.py")
+        try Data(Self.mockPythonLSPServerScript.utf8).write(to: scriptURL)
+
+        let firstURL = tempDir.appendingPathComponent("first.py")
+        let secondURL = tempDir.appendingPathComponent("second.py")
+        try Data("x = 1\n".utf8).write(to: firstURL)
+        try Data("y = 2\n".utf8).write(to: secondURL)
+
+        let trustStore = EditorWorkspaceTrustStore(fileURL: tempDir.appendingPathComponent("trust.json"))
+        #expect(trustStore.trust(workspaceRoot: tempDir.path))
+
+        let lspManager = EditorLSPManager(
+            serverCommands: ["python": EditorLSPServerCommand(executable: pythonPath, arguments: ["-u", scriptURL.path])],
+            idleTimeout: 30.0,
+            emptyWorkspaceIdleTimeout: 0.12,
+            reaperInterval: 0.04,
+            trustStore: trustStore
+        )
+        let symbolIndex = EditorSymbolIndex()
+        let coordinator = EditorIntelligenceCoordinator(lspManager: lspManager, symbolIndex: symbolIndex)
+        let workspace = EditorWorkspace(
+            intelligenceCoordinator: coordinator,
+            fileWatcherDebounce: 0.03,
+            idleReapDelay: .milliseconds(25)
+        )
+        defer {
+            workspace.cancelAndClear()
+            Task { await lspManager.shutdownAll() }
+        }
+
+        var diagnosticsByPath: [String: [EditorDiagnostic]] = [:]
+        var emptyDiagnosticWipes: [String] = []
+        let bridgeOnDiagnostics = coordinator.onDiagnostics
+        coordinator.onDiagnostics = { path, diags in
+            diagnosticsByPath[path] = diags
+            if diags.isEmpty {
+                emptyDiagnosticWipes.append(path)
+            }
+            bridgeOnDiagnostics?(path, diags)
+        }
+
+        let fs = LocalWorkspaceFilesystem(workingDirectory: tempDir.path)
+        workspace.open(path: firstURL.path, filesystem: fs)
+        let openedFirst = await waitForMainCondition(timeoutMs: 2_000) {
+            !workspace.isLoading && workspace.documents.count == 1
+        }
+        #expect(openedFirst)
+        let firstDoc = try #require(workspace.documents.first)
+        firstDoc.suspendAutoSave()
+
+        workspace.open(path: secondURL.path, filesystem: fs)
+        let openedSecond = await waitForMainCondition(timeoutMs: 2_000) {
+            !workspace.isLoading && workspace.documents.count == 2
+        }
+        #expect(openedSecond)
+        let secondDoc = try #require(workspace.documents.last)
+        secondDoc.suspendAutoSave()
+
+        // Wait until mock LSP publishes initial diagnostics for both open documents.
+        let gotInitialDiagnostics = await waitForMainCondition(timeoutMs: 3_000) {
+            !(diagnosticsByPath[firstDoc.path] ?? []).isEmpty
+                && !(diagnosticsByPath[secondDoc.path] ?? []).isEmpty
+        }
+        #expect(gotInitialDiagnostics)
+        #expect(await lspManager.activeServerCount == 1)
+
+        // Populate unsaved in-memory symbols on both documents (resolvable ONLY via symbolIndex openDocuments).
+        firstDoc.text = "class UnsavedSymbolAlpha:\n    pass\n"
+        secondDoc.text = "class UnsavedSymbolBeta:\n    pass\n"
+        await symbolIndex.updateOpenDocument(path: firstDoc.path, text: firstDoc.text, languageID: "python")
+        await symbolIndex.updateOpenDocument(path: secondDoc.path, text: secondDoc.text, languageID: "python")
+        emptyDiagnosticWipes.removeAll()
+
+        // Case 1: Uncollapse while `reclaimIdleWorkbenchNow()` is suspended mid-`suspendDocumentsForHiddenReclaim()`.
+        let genBeforeReclaim = workspace.intelligenceBridge.reclaimGeneration
+        workspace.isVisible = false
+        let manualReclaimTask = Task { @MainActor in
+            await workspace.reclaimIdleWorkbenchNow()
+        }
+        while !workspace.intelligenceBridge.hasSuspendedDocuments {
+            await Task.yield()
+        }
+        let genDuringSuspend = workspace.intelligenceBridge.reclaimGeneration
+        #expect(genDuringSuspend > genBeforeReclaim)
+
+        // Uncollapse right while `suspendDocumentsForHiddenReclaim()` is in-flight!
+        workspace.isVisible = true
+        let manualReclaimed = await manualReclaimTask.value
+        #expect(!manualReclaimed)
+        #expect(workspace.intelligenceBridge.reclaimGeneration > genDuringSuspend)
+        #expect(!workspace.intelligenceBridge.hasSuspendedDocuments)
+        #expect(emptyDiagnosticWipes.isEmpty)
+        #expect(!(diagnosticsByPath[firstDoc.path] ?? []).isEmpty)
+        #expect(!(diagnosticsByPath[secondDoc.path] ?? []).isEmpty)
+
+        // Allow rehydration tasks to settle and verify both unsaved open-document symbols remain indexed.
+        let recoveredManual = await waitForAsyncCondition(timeoutMs: 2_000) {
+            let alpha = await symbolIndex.findDefinitions(
+                symbol: "UnsavedSymbolAlpha",
+                currentPath: secondDoc.path,
+                currentText: secondDoc.text,
+                workspaceRoot: tempDir.path
+            )
+            let beta = await symbolIndex.findDefinitions(
+                symbol: "UnsavedSymbolBeta",
+                currentPath: firstDoc.path,
+                currentText: firstDoc.text,
+                workspaceRoot: tempDir.path
+            )
+            return !alpha.isEmpty && !beta.isEmpty
+        }
+        #expect(recoveredManual)
+
+        // Case 2: Uncollapse while scheduled `workbenchReapTask` is mid-`suspendDocumentsForHiddenReclaim()`,
+        // verifying `cancelWorkbenchReap()` cancels the still-assigned `workbenchReapTask`.
+        emptyDiagnosticWipes.removeAll()
+        let genBeforeScheduled = workspace.intelligenceBridge.reclaimGeneration
+        workspace.isVisible = false
+        let enteredScheduledSuspend = await waitForMainCondition(timeoutMs: 2_000) {
+            workspace.intelligenceBridge.reclaimGeneration > genBeforeScheduled
+        }
+        #expect(enteredScheduledSuspend)
+        workspace.isVisible = true
+        try? await Task.sleep(for: .milliseconds(80))
+
+        #expect(!workspace.intelligenceBridge.hasSuspendedDocuments)
+        #expect(emptyDiagnosticWipes.isEmpty)
+        let recoveredScheduled = await waitForAsyncCondition(timeoutMs: 2_000) {
+            let alpha = await symbolIndex.findDefinitions(
+                symbol: "UnsavedSymbolAlpha",
+                currentPath: secondDoc.path,
+                currentText: secondDoc.text,
+                workspaceRoot: tempDir.path
+            )
+            let beta = await symbolIndex.findDefinitions(
+                symbol: "UnsavedSymbolBeta",
+                currentPath: firstDoc.path,
+                currentText: firstDoc.text,
+                workspaceRoot: tempDir.path
+            )
+            return !alpha.isEmpty && !beta.isEmpty
+        }
+        #expect(recoveredScheduled)
+        #expect(await lspManager.activeServerCount == 1)
+
+        // Removing both open documents must drop openCount cleanly to 0 (no leaked openCount).
+        workspace.remove(firstDoc)
+        workspace.remove(secondDoc)
+        let reapedAfterRemove = await waitForAsyncCondition(timeoutMs: 2_500) {
+            await lspManager.activeServerCount == 0
+        }
+        #expect(reapedAfterRemove)
+        await lspManager.shutdownAll()
+    }
+
     // MARK: - Helpers
 
     @MainActor

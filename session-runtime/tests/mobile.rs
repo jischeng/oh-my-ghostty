@@ -1407,7 +1407,7 @@ fn idle_exited_broker_paused_session_auto_starts_host_local_and_watermarked_ack_
     let token_path = base.join("pair.token");
     let mut gateway = Command::new(env!("CARGO_BIN_EXE_omgd"))
         .args(["mobile", "--listen", "127.0.0.1:0", "--app-support"])
-        .arg(&support)
+        .arg(format!("{}/", support.display()))
         .arg("--token-file")
         .arg(&token_path)
         .arg("--no-qr")
@@ -1579,7 +1579,7 @@ fn idle_exited_broker_paused_session_auto_starts_host_local_and_watermarked_ack_
             "--local",
             "--app-support",
         ])
-        .arg(&support)
+        .arg(format!("{}/./", support.display()))
         .env("HOME", &base)
         .env("SHELL", "/bin/sh")
         .output()

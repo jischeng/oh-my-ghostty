@@ -143,6 +143,144 @@ class SessionCLITests(unittest.TestCase):
                 daemon.terminate()
                 daemon.wait(timeout=5)
 
+    def test_trailing_slash_app_support_and_cached_version_exe_on_symlinked_home(self):
+        import shutil
+        with tempfile.TemporaryDirectory(prefix="omg-cli-sym-", dir="/tmp") as directory:
+            base = Path(directory)
+            real_home = base / "Volumes/Data/Users/alice"
+            real_home.mkdir(parents=True, mode=0o700)
+            logical_home = base / "Users/alice"
+            logical_home.parent.mkdir(parents=True, mode=0o700)
+            logical_home.symlink_to(real_home)
+
+            logical_support = logical_home / "Library/Application Support/OMG"
+            revision = "pinned-fixture"
+            version_dir = logical_support / "session-runtime/versions" / revision
+            version_dir.mkdir(parents=True, mode=0o700)
+            cached_exe = version_dir / "omgd"
+            shutil.copy2(BINARY, cached_exe)
+            cached_exe.chmod(0o755)
+            (version_dir / "revision").write_text(revision + "\n")
+
+            key = hashlib.sha256((str(logical_support) + "\0" + revision).encode()).hexdigest()[:20]
+            state = logical_home / ".omg/run" / key
+            (logical_home / ".omg/run").mkdir(parents=True, mode=0o700)
+            (logical_home / ".omg/run").chmod(0o700)
+            state.mkdir(parents=True, mode=0o700)
+            state.chmod(0o700)
+            (state / "support-root").write_text(str(logical_support) + "\n")
+            (state / "support-root").chmod(0o600)
+
+            env = dict(os.environ, HOME=str(logical_home))
+            env.pop("OMG_APP_SUPPORT", None)
+            daemon = subprocess.Popen(
+                [str(cached_exe), "host-local", str(state), "--", "/bin/sh"],
+                env=env,
+            )
+            identity = str(uuid.uuid4())
+            try:
+                wait_socket(state / "host.sock", daemon)
+                # host-local started from cached versions/<rev>/omgd without OMG_APP_SUPPORT
+                # must NOT overwrite logical support-root stamp with realpath!
+                self.assertEqual(
+                    (state / "support-root").read_text().strip(),
+                    str(logical_support),
+                )
+                with socket.socket(socket.AF_UNIX) as stream:
+                    stream.settimeout(8)
+                    stream.connect(str(state / "host.sock"))
+                    launch = dict(
+                        argv=["/bin/sh", "-c", "sleep 600"],
+                        env={"PATH": "/usr/bin:/bin", "HOME": str(logical_home)},
+                        cwd=str(real_home),
+                        cols=80,
+                        rows=24,
+                        pixel_width=640,
+                        pixel_height=384,
+                        input_base64="",
+                    )
+                    stream.sendall(
+                        encode(
+                            b"C",
+                            1,
+                            json.dumps(
+                                dict(id=identity, create=True, launch=launch, policy={})
+                            ).encode(),
+                        )
+                    )
+                    inner_event(stream, 1, b"J")
+
+                # 1. Trailing slash & dot segments on --app-support hit the exact same live host.
+                for suffix in ["/", "///", "/."]:
+                    res = subprocess.run(
+                        [
+                            str(BINARY),
+                            "sessions",
+                            "list",
+                            "--local",
+                            "--app-support",
+                            str(logical_support) + suffix,
+                            "--json",
+                        ],
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        timeout=15,
+                    )
+                    self.assertEqual(res.returncode, 0, res.stderr)
+                    sessions = json.loads(res.stdout)["sessions"]
+                    self.assertEqual([s["id"] for s in sessions], [identity])
+
+                # 2. Cached versions/<rev>/omgd without --app-support infers logical support root
+                # across symlinked $HOME and closes the running session cleanly.
+                listed_no_flag = subprocess.run(
+                    [str(cached_exe), "sessions", "list", "--local", "--json"],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                self.assertEqual(listed_no_flag.returncode, 0, listed_no_flag.stderr)
+                self.assertEqual(
+                    [s["id"] for s in json.loads(listed_no_flag.stdout)["sessions"]],
+                    [identity],
+                )
+
+                closed_no_flag = subprocess.run(
+                    [
+                        str(cached_exe),
+                        "sessions",
+                        "close",
+                        "--all",
+                        "--yes",
+                        "--local",
+                        "--json",
+                    ],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=25,
+                )
+                self.assertEqual(
+                    closed_no_flag.returncode,
+                    0,
+                    closed_no_flag.stderr + closed_no_flag.stdout,
+                )
+                self.assertEqual(json.loads(closed_no_flag.stdout)["closed"], 1)
+                wait_holders_stopped(state)
+            finally:
+                try:
+                    with socket.socket(socket.AF_UNIX) as stream:
+                        stream.settimeout(2)
+                        stream.connect(str(state / "host.sock"))
+                        stream.sendall(encode(b"K", 1, identity.encode()))
+                        frame(stream)
+                    wait_holders_stopped(state)
+                except Exception:
+                    pass
+                daemon.terminate()
+                daemon.wait(timeout=5)
+
 
 if __name__ == "__main__":
     unittest.main()

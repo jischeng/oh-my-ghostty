@@ -182,7 +182,7 @@ fn relay_connector(
                     .clone()
                     .or_else(|| env::var("SHELL").ok())
                     .unwrap_or_else(|| "/bin/sh".into());
-                ensure_host_with(&root.to_string_lossy(), Some(&shell), &helper, true)?;
+                ensure_host_with(&root.to_string_lossy(), Some(&shell), &helper, true, None)?;
                 let path = root.join("host.sock");
                 if path.as_os_str().as_encoded_bytes().len() >= 104 {
                     return Err(io::Error::other("local runtime socket path is too long"));
@@ -197,7 +197,7 @@ fn relay_connector(
 }
 
 fn ensure_host(directory: &str, shell_override: Option<&str>) -> io::Result<()> {
-    ensure_host_with(directory, shell_override, &env::current_exe()?, false)
+    ensure_host_with(directory, shell_override, &env::current_exe()?, false, None)
 }
 
 fn ensure_host_with(
@@ -205,13 +205,27 @@ fn ensure_host_with(
     shell_override: Option<&str>,
     executable: &Path,
     local: bool,
+    support_override: Option<&Path>,
 ) -> io::Result<()> {
     use std::os::unix::{fs::PermissionsExt, process::CommandExt};
     let root = Path::new(directory);
     std::fs::create_dir_all(root)?;
     std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
     let inferred_support = if local {
-        let sup = omg_session_runtime::registry::infer_support_root_from_exe(executable)
+        let current_exe = env::current_exe().ok();
+        let sup = support_override
+            .map(omg_session_runtime::registry::normalize_support_path)
+            .or_else(omg_session_runtime::registry::infer_support_root_from_env)
+            .or_else(|| {
+                omg_session_runtime::registry::infer_support_root_from_exe(executable).map(|p| {
+                    if current_exe.as_deref() == Some(executable) {
+                        omg_session_runtime::registry::prefer_logical_home_path(&p)
+                    } else {
+                        p
+                    }
+                })
+            })
+            .or_else(|| omg_session_runtime::registry::read_support_root_stamp(root))
             .or_else(omg_session_runtime::registry::infer_support_root_from_env_or_exe);
         if let Some(ref s) = sup {
             let _ = omg_session_runtime::registry::write_support_root_stamp(root, s);
@@ -272,10 +286,15 @@ fn ensure_host_with(
             shell.clone(),
             "-l".into(),
         ];
-        if let Some(pid) = omg_session_runtime::launchd::spawn(
+        let mut extra_env = Vec::new();
+        if let Some(sup_str) = inferred_support.as_deref().and_then(Path::to_str) {
+            extra_env.push(("OMG_APP_SUPPORT", sup_str));
+        }
+        if let Some(pid) = omg_session_runtime::launchd::spawn_with_env(
             &env::current_exe()?,
             &command,
             &root.join("host.log"),
+            &extra_env,
         )? {
             for _ in 0..100 {
                 if UnixStream::connect(&socket).is_ok() {

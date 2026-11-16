@@ -96,7 +96,11 @@ fn serve_mode(directory: &Path, command: Vec<String>, local: bool) -> io::Result
     let _lock = HostLock::acquire(directory)?;
     if local {
         if let Some(support) = crate::registry::infer_support_root_from_env_or_exe() {
-            let _ = crate::registry::write_support_root_stamp(directory, &support);
+            let preserve_existing = crate::registry::read_support_root_stamp(directory)
+                .is_some_and(|existing| crate::registry::same_canonical_path(&existing, &support));
+            if !preserve_existing {
+                let _ = crate::registry::write_support_root_stamp(directory, &support);
+            }
         }
     }
     let _ = fs::remove_file(directory.join("host.sock"));

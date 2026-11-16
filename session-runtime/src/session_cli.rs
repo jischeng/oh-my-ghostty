@@ -98,6 +98,12 @@ pub(crate) fn current_revision() -> String {
 }
 pub(crate) fn default_support() -> io::Result<PathBuf> {
     let executable = env::current_exe()?;
+    if let Some(inferred) = omg_session_runtime::registry::infer_support_root_from_exe(&executable)
+    {
+        return Ok(omg_session_runtime::registry::prefer_logical_home_path(
+            &inferred,
+        ));
+    }
     let contents = executable
         .parent()
         .and_then(Path::parent)
@@ -118,11 +124,15 @@ pub(crate) fn default_support() -> io::Result<PathBuf> {
             ))
         }
     };
-    Ok(home()?.join("Library/Application Support").join(name))
+    Ok(omg_session_runtime::registry::normalize_support_path(
+        &home()?.join("Library/Application Support").join(name),
+    ))
 }
 pub(crate) fn default_mobile_support() -> io::Result<PathBuf> {
     if let Ok(support) = default_support() {
-        return Ok(support);
+        return Ok(omg_session_runtime::registry::normalize_support_path(
+            &support,
+        ));
     }
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     let omg_dir = home()?.join(".omg");
@@ -132,7 +142,7 @@ pub(crate) fn default_mobile_support() -> io::Result<PathBuf> {
             .mode(0o700)
             .create(&omg_dir)?;
     }
-    let mobile_dir = omg_dir.join("mobile");
+    let mobile_dir = omg_session_runtime::registry::normalize_support_path(&omg_dir.join("mobile"));
     if !mobile_dir.exists() {
         fs::DirBuilder::new()
             .recursive(true)
@@ -246,7 +256,8 @@ fn ensure_runtime_root_socket(
     if !validate_runtime_root_dir(root)? {
         return Ok(None);
     }
-    let _ = omg_session_runtime::registry::write_support_root_stamp(root, support);
+    let support = omg_session_runtime::registry::normalize_support_path(support);
+    let _ = omg_session_runtime::registry::write_support_root_stamp(root, &support);
     let socket = root.join("host.sock");
     if socket.exists() {
         match UnixStream::connect(&socket) {
@@ -258,9 +269,15 @@ fn ensure_runtime_root_socket(
         }
     }
     if runtime_root_has_recoverable_sessions(root, expected_snapshot) {
-        if let Some(binary) = resolve_local_broker_binary(support, rev, true) {
-            if super::ensure_host_with(&root.to_string_lossy(), Some("/bin/sh"), &binary, true)
-                .is_ok()
+        if let Some(binary) = resolve_local_broker_binary(&support, rev, true) {
+            if super::ensure_host_with(
+                &root.to_string_lossy(),
+                Some("/bin/sh"),
+                &binary,
+                true,
+                Some(&support),
+            )
+            .is_ok()
                 && socket.exists()
             {
                 return Ok(Some(socket));
@@ -273,17 +290,18 @@ fn ensure_runtime_root_socket(
 /// Mobile uses the same channel/revision namespaces as the management CLI.
 /// Discovery never launches shells, installs runtimes, or includes SSH credentials.
 pub(crate) fn mobile_targets(support: &Path) -> io::Result<Vec<(String, PathBuf)>> {
+    let support = omg_session_runtime::registry::normalize_support_path(support);
     let path = support.join("session-runtime/endpoints.json");
     let mut ordered: Vec<(String, PathBuf)> = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     let run_root = home()?.join(".omg/run");
     let revision = current_revision();
     let expected_snapshot = current_snapshot_revision();
-    let current_key = digest(&format!("{}\0{revision}", support.display()));
+    let current_key = omg_session_runtime::registry::local_run_dir_key(&support, &revision);
     if let Some(socket) = ensure_runtime_root_socket(
-        support,
+        &support,
         Some(&revision),
-        &run_root.join(&current_key[..20]),
+        &run_root.join(&current_key),
         expected_snapshot.as_deref(),
     )? {
         if seen.insert(socket.clone()) {
@@ -317,10 +335,12 @@ pub(crate) fn mobile_targets(support: &Path) -> io::Result<Vec<(String, PathBuf)
                     }
                 }
             }
-            let key = digest(&format!("{}\0{}", support.display(), d.revision));
-            let root = run_root.join(&key[..20]);
+            let root = run_root.join(omg_session_runtime::registry::local_run_dir_key(
+                &support,
+                &d.revision,
+            ));
             if let Some(socket) = ensure_runtime_root_socket(
-                support,
+                &support,
                 Some(&d.revision),
                 &root,
                 expected_snapshot.as_deref(),
@@ -353,10 +373,11 @@ pub(crate) fn mobile_targets(support: &Path) -> io::Result<Vec<(String, PathBuf)
                     }
                 }
             }
-            let key = digest(&format!("{}\0{rev}", support.display()));
-            let root = run_root.join(&key[..20]);
+            let root = run_root.join(omg_session_runtime::registry::local_run_dir_key(
+                &support, &rev,
+            ));
             if let Some(socket) = ensure_runtime_root_socket(
-                support,
+                &support,
                 Some(&rev),
                 &root,
                 expected_snapshot.as_deref(),
@@ -367,7 +388,8 @@ pub(crate) fn mobile_targets(support: &Path) -> io::Result<Vec<(String, PathBuf)
             }
         }
     }
-    let is_headless_mobile = support == home()?.join(".omg/mobile");
+    let is_headless_mobile = support
+        == omg_session_runtime::registry::normalize_support_path(&home()?.join(".omg/mobile"));
     if !path.exists() && is_headless_mobile && run_root.exists() {
         use std::os::unix::fs::MetadataExt;
         let meta = fs::symlink_metadata(&run_root)?;
@@ -380,7 +402,7 @@ pub(crate) fn mobile_targets(support: &Path) -> io::Result<Vec<(String, PathBuf)
             for entry in entries {
                 let candidate = entry.path();
                 if let Ok(Some(socket)) = ensure_runtime_root_socket(
-                    support,
+                    &support,
                     None,
                     &candidate,
                     expected_snapshot.as_deref(),
@@ -449,6 +471,7 @@ pub(crate) fn mobile_relay_targets(
     support: &Path,
 ) -> Vec<(String, PathBuf, omg_session_runtime::location::SshTarget)> {
     use std::os::unix::fs::MetadataExt;
+    let support = omg_session_runtime::registry::normalize_support_path(support);
     let uid = unsafe { libc::geteuid() };
     let prefix = format!("omg-runtime-{uid}-");
     let versions_root = support.join("session-runtime/versions");
@@ -543,6 +566,7 @@ pub(crate) fn mobile_inline_relay_targets(
     support: &Path,
 ) -> Vec<(PathBuf, PathBuf, omg_session_runtime::location::SshTarget)> {
     use std::os::unix::fs::MetadataExt;
+    let support = omg_session_runtime::registry::normalize_support_path(support);
     let uid = unsafe { libc::geteuid() };
     let prefix = format!("omg-inline-{uid}-");
     let versions_root = support.join("session-runtime/versions");
@@ -687,7 +711,7 @@ fn parse_relay_ssh_arguments(
 }
 fn home() -> io::Result<PathBuf> {
     env::var_os("HOME")
-        .map(PathBuf::from)
+        .map(|h| omg_session_runtime::registry::normalize_support_path(Path::new(&h)))
         .filter(|p| p.is_absolute())
         .ok_or_else(|| io::Error::other("HOME must be an absolute directory"))
 }
@@ -699,6 +723,7 @@ impl Descriptor {
             .unwrap_or_else(|| "This Mac".into())
     }
     fn identity(&self, support: &Path) -> String {
+        let support = omg_session_runtime::registry::normalize_support_path(support);
         let endpoint = if let Some(ssh) = &self.connection {
             let mut fields = vec![
                 ssh.destination.as_str(),
@@ -776,8 +801,9 @@ impl Descriptor {
             };
             return super::tunnel_child(deploy::fast_connect(&connection, false)?).map(Some);
         }
-        let key = digest(&format!("{}\0{}", support.display(), self.revision));
-        let root = home()?.join(".omg/run").join(&key[..20]);
+        let support = omg_session_runtime::registry::normalize_support_path(support);
+        let key = omg_session_runtime::registry::local_run_dir_key(&support, &self.revision);
+        let root = home()?.join(".omg/run").join(&key);
         if !root.exists() {
             return Ok(None);
         }
@@ -793,13 +819,13 @@ impl Descriptor {
                 ));
             }
         }
-        let _ = omg_session_runtime::registry::write_support_root_stamp(&root, support);
+        let _ = omg_session_runtime::registry::write_support_root_stamp(&root, &support);
         let socket = root.join("host.sock");
         if UnixStream::connect(&socket).is_err() {
             // Re-adopt existing holders with their pinned broker, never create
             // a session or upgrade a live daemon as part of listing.
             let binary = resolve_local_broker_binary(
-                support,
+                &support,
                 Some(&self.revision),
                 self.revision == current_revision(),
             )
@@ -809,7 +835,13 @@ impl Descriptor {
                     .join(&self.revision)
                     .join("omgd")
             });
-            super::ensure_host_with(&root.to_string_lossy(), Some("/bin/sh"), &binary, true)?;
+            super::ensure_host_with(
+                &root.to_string_lossy(),
+                Some("/bin/sh"),
+                &binary,
+                true,
+                Some(&support),
+            )?;
         }
         Ok(Some(RelayTransport {
             socket: UnixStream::connect(socket)?,
@@ -899,9 +931,11 @@ pub fn run(arguments: &[String]) -> io::Result<u8> {
             "--json" => json = true,
             "--local" => local = true,
             "--app-support" => {
-                support = Some(PathBuf::from(
-                    args.next()
-                        .ok_or_else(|| io::Error::other("Missing support path"))?,
+                support = Some(omg_session_runtime::registry::normalize_support_path(
+                    Path::new(
+                        args.next()
+                            .ok_or_else(|| io::Error::other("Missing support path"))?,
+                    ),
                 ))
             }
             "--host" => {
@@ -923,7 +957,9 @@ pub fn run(arguments: &[String]) -> io::Result<u8> {
             "Use list, or close --all --yes; --local and --host are exclusive",
         ));
     }
-    let support = support.map(Ok).unwrap_or_else(default_support)?;
+    let support = omg_session_runtime::registry::normalize_support_path(
+        &support.map(Ok).unwrap_or_else(default_support)?,
+    );
     if !support.is_absolute() {
         return Err(io::Error::other("Support path must be absolute"));
     }
@@ -959,8 +995,8 @@ pub fn run(arguments: &[String]) -> io::Result<u8> {
             connection: None,
             revision: cur_rev.clone(),
         };
-        let cur_key = digest(&format!("{}\0{cur_rev}", support.display()));
-        if run_root.join(&cur_key[..20]).exists() {
+        let cur_key = omg_session_runtime::registry::local_run_dir_key(&support, &cur_rev);
+        if run_root.join(&cur_key).exists() {
             selected
                 .entry(cur_desc.identity(&support))
                 .or_insert(cur_desc);
@@ -975,8 +1011,8 @@ pub fn run(arguments: &[String]) -> io::Result<u8> {
                 if !valid_revision(&rev) {
                     continue;
                 }
-                let key = digest(&format!("{}\0{rev}", support.display()));
-                if run_root.join(&key[..20]).exists() {
+                let key = omg_session_runtime::registry::local_run_dir_key(&support, &rev);
+                if run_root.join(&key).exists() {
                     let desc = Descriptor {
                         connection: None,
                         revision: rev,

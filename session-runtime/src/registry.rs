@@ -36,7 +36,76 @@ fn file_modified_unix(path: &Path) -> Option<u64> {
         .map(|d| d.as_secs())
 }
 
+pub fn normalize_support_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        if !matches!(comp, std::path::Component::CurDir) {
+            out.push(comp.as_os_str());
+        }
+    }
+    if out.as_os_str().is_empty() && !path.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        out
+    }
+}
+
+pub fn same_canonical_path(a: &Path, b: &Path) -> bool {
+    let na = normalize_support_path(a);
+    let nb = normalize_support_path(b);
+    if na == nb {
+        return true;
+    }
+    match (fs::canonicalize(&na), fs::canonicalize(&nb)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
+    }
+}
+
+pub fn prefer_logical_home_path_with_home(path: &Path, home: Option<&Path>) -> PathBuf {
+    let norm = normalize_support_path(path);
+    let Some(logical_home) = home.map(normalize_support_path).filter(|p| p.is_absolute()) else {
+        return norm;
+    };
+    if let Some(channel_name) = norm.file_name() {
+        let app_sup_candidate = normalize_support_path(
+            &logical_home
+                .join("Library/Application Support")
+                .join(channel_name),
+        );
+        if same_canonical_path(&app_sup_candidate, &norm) {
+            return app_sup_candidate;
+        }
+    }
+    if let Ok(canon_home) = fs::canonicalize(&logical_home) {
+        let canon_target = fs::canonicalize(&norm).unwrap_or_else(|_| norm.clone());
+        if let Ok(rel) = canon_target.strip_prefix(&canon_home) {
+            let home_rel = normalize_support_path(&logical_home.join(rel));
+            if same_canonical_path(&home_rel, &norm) {
+                return home_rel;
+            }
+        }
+    }
+    norm
+}
+
+pub fn prefer_logical_home_path(path: &Path) -> PathBuf {
+    let env_home = std::env::var_os("HOME").map(PathBuf::from);
+    prefer_logical_home_path_with_home(path, env_home.as_deref())
+}
+
+pub fn local_run_dir_key(support: &Path, revision: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let normalized = normalize_support_path(support);
+    let hex = format!(
+        "{:x}",
+        Sha256::digest(format!("{}\0{revision}", normalized.display()).as_bytes())
+    );
+    hex[..20].to_owned()
+}
+
 pub fn infer_support_root_from_exe(exe: &Path) -> Option<PathBuf> {
+    let exe = normalize_support_path(exe);
     if exe.file_name().and_then(|s| s.to_str()) != Some("omgd") {
         return None;
     }
@@ -53,21 +122,26 @@ pub fn infer_support_root_from_exe(exe: &Path) -> Option<PathBuf> {
     if sr_dir.file_name()?.to_str()? != "session-runtime" {
         return None;
     }
-    let support = sr_dir.parent()?;
-    (support.is_absolute() && !support.as_os_str().is_empty()).then(|| support.to_path_buf())
+    let support = normalize_support_path(sr_dir.parent()?);
+    (support.is_absolute() && !support.as_os_str().is_empty()).then_some(support)
+}
+
+pub fn infer_support_root_from_env() -> Option<PathBuf> {
+    let raw = std::env::var_os("OMG_APP_SUPPORT")?;
+    let p = normalize_support_path(Path::new(&raw));
+    let s = p.to_string_lossy();
+    (p.is_absolute() && !s.is_empty() && s.len() <= 4096 && !s.contains('\0') && !s.contains('\n'))
+        .then_some(p)
 }
 
 pub fn infer_support_root_from_env_or_exe() -> Option<PathBuf> {
-    if let Some(raw) = std::env::var_os("OMG_APP_SUPPORT") {
-        let p = PathBuf::from(raw);
-        let s = p.to_string_lossy();
-        if p.is_absolute() && !s.is_empty() && s.len() <= 4096 && !s.contains('\0') {
-            return Some(p);
-        }
+    if let Some(p) = infer_support_root_from_env() {
+        return Some(p);
     }
     std::env::current_exe()
         .ok()
         .and_then(|exe| infer_support_root_from_exe(&exe))
+        .map(|p| prefer_logical_home_path(&p))
 }
 
 pub fn write_support_root_stamp(state_dir: &Path, support: &Path) -> io::Result<()> {
@@ -75,6 +149,7 @@ pub fn write_support_root_stamp(state_dir: &Path, support: &Path) -> io::Result<
         io::Write,
         os::unix::fs::{MetadataExt, OpenOptionsExt},
     };
+    let support = normalize_support_path(support);
     let support_str = support
         .to_str()
         .ok_or_else(|| io::Error::other("support path must be valid UTF-8"))?;
@@ -95,8 +170,10 @@ pub fn write_support_root_stamp(state_dir: &Path, support: &Path) -> io::Result<
             "state directory must be private and owned by current user",
         ));
     }
-    if read_support_root_stamp(state_dir).as_deref() == Some(support) {
-        return Ok(());
+    if let Some(existing) = read_support_root_stamp(state_dir) {
+        if same_canonical_path(&existing, &support) {
+            return Ok(());
+        }
     }
     let target = state_dir.join("support-root");
     if let Ok(existing) = fs::symlink_metadata(&target) {
@@ -125,7 +202,7 @@ pub fn write_support_root_stamp(state_dir: &Path, support: &Path) -> io::Result<
     write_res
 }
 
-fn read_support_root_stamp(state_dir: &Path) -> Option<PathBuf> {
+pub fn read_support_root_stamp(state_dir: &Path) -> Option<PathBuf> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let path = state_dir.join("support-root");
     let file = fs::OpenOptions::new()
@@ -151,7 +228,7 @@ fn read_support_root_stamp(state_dir: &Path) -> Option<PathBuf> {
     if raw.is_empty() || raw.contains(['\0', '\n']) {
         return None;
     }
-    let p = PathBuf::from(raw);
+    let p = normalize_support_path(Path::new(raw));
     p.is_absolute().then_some(p)
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -335,7 +412,27 @@ struct LocalHolderSpawnPlan {
     socket: PathBuf,
     path: PathBuf,
     record: Record,
+    child: Option<Child>,
     migrated_from: Option<(PathBuf, PathBuf)>,
+    created_new_record: bool,
+    created_dest_marker: bool,
+}
+
+impl LocalHolderSpawnPlan {
+    fn terminate_and_reap_child(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            if child.try_wait().ok().flatten().is_none() {
+                let _ = child.kill();
+            }
+            let _ = child.wait();
+        }
+    }
+}
+
+impl Drop for LocalHolderSpawnPlan {
+    fn drop(&mut self) {
+        self.terminate_and_reap_child();
+    }
 }
 
 pub struct Registry {
@@ -389,6 +486,13 @@ impl Registry {
     pub fn set_containment_root(&mut self, root: Option<PathBuf>) {
         self.containment_root = root;
     }
+    fn is_session_inflight(&self, id: &str) -> bool {
+        self.inflight_sessions
+            .0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(id)
+    }
     fn session_socket_in(sessions_root: &Path, id: &str) -> PathBuf {
         use sha2::{Digest, Sha256};
         let key = format!("{:x}", Sha256::digest(id.as_bytes()));
@@ -410,8 +514,37 @@ impl Registry {
             && meta.uid() == unsafe { libc::geteuid() }
             && (meta.mode() & 0o077) == 0
     }
+    fn support_path_variants(cur_support: &Path, home: Option<&Path>) -> Vec<PathBuf> {
+        let mut variants = Vec::new();
+        let mut push_unique = |p: PathBuf| {
+            let norm = normalize_support_path(&p);
+            if !norm.as_os_str().is_empty() && !variants.contains(&norm) {
+                variants.push(norm);
+            }
+        };
+        let norm = normalize_support_path(cur_support);
+        push_unique(norm.clone());
+        if let Ok(canon) = fs::canonicalize(&norm) {
+            push_unique(canon);
+        }
+        push_unique(prefer_logical_home_path_with_home(&norm, home));
+        if let Some(logical_home) = home.map(normalize_support_path).filter(|p| p.is_absolute()) {
+            if let Some(channel_name) = norm.file_name() {
+                let candidate = logical_home
+                    .join("Library/Application Support")
+                    .join(channel_name);
+                if same_canonical_path(&candidate, &norm) {
+                    push_unique(candidate);
+                }
+            }
+        }
+        variants
+    }
     fn sibling_session_roots_for(root: &Path) -> Vec<PathBuf> {
-        use sha2::{Digest, Sha256};
+        let env_home = std::env::var_os("HOME").map(PathBuf::from);
+        Self::sibling_session_roots_for_with_home(root, env_home.as_deref())
+    }
+    fn sibling_session_roots_for_with_home(root: &Path, home: Option<&Path>) -> Vec<PathBuf> {
         let Some(current_state_dir) = root.parent() else {
             return Vec::new();
         };
@@ -422,24 +555,25 @@ impl Registry {
             return Vec::new();
         }
         let current_support = read_support_root_stamp(current_state_dir);
+        let current_canonical = current_support
+            .as_ref()
+            .and_then(|cur| fs::canonicalize(cur).ok());
         let legacy_allowed_hashes = if let Some(ref cur_support) = current_support {
             if !cur_support.exists() {
                 return Vec::new();
             }
+            let variants = Self::support_path_variants(cur_support, home);
             let mut hashes = std::collections::HashSet::new();
-            let hash_for = |rev: &str| -> String {
-                let hex = format!(
-                    "{:x}",
-                    Sha256::digest(format!("{}\0{rev}", cur_support.display()).as_bytes())
-                );
-                hex[..20].to_owned()
-            };
-            hashes.insert(hash_for(env!("CARGO_PKG_VERSION")));
+            for variant in &variants {
+                hashes.insert(local_run_dir_key(variant, env!("CARGO_PKG_VERSION")));
+            }
             if let Ok(entries) = fs::read_dir(cur_support.join("session-runtime/versions")) {
                 for entry in entries.take(256).flatten() {
                     if let Some(rev) = entry.file_name().to_str() {
                         if crate::valid_revision(rev) {
-                            hashes.insert(hash_for(rev));
+                            for variant in &variants {
+                                hashes.insert(local_run_dir_key(variant, rev));
+                            }
                         }
                     }
                 }
@@ -459,7 +593,13 @@ impl Registry {
             }
             let sibling_support = read_support_root_stamp(&state_dir);
             let channel_matches = match (&current_support, sibling_support) {
-                (Some(cur), Some(sib)) => &sib == cur,
+                (Some(cur), Some(sib)) => {
+                    &sib == cur
+                        || current_canonical
+                            .as_ref()
+                            .zip(fs::canonicalize(&sib).ok())
+                            .is_some_and(|(cur_c, sib_c)| cur_c == &sib_c)
+                }
                 (Some(_), None) => {
                     state_dir
                         .file_name()
@@ -823,7 +963,10 @@ impl Registry {
                 }
                 if entry_path.extension().is_some_and(|s| s == "json") {
                     if let Ok(mut record) = Record::load(&entry_path) {
-                        if !valid_id(&record.id) || self.workers.contains_key(&record.id) {
+                        if !valid_id(&record.id)
+                            || self.workers.contains_key(&record.id)
+                            || self.is_session_inflight(&record.id)
+                        {
                             continue;
                         }
                         if self.mode == RuntimeMode::Local {
@@ -899,7 +1042,10 @@ impl Registry {
             let Some(id) = snap_path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            if !valid_id(id) || self.workers.contains_key(id) || self.local_holders.contains_key(id)
+            if !valid_id(id)
+                || self.workers.contains_key(id)
+                || self.local_holders.contains_key(id)
+                || self.is_session_inflight(id)
             {
                 continue;
             }
@@ -918,7 +1064,10 @@ impl Registry {
             let Some(id) = closed_path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            if !valid_id(id) || self.workers.contains_key(id) || self.local_holders.contains_key(id)
+            if !valid_id(id)
+                || self.workers.contains_key(id)
+                || self.local_holders.contains_key(id)
+                || self.is_session_inflight(id)
             {
                 continue;
             }
@@ -1582,6 +1731,7 @@ impl Registry {
                             && !k.contains('\0')
                             && !v.contains('\0')
                             && !k.starts_with("OMG_RUNTIME_")
+                            && k != "OMG_APP_SUPPORT"
                     })
                     .collect();
                 LocalLaunchSpec {
@@ -1662,6 +1812,7 @@ impl Registry {
         (!bytes.is_empty() && bytes.len() <= crate::MAX_FRAME).then_some(bytes)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prepare_local_holder_spawn(
         &mut self,
         id: &str,
@@ -1671,8 +1822,38 @@ impl Registry {
         launch: LocalLaunchSpec,
         resurrect: bool,
         migrated_from: Option<(PathBuf, PathBuf)>,
+        created_new_record: bool,
+        created_dest_marker: bool,
     ) -> io::Result<LocalHolderSpawnPlan> {
         let executable = std::env::current_exe()?;
+        self.prepare_local_holder_spawn_with_exe(
+            &executable,
+            id,
+            socket,
+            path,
+            record,
+            launch,
+            resurrect,
+            migrated_from,
+            created_new_record,
+            created_dest_marker,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_local_holder_spawn_with_exe(
+        &mut self,
+        executable: &Path,
+        id: &str,
+        socket: &Path,
+        path: &Path,
+        record: &mut Record,
+        launch: LocalLaunchSpec,
+        resurrect: bool,
+        migrated_from: Option<(PathBuf, PathBuf)>,
+        created_new_record: bool,
+        created_dest_marker: bool,
+    ) -> io::Result<LocalHolderSpawnPlan> {
         let request = crate::holder::HolderRequest {
             session_socket: socket.to_path_buf(),
             record_path: path.to_path_buf(),
@@ -1689,33 +1870,35 @@ impl Registry {
             .custom_flags(libc::O_NOFOLLOW)
             .open(&diagnostics_path)?;
         fs::set_permissions(&diagnostics_path, fs::Permissions::from_mode(0o600))?;
-        let child = match crate::holder::spawn(&executable, &request, Stdio::from(diagnostics)) {
+        let child = match crate::holder::spawn(executable, &request, Stdio::from(diagnostics)) {
             Ok(child) => child,
             Err(error) => {
-                if migrated_from.is_some() {
+                let _ = fs::remove_file(socket);
+                let _ = fs::remove_file(socket.with_extension("evt"));
+                let _ = fs::remove_file(crate::holder::control_path(socket));
+                if migrated_from.is_some() || created_new_record {
                     let _ = fs::remove_file(path);
                     crate::server::remove_snapshot_files(path);
-                    let _ = fs::remove_file(self.root.join(format!("{id}.created")));
+                    if created_dest_marker {
+                        let _ = fs::remove_file(self.root.join(format!("{id}.created")));
+                    }
                 } else {
+                    record.pid = None;
                     record.ended = Some(EndReason::Lost);
                     let _ = record.save(path);
                 }
                 return Err(error);
             }
         };
-        self.local_holders.insert(
-            id.into(),
-            LocalHolder {
-                capability: record.holder_capability.clone().unwrap(),
-                child: Some(child),
-            },
-        );
         Ok(LocalHolderSpawnPlan {
             id: id.to_owned(),
             socket: socket.to_path_buf(),
             path: path.to_path_buf(),
             record: record.clone(),
+            child: Some(child),
             migrated_from,
+            created_new_record,
+            created_dest_marker,
         })
     }
 
@@ -1727,28 +1910,26 @@ impl Registry {
         }
     }
 
-    fn rollback_failed_spawn(
-        &mut self,
-        plan: &LocalHolderSpawnPlan,
-        holder_exited: bool,
-    ) -> io::Result<()> {
-        if holder_exited {
-            self.local_holders.remove(&plan.id);
-        }
-        if plan.migrated_from.is_some() {
-            if let Some(mut holder) = self.local_holders.remove(&plan.id) {
-                if let Some(child) = holder.child.as_mut() {
+    fn rollback_failed_spawn(&mut self, plan: &mut LocalHolderSpawnPlan) -> io::Result<()> {
+        plan.terminate_and_reap_child();
+        if let Some(mut holder) = self.local_holders.remove(&plan.id) {
+            if let Some(child) = holder.child.as_mut() {
+                if child.try_wait().ok().flatten().is_none() {
                     let _ = child.kill();
-                    let _ = child.wait();
                 }
+                let _ = child.wait();
             }
+        }
+        let _ = fs::remove_file(&plan.socket);
+        let _ = fs::remove_file(plan.socket.with_extension("evt"));
+        let _ = fs::remove_file(crate::holder::control_path(&plan.socket));
+        if plan.migrated_from.is_some() || plan.created_new_record {
             let _ = fs::remove_file(&plan.path);
             crate::server::remove_snapshot_files(&plan.path);
-            let _ = fs::remove_file(self.root.join(format!("{}.created", plan.id)));
-            let _ = fs::remove_file(&plan.socket);
-            let _ = fs::remove_file(plan.socket.with_extension("evt"));
-            let _ = fs::remove_file(crate::holder::control_path(&plan.socket));
-        } else if holder_exited {
+            if plan.created_dest_marker {
+                let _ = fs::remove_file(self.root.join(format!("{}.created", plan.id)));
+            }
+        } else {
             let mut updated = plan.record.clone();
             updated.pid = None;
             updated.ended = Some(EndReason::Lost);
@@ -1757,6 +1938,7 @@ impl Registry {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_and_connect_local_holder(
         &mut self,
         id: &str,
@@ -1766,8 +1948,10 @@ impl Registry {
         launch: LocalLaunchSpec,
         resurrect: bool,
         migrated_from: Option<(PathBuf, PathBuf)>,
+        created_new_record: bool,
+        created_dest_marker: bool,
     ) -> io::Result<UnixStream> {
-        let plan = self.prepare_local_holder_spawn(
+        let mut plan = self.prepare_local_holder_spawn(
             id,
             socket,
             path,
@@ -1775,31 +1959,37 @@ impl Registry {
             launch,
             resurrect,
             migrated_from,
+            created_new_record,
+            created_dest_marker,
         )?;
+        let capability = match plan.record.holder_capability.clone() {
+            Some(cap) => cap,
+            None => {
+                let _ = self.rollback_failed_spawn(&mut plan);
+                return Err(io::Error::other("local holder capability is missing"));
+            }
+        };
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let holder_exited = self
-                .local_holders
-                .get_mut(id)
-                .and_then(|holder| holder.child.as_mut())
-                .map(Child::try_wait)
-                .transpose()?
-                .flatten()
-                .is_some();
+            let holder_exited = match plan.child.as_mut().map(Child::try_wait).transpose() {
+                Ok(status) => status.flatten().is_some(),
+                Err(error) => {
+                    let _ = self.rollback_failed_spawn(&mut plan);
+                    return Err(error);
+                }
+            };
             if holder_exited {
-                self.rollback_failed_spawn(&plan, true)?;
+                self.rollback_failed_spawn(&mut plan)?;
                 return Err(io::Error::other(
                     "local session holder exited during startup",
                 ));
             }
-            match crate::holder::probe(
-                socket,
-                id,
-                &record.generation,
-                record.holder_capability.as_deref().unwrap(),
-            ) {
+            match crate::holder::probe(socket, id, &record.generation, &capability) {
                 Ok(status) if status.session_pid.is_some() => {
                     if let Ok(stream) = UnixStream::connect(socket) {
+                        let child = plan.child.take();
+                        self.local_holders
+                            .insert(id.into(), LocalHolder { capability, child });
                         Self::finish_migrated_source_cleanup(plan.migrated_from.as_ref(), id);
                         return Ok(stream);
                     }
@@ -1807,7 +1997,17 @@ impl Registry {
                 _ => {}
             }
             if Instant::now() >= deadline {
-                let _ = self.rollback_failed_spawn(&plan, false);
+                let exited_at_deadline = plan
+                    .child
+                    .as_mut()
+                    .and_then(|c| c.try_wait().ok().flatten())
+                    .is_some();
+                let _ = self.rollback_failed_spawn(&mut plan);
+                if exited_at_deadline {
+                    return Err(io::Error::other(
+                        "local session holder exited during startup",
+                    ));
+                }
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "local session holder started but did not become attachable",
@@ -1923,6 +2123,7 @@ impl Registry {
                 Self::build_resurrect_launch(&record, resurrect_launch, !resurrect_snapshot)?;
             let original_snapshot_revision = record.snapshot_revision.clone();
             let migrated = target_root != self.root;
+            let mut created_dest_marker = false;
             if migrated {
                 use std::os::unix::fs::OpenOptionsExt;
                 let created_marker = self.root.join(format!("{id}.created"));
@@ -1933,6 +2134,7 @@ impl Registry {
                         .truncate(false)
                         .mode(0o600)
                         .open(&created_marker)?;
+                    created_dest_marker = true;
                 }
                 if resurrect_snapshot {
                     if target_path.with_extension("snapshot").exists() {
@@ -1978,6 +2180,8 @@ impl Registry {
                 launch,
                 resurrect_snapshot,
                 migrated_from,
+                false,
+                created_dest_marker,
             );
         }
         if !create {
@@ -2020,7 +2224,17 @@ impl Registry {
         record.cwd = launch.cwd.clone();
         record.save(path)?;
 
-        self.spawn_and_connect_local_holder(id, socket, path, &mut record, launch, false, None)
+        self.spawn_and_connect_local_holder(
+            id,
+            socket,
+            path,
+            &mut record,
+            launch,
+            false,
+            None,
+            true,
+            true,
+        )
     }
 
     pub fn maintenance_unlocked(registry: &Mutex<Self>, force: bool) {
@@ -2068,7 +2282,10 @@ impl Registry {
                     }
                     if entry_path.extension().is_some_and(|s| s == "json") {
                         if let Ok(record) = Record::load(&entry_path) {
-                            if !valid_id(&record.id) || state.workers.contains_key(&record.id) {
+                            if !valid_id(&record.id)
+                                || state.workers.contains_key(&record.id)
+                                || state.is_session_inflight(&record.id)
+                            {
                                 continue;
                             }
                             if record.ended.is_none() {
@@ -2101,6 +2318,7 @@ impl Registry {
                 if !valid_id(id)
                     || state.workers.contains_key(id)
                     || state.local_holders.contains_key(id)
+                    || state.is_session_inflight(id)
                 {
                     continue;
                 }
@@ -2122,6 +2340,7 @@ impl Registry {
                 if !valid_id(id)
                     || state.workers.contains_key(id)
                     || state.local_holders.contains_key(id)
+                    || state.is_session_inflight(id)
                 {
                     continue;
                 }
@@ -2799,6 +3018,7 @@ impl Registry {
                 Self::build_resurrect_launch(&record, resurrect_launch, !resurrect_snapshot)?;
             let original_snapshot_revision = record.snapshot_revision.clone();
             let migrated = target_root != self.root;
+            let mut created_dest_marker = false;
             if migrated {
                 use std::os::unix::fs::OpenOptionsExt;
                 let created_marker = self.root.join(format!("{id}.created"));
@@ -2809,6 +3029,7 @@ impl Registry {
                         .truncate(false)
                         .mode(0o600)
                         .open(&created_marker)?;
+                    created_dest_marker = true;
                 }
                 if resurrect_snapshot {
                     if target_path.with_extension("snapshot").exists() {
@@ -2854,6 +3075,8 @@ impl Registry {
                 launch,
                 resurrect_snapshot,
                 migrated_from,
+                false,
+                created_dest_marker,
             );
         }
         if !create {
@@ -2896,41 +3119,70 @@ impl Registry {
         record.cwd = launch.cwd.clone();
         record.save(path)?;
 
-        self.prepare_local_holder_spawn(id, socket, path, &mut record, launch, false, None)
+        self.prepare_local_holder_spawn(
+            id,
+            socket,
+            path,
+            &mut record,
+            launch,
+            false,
+            None,
+            true,
+            true,
+        )
     }
 
     fn await_spawned_local_holder(
         registry: &Mutex<Self>,
         plan: LocalHolderSpawnPlan,
     ) -> io::Result<UnixStream> {
-        let capability = plan
-            .record
-            .holder_capability
-            .clone()
-            .ok_or_else(|| io::Error::other("local holder capability is missing"))?;
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            {
+        Self::await_spawned_local_holder_with_timeout(registry, plan, Duration::from_secs(5))
+    }
+
+    fn await_spawned_local_holder_with_timeout(
+        registry: &Mutex<Self>,
+        mut plan: LocalHolderSpawnPlan,
+        timeout: Duration,
+    ) -> io::Result<UnixStream> {
+        let capability = match plan.record.holder_capability.clone() {
+            Some(cap) => cap,
+            None => {
+                plan.terminate_and_reap_child();
                 let mut state = registry.lock().unwrap_or_else(|p| p.into_inner());
-                let holder_exited = state
-                    .local_holders
-                    .get_mut(&plan.id)
-                    .and_then(|holder| holder.child.as_mut())
-                    .map(Child::try_wait)
-                    .transpose()?
-                    .flatten()
-                    .is_some();
-                if holder_exited {
-                    state.rollback_failed_spawn(&plan, true)?;
-                    return Err(io::Error::other(
-                        "local session holder exited during startup",
-                    ));
+                let _ = state.rollback_failed_spawn(&mut plan);
+                return Err(io::Error::other("local holder capability is missing"));
+            }
+        };
+        let deadline = Instant::now() + timeout;
+        loop {
+            let holder_exited = match plan.child.as_mut().map(Child::try_wait).transpose() {
+                Ok(status) => status.flatten().is_some(),
+                Err(error) => {
+                    plan.terminate_and_reap_child();
+                    let mut state = registry.lock().unwrap_or_else(|p| p.into_inner());
+                    let _ = state.rollback_failed_spawn(&mut plan);
+                    return Err(error);
                 }
+            };
+            if holder_exited {
+                plan.terminate_and_reap_child();
+                let mut state = registry.lock().unwrap_or_else(|p| p.into_inner());
+                state.rollback_failed_spawn(&mut plan)?;
+                return Err(io::Error::other(
+                    "local session holder exited during startup",
+                ));
             }
             match crate::holder::probe(&plan.socket, &plan.id, &plan.record.generation, &capability)
             {
                 Ok(status) if status.session_pid.is_some() => {
                     if let Ok(stream) = UnixStream::connect(&plan.socket) {
+                        let child = plan.child.take();
+                        {
+                            let mut state = registry.lock().unwrap_or_else(|p| p.into_inner());
+                            state
+                                .local_holders
+                                .insert(plan.id.clone(), LocalHolder { capability, child });
+                        }
                         Self::finish_migrated_source_cleanup(plan.migrated_from.as_ref(), &plan.id);
                         return Ok(stream);
                     }
@@ -2938,8 +3190,19 @@ impl Registry {
                 _ => {}
             }
             if Instant::now() >= deadline {
+                let exited_at_deadline = plan
+                    .child
+                    .as_mut()
+                    .and_then(|c| c.try_wait().ok().flatten())
+                    .is_some();
+                plan.terminate_and_reap_child();
                 let mut state = registry.lock().unwrap_or_else(|p| p.into_inner());
-                let _ = state.rollback_failed_spawn(&plan, false);
+                let _ = state.rollback_failed_spawn(&mut plan);
+                if exited_at_deadline {
+                    return Err(io::Error::other(
+                        "local session holder exited during startup",
+                    ));
+                }
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "local session holder started but did not become attachable",
@@ -3773,6 +4036,394 @@ mod tests {
         // If the disposable `support_dev` profile was deleted, `cur_dev` discovers zero siblings!
         fs::remove_dir_all(&support_dev).unwrap();
         assert!(reg_dev.list().unwrap().is_empty());
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn normalize_support_path_and_symlinked_support_root_preserve_sibling_discovery() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        assert_eq!(normalize_support_path(Path::new("/")), PathBuf::from("/"));
+        assert_eq!(normalize_support_path(Path::new("///")), PathBuf::from("/"));
+        assert_eq!(normalize_support_path(Path::new("/.")), PathBuf::from("/"));
+        assert_eq!(
+            normalize_support_path(Path::new(
+                "/Users/alice/./Library//Application Support/OMG/."
+            )),
+            PathBuf::from("/Users/alice/Library/Application Support/OMG")
+        );
+        assert_eq!(
+            normalize_support_path(Path::new("/Users/alice/Library/Application Support/OMG/")),
+            PathBuf::from("/Users/alice/Library/Application Support/OMG")
+        );
+        assert_eq!(normalize_support_path(Path::new(".")), PathBuf::from("."));
+        assert_eq!(
+            normalize_support_path(Path::new("./rel/path/")),
+            PathBuf::from("rel/path")
+        );
+        assert_eq!(
+            local_run_dir_key(
+                Path::new("/Users/alice/Library/Application Support/OMG"),
+                "0.21.0"
+            ),
+            local_run_dir_key(
+                Path::new("/Users/alice/./Library//Application Support/OMG/"),
+                "0.21.0"
+            )
+        );
+        assert_eq!(
+            infer_support_root_from_exe(Path::new(
+                "/Users/alice/./Library/Application Support/OMG//session-runtime/versions/0.21.0/omgd"
+            )),
+            Some(PathBuf::from("/Users/alice/Library/Application Support/OMG"))
+        );
+
+        let base = std::env::temp_dir().join(format!(
+            "omg-reg-sym-{}",
+            &crate::record::nonce().unwrap()[..8]
+        ));
+        let real_home = base.join("Volumes/Data/Users/alice");
+        let logical_home = base.join("Users/alice");
+        fs::create_dir_all(&real_home).unwrap();
+        fs::create_dir_all(logical_home.parent().unwrap()).unwrap();
+        symlink(&real_home, &logical_home).unwrap();
+
+        let logical_omg = logical_home.join("Library/Application Support/OMG");
+        let logical_dev = logical_home.join("Library/Application Support/OMG Dev");
+        fs::create_dir_all(logical_omg.join("session-runtime/versions/0.20.0")).unwrap();
+        fs::create_dir_all(logical_dev.join("session-runtime/versions/0.20.0")).unwrap();
+
+        let realpath_omg = fs::canonicalize(&logical_omg).unwrap();
+        let realpath_dev = fs::canonicalize(&logical_dev).unwrap();
+        assert_ne!(logical_omg, realpath_omg);
+        assert_eq!(
+            prefer_logical_home_path_with_home(&realpath_omg, Some(&logical_home)),
+            logical_omg
+        );
+
+        let run_root = logical_home.join(".omg/run");
+        let cur_realpath_stamped = run_root.join("curreal0000000000000");
+        let sib_logical_stamped = run_root.join("siblogi0000000000000");
+        let sib_logical_legacy = run_root.join(local_run_dir_key(&logical_omg, "0.20.0"));
+        let sib_realpath_legacy = run_root.join(local_run_dir_key(&realpath_omg, "0.20.0"));
+        let sib_dev_stamped = run_root.join("sibdevs0000000000000");
+        let sib_dev_legacy = run_root.join(local_run_dir_key(&logical_dev, "0.20.0"));
+
+        for dir in [
+            &cur_realpath_stamped,
+            &sib_logical_stamped,
+            &sib_logical_legacy,
+            &sib_realpath_legacy,
+            &sib_dev_stamped,
+            &sib_dev_legacy,
+        ] {
+            fs::create_dir_all(dir.join("sessions")).unwrap();
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(dir.join("sessions"), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::set_permissions(&run_root, fs::Permissions::from_mode(0o700)).unwrap();
+
+        // Stamping logical path first, then calling write_support_root_stamp with realpath
+        // (or trailing slash) must NOT overwrite the logical stamp!
+        write_support_root_stamp(
+            &sib_logical_stamped,
+            Path::new(&format!("{}/", logical_omg.display())),
+        )
+        .unwrap();
+        assert_eq!(
+            read_support_root_stamp(&sib_logical_stamped).as_deref(),
+            Some(logical_omg.as_path())
+        );
+        write_support_root_stamp(&sib_logical_stamped, &realpath_omg).unwrap();
+        assert_eq!(
+            read_support_root_stamp(&sib_logical_stamped).as_deref(),
+            Some(logical_omg.as_path())
+        );
+
+        // Even if an upgraded state dir was previously stamped with realpath,
+        // sibling_session_roots_for_with_home discovers both logical-stamped and
+        // logical-hashed pre-stamp siblings while isolating OMG Dev!
+        write_support_root_stamp(&cur_realpath_stamped, &realpath_omg).unwrap();
+        write_support_root_stamp(&sib_dev_stamped, &realpath_dev).unwrap();
+
+        let siblings = Registry::sibling_session_roots_for_with_home(
+            &cur_realpath_stamped.join("sessions"),
+            Some(&logical_home),
+        );
+        assert!(siblings.contains(&sib_logical_stamped.join("sessions")));
+        assert!(siblings.contains(&sib_logical_legacy.join("sessions")));
+        assert!(siblings.contains(&sib_realpath_legacy.join("sessions")));
+        assert!(!siblings.contains(&sib_dev_stamped.join("sessions")));
+        assert!(!siblings.contains(&sib_dev_legacy.join("sessions")));
+
+        // Symmetric check: logical-stamped current dir also discovers realpath-stamped sibling.
+        let siblings_reverse = Registry::sibling_session_roots_for_with_home(
+            &sib_logical_stamped.join("sessions"),
+            Some(&logical_home),
+        );
+        assert!(siblings_reverse.contains(&cur_realpath_stamped.join("sessions")));
+        assert!(siblings_reverse.contains(&sib_logical_legacy.join("sessions")));
+        assert!(siblings_reverse.contains(&sib_realpath_legacy.join("sessions")));
+        assert!(!siblings_reverse.contains(&sib_dev_stamped.join("sessions")));
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn concurrent_reap_during_failed_holder_spawn_fails_fast_and_rolls_back_record() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let base = std::env::temp_dir().join(format!(
+            "omg-reg-toctou-{}",
+            &crate::record::nonce().unwrap()[..8]
+        ));
+        let sessions = base.join("state/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(base.join("state"), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&sessions, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let fake_holder = base.join("fail-holder.sh");
+        fs::write(&fake_holder, b"#!/bin/sh\ncat >/dev/null\nexit 1\n").unwrap();
+        fs::set_permissions(&fake_holder, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let registry = Arc::new(Mutex::new(Registry::new_local(
+            sessions.clone(),
+            vec!["/bin/sh".into()],
+            Policy::default(),
+        )));
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_reaper = stop.clone();
+        let reg_reaper = registry.clone();
+        let reaper = thread::spawn(move || {
+            while !stop_reaper.load(Ordering::Relaxed) {
+                reg_reaper.lock().unwrap().reap_finished_children();
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+
+        let launch = LocalLaunchSpec {
+            argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
+            env: BTreeMap::new(),
+            cwd: Some(base.to_string_lossy().into_owned()),
+            cols: 80,
+            rows: 24,
+            pixel_width: 640,
+            pixel_height: 384,
+            scrollback_max_bytes: None,
+            scrollback_max_lines: None,
+            input_base64: None,
+        };
+
+        // 1. Newly created session: must fail fast (< 1.5s, not 5s!) and remove .json + .created.
+        let new_id = "11111111-2222-4333-8444-555555555555";
+        let new_path = sessions.join(format!("{new_id}.json"));
+        let new_created = sessions.join(format!("{new_id}.created"));
+        let new_sock = Registry::session_socket_in(&sessions, new_id);
+        fs::write(&new_created, b"").unwrap();
+        let mut new_rec = Record::new(new_id, Policy::default()).unwrap();
+        new_rec.holder_capability = Some(nonce().unwrap());
+        new_rec.save(&new_path).unwrap();
+
+        let plan_new = registry
+            .lock()
+            .unwrap()
+            .prepare_local_holder_spawn_with_exe(
+                &fake_holder,
+                new_id,
+                &new_sock,
+                &new_path,
+                &mut new_rec,
+                launch.clone(),
+                false,
+                None,
+                true,
+                true,
+            )
+            .unwrap();
+        assert!(registry.lock().unwrap().local_holders.is_empty());
+
+        let started = Instant::now();
+        let err = Registry::await_spawned_local_holder(&registry, plan_new).unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_millis(1500),
+            "expected fast exit detection despite concurrent reap_finished_children, took {:?}",
+            started.elapsed()
+        );
+        assert!(err.to_string().contains("exited during startup"));
+        assert!(!new_path.exists());
+        assert!(!new_created.exists());
+
+        // 2. Existing resurrected session: must fail fast and roll {id}.json back to EndReason::Lost!
+        let res_id = "22222222-3333-4444-8555-666666666666";
+        let res_path = sessions.join(format!("{res_id}.json"));
+        let res_snap = sessions.join(format!("{res_id}.snapshot"));
+        let res_sock = Registry::session_socket_in(&sessions, res_id);
+        fs::write(&res_snap, b"SNAP").unwrap();
+        let mut res_rec = Record::new(res_id, Policy::default()).unwrap();
+        res_rec.holder_capability = Some(nonce().unwrap());
+        res_rec.ended = None;
+        res_rec.save(&res_path).unwrap();
+
+        let plan_res = registry
+            .lock()
+            .unwrap()
+            .prepare_local_holder_spawn_with_exe(
+                &fake_holder,
+                res_id,
+                &res_sock,
+                &res_path,
+                &mut res_rec,
+                launch,
+                true,
+                None,
+                false,
+                false,
+            )
+            .unwrap();
+
+        let started_res = Instant::now();
+        let err_res = Registry::await_spawned_local_holder(&registry, plan_res).unwrap_err();
+        assert!(started_res.elapsed() < Duration::from_millis(1500));
+        assert!(err_res.to_string().contains("exited during startup"));
+        let rolled_back = Record::load(&res_path).unwrap();
+        assert_eq!(rolled_back.ended, Some(EndReason::Lost));
+        assert_eq!(rolled_back.pid, None);
+        assert!(res_snap.exists());
+
+        stop.store(true, Ordering::Relaxed);
+        reaper.join().unwrap();
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn wedged_holder_spawn_timeout_kills_and_reaps_child_and_rolls_back() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = std::env::temp_dir().join(format!(
+            "omg-reg-wedge-{}",
+            &crate::record::nonce().unwrap()[..8]
+        ));
+        let sessions = base.join("state/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(base.join("state"), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&sessions, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let wedged_holder = base.join("wedged-holder.sh");
+        fs::write(
+            &wedged_holder,
+            b"#!/bin/sh\ncat >/dev/null\ntrap '' TERM INT HUP\nsleep 60\n",
+        )
+        .unwrap();
+        fs::set_permissions(&wedged_holder, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let registry = Arc::new(Mutex::new(Registry::new_local(
+            sessions.clone(),
+            vec!["/bin/sh".into()],
+            Policy::default(),
+        )));
+        let launch = LocalLaunchSpec {
+            argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
+            env: BTreeMap::new(),
+            cwd: Some(base.to_string_lossy().into_owned()),
+            cols: 80,
+            rows: 24,
+            pixel_width: 640,
+            pixel_height: 384,
+            scrollback_max_bytes: None,
+            scrollback_max_lines: None,
+            input_base64: None,
+        };
+
+        // 1. Existing resurrected record timeout: kills + reaps wedged child, cleans sockets, marks Lost.
+        let res_id = "33333333-4444-4555-8666-777777777777";
+        let res_path = sessions.join(format!("{res_id}.json"));
+        let res_sock = Registry::session_socket_in(&sessions, res_id);
+        let res_ctl = crate::holder::control_path(&res_sock);
+        fs::write(&res_sock, b"stale").unwrap();
+        fs::write(&res_ctl, b"stale").unwrap();
+        let mut res_rec = Record::new(res_id, Policy::default()).unwrap();
+        res_rec.holder_capability = Some(nonce().unwrap());
+        res_rec.ended = None;
+        res_rec.save(&res_path).unwrap();
+
+        let plan_res = registry
+            .lock()
+            .unwrap()
+            .prepare_local_holder_spawn_with_exe(
+                &wedged_holder,
+                res_id,
+                &res_sock,
+                &res_path,
+                &mut res_rec,
+                launch.clone(),
+                true,
+                None,
+                false,
+                false,
+            )
+            .unwrap();
+        let wedged_pid_1 = plan_res.child.as_ref().unwrap().id() as libc::pid_t;
+        assert_eq!(unsafe { libc::kill(wedged_pid_1, 0) }, 0);
+
+        let err = Registry::await_spawned_local_holder_with_timeout(
+            &registry,
+            plan_res,
+            Duration::from_millis(120),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert_ne!(unsafe { libc::kill(wedged_pid_1, 0) }, 0);
+        assert!(!res_sock.exists());
+        assert!(!res_ctl.exists());
+        assert_eq!(
+            Record::load(&res_path).unwrap().ended,
+            Some(EndReason::Lost)
+        );
+
+        // 2. Newly created record timeout: kills + reaps wedged child and removes .json + .created.
+        let new_id = "44444444-5555-4666-8777-888888888888";
+        let new_path = sessions.join(format!("{new_id}.json"));
+        let new_created = sessions.join(format!("{new_id}.created"));
+        let new_sock = Registry::session_socket_in(&sessions, new_id);
+        fs::write(&new_created, b"").unwrap();
+        let mut new_rec = Record::new(new_id, Policy::default()).unwrap();
+        new_rec.holder_capability = Some(nonce().unwrap());
+        new_rec.save(&new_path).unwrap();
+
+        let plan_new = registry
+            .lock()
+            .unwrap()
+            .prepare_local_holder_spawn_with_exe(
+                &wedged_holder,
+                new_id,
+                &new_sock,
+                &new_path,
+                &mut new_rec,
+                launch,
+                false,
+                None,
+                true,
+                true,
+            )
+            .unwrap();
+        let wedged_pid_2 = plan_new.child.as_ref().unwrap().id() as libc::pid_t;
+        assert_eq!(unsafe { libc::kill(wedged_pid_2, 0) }, 0);
+
+        let err2 = Registry::await_spawned_local_holder_with_timeout(
+            &registry,
+            plan_new,
+            Duration::from_millis(120),
+        )
+        .unwrap_err();
+        assert_eq!(err2.kind(), io::ErrorKind::TimedOut);
+        assert_ne!(unsafe { libc::kill(wedged_pid_2, 0) }, 0);
+        assert!(!new_path.exists());
+        assert!(!new_created.exists());
 
         fs::remove_dir_all(base).unwrap();
     }

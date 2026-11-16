@@ -676,7 +676,11 @@ pub fn run(args: &[String]) -> io::Result<()> {
                     .map_err(|_| io::Error::other("Invalid --port"))?;
             }
             "--public-url" => public_url_arg = Some(validate_public_url(value)?),
-            "--app-support" | "--state-dir" => support = Some(PathBuf::from(value)),
+            "--app-support" | "--state-dir" => {
+                support = Some(omg_session_runtime::registry::normalize_support_path(
+                    Path::new(value),
+                ))
+            }
             "--socket" => socket = Some(PathBuf::from(value)),
             "--token-file" => key = Some(PathBuf::from(value)),
             "--allow-origin" => origin = Some(value.clone()),
@@ -699,10 +703,10 @@ pub fn run(args: &[String]) -> io::Result<()> {
     let endpoints = if let Some(ref sock) = socket {
         targets(vec![("This Machine".into(), sock.clone())])?
     } else {
-        let dir = match support {
+        let dir = omg_session_runtime::registry::normalize_support_path(&match support {
             Some(path) => path,
             None => super::session_cli::default_mobile_support()?,
-        };
+        });
         ensure_state_dir(&dir)?;
         support = Some(dir);
         Vec::new()
@@ -1108,8 +1112,12 @@ fn ensure_background_gateway(
         let mut launchd_cmd = Vec::with_capacity(serve_args.len() + 1);
         launchd_cmd.push(exe.to_string_lossy().into_owned());
         launchd_cmd.extend(serve_args.iter().cloned());
+        let mut extra_env = Vec::new();
+        if let Some(sup_str) = support.and_then(Path::to_str) {
+            extra_env.push(("OMG_APP_SUPPORT", sup_str));
+        }
         matches!(
-            omg_session_runtime::launchd::spawn(&exe, &launchd_cmd, &log_path),
+            omg_session_runtime::launchd::spawn_with_env(&exe, &launchd_cmd, &log_path, &extra_env,),
             Ok(Some(_))
         )
     } else {
@@ -1125,6 +1133,9 @@ fn ensure_background_gateway(
             .open(&log_path)?;
         let mut cmd = Command::new(&exe);
         cmd.args(&serve_args);
+        if let Some(dir) = support {
+            cmd.env("OMG_APP_SUPPORT", dir);
+        }
         cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(log);
         unsafe {
             cmd.pre_exec(|| {
@@ -1655,10 +1666,17 @@ mod tests {
             should_launch_gateway_via_launchd(true, &bundled_omgd, None, None),
             cfg!(target_os = "macos")
         );
-        assert!(!should_launch_gateway_via_launchd(false, &bundled_omgd, None, None));
+        assert!(!should_launch_gateway_via_launchd(
+            false,
+            &bundled_omgd,
+            None,
+            None
+        ));
 
         let unbundled = dir.join("bin/omgd");
-        assert!(!should_launch_gateway_via_launchd(true, &unbundled, None, None));
+        assert!(!should_launch_gateway_via_launchd(
+            true, &unbundled, None, None
+        ));
         assert_eq!(
             should_launch_gateway_via_launchd(
                 true,

@@ -113,6 +113,13 @@ pub fn environment(vars: impl Iterator<Item = (String, String)>) -> Vec<(String,
         .map(|(key, value)| {
             if key == "TERM" && (value.trim().is_empty() || value == "dumb") {
                 (key, "xterm-256color".into())
+            } else if key == "OMG_APP_SUPPORT" && Path::new(&value).is_absolute() {
+                (
+                    key,
+                    crate::registry::normalize_support_path(Path::new(&value))
+                        .to_string_lossy()
+                        .into_owned(),
+                )
             } else {
                 (key, value)
             }
@@ -265,6 +272,15 @@ fn launchctl(args: &[&str]) -> io::Result<bool> {
 /// Starts `command` outside the caller's coalition. Returns Ok(None) when the
 /// GUI launchd domain is unavailable so callers can use direct startup.
 pub fn spawn(helper: &Path, command: &[String], log: &Path) -> io::Result<Option<u32>> {
+    spawn_with_env(helper, command, log, &[])
+}
+
+pub fn spawn_with_env(
+    helper: &Path,
+    command: &[String],
+    log: &Path,
+    extra_env: &[(&str, &str)],
+) -> io::Result<Option<u32>> {
     if !cfg!(target_os = "macos") {
         return Ok(None);
     }
@@ -313,7 +329,13 @@ pub fn spawn(helper: &Path, command: &[String], log: &Path) -> io::Result<Option
     };
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let job_plist = dir.join("job.plist");
-    let mut env = environment(std::env::vars());
+    let mut raw_vars: Vec<(String, String)> = std::env::vars()
+        .filter(|(k, _)| !extra_env.iter().any(|(ek, _)| ek == k))
+        .collect();
+    for &(k, v) in extra_env {
+        raw_vars.push((k.to_owned(), v.to_owned()));
+    }
+    let mut env = environment(raw_vars.into_iter());
     if host_app.is_some() {
         env.push(("OMG_RUNTIME_HOST_LABEL".into(), label.clone()));
         env.sort();
@@ -440,6 +462,33 @@ mod tests {
             env,
             vec![
                 ("PATH".to_string(), "/bin".to_string()),
+                ("TERM".to_string(), "xterm-256color".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn environment_preserves_and_normalizes_omg_app_support() {
+        let env = environment(
+            [
+                (
+                    "OMG_APP_SUPPORT",
+                    "/Users/alice/./Library//Application Support/OMG/.",
+                ),
+                ("OMG_HOST_APP_BUNDLE", "/Applications/OMG.app"),
+                ("PATH", "/usr/bin:/bin"),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string())),
+        );
+        assert_eq!(
+            env,
+            vec![
+                (
+                    "OMG_APP_SUPPORT".to_string(),
+                    "/Users/alice/Library/Application Support/OMG".to_string()
+                ),
+                ("PATH".to_string(), "/usr/bin:/bin".to_string()),
                 ("TERM".to_string(), "xterm-256color".to_string()),
             ]
         );

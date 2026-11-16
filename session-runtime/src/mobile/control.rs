@@ -97,7 +97,7 @@ fn hash(value: &str) -> String {
 }
 fn home() -> io::Result<PathBuf> {
     std::env::var_os("HOME")
-        .map(PathBuf::from)
+        .map(|h| omg_session_runtime::registry::normalize_support_path(Path::new(&h)))
         .filter(|p| p.is_absolute())
         .ok_or_else(|| io::Error::other("HOME is unavailable"))
 }
@@ -961,7 +961,9 @@ fn build_view(config: &Config) -> io::Result<View> {
     let current_rev_socket = config.support.as_ref().map(|support| {
         let rev = crate::session_cli::current_revision();
         home.join(".omg/run")
-            .join(&hash(&format!("{}\0{rev}", support.display()))[..20])
+            .join(omg_session_runtime::registry::local_run_dir_key(
+                support, &rev,
+            ))
             .join("host.sock")
     });
     let preferred = current_rev_socket
@@ -2137,6 +2139,7 @@ fn start(config: &Config, view: &View, request: &Value) -> io::Result<Value> {
         .filter(|(k, _)| {
             !k.starts_with("OMG_MOBILE_")
                 && !k.starts_with("OMG_RUNTIME_")
+                && k != "OMG_APP_SUPPORT"
                 && k != "OMG_SESSION_RUNTIME_DESCRIPTOR"
                 && k != "GHOSTTY_SURFACE_ID"
         })
@@ -2236,15 +2239,18 @@ fn start(config: &Config, view: &View, request: &Value) -> io::Result<Value> {
 }
 
 fn ensure_local_broker(binary: &Path, support: &Path, revision: &str) -> io::Result<Endpoint> {
+    let support = omg_session_runtime::registry::normalize_support_path(support);
     let root = home()?
         .join(".omg/run")
-        .join(&hash(&format!("{}\0{revision}", support.display()))[..20]);
+        .join(omg_session_runtime::registry::local_run_dir_key(
+            &support, revision,
+        ));
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(&root)?;
     super::private(&root, true)?;
-    let _ = omg_session_runtime::registry::write_support_root_stamp(&root, support);
+    let _ = omg_session_runtime::registry::write_support_root_stamp(&root, &support);
     let socket = root.join("host.sock");
     let running = match UnixStream::connect(&socket) {
         Ok(_) => true,
@@ -2260,7 +2266,13 @@ fn ensure_local_broker(binary: &Path, support: &Path, revision: &str) -> io::Res
             "--".into(),
             "/bin/sh".into(),
         ];
-        if omg_session_runtime::launchd::spawn(binary, &command, &log_path)?.is_none() {
+        let mut extra_env = Vec::new();
+        if let Some(sup_str) = support.to_str() {
+            extra_env.push(("OMG_APP_SUPPORT", sup_str));
+        }
+        if omg_session_runtime::launchd::spawn_with_env(binary, &command, &log_path, &extra_env)?
+            .is_none()
+        {
             use std::os::unix::process::CommandExt;
             let log = fs::OpenOptions::new()
                 .create(true)
@@ -2272,7 +2284,7 @@ fn ensure_local_broker(binary: &Path, support: &Path, revision: &str) -> io::Res
             child
                 .args(&command[1..])
                 .env("TERM", "xterm-256color")
-                .env("OMG_APP_SUPPORT", support)
+                .env("OMG_APP_SUPPORT", &support)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(log);

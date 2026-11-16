@@ -89,7 +89,7 @@ struct GitSSHConnection: Hashable, Codable, Sendable {
          "-o", "ClearAllForwardings=yes", "-o", "PermitLocalCommand=no", "-o", "SessionType=default",
          "-o", "RemoteCommand=none", "-o", "RequestTTY=no", "-o", "StdinNull=no",
          "-o", controlSocket == nil ? "ControlMaster=no" : "ControlMaster=auto",
-         "-o", controlSocket == nil ? "ControlPersist=no" : "ControlPersist=60"] + options +
+         "-o", controlSocket == nil ? "ControlPersist=no" : "ControlPersist=3600"] + options +
             (controlSocket.map { ["-S", $0] } ?? []) + ["--", destination]
     }
 }
@@ -98,9 +98,60 @@ struct SSHGitExecutor: GitExecutor {
     let connection: GitSSHConnection
     var sshPath: String?
     var multiplexing = true
+    var omgdPath: String?
     static let marker = Data("\u{1e}OMG-GIT-v1\u{1f}".utf8)
 
     static func quote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+
+    static func isIdempotentReadOnly(arguments: [String]) -> Bool {
+        if arguments.contains(where: {
+            $0 == "-c" || ($0.hasPrefix("-c") && $0.contains("="))
+                || $0 == "--config-env" || $0.hasPrefix("--config-env=")
+        }) {
+            return false
+        }
+        var index = 0
+        while index < arguments.count {
+            let arg = arguments[index]
+            if arg == "--no-optional-locks" || arg == "--literal-pathspecs" || arg == "--no-pager" {
+                index += 1
+            } else if arg == "-C" || arg == "--git-dir" || arg == "--work-tree" || arg == "--namespace" {
+                index += 2
+            } else if arg.hasPrefix("-C")
+                || arg.hasPrefix("--git-dir=")
+                || arg.hasPrefix("--work-tree=")
+                || arg.hasPrefix("--namespace=") {
+                index += 1
+            } else if arg == "--version" {
+                return true
+            } else if arg.hasPrefix("-c") || arg.hasPrefix("-") {
+                return false
+            } else {
+                break
+            }
+        }
+        guard index < arguments.count else { return false }
+        let subcommand = arguments[index]
+        switch subcommand {
+        case "rev-parse", "symbolic-ref", "status", "diff", "diff-index", "diff-files",
+             "diff-tree", "log", "show", "for-each-ref", "ls-files", "ls-tree",
+             "cat-file", "describe", "version":
+            return true
+        case "worktree":
+            let nextIndex = index + 1
+            return nextIndex < arguments.count && arguments[nextIndex] == "list"
+        case "remote":
+            let nextIndex = index + 1
+            guard nextIndex < arguments.count else { return true }
+            let next = arguments[nextIndex]
+            if next == "-v" || next == "--verbose" {
+                return arguments.count == nextIndex + 1
+            }
+            return next == "get-url"
+        default:
+            return false
+        }
+    }
 
     func execute(arguments: [String], workingDirectory: String, stdin: Data?, maxOutputBytes: Int?) async throws -> GitExecutionResult {
         guard workingDirectory.hasPrefix("/"), !workingDirectory.contains("\0"),
@@ -111,7 +162,12 @@ struct SSHGitExecutor: GitExecutor {
             "unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES; " +
             "export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; " +
             "exec env LC_ALL=C GIT_TERMINAL_PROMPT=0 git " + arguments.map(Self.quote).joined(separator: " ")
-        return try await run(command, stdin: stdin, limit: maxOutputBytes)
+        return try await run(
+            command,
+            stdin: stdin,
+            limit: maxOutputBytes,
+            idempotent: Self.isIdempotentReadOnly(arguments: arguments)
+        )
     }
 
     func readWorkingFile(at path: String, root: String, limit: Int) async throws -> Data {
@@ -127,20 +183,28 @@ struct SSHGitExecutor: GitExecutor {
         if [ -L "$file" ] || [ ! -f "$file" ]; then echo 'Use patch view for symlinks or non-regular files.' >&2; exit 1; fi
         exec head -c \(limit + 1) "$file"
         """
-        let result = try await run(script, stdin: nil, limit: limit + 1)
+        let result = try await run(script, stdin: nil, limit: limit + 1, idempotent: true)
         guard result.isSuccess else { throw GitExecutionError.processFailed(exitCode: result.exitCode, stderr: result.stderrString) }
         guard result.stdout.count <= limit else { throw GitExecutionError.outputLimitExceeded(maxBytes: limit) }
         return result.stdout
     }
 
-    private func run(_ script: String, stdin: Data?, limit: Int?) async throws -> GitExecutionResult {
+    private func run(_ script: String, stdin: Data?, limit: Int?, idempotent: Bool) async throws -> GitExecutionResult {
         let framed = "printf '\\036OMG-GIT-v1\\037'; " + script
         // Only a quote-free base64 alphabet crosses the login shell. The
         // decoded POSIX script is a -c argument, leaving SSH stdin for git commit.
         let command = SSHSessionTransport.shellCommand(framed)
         let executable = sshPath ?? connection.executablePath
-        let result = try await SSHSessionTransport.run(connection: connection, command: command,
-            stdin: stdin, limit: limit.map { $0 + 64 * 1024 }, executable: executable, multiplexing: multiplexing)
+        let result = try await SSHSessionTransport.run(
+            connection: connection,
+            command: command,
+            stdin: stdin,
+            limit: limit.map { $0 + 64 * 1024 },
+            executable: executable,
+            multiplexing: multiplexing,
+            idempotent: idempotent,
+            omgdExecutableOverride: omgdPath
+        )
         guard result.exitCode != 255 else {
             throw GitExecutionError.executionFailed(GitL10n.text("SSH connection failed. If a write was in progress, refresh before retrying; its outcome may be unknown.\n") + result.stderrString)
         }

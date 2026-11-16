@@ -4,7 +4,7 @@ import Foundation
 import os
 
 /// OpenSSH owns connection/channel lifetimes and expires idle masters after
-/// 60 seconds. A private socket namespace prevents sharing an interactive
+/// 3600 seconds (1 hour). A private socket namespace prevents sharing an interactive
 /// terminal's master or reusing a connection with different routing options.
 enum GitSSHControlSocket {
     private static let session = UUID().uuidString
@@ -31,7 +31,7 @@ enum GitSSHControlSocket {
 
     private static let issued = OSAllocatedUnfairLock(initialState: [String: String]())
 
-    /// Masters persist 60 seconds after their last channel. Their sockets are
+    /// Masters persist 3600 seconds (1 hour) after their last channel. Their sockets are
     /// unique to this launch, so nothing can reuse them after quit; leaving
     /// them (and their ProxyJump helpers) running keeps the quit app listed
     /// as running in the background. Ask each live master to exit.

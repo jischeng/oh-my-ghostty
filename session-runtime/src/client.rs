@@ -68,6 +68,7 @@ struct LocalPeer {
     ended: bool,
     control: bool,
     control_done: bool,
+    exec_stream: bool,
     close_id: Option<String>,
     list_requested: bool,
 }
@@ -92,10 +93,48 @@ impl LocalPeer {
             ended: false,
             control: false,
             control_done: false,
+            exec_stream: false,
             close_id: None,
             list_requested: false,
         }
     }
+}
+
+#[derive(Default)]
+struct RemoteCapabilities {
+    received: bool,
+    strict_open: bool,
+    durable_close: bool,
+    local_launch: bool,
+    local_resurrect: bool,
+    inline_viewer: bool,
+    recreate_if_gone: bool,
+    exec: bool,
+}
+
+impl RemoteCapabilities {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn update(&mut self, data: &[u8]) {
+        self.received = true;
+        self.strict_open = has_capability(data, "strict-open/1");
+        self.durable_close = has_capability(data, "durable-close/1");
+        self.local_launch = has_capability(data, "local-launch/1");
+        self.local_resurrect = has_capability(data, "local-resurrect/1");
+        self.inline_viewer = has_capability(data, "inline-viewer/1");
+        self.recreate_if_gone = has_capability(data, "recreate-if-gone/1");
+        self.exec = has_capability(data, "exec/1");
+    }
+}
+
+fn is_active_peer(p: &LocalPeer) -> bool {
+    !p.ended
+        && (!p.control
+            || p.close_id.is_some() && !p.control_done
+            || p.list_requested && !p.control_done
+            || p.exec_stream && !p.control_done)
 }
 
 fn next_generation(generation: u64) -> u64 {
@@ -323,7 +362,10 @@ fn reset_remote_streams(peers: &mut HashMap<u64, LocalPeer>, discard_output: boo
         peer.snapshot_acked = false;
         peer.writer_requested = false;
         peer.writer_ready = false;
-        if !peer.failed && !peer.ended && !peer.control {
+        if peer.exec_stream && !peer.control_done {
+            peer.peer.push(Frame::new(b'E', 0, b"exec-disconnected"));
+            peer.control_done = true;
+        } else if !peer.failed && !peer.ended && !peer.control {
             peer.retry_requested = false;
             if discard_output {
                 discard_queued_output(&mut peer.peer);
@@ -400,13 +442,7 @@ fn supervise_with_timeouts(
     let mut remote_streams: HashMap<u64, u64> = HashMap::new();
     let mut remote: Option<Peer> = None;
     let mut _transport_guard: Option<Box<dyn Send>> = None;
-    let mut capabilities_received = false;
-    let mut strict_open = false;
-    let mut durable_close = false;
-    let mut local_launch = false;
-    let mut local_resurrect = false;
-    let mut inline_viewer = false;
-    let mut allow_recreate_if_gone = false;
+    let mut capabilities = RemoteCapabilities::default();
     let mut list_in_flight = false;
     let mut generation_counter = initial_generation;
     let mut state = State::Connecting;
@@ -426,12 +462,7 @@ fn supervise_with_timeouts(
     loop {
         wake.drain();
         let idle_timeout = effective_idle_timeout(initial_ppid);
-        if peers.values().any(|p| {
-            !p.ended
-                && (!p.control
-                    || p.close_id.is_some() && !p.control_done
-                    || p.list_requested && !p.control_done)
-        }) {
+        if peers.values().any(is_active_peer) {
             idle_since = Instant::now();
         } else if idle_since.elapsed() > idle_timeout {
             return Ok(());
@@ -452,13 +483,7 @@ fn supervise_with_timeouts(
             remote_streams.clear();
             reset_remote_streams(&mut peers, true);
             list_in_flight = false;
-            capabilities_received = false;
-            strict_open = false;
-            durable_close = false;
-            local_launch = false;
-            local_resurrect = false;
-            inline_viewer = false;
-            allow_recreate_if_gone = false;
+            capabilities.reset();
             advance_peer_generations(&mut peers, &mut generation_counter);
             stable_since = None;
             state = State::Reconnecting;
@@ -510,12 +535,7 @@ fn supervise_with_timeouts(
                             next_stream = 1;
                             remote = Some(peer);
                             last_pong = Instant::now();
-                            capabilities_received = false;
-                            strict_open = false;
-                            durable_close = false;
-                            local_launch = false;
-                            local_resurrect = false;
-                            inline_viewer = false;
+                            capabilities.reset();
                             list_in_flight = false;
                             remote.as_mut().unwrap().push(Frame::new(b'P', 0, &[]));
                             last_heartbeat = Instant::now();
@@ -625,10 +645,73 @@ fn supervise_with_timeouts(
             match peer.peer.read() {
                 Ok(frames) => {
                     for frame in frames {
-                        if peer.control {
+                        if peer.control && !peer.exec_stream {
+                            continue;
+                        }
+                        if peer.exec_stream {
+                            if peer.control_done {
+                                continue;
+                            }
+                            if matches!(frame.kind, b'i' | b'z') {
+                                if frame.data.len() > MAX_FRAME.saturating_sub(13) {
+                                    peer.peer.push(Frame::new(
+                                        b'E',
+                                        0,
+                                        b"exec input frame too large",
+                                    ));
+                                    peer.control_done = true;
+                                } else if let (Some(remote), Some(stream)) =
+                                    (remote.as_mut(), peer.remote_stream)
+                                {
+                                    remote.push(Frame::new(b'D', stream, &frame.encode()));
+                                }
+                            }
                             continue;
                         }
                         if peer.open.is_none() {
+                            if frame.kind == b'x' {
+                                peer.control = true;
+                                peer.exec_stream = true;
+                                match remote.as_mut() {
+                                    Some(remote_peer)
+                                        if state == State::Online && capabilities.received =>
+                                    {
+                                        if !capabilities.exec {
+                                            peer.peer.push(Frame::new(
+                                                b'E',
+                                                0,
+                                                b"exec-unsupported",
+                                            ));
+                                            peer.control_done = true;
+                                        } else if frame.seq != 0
+                                            || frame.data.len() > MAX_FRAME
+                                            || serde_json::from_slice::<host::ExecOpen>(&frame.data)
+                                                .is_err()
+                                        {
+                                            peer.peer.push(Frame::new(
+                                                b'E',
+                                                0,
+                                                b"invalid exec request",
+                                            ));
+                                            peer.control_done = true;
+                                        } else {
+                                            let mut stream = next_stream;
+                                            while remote_streams.contains_key(&stream) {
+                                                stream = next_generation(stream);
+                                            }
+                                            next_stream = next_generation(stream);
+                                            peer.remote_stream = Some(stream);
+                                            remote_streams.insert(stream, id);
+                                            remote_peer.push(Frame::new(b'x', stream, &frame.data));
+                                        }
+                                    }
+                                    _ => {
+                                        peer.peer.push(Frame::new(b'E', 0, b"relay-offline"));
+                                        peer.control_done = true;
+                                    }
+                                }
+                                continue;
+                            }
                             if frame.kind == b'L' {
                                 peer.control = true;
                                 if frame.seq != 0 || !frame.data.is_empty() {
@@ -692,7 +775,7 @@ fn supervise_with_timeouts(
                                 peer.control = true;
                                 peer.close_id =
                                     Some(String::from_utf8(frame.data).expect("validated UUID"));
-                                if capabilities_received && !durable_close {
+                                if capabilities.received && !capabilities.durable_close {
                                     peer.peer.push(Frame::new(
                                         b'E',
                                         0,
@@ -713,9 +796,9 @@ fn supervise_with_timeouts(
                                     peer.recreate_if_gone = request.recreate_if_gone;
                                     peer.recreate_fallback_used = false;
                                     peer.open = Some(frame.data);
-                                    if capabilities_received
+                                    if capabilities.received
                                         && request.launch.is_some()
-                                        && !local_launch
+                                        && !capabilities.local_launch
                                     {
                                         peer.failed = true;
                                         peer.peer.push(Frame::new(
@@ -723,14 +806,14 @@ fn supervise_with_timeouts(
                                             0,
                                             b"runtime does not support persistent local launches; no session was created",
                                         ));
-                                    } else if capabilities_received
+                                    } else if capabilities.received
                                         && request.inline_viewer
-                                        && !inline_viewer
+                                        && !capabilities.inline_viewer
                                     {
                                         peer.failed = true;
                                         peer.peer.push(Frame::new(b'E', 0,
                                             b"runtime does not support inline viewers; no session was created"));
-                                    } else if capabilities_received && !strict_open {
+                                    } else if capabilities.received && !capabilities.strict_open {
                                         peer.failed = true;
                                         peer.peer.push(Frame::new(
                                             b'E',
@@ -842,7 +925,7 @@ fn supervise_with_timeouts(
             if let Some(remote) = remote.as_mut() {
                 for id in &failed {
                     if let Some(peer) = peers.get_mut(id) {
-                        if !strict_open {
+                        if !capabilities.strict_open {
                             peer.retry_requested = false;
                             peer.peer.push(Frame::new(
                                 b'E',
@@ -853,8 +936,8 @@ fn supervise_with_timeouts(
                         }
                         match open_request(
                             peer,
-                            local_launch && local_resurrect,
-                            allow_recreate_if_gone,
+                            capabilities.local_launch && capabilities.local_resurrect,
+                            capabilities.recreate_if_gone,
                         ) {
                             Ok((kind, data)) => {
                                 let stream = next_stream;
@@ -895,26 +978,26 @@ fn supervise_with_timeouts(
         }
 
         let remote_frames = if let Some(remote) = remote.as_mut() {
-            if capabilities_received && strict_open {
+            if capabilities.received && capabilities.strict_open {
                 if let Err(error) = begin_open(
                     remote,
                     &mut peers,
                     &mut remote_streams,
                     &mut next_stream,
-                    local_launch && local_resurrect,
-                    allow_recreate_if_gone,
+                    capabilities.local_launch && capabilities.local_resurrect,
+                    capabilities.recreate_if_gone,
                 ) {
                     eprintln!("session runtime open failed: {error}");
                 }
             }
-            if capabilities_received && durable_close {
+            if capabilities.received && capabilities.durable_close {
                 begin_controls(remote, &mut peers, &mut remote_streams, &mut next_stream);
             }
             if last_heartbeat.elapsed() >= heartbeat_interval {
                 remote.push(Frame::new(b'P', 0, &[]));
                 last_heartbeat = Instant::now();
             }
-            if capabilities_received {
+            if capabilities.received {
                 begin_list(remote, &peers, &mut list_in_flight);
             }
             Some(remote.read())
@@ -927,15 +1010,8 @@ fn supervise_with_timeouts(
                     for frame in frames {
                         last_pong = Instant::now();
                         if frame.kind == b'P' && frame.seq == 0 {
-                            let first_capabilities = !capabilities_received;
-                            capabilities_received = true;
-                            strict_open = has_capability(&frame.data, "strict-open/1");
-                            durable_close = has_capability(&frame.data, "durable-close/1");
-                            local_launch = has_capability(&frame.data, "local-launch/1");
-                            local_resurrect = has_capability(&frame.data, "local-resurrect/1");
-                            inline_viewer = has_capability(&frame.data, "inline-viewer/1");
-                            allow_recreate_if_gone =
-                                has_capability(&frame.data, "recreate-if-gone/1");
+                            let first_capabilities = !capabilities.received;
+                            capabilities.update(&frame.data);
                             if first_capabilities {
                                 for peer in peers
                                     .values_mut()
@@ -950,7 +1026,7 @@ fn supervise_with_timeouts(
                                     let requires_inline = request
                                         .as_ref()
                                         .is_some_and(|request| request.inline_viewer);
-                                    if requires_local_launch && !local_launch {
+                                    if requires_local_launch && !capabilities.local_launch {
                                         peer.failed = true;
                                         peer.retry_requested = false;
                                         clear_launch_data(peer, true);
@@ -960,14 +1036,14 @@ fn supervise_with_timeouts(
                                             0,
                                             b"runtime does not support persistent local launches; no session was created",
                                         ));
-                                    } else if requires_inline && !inline_viewer {
+                                    } else if requires_inline && !capabilities.inline_viewer {
                                         peer.failed = true;
                                         peer.retry_requested = false;
                                         clear_launch_data(peer, true);
                                         peer.remote_stream = None;
                                         peer.peer.push(Frame::new(b'E', 0,
                                             b"runtime does not support inline viewers; no session was created"));
-                                    } else if !strict_open {
+                                    } else if !capabilities.strict_open {
                                         peer.failed = true;
                                         peer.retry_requested = false;
                                         clear_launch_data(peer, true);
@@ -980,7 +1056,7 @@ fn supervise_with_timeouts(
                                     }
                                 }
                             }
-                            if first_capabilities && !strict_open {
+                            if first_capabilities && !capabilities.strict_open {
                                 for peer in peers.values_mut().filter(|p| {
                                     p.control && !p.control_done && p.close_id.is_some()
                                 }) {
@@ -1034,13 +1110,14 @@ fn supervise_with_timeouts(
                             if let Some(id) = remote_streams.remove(&frame.seq) {
                                 if let Some(peer) = peers.get_mut(&id) {
                                     peer.remote_stream = None;
-                                    if peer.control && peer.close_id.is_some() {
+                                    if peer.control && (peer.close_id.is_some() || peer.exec_stream)
+                                    {
                                         peer.peer.push(Frame::new(b'E', 0, &frame.data));
                                         peer.control_done = true;
                                         continue;
                                     }
-                                    if !local_launch
-                                        && !allow_recreate_if_gone
+                                    if !capabilities.local_launch
+                                        && !capabilities.recreate_if_gone
                                         && peer.recreate_if_gone
                                         && !peer.snapshot_confirmed
                                         && !peer.recreate_fallback_used
@@ -1086,6 +1163,13 @@ fn supervise_with_timeouts(
                                 if let Some(peer) = peers.get_mut(&id) {
                                     peer.remote_stream = None;
                                     if peer.control {
+                                        if peer.exec_stream && !peer.control_done {
+                                            peer.peer.push(Frame::new(
+                                                b'E',
+                                                0,
+                                                b"exec stream closed unexpectedly",
+                                            ));
+                                        }
                                         peer.control_done = true;
                                         continue;
                                     }
@@ -1126,6 +1210,25 @@ fn supervise_with_timeouts(
                                 peer.peer
                                     .push(Frame::new(b'E', 0, b"invalid close confirmation"));
                                 peer.control_done = true;
+                            }
+                            continue;
+                        }
+                        if peer.control && peer.exec_stream {
+                            match inner.kind {
+                                b'o' | b'e' => {
+                                    if !peer.control_done {
+                                        peer.peer.push(inner);
+                                    }
+                                }
+                                b'x' | b'E' => {
+                                    if !peer.control_done {
+                                        peer.peer.push(inner);
+                                        peer.control_done = true;
+                                    }
+                                    remote_streams.remove(&frame.seq);
+                                    peer.remote_stream = None;
+                                }
+                                _ => {}
                             }
                             continue;
                         }
@@ -1174,19 +1277,19 @@ fn supervise_with_timeouts(
                         peer.peer.push(inner);
                     }
                     if let Some(remote) = remote.as_mut() {
-                        if capabilities_received && strict_open {
+                        if capabilities.received && capabilities.strict_open {
                             if let Err(error) = begin_open(
                                 remote,
                                 &mut peers,
                                 &mut remote_streams,
                                 &mut next_stream,
-                                local_launch && local_resurrect,
-                                allow_recreate_if_gone,
+                                capabilities.local_launch && capabilities.local_resurrect,
+                                capabilities.recreate_if_gone,
                             ) {
                                 eprintln!("session runtime open failed: {error}");
                             }
                         }
-                        if capabilities_received && durable_close {
+                        if capabilities.received && capabilities.durable_close {
                             begin_controls(
                                 remote,
                                 &mut peers,
@@ -1194,7 +1297,7 @@ fn supervise_with_timeouts(
                                 &mut next_stream,
                             );
                         }
-                        if capabilities_received {
+                        if capabilities.received {
                             begin_list(remote, &peers, &mut list_in_flight);
                         }
                     }
@@ -1207,13 +1310,7 @@ fn supervise_with_timeouts(
                     list_in_flight = false;
                     advance_peer_generations(&mut peers, &mut generation_counter);
                     stable_since = None;
-                    capabilities_received = false;
-                    strict_open = false;
-                    durable_close = false;
-                    local_launch = false;
-                    local_resurrect = false;
-                    inline_viewer = false;
-                    allow_recreate_if_gone = false;
+                    capabilities.reset();
                     state = State::Reconnecting;
                     let delay = retry_delay(attempt.max(1));
                     set_status(&mut peers, state, attempt, Some(delay), None);
@@ -1261,13 +1358,7 @@ fn supervise_with_timeouts(
             list_in_flight = false;
             advance_peer_generations(&mut peers, &mut generation_counter);
             stable_since = None;
-            capabilities_received = false;
-            strict_open = false;
-            durable_close = false;
-            local_launch = false;
-            local_resurrect = false;
-            inline_viewer = false;
-            allow_recreate_if_gone = false;
+            capabilities.reset();
             state = State::Reconnecting;
             let delay = retry_delay(attempt.max(1));
             set_status(&mut peers, state, attempt, Some(delay), None);
@@ -1276,7 +1367,7 @@ fn supervise_with_timeouts(
                     peer.peer.dead = true;
                 }
             }
-            peers.retain(|_, p| !p.peer.dead);
+            peers.retain(|_, p| !(p.peer.dead || p.control_done && p.peer.queued == 0));
             retry_at = Instant::now() + delay;
         }
 
@@ -1295,12 +1386,7 @@ fn supervise_with_timeouts(
             descriptors.push(peer.peer.poll_fd());
         }
         let now = Instant::now();
-        let has_active_peers = peers.values().any(|p| {
-            !p.ended
-                && (!p.control
-                    || p.close_id.is_some() && !p.control_done
-                    || p.list_requested && !p.control_done)
-        });
+        let has_active_peers = peers.values().any(is_active_peer);
         let mut timeout_ms: libc::c_int = 60_000;
         if !has_active_peers {
             let idle_timeout = effective_idle_timeout(initial_ppid);
@@ -2370,6 +2456,261 @@ mod error_classification_tests {
             1
         );
         drop(peer);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn exec_stream_reports_offline_and_unsupported_capabilities() {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let dir = PathBuf::from(format!(
+            "/tmp/omg-client-exec-err-{}",
+            &crate::record::nonce().unwrap()[..8]
+        ));
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .unwrap();
+        let socket_path = dir.join("relay.sock");
+        let allow_connect = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let allow_connect_srv = allow_connect.clone();
+
+        let connector: Connector = Arc::new(move |_| {
+            if !allow_connect_srv.load(Ordering::SeqCst) {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "offline"));
+            }
+            let (client_side, mut server_side) = UnixStream::pair()?;
+            thread::spawn(move || {
+                let caps = b"strict-open/1,durable-close/1";
+                let _ = Frame::new(b'P', 0, caps).send(&mut server_side);
+                while let Ok(frame) = Frame::read(&mut server_side) {
+                    if frame.kind == b'P' {
+                        let _ = Frame::new(b'P', 0, caps).send(&mut server_side);
+                    }
+                }
+            });
+            Ok(RelayTransport {
+                socket: client_side,
+                guard: Box::new(()),
+            })
+        });
+
+        let socket_clone = socket_path.clone();
+        thread::spawn(move || {
+            let _ = supervise(&socket_clone, connector, false);
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let connect_peer = || loop {
+            match UnixStream::connect(&socket_path) {
+                Ok(s) => {
+                    s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                    return s;
+                }
+                Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+                Err(err) => panic!("connect failed: {err}"),
+            }
+        };
+
+        let open = serde_json::to_vec(&crate::host::ExecOpen {
+            command: "echo hi".into(),
+            max_output_bytes: 1024,
+        })
+        .unwrap();
+
+        // 1) Offline relay -> immediate "relay-offline".
+        let mut offline_peer = connect_peer();
+        Frame::new(b'x', 0, &open).send(&mut offline_peer).unwrap();
+        let err = loop {
+            let f = Frame::read(&mut offline_peer).unwrap();
+            if f.kind != b'T' {
+                break f;
+            }
+        };
+        assert_eq!(err.kind, b'E');
+        assert_eq!(err.data, b"relay-offline");
+        drop(offline_peer);
+
+        // 2) Online remote without exec/1 -> immediate "exec-unsupported".
+        allow_connect.store(true, Ordering::SeqCst);
+        retry_local(&socket_path, false).unwrap();
+        let wait_deadline = Instant::now() + Duration::from_secs(2);
+        let unsupported = loop {
+            let mut peer = connect_peer();
+            Frame::new(b'x', 0, &open).send(&mut peer).unwrap();
+            let f = loop {
+                let f = Frame::read(&mut peer).unwrap();
+                if f.kind != b'T' {
+                    break f;
+                }
+            };
+            if f.kind == b'E' && f.data == b"exec-unsupported" {
+                break f;
+            }
+            assert!(Instant::now() < wait_deadline);
+            thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(unsupported.data, b"exec-unsupported");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn exec_stream_handles_remote_disconnect_early_local_close_and_large_flush() {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let dir = PathBuf::from(format!(
+            "/tmp/omg-client-exec-flow-{}",
+            &crate::record::nonce().unwrap()[..8]
+        ));
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .unwrap();
+        let socket_path = dir.join("relay.sock");
+        let conn_num = Arc::new(AtomicUsize::new(0));
+        let conn_srv = conn_num.clone();
+        let (quit_tx, quit_rx) = mpsc::channel::<u64>();
+        let (drop_tx, drop_rx) = mpsc::channel::<mpsc::Sender<()>>();
+
+        let connector: Connector = Arc::new(move |_| {
+            let n = conn_srv.fetch_add(1, Ordering::SeqCst);
+            let (client_side, mut server_side) = UnixStream::pair()?;
+            let quit_tx = quit_tx.clone();
+            let drop_tx = drop_tx.clone();
+            thread::spawn(move || {
+                let caps = b"strict-open/1,durable-close/1,exec/1";
+                let _ = Frame::new(b'P', 0, caps).send(&mut server_side);
+                let (trigger_drop_tx, trigger_drop_rx) = mpsc::channel::<()>();
+                let _ = drop_tx.send(trigger_drop_tx);
+                while let Ok(frame) = Frame::read(&mut server_side) {
+                    match frame.kind {
+                        b'P' => {
+                            let _ = Frame::new(b'P', 0, caps).send(&mut server_side);
+                        }
+                        b'x' => {
+                            let req: crate::host::ExecOpen =
+                                serde_json::from_slice(&frame.data).unwrap();
+                            if req.command == "large" {
+                                // Send > 4 MiB output across multiple frames then exit 0 to verify
+                                // client flushes all queued bytes before dropping control_done peer.
+                                let chunk = vec![b'X'; 512 * 1024];
+                                for _ in 0..10 {
+                                    let _ = Frame::new(
+                                        b'D',
+                                        frame.seq,
+                                        &Frame::new(b'o', 0, &chunk).encode(),
+                                    )
+                                    .send(&mut server_side);
+                                }
+                                let _ = Frame::new(
+                                    b'D',
+                                    frame.seq,
+                                    &Frame::new(b'x', 0, b"0").encode(),
+                                )
+                                .send(&mut server_side);
+                                let _ = Frame::new(b'Q', frame.seq, &[]).send(&mut server_side);
+                            } else if req.command == "wait-disconnect" && n == 0 {
+                                // Wait for test to trigger sudden remote disconnect.
+                                let _ = trigger_drop_rx.recv_timeout(Duration::from_secs(2));
+                                break;
+                            }
+                        }
+                        b'Q' => {
+                            let _ = quit_tx.send(frame.seq);
+                        }
+                        _ => {}
+                    }
+                }
+            });
+            Ok(RelayTransport {
+                socket: client_side,
+                guard: Box::new(()),
+            })
+        });
+
+        let socket_clone = socket_path.clone();
+        thread::spawn(move || {
+            let _ = supervise(&socket_clone, connector, false);
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let connect_peer = || loop {
+            match UnixStream::connect(&socket_path) {
+                Ok(s) => {
+                    s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                    return s;
+                }
+                Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+                Err(err) => panic!("connect failed: {err}"),
+            }
+        };
+
+        let trigger_drop = drop_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        // 1) Large (> 4 MiB) output followed immediately by b'x' must flush completely before close.
+        let mut large_peer = connect_peer();
+        let large_open = serde_json::to_vec(&crate::host::ExecOpen {
+            command: "large".into(),
+            max_output_bytes: 16 * 1024 * 1024,
+        })
+        .unwrap();
+        Frame::new(b'x', 0, &large_open)
+            .send(&mut large_peer)
+            .unwrap();
+        let mut total_bytes = 0usize;
+        let exit_frame = loop {
+            let f = Frame::read(&mut large_peer).unwrap();
+            match f.kind {
+                b'T' => {}
+                b'o' => total_bytes += f.data.len(),
+                b'x' => break f,
+                other => panic!("unexpected frame {other}"),
+            }
+        };
+        assert_eq!(total_bytes, 10 * 512 * 1024);
+        assert_eq!(exit_frame.data, b"0");
+        drop(large_peer);
+
+        // 2) Early local peer disconnect sends outer b'Q' to remote.
+        let mut cancel_peer = connect_peer();
+        let cancel_open = serde_json::to_vec(&crate::host::ExecOpen {
+            command: "stay-open".into(),
+            max_output_bytes: 1024,
+        })
+        .unwrap();
+        Frame::new(b'x', 0, &cancel_open)
+            .send(&mut cancel_peer)
+            .unwrap();
+        thread::sleep(Duration::from_millis(30));
+        drop(cancel_peer);
+        let cancelled_stream = quit_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_ne!(cancelled_stream, 0);
+
+        // 3) Remote disconnect mid-exec delivers b'E' "exec-disconnected".
+        let mut inflight_peer = connect_peer();
+        let inflight_open = serde_json::to_vec(&crate::host::ExecOpen {
+            command: "wait-disconnect".into(),
+            max_output_bytes: 1024,
+        })
+        .unwrap();
+        Frame::new(b'x', 0, &inflight_open)
+            .send(&mut inflight_peer)
+            .unwrap();
+        thread::sleep(Duration::from_millis(30));
+        let _ = trigger_drop.send(());
+        let disc_err = loop {
+            let f = Frame::read(&mut inflight_peer).unwrap();
+            if f.kind != b'T' {
+                break f;
+            }
+        };
+        assert_eq!(disc_err.kind, b'E');
+        assert_eq!(disc_err.data, b"exec-disconnected");
+        drop(inflight_peer);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

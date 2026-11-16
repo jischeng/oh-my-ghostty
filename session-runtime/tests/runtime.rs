@@ -1654,3 +1654,459 @@ fn detached_hermes_hook_rejects_cross_pane_bleed_and_unwritable_resume_save_keep
         std::thread::sleep(Duration::from_millis(25));
     }
 }
+
+struct ExecRelayHarness {
+    dir: std::path::PathBuf,
+    relay_sock: std::path::PathBuf,
+    host: Option<Child>,
+    relay: Child,
+}
+
+impl ExecRelayHarness {
+    fn stop_child(child: &mut Child) {
+        if matches!(child.try_wait(), Ok(None)) {
+            unsafe {
+                libc::kill(child.id() as i32, libc::SIGTERM);
+            }
+            let deadline = Instant::now() + Duration::from_millis(400);
+            while Instant::now() < deadline {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(15));
+            }
+            let _ = child.kill();
+        }
+        let _ = child.wait();
+    }
+}
+
+impl Drop for ExecRelayHarness {
+    fn drop(&mut self) {
+        Self::stop_child(&mut self.relay);
+        if let Some(mut host) = self.host.take() {
+            Self::stop_child(&mut host);
+        }
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn write_fake_ssh_bridge(
+    dir: &std::path::Path,
+    target_sock: &std::path::Path,
+) -> std::path::PathBuf {
+    let bin = env!("CARGO_BIN_EXE_omgd");
+    let script = dir.join("fake-ssh.sh");
+    let body = format!(
+        "#!/bin/sh\nprintf R\nexec '{}' bridge '{}'\n",
+        bin.replace('\'', "'\\''"),
+        target_sock.to_string_lossy().replace('\'', "'\\''"),
+    );
+    fs::write(&script, body).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    script
+}
+
+fn write_ssh_connection_json(
+    dir: &std::path::Path,
+    ssh_script: &std::path::Path,
+) -> std::path::PathBuf {
+    let config = serde_json::json!({
+        "auto_install": false,
+        "transport": "ssh",
+        "executable": ssh_script,
+        "arguments": ["fake-host"],
+        "cwd": dir,
+        "bundle": dir,
+        "policy": lifecycle::Policy::default(),
+        "revision": "exec-test",
+    });
+    let config_path = dir.join("conn.json");
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600)).unwrap();
+    config_path
+}
+
+fn start_exec_relay_harness(with_real_host: bool) -> (ExecRelayHarness, std::path::PathBuf) {
+    let bin = env!("CARGO_BIN_EXE_omgd");
+    let dir = std::path::PathBuf::from("/tmp")
+        .join(format!("omg-exec-e2e-{}", &record::nonce().unwrap()[..8]));
+    let host_dir = dir.join("h");
+    fs::create_dir_all(&host_dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&host_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let host_sock = host_dir.join("host.sock");
+    let host = if with_real_host {
+        let child = Command::new(bin)
+            .args(["host", host_dir.to_str().unwrap(), "--", "/bin/sh"])
+            .env("HOME", &dir)
+            .env("SHELL", "/bin/sh")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while Instant::now() < deadline {
+            if host_sock.exists() && UnixStream::connect(&host_sock).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        assert!(host_sock.exists(), "host.sock did not become ready");
+        Some(child)
+    } else {
+        None
+    };
+
+    let ssh_script = write_fake_ssh_bridge(&dir, &host_sock);
+    let config_path = write_ssh_connection_json(&dir, &ssh_script);
+    let relay_sock = dir.join("r.sock");
+    let relay = Command::new(bin)
+        .args([
+            "connect",
+            relay_sock.to_str().unwrap(),
+            config_path.to_str().unwrap(),
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while Instant::now() < deadline {
+        if relay_sock.exists() && UnixStream::connect(&relay_sock).is_ok() {
+            if with_real_host {
+                let status = Command::new(bin)
+                    .args(["list-local", relay_sock.to_str().unwrap()])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .unwrap();
+                if status.success() {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
+
+    (
+        ExecRelayHarness {
+            dir,
+            relay_sock,
+            host,
+            relay,
+        },
+        host_sock,
+    )
+}
+
+#[test]
+fn exec_local_end_to_end_binary_stdin_stdout_exit_codes_limits_and_cancellation() {
+    use std::io::Write;
+    let bin = env!("CARGO_BIN_EXE_omgd");
+    let (harness, _) = start_exec_relay_harness(true);
+
+    // 1) Binary NUL-containing stdout + large 256 KiB stdin round-trip.
+    let mut payload = Vec::with_capacity(256 * 1024);
+    for i in 0..(256 * 1024) {
+        payload.push(match i % 5 {
+            0 => 0u8,
+            1 => 0xffu8,
+            _ => (i & 0x7f) as u8,
+        });
+    }
+    let mut child = Command::new(bin)
+        .args([
+            "exec-local",
+            harness.relay_sock.to_str().unwrap(),
+            "1048576",
+            "cat",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let expected = payload.clone();
+    let writer = std::thread::spawn(move || {
+        stdin.write_all(&payload).unwrap();
+    });
+    let output = child.wait_with_output().unwrap();
+    writer.join().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, expected);
+    assert!(output.stderr.is_empty());
+
+    // 2) Fast remote exit does NOT hang even when local stdin pipe stays open without EOF.
+    let mut fast_child = Command::new(bin)
+        .args([
+            "exec-local",
+            harness.relay_sock.to_str().unwrap(),
+            "65536",
+            "printf 'fast-ok\\n'",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let _held_stdin = fast_child.stdin.take().unwrap();
+    let started = Instant::now();
+    let fast_out = fast_child.wait_with_output().unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "exec-local hung waiting for open stdin"
+    );
+    assert_eq!(fast_out.status.code(), Some(0));
+    assert_eq!(fast_out.stdout, b"fast-ok\n");
+
+    // 3) Nonzero exit codes (including 252 and 253 without sentinels) & stderr preservation.
+    for code in [17, 252, 253] {
+        let out = Command::new(bin)
+            .args([
+                "exec-local",
+                harness.relay_sock.to_str().unwrap(),
+                "65536",
+                &format!("printf 'out-{code}\\n'; printf 'err-{code}\\n' >&2; exit {code}"),
+            ])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(code));
+        assert_eq!(out.stdout, format!("out-{code}\n").as_bytes());
+        assert_eq!(out.stderr, format!("err-{code}\n").as_bytes());
+    }
+
+    // 4) max_output_bytes exceeded (both stdout-only and combined stdout+stderr) -> exit 252 + \x1eOMG-EXEC-LIMIT\x1f sentinel.
+    for cmd in [
+        "python3 -c 'import sys; sys.stdout.buffer.write(b\"x\" * 4096)'",
+        "python3 -c 'import sys; sys.stdout.buffer.write(b\"a\" * 600); sys.stderr.buffer.write(b\"b\" * 600)'",
+    ] {
+        let limit_out = Command::new(bin)
+            .args([
+                "exec-local",
+                harness.relay_sock.to_str().unwrap(),
+                "1024",
+                cmd,
+            ])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(limit_out.status.code(), Some(252));
+        let limit_stderr = String::from_utf8_lossy(&limit_out.stderr);
+        assert!(
+            limit_stderr.contains("\u{1e}OMG-EXEC-LIMIT\u{1f}"),
+            "unexpected limit stderr: {limit_stderr:?}"
+        );
+    }
+
+    // 4b) Early fd close (`exec 1>&- 2>&-`) still waits for real exit status, and SIGPIPE works in shell pipelines.
+    let early_close = Command::new(bin)
+        .args([
+            "exec-local",
+            harness.relay_sock.to_str().unwrap(),
+            "4096",
+            "exec 1>&- 2>&-; sleep 0.05; exit 9",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(early_close.status.code(), Some(9));
+
+    let sigpipe_out = Command::new(bin)
+        .args([
+            "exec-local",
+            harness.relay_sock.to_str().unwrap(),
+            "4096",
+            "yes hi | head -n 1",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(sigpipe_out.status.code(), Some(0));
+    assert_eq!(sigpipe_out.stdout, b"hi\n");
+
+    // 5) Client kill mid-exec kills remote process group cleanly (no orphan sleep).
+    let pid_file = harness.dir.join("orphan-check.pid");
+    let mut kill_child = Command::new(bin)
+        .args([
+            "exec-local",
+            harness.relay_sock.to_str().unwrap(),
+            "65536",
+            &format!("sleep 30 & echo $! > '{}'; wait", pid_file.display()),
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let remote_pid = loop {
+        if let Ok(text) = fs::read_to_string(&pid_file) {
+            if let Ok(pid) = text.trim().parse::<libc::pid_t>() {
+                break pid;
+            }
+        }
+        assert!(Instant::now() < deadline, "remote child did not record pid");
+        std::thread::sleep(Duration::from_millis(15));
+    };
+    kill_child.kill().unwrap();
+    let _ = kill_child.wait();
+    let kill_deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < kill_deadline {
+        if unsafe { libc::kill(remote_pid, 0) } != 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    assert_ne!(
+        unsafe { libc::kill(remote_pid, 0) },
+        0,
+        "remote grandchild {remote_pid} survived client kill"
+    );
+}
+
+#[test]
+fn exec_local_handles_offline_socket_legacy_remote_without_exec_and_mid_exec_drop() {
+    use std::os::unix::net::UnixListener;
+    let bin = env!("CARGO_BIN_EXE_omgd");
+
+    // 1) Offline / missing relay socket -> exit 253 + OMG-EXEC-UNSUPPORTED.
+    let missing_sock = std::path::PathBuf::from("/tmp").join(format!(
+        "omg-missing-exec-{}.sock",
+        &record::nonce().unwrap()[..8]
+    ));
+    let offline_out = Command::new(bin)
+        .args([
+            "exec-local",
+            missing_sock.to_str().unwrap(),
+            "4096",
+            "echo hi",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(offline_out.status.code(), Some(253));
+    let offline_err = String::from_utf8_lossy(&offline_out.stderr);
+    assert!(
+        offline_err.starts_with("\u{1e}OMG-EXEC-UNSUPPORTED\u{1f}\n"),
+        "unexpected offline stderr: {offline_err:?}"
+    );
+
+    // 2) Remote host advertising capabilities WITHOUT exec/1 -> exit 253 + OMG-EXEC-UNSUPPORTED.
+    let (harness, legacy_host_sock) = start_exec_relay_harness(false);
+    let listener = UnixListener::bind(&legacy_host_sock).unwrap();
+    let stop_legacy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_legacy_srv = stop_legacy.clone();
+    let legacy_srv = std::thread::spawn(move || {
+        listener.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut conn = loop {
+            match listener.accept() {
+                Ok((s, _)) => break s,
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => return,
+            }
+        };
+        conn.set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let caps =
+            b"durable-close/1,strict-open/1,inline-viewer/1,agent-state/1,recreate-if-gone/1";
+        let _ = Frame::new(b'P', 0, caps).send(&mut conn);
+        while !stop_legacy_srv.load(std::sync::atomic::Ordering::SeqCst) {
+            match Frame::read(&mut conn) {
+                Ok(f) if f.kind == b'P' => {
+                    let _ = Frame::new(b'P', 0, caps).send(&mut conn);
+                }
+                Ok(f) if f.kind == b'L' => {
+                    let _ = Frame::new(b'L', 0, b"[]").send(&mut conn);
+                }
+                Ok(_) => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Wait until relay is online with legacy capabilities (list-local succeeds).
+    let list_deadline = Instant::now() + Duration::from_secs(4);
+    while Instant::now() < list_deadline {
+        if Command::new(bin)
+            .args(["list-local", harness.relay_sock.to_str().unwrap()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let legacy_out = Command::new(bin)
+        .args([
+            "exec-local",
+            harness.relay_sock.to_str().unwrap(),
+            "4096",
+            "echo hi",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(legacy_out.status.code(), Some(253));
+    let legacy_err = String::from_utf8_lossy(&legacy_out.stderr);
+    assert!(
+        legacy_err.starts_with("\u{1e}OMG-EXEC-UNSUPPORTED\u{1f}\n"),
+        "unexpected legacy stderr: {legacy_err:?}"
+    );
+    stop_legacy.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = legacy_srv.join();
+    drop(harness);
+
+    // 3) Tunnel drop mid-exec -> exit 255 + OMG-EXEC-TRANSPORT.
+    let (mut drop_harness, _) = start_exec_relay_harness(true);
+    let started_flag = drop_harness.dir.join("started");
+    let drop_child = Command::new(bin)
+        .args([
+            "exec-local",
+            drop_harness.relay_sock.to_str().unwrap(),
+            "4096",
+            &format!("touch '{}'; sleep 30", started_flag.display()),
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let start_deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < start_deadline && !started_flag.exists() {
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    assert!(started_flag.exists());
+    if let Some(mut host) = drop_harness.host.take() {
+        ExecRelayHarness::stop_child(&mut host);
+    }
+    let drop_out = drop_child.wait_with_output().unwrap();
+    assert_eq!(drop_out.status.code(), Some(255));
+    let drop_err = String::from_utf8_lossy(&drop_out.stderr);
+    assert!(
+        drop_err.starts_with("\u{1e}OMG-EXEC-TRANSPORT\u{1f}\n"),
+        "unexpected drop stderr: {drop_err:?}"
+    );
+}

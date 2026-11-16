@@ -786,6 +786,14 @@
     "en": "Fetch",
     "zh-Hans": "Fetch"
   },
+  "Refresh": {
+    "en": "Refresh",
+    "zh-Hans": "刷新"
+  },
+  "Retry": {
+    "en": "Retry",
+    "zh-Hans": "刷新重试"
+  },
   "Up to date": {
     "en": "Up to date",
     "zh-Hans": "已同步"

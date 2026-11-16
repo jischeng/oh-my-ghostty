@@ -3,18 +3,48 @@
 use crate::*;
 use crate::{lifecycle::Policy, registry::Registry};
 use std::{
+    collections::VecDeque,
     fs,
+    io::{Read, Write},
     os::unix::{
         fs::{MetadataExt, PermissionsExt},
-        net::UnixListener,
+        net::{UnixListener, UnixStream},
     },
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 const MAX_STREAMS: usize = 512;
+const MAX_EXEC_STREAMS: usize = 32;
+const MAX_EXEC_COMMAND_BYTES: usize = 256 * 1024;
+const MAX_EXEC_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_EXEC_STDIN_BUFFER: usize = 32 * 1024 * 1024;
+const EXEC_PIPE_CHUNK_BYTES: usize = 32 * 1024;
 const MAX_LIST_ENTRIES: usize = 2048;
 const MAX_LIST_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ExecOpen {
+    pub command: String,
+    pub max_output_bytes: usize,
+}
+
+struct ActiveExecGuard(Arc<AtomicUsize>);
+
+impl Drop for ActiveExecGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+struct StreamEntry {
+    peer: Peer,
+    is_exec: bool,
+    write_closed: bool,
+}
 struct HostLock(fs::File);
 impl HostLock {
     fn acquire(directory: &Path) -> io::Result<Self> {
@@ -84,7 +114,29 @@ pub fn serve_local(directory: &Path, command: Vec<String>) -> io::Result<()> {
     serve_mode(directory, command, true)
 }
 
+fn raise_nofile_limit() {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0 {
+        let desired = 4096 as libc::rlim_t;
+        let target = if limit.rlim_max == libc::RLIM_INFINITY {
+            desired
+        } else {
+            desired.min(limit.rlim_max)
+        };
+        if limit.rlim_cur < target {
+            limit.rlim_cur = target;
+            unsafe {
+                libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
+            }
+        }
+    }
+}
+
 fn serve_mode(directory: &Path, command: Vec<String>, local: bool) -> io::Result<()> {
+    raise_nofile_limit();
     private(directory)?;
     let policy_path = directory.join("policy.json");
     let policy: Policy = if policy_path.exists() {
@@ -202,7 +254,8 @@ fn host_connection_with_limit(
     max_streams: usize,
 ) -> io::Result<()> {
     let mut transport = Peer::new(socket, 0)?;
-    let mut streams: std::collections::HashMap<u64, Peer> = Default::default();
+    let mut streams: std::collections::HashMap<u64, StreamEntry> = Default::default();
+    let active_execs = Arc::new(AtomicUsize::new(0));
     let mut last_heartbeat = Instant::now();
     loop {
         if last_heartbeat.elapsed() > Duration::from_secs(45) {
@@ -217,9 +270,9 @@ fn host_connection_with_limit(
                         .unwrap_or_else(|p| p.into_inner())
                         .is_local();
                     let capabilities = if is_local {
-                        b"durable-close/1,strict-open/1,local-launch/1,local-resurrect/1,inline-viewer/1,agent-state/1,holder-presentation/1,recreate-if-gone/1".as_slice()
+                        b"durable-close/1,strict-open/1,local-launch/1,local-resurrect/1,inline-viewer/1,agent-state/1,holder-presentation/1,recreate-if-gone/1,exec/1".as_slice()
                     } else {
-                        b"durable-close/1,strict-open/1,inline-viewer/1,agent-state/1,recreate-if-gone/1".as_slice()
+                        b"durable-close/1,strict-open/1,inline-viewer/1,agent-state/1,recreate-if-gone/1,exec/1".as_slice()
                     };
                     transport.push(Frame::new(b'P', 0, capabilities));
                 }
@@ -259,7 +312,7 @@ fn host_connection_with_limit(
                 b'L' if f.seq == 0 => {
                     transport.push(Frame::new(b'E', 0, b"invalid catalogue request"));
                 }
-                b'U' | b'C' | b'H'
+                b'U' | b'C' | b'H' | b'x'
                     if f.seq != 0
                         && (streams.contains_key(&f.seq) || streams.len() >= max_streams) =>
                 {
@@ -280,7 +333,14 @@ fn host_connection_with_limit(
                         false,
                     ) {
                         Ok(s) => {
-                            streams.insert(f.seq, Peer::new(s, f.seq)?);
+                            streams.insert(
+                                f.seq,
+                                StreamEntry {
+                                    peer: Peer::new(s, f.seq)?,
+                                    is_exec: false,
+                                    write_closed: false,
+                                },
+                            );
                         }
                         Err(e) => transport.push(Frame::new(b'E', f.seq, e.to_string().as_bytes())),
                     }
@@ -291,7 +351,14 @@ fn host_connection_with_limit(
                     let result = Registry::open_unlocked(&registry, &request);
                     match result {
                         Ok(s) => {
-                            streams.insert(f.seq, Peer::new(s, f.seq)?);
+                            streams.insert(
+                                f.seq,
+                                StreamEntry {
+                                    peer: Peer::new(s, f.seq)?,
+                                    is_exec: false,
+                                    write_closed: false,
+                                },
+                            );
                         }
                         Err(e) => transport.push(Frame::new(b'E', f.seq, e.to_string().as_bytes())),
                     }
@@ -303,16 +370,90 @@ fn host_connection_with_limit(
                         .and_then(|id| Registry::connect_unlocked(&registry, id, None, true));
                     match result {
                         Ok(s) => {
-                            streams.insert(f.seq, Peer::new(s, f.seq)?);
+                            streams.insert(
+                                f.seq,
+                                StreamEntry {
+                                    peer: Peer::new(s, f.seq)?,
+                                    is_exec: false,
+                                    write_closed: false,
+                                },
+                            );
                         }
                         Err(e) => transport.push(Frame::new(b'E', f.seq, e.to_string().as_bytes())),
                     }
                     let _ = transport.flush();
                 }
+                b'x' if f.seq != 0 => {
+                    if active_execs.fetch_add(1, Ordering::SeqCst) >= MAX_EXEC_STREAMS {
+                        active_execs.fetch_sub(1, Ordering::SeqCst);
+                        transport.push(Frame::new(
+                            b'E',
+                            f.seq,
+                            b"too many concurrent exec requests",
+                        ));
+                        let _ = transport.flush();
+                        continue;
+                    }
+                    let guard = ActiveExecGuard(active_execs.clone());
+                    let Ok(mut req) = serde_json::from_slice::<ExecOpen>(&f.data) else {
+                        transport.push(Frame::new(b'E', f.seq, b"invalid exec request"));
+                        let _ = transport.flush();
+                        continue;
+                    };
+                    if req.command.is_empty()
+                        || req.command.len() > MAX_EXEC_COMMAND_BYTES
+                        || req.command.contains('\0')
+                    {
+                        transport.push(Frame::new(b'E', f.seq, b"invalid exec command"));
+                        let _ = transport.flush();
+                        continue;
+                    }
+                    req.max_output_bytes = req.max_output_bytes.clamp(1, MAX_EXEC_OUTPUT_BYTES);
+                    let pair = UnixStream::pair().and_then(|(host_side, worker_side)| {
+                        Ok((Peer::new(host_side, f.seq)?, worker_side))
+                    });
+                    match pair {
+                        Ok((host_peer, worker_side)) => {
+                            match std::thread::Builder::new()
+                                .name("omg-exec".into())
+                                .spawn(move || run_exec_worker(worker_side, req, guard))
+                            {
+                                Ok(_) => {
+                                    streams.insert(
+                                        f.seq,
+                                        StreamEntry {
+                                            peer: host_peer,
+                                            is_exec: true,
+                                            write_closed: false,
+                                        },
+                                    );
+                                }
+                                Err(error) => {
+                                    transport.push(Frame::new(
+                                        b'E',
+                                        f.seq,
+                                        format!("exec worker spawn failed: {error}").as_bytes(),
+                                    ));
+                                    let _ = transport.flush();
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            transport.push(Frame::new(
+                                b'E',
+                                f.seq,
+                                format!("exec stream setup failed: {error}").as_bytes(),
+                            ));
+                            let _ = transport.flush();
+                        }
+                    }
+                }
                 b'D' => {
-                    if let Some(p) = streams.get_mut(&f.seq) {
+                    if let Some(entry) = streams.get_mut(&f.seq) {
                         let inner = inner_frame(&f.data)?;
-                        p.push(inner);
+                        if !entry.write_closed {
+                            entry.peer.push(inner);
+                        }
                     }
                 }
                 b'Q' => {
@@ -321,25 +462,43 @@ fn host_connection_with_limit(
                 _ => return Err(io::Error::other("invalid multiplex frame")),
             }
         }
-        for (&id, p) in &mut streams {
+        for (&id, entry) in &mut streams {
             if transport.queued_bytes() < crate::MAX_QUEUE / 2 {
-                match p.read() {
-                    Ok(frames) => {
-                        for f in frames {
-                            transport.push(Frame::new(b'D', id, &f.encode()));
+                let max_reads = if entry.is_exec { 64 } else { 1 };
+                for _ in 0..max_reads {
+                    let prev_incoming = entry.peer.incoming.len();
+                    match entry.peer.read() {
+                        Ok(frames) => {
+                            let got_frames = !frames.is_empty();
+                            for f in frames {
+                                transport.push(Frame::new(b'D', id, &f.encode()));
+                            }
+                            if transport.queued_bytes() >= crate::MAX_QUEUE / 2
+                                || (!got_frames && entry.peer.incoming.len() == prev_incoming)
+                            {
+                                break;
+                            }
+                        }
+                        Err(_) => {
+                            entry.peer.dead = true;
+                            break;
                         }
                     }
-                    Err(_) => p.dead = true,
                 }
             }
-            if p.flush().is_err() {
-                p.dead = true;
+            if !entry.write_closed && entry.peer.flush().is_err() {
+                if entry.is_exec {
+                    entry.write_closed = true;
+                    entry.peer.discard_queued_output();
+                } else {
+                    entry.peer.dead = true;
+                }
             }
-            if p.dead {
+            if entry.peer.dead {
                 transport.push(Frame::new(b'Q', id, &[]));
             }
         }
-        streams.retain(|_, p| !p.dead);
+        streams.retain(|_, entry| !entry.peer.dead);
         transport.flush()?;
         if transport.dead {
             return Err(io::Error::other("transport backlog exceeded"));
@@ -347,10 +506,13 @@ fn host_connection_with_limit(
         let allow_stream_read = transport.queued_bytes() < crate::MAX_QUEUE / 2;
         let mut descriptors = Vec::with_capacity(streams.len() + 1);
         descriptors.push(transport.poll_fd());
-        for p in streams.values() {
-            let mut pfd = p.poll_fd();
+        for entry in streams.values() {
+            let mut pfd = entry.peer.poll_fd();
             if !allow_stream_read {
                 pfd.events &= !libc::POLLIN;
+            }
+            if entry.write_closed {
+                pfd.events &= !libc::POLLOUT;
             }
             if pfd.events != 0 {
                 descriptors.push(pfd);
@@ -361,6 +523,312 @@ fn host_connection_with_limit(
             last_heartbeat + Duration::from_secs(45) + Duration::from_nanos(1),
         );
         poll_fds(&mut descriptors, timeout_ms)?;
+    }
+}
+
+fn set_nonblocking_fd(fd: std::os::fd::RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn kill_and_reap(pgid: libc::pid_t, child: &mut std::process::Child) {
+    unsafe {
+        libc::kill(-pgid, libc::SIGKILL);
+    }
+    let _ = child.wait();
+}
+
+fn flush_peer_blocking(worker: &mut Peer) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !worker.dead && worker.queued_bytes() > 0 {
+        if worker.flush().is_err() || worker.queued_bytes() == 0 {
+            break;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        use std::os::fd::AsRawFd;
+        let mut pfd = [libc::pollfd {
+            fd: worker.socket.as_raw_fd(),
+            events: libc::POLLOUT,
+            revents: 0,
+        }];
+        let timeout = deadline_poll_ms(now, deadline);
+        if poll_fds(&mut pfd, timeout).is_err() {
+            break;
+        }
+        if pfd[0].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            let _ = worker.flush();
+            break;
+        }
+    }
+}
+
+enum PipeRead {
+    Ok,
+    Eof,
+    LimitExceeded,
+}
+
+fn drain_child_pipe<R: Read>(
+    pipe: &mut R,
+    frame_kind: u8,
+    worker: &mut Peer,
+    total_output_bytes: &mut usize,
+    max_output_bytes: usize,
+    buf: &mut [u8],
+) -> PipeRead {
+    while worker.queued_bytes() < crate::MAX_QUEUE / 2 {
+        match pipe.read(buf) {
+            Ok(0) => return PipeRead::Eof,
+            Ok(n) => {
+                *total_output_bytes = total_output_bytes.saturating_add(n);
+                if *total_output_bytes > max_output_bytes {
+                    return PipeRead::LimitExceeded;
+                }
+                worker.push(Frame::new(frame_kind, 0, &buf[..n]));
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return PipeRead::Ok,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return PipeRead::Eof,
+        }
+    }
+    PipeRead::Ok
+}
+
+fn run_exec_worker(worker_side: UnixStream, req: ExecOpen, _guard: ActiveExecGuard) {
+    use std::os::{
+        fd::AsRawFd,
+        unix::process::{CommandExt, ExitStatusExt},
+    };
+    let Ok(mut worker) = Peer::new(worker_side, 0) else {
+        return;
+    };
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.arg("-c")
+        .arg(&req.command)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .process_group(0);
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            worker.push(Frame::new(
+                b'E',
+                0,
+                format!("exec spawn failed: {error}").as_bytes(),
+            ));
+            flush_peer_blocking(&mut worker);
+            return;
+        }
+    };
+    let pgid = child.id() as libc::pid_t;
+    let mut child_stdin = child.stdin.take();
+    let mut child_stdout = child.stdout.take();
+    let mut child_stderr = child.stderr.take();
+    if let Some(stdin) = &child_stdin {
+        if let Err(error) = set_nonblocking_fd(stdin.as_raw_fd()) {
+            kill_and_reap(pgid, &mut child);
+            worker.push(Frame::new(b'E', 0, error.to_string().as_bytes()));
+            flush_peer_blocking(&mut worker);
+            return;
+        }
+    }
+    if let Some(stdout) = &child_stdout {
+        if let Err(error) = set_nonblocking_fd(stdout.as_raw_fd()) {
+            kill_and_reap(pgid, &mut child);
+            worker.push(Frame::new(b'E', 0, error.to_string().as_bytes()));
+            flush_peer_blocking(&mut worker);
+            return;
+        }
+    }
+    if let Some(stderr) = &child_stderr {
+        if let Err(error) = set_nonblocking_fd(stderr.as_raw_fd()) {
+            kill_and_reap(pgid, &mut child);
+            worker.push(Frame::new(b'E', 0, error.to_string().as_bytes()));
+            flush_peer_blocking(&mut worker);
+            return;
+        }
+    }
+
+    let mut stdin_buf: VecDeque<u8> = VecDeque::new();
+    let mut stdin_eof = false;
+    let mut total_output_bytes: usize = 0;
+    let mut out_chunk = [0u8; EXEC_PIPE_CHUNK_BYTES];
+    let mut wait_backoff_ms: libc::c_int = 1;
+
+    loop {
+        match worker.read() {
+            Ok(frames) => {
+                for frame in frames {
+                    match frame.kind {
+                        b'i' if !stdin_eof && child_stdin.is_some() => {
+                            if stdin_buf.len().saturating_add(frame.data.len())
+                                > MAX_EXEC_STDIN_BUFFER
+                            {
+                                kill_and_reap(pgid, &mut child);
+                                worker.push(Frame::new(
+                                    b'E',
+                                    0,
+                                    b"exec stdin buffer limit exceeded",
+                                ));
+                                flush_peer_blocking(&mut worker);
+                                return;
+                            }
+                            stdin_buf.extend(frame.data);
+                        }
+                        b'z' => {
+                            stdin_eof = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Err(_) => {
+                kill_and_reap(pgid, &mut child);
+                return;
+            }
+        }
+
+        while let Some(stdin) = child_stdin.as_mut() {
+            if stdin_buf.is_empty() {
+                break;
+            }
+            let (head, _) = stdin_buf.as_slices();
+            match stdin.write(head) {
+                Ok(0) => {
+                    child_stdin = None;
+                    stdin_buf.clear();
+                    break;
+                }
+                Ok(n) => {
+                    stdin_buf.drain(..n);
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => {
+                    child_stdin = None;
+                    stdin_buf.clear();
+                    break;
+                }
+            }
+        }
+        if stdin_eof && stdin_buf.is_empty() {
+            child_stdin = None;
+        }
+
+        if let Some(stdout) = child_stdout.as_mut() {
+            match drain_child_pipe(
+                stdout,
+                b'o',
+                &mut worker,
+                &mut total_output_bytes,
+                req.max_output_bytes,
+                &mut out_chunk,
+            ) {
+                PipeRead::Ok => {}
+                PipeRead::Eof => child_stdout = None,
+                PipeRead::LimitExceeded => {
+                    kill_and_reap(pgid, &mut child);
+                    worker.push(Frame::new(b'E', 0, b"output-limit-exceeded"));
+                    flush_peer_blocking(&mut worker);
+                    return;
+                }
+            }
+        }
+        if let Some(stderr) = child_stderr.as_mut() {
+            match drain_child_pipe(
+                stderr,
+                b'e',
+                &mut worker,
+                &mut total_output_bytes,
+                req.max_output_bytes,
+                &mut out_chunk,
+            ) {
+                PipeRead::Ok => {}
+                PipeRead::Eof => child_stderr = None,
+                PipeRead::LimitExceeded => {
+                    kill_and_reap(pgid, &mut child);
+                    worker.push(Frame::new(b'E', 0, b"output-limit-exceeded"));
+                    flush_peer_blocking(&mut worker);
+                    return;
+                }
+            }
+        }
+
+        if worker.flush().is_err() || worker.dead {
+            kill_and_reap(pgid, &mut child);
+            return;
+        }
+
+        if child_stdout.is_none() && child_stderr.is_none() {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let exit_code = status
+                        .code()
+                        .or_else(|| status.signal().map(|sig| 128i32.saturating_add(sig)))
+                        .unwrap_or(1)
+                        .clamp(0, 255);
+                    worker.push(Frame::new(b'x', 0, exit_code.to_string().as_bytes()));
+                    flush_peer_blocking(&mut worker);
+                    return;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    kill_and_reap(pgid, &mut child);
+                    worker.push(Frame::new(b'E', 0, error.to_string().as_bytes()));
+                    flush_peer_blocking(&mut worker);
+                    return;
+                }
+            }
+        }
+
+        let mut descriptors = Vec::with_capacity(4);
+        descriptors.push(worker.poll_fd());
+        if let Some(stdin) = &child_stdin {
+            if !stdin_buf.is_empty() {
+                descriptors.push(libc::pollfd {
+                    fd: stdin.as_raw_fd(),
+                    events: libc::POLLOUT,
+                    revents: 0,
+                });
+            }
+        }
+        if worker.queued_bytes() < crate::MAX_QUEUE / 2 {
+            if let Some(stdout) = &child_stdout {
+                descriptors.push(libc::pollfd {
+                    fd: stdout.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                });
+            }
+            if let Some(stderr) = &child_stderr {
+                descriptors.push(libc::pollfd {
+                    fd: stderr.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                });
+            }
+        }
+        let timeout_ms = if child_stdout.is_none() && child_stderr.is_none() {
+            let current = wait_backoff_ms;
+            wait_backoff_ms = (wait_backoff_ms * 2).min(25);
+            current
+        } else {
+            -1
+        };
+        if poll_fds(&mut descriptors, timeout_ms).is_err() {
+            kill_and_reap(pgid, &mut child);
+            return;
+        }
     }
 }
 
@@ -511,7 +979,9 @@ mod tests {
         Frame::new(b'P', 0, &[]).send(&mut local_cli).unwrap();
         let local_caps = Frame::read(&mut local_cli).unwrap();
         assert_eq!(local_caps.kind, b'P');
-        assert!(String::from_utf8_lossy(&local_caps.data).contains("recreate-if-gone/1"));
+        let local_caps_str = String::from_utf8_lossy(&local_caps.data);
+        assert!(local_caps_str.contains("recreate-if-gone/1"));
+        assert!(local_caps_str.split(',').any(|c| c == "exec/1"));
         drop(local_cli);
         let _ = local_handle.join();
 
@@ -527,7 +997,9 @@ mod tests {
         Frame::new(b'P', 0, &[]).send(&mut cli).unwrap();
         let caps = Frame::read(&mut cli).unwrap();
         assert_eq!(caps.kind, b'P');
-        assert!(String::from_utf8_lossy(&caps.data).contains("recreate-if-gone/1"));
+        let caps_str = String::from_utf8_lossy(&caps.data);
+        assert!(caps_str.contains("recreate-if-gone/1"));
+        assert!(caps_str.split(',').any(|c| c == "exec/1"));
 
         let id1 = "11111111-1111-4111-8111-111111111111";
         let id2 = "22222222-2222-4222-8222-222222222222";
@@ -565,6 +1037,21 @@ mod tests {
         };
         assert_eq!(limit_err.data, b"host stream limit reached");
 
+        // Reaching max_streams (1) on exec seq 13 must also return b'E'.
+        let exec_payload = serde_json::to_vec(&ExecOpen {
+            command: "echo ok".into(),
+            max_output_bytes: 1024,
+        })
+        .unwrap();
+        Frame::new(b'x', 13, &exec_payload).send(&mut cli).unwrap();
+        let exec_limit_err = loop {
+            let f = Frame::read(&mut cli).unwrap();
+            if f.kind == b'E' && f.seq == 13 {
+                break f;
+            }
+        };
+        assert_eq!(exec_limit_err.data, b"host stream limit reached");
+
         // Stream 10 and transport heartbeat remain completely healthy.
         Frame::new(b'P', 0, &[]).send(&mut cli).unwrap();
         let pong = loop {
@@ -588,6 +1075,217 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
+        drop(cli);
+        let _ = handle.join();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn host_exec_validates_payload_and_enforces_max_exec_streams() {
+        raise_nofile_limit();
+        let nonce = crate::record::nonce().unwrap();
+        let root = std::env::temp_dir().join(format!("omg-host-exec-cap-{}", &nonce[..8]));
+        let sessions = root.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&sessions, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let registry = Arc::new(Mutex::new(Registry::new_local(
+            sessions,
+            vec!["/bin/sh".into()],
+            Policy::default(),
+        )));
+        let (srv, mut cli) = UnixStream::pair().unwrap();
+        cli.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let handle = std::thread::spawn(move || host_connection(srv, registry));
+
+        // Empty command and oversized command must fail with b'E' without breaking transport.
+        for (seq, cmd) in [
+            (1u64, String::new()),
+            (2u64, "a\0b".into()),
+            (3u64, "x".repeat(MAX_EXEC_COMMAND_BYTES + 1)),
+        ] {
+            let payload = serde_json::to_vec(&ExecOpen {
+                command: cmd,
+                max_output_bytes: 1024,
+            })
+            .unwrap();
+            Frame::new(b'x', seq, &payload).send(&mut cli).unwrap();
+            let err = Frame::read(&mut cli).unwrap();
+            assert_eq!(err.kind, b'E');
+            assert_eq!(err.seq, seq);
+        }
+
+        // Open MAX_EXEC_STREAMS (32) sleeping commands; 33rd must be rejected.
+        let sleep_payload = serde_json::to_vec(&ExecOpen {
+            command: "sleep 30".into(),
+            max_output_bytes: 1024,
+        })
+        .unwrap();
+        for seq in 100..100 + MAX_EXEC_STREAMS as u64 {
+            Frame::new(b'x', seq, &sleep_payload)
+                .send(&mut cli)
+                .unwrap();
+        }
+        // Wait for worker threads to be active by sending a ping after all opens, or check 33rd.
+        Frame::new(b'x', 200, &sleep_payload)
+            .send(&mut cli)
+            .unwrap();
+        let overflow = loop {
+            let f = Frame::read(&mut cli).unwrap();
+            if f.seq == 200 {
+                break f;
+            }
+        };
+        assert_eq!(
+            overflow.kind,
+            b'E',
+            "expected outer b'E', got {} with payload {:?}",
+            overflow.kind as char,
+            String::from_utf8_lossy(&overflow.data)
+        );
+        assert_eq!(overflow.data, b"too many concurrent exec requests");
+
+        // Cancel all 32 active streams and verify a new exec succeeds afterwards.
+        for seq in 100..100 + MAX_EXEC_STREAMS as u64 {
+            Frame::new(b'Q', seq, &[]).send(&mut cli).unwrap();
+        }
+        let ok_payload = serde_json::to_vec(&ExecOpen {
+            command: "printf 'reclaimed'".into(),
+            max_output_bytes: 1024,
+        })
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut seq_try = 300u64;
+        let reclaimed_ok = loop {
+            Frame::new(b'x', seq_try, &ok_payload)
+                .send(&mut cli)
+                .unwrap();
+            let mut got_output = Vec::new();
+            let mut got_exit = None;
+            let mut got_busy = false;
+            loop {
+                let f = Frame::read(&mut cli).unwrap();
+                if f.seq != seq_try {
+                    continue;
+                }
+                match f.kind {
+                    b'E' if f.data == b"too many concurrent exec requests" => {
+                        got_busy = true;
+                        break;
+                    }
+                    b'D' => {
+                        let inner = inner_frame(&f.data).unwrap();
+                        if inner.kind == b'o' {
+                            got_output.extend_from_slice(&inner.data);
+                        } else if inner.kind == b'x' {
+                            got_exit = Some(inner.data);
+                        }
+                    }
+                    b'Q' => break,
+                    other => panic!("unexpected frame kind {other}"),
+                }
+            }
+            if !got_busy {
+                assert_eq!(got_output, b"reclaimed");
+                assert_eq!(got_exit.as_deref(), Some(b"0".as_slice()));
+                break true;
+            }
+            assert!(Instant::now() < deadline);
+            seq_try += 1;
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(reclaimed_ok);
+
+        drop(cli);
+        let _ = handle.join();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn host_exec_handles_unconsumed_large_stdin_before_fast_exit_and_kills_pgid_on_cancel() {
+        let nonce = crate::record::nonce().unwrap();
+        let root = std::env::temp_dir().join(format!("omg-host-exec-pgid-{}", &nonce[..8]));
+        let sessions = root.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&sessions, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let registry = Arc::new(Mutex::new(Registry::new_local(
+            sessions,
+            vec!["/bin/sh".into()],
+            Policy::default(),
+        )));
+        let (srv, mut cli) = UnixStream::pair().unwrap();
+        cli.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let handle = std::thread::spawn(move || host_connection(srv, registry));
+
+        // 1) Fast exit with 32 KiB output while unconsumed stdin is in flight must deliver b'o' and b'x'.
+        let fast_payload = serde_json::to_vec(&ExecOpen {
+            command: "python3 -c 'import sys; sys.stdout.buffer.write(b\"A\" * 32768)'".into(),
+            max_output_bytes: 64 * 1024,
+        })
+        .unwrap();
+        Frame::new(b'x', 1, &fast_payload).send(&mut cli).unwrap();
+        let big_in = vec![b'Z'; 64 * 1024];
+        for _ in 0..4 {
+            Frame::new(b'D', 1, &Frame::new(b'i', 0, &big_in).encode())
+                .send(&mut cli)
+                .unwrap();
+        }
+        let mut out = Vec::new();
+        let mut exit = None;
+        loop {
+            let f = Frame::read(&mut cli).unwrap();
+            assert_eq!(f.seq, 1);
+            match f.kind {
+                b'D' => {
+                    let inner = inner_frame(&f.data).unwrap();
+                    match inner.kind {
+                        b'o' => out.extend_from_slice(&inner.data),
+                        b'x' => exit = Some(inner.data),
+                        other => panic!("unexpected inner frame {other}"),
+                    }
+                }
+                b'Q' => break,
+                other => panic!("unexpected outer frame {other}"),
+            }
+        }
+        assert_eq!(out.len(), 32768);
+        assert_eq!(exit.as_deref(), Some(b"0".as_slice()));
+
+        // 2) Cancel mid-flight kills child and grandchild in process group.
+        let pid_file = root.join("grandchild.pid");
+        let cancel_payload = serde_json::to_vec(&ExecOpen {
+            command: format!("sleep 30 & echo $! > '{}'; wait", pid_file.display()),
+            max_output_bytes: 4096,
+        })
+        .unwrap();
+        Frame::new(b'x', 2, &cancel_payload).send(&mut cli).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let child_pid = loop {
+            if let Ok(text) = fs::read_to_string(&pid_file) {
+                if let Ok(pid) = text.trim().parse::<libc::pid_t>() {
+                    break pid;
+                }
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(15));
+        };
+        Frame::new(b'Q', 2, &[]).send(&mut cli).unwrap();
+        let kill_deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < kill_deadline {
+            if unsafe { libc::kill(child_pid, 0) } != 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        assert_ne!(
+            unsafe { libc::kill(child_pid, 0) },
+            0,
+            "grandchild {child_pid} should be killed with its process group"
+        );
+
         drop(cli);
         let _ = handle.join();
         let _ = fs::remove_dir_all(root);

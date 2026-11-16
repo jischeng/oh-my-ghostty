@@ -71,6 +71,8 @@ final class BuiltInGitInspectorProvider {
     }
     private var detailTasks: [DetailKey: Task<Void, Never>] = [:]
     private var lastRemotePoll: [UUID: Date] = [:]
+    private var consecutivePollFailures: [UUID: Int] = [:]
+    private var lastLocations: [UUID: InspectorPaneContext] = [:]
     private var resolvedDirectories: [UUID: String] = [:]
     private var localChangeMonitors: [UUID: (repository: GitRepositoryIdentity, monitor: GitRepositoryChangeMonitor)] = [:]
     private var lastAutoFetch: [String: Date] = [:]
@@ -142,6 +144,8 @@ final class BuiltInGitInspectorProvider {
         lastPublishedContent.removeValue(forKey: tabID)
         resolvedDirectories.removeValue(forKey: tabID)
         lastRemotePoll.removeValue(forKey: tabID)
+        consecutivePollFailures.removeValue(forKey: tabID)
+        lastLocations.removeValue(forKey: tabID)
         generations.removeValue(forKey: tabID)
         historyGenerations.removeValue(forKey: tabID)
         if presentedContexts.isEmpty {
@@ -155,6 +159,11 @@ final class BuiltInGitInspectorProvider {
         switch event {
         case .appeared(let context):
             let returning = presentedContexts[context.tabID] == nil
+            if let previous = lastLocations[context.tabID], !previous.hasSameLocation(as: context) {
+                consecutivePollFailures[context.tabID] = 0
+                lastRemotePoll.removeValue(forKey: context.tabID)
+            }
+            lastLocations[context.tabID] = context
             presentedContexts[context.tabID] = context
             let cached = lastPublishedContent[context.tabID]
             let canReuse = returning && cached?.repository?.matches(context.session) == true &&
@@ -175,6 +184,8 @@ final class BuiltInGitInspectorProvider {
         guard case .gitAction(let gitAction) = action.kind else { return }
         switch gitAction {
         case .fetch:
+            consecutivePollFailures[action.context.tabID] = 0
+            lastRemotePoll.removeValue(forKey: action.context.tabID)
             let key = currentWorktreeKey(for: action.context)
             var value = state(for: action.context.tabID, worktreeKey: key)
             value.detailCache.removeAll(); value.detailCacheOrder.removeAll()
@@ -182,6 +193,8 @@ final class BuiltInGitInspectorProvider {
             save(value, tabID: action.context.tabID, worktreeKey: key)
             fetchAndRefresh(context: action.context)
         case .refresh, .refreshLocal:
+            consecutivePollFailures[action.context.tabID] = 0
+            lastRemotePoll.removeValue(forKey: action.context.tabID)
             let key = currentWorktreeKey(for: action.context)
             var value = state(for: action.context.tabID, worktreeKey: key)
             value.detailCache.removeAll(); value.detailCacheOrder.removeAll()
@@ -445,6 +458,11 @@ final class BuiltInGitInspectorProvider {
         if let repository = lastPublishedContent[context.tabID]?.repository,
            mutationTasks[repository.stateKey] != nil, repository.matches(context.session),
            context.workingDirectory == resolvedDirectories[context.tabID] { return }
+        if let previous = lastLocations[context.tabID], !previous.hasSameLocation(as: context) {
+            consecutivePollFailures[context.tabID] = 0
+            lastRemotePoll.removeValue(forKey: context.tabID)
+        }
+        lastLocations[context.tabID] = context
         loadTasks.removeValue(forKey: context.tabID)?.cancel()
         let generation = nextGeneration(for: context.tabID)
         let key = currentWorktreeKey(for: context)
@@ -469,6 +487,20 @@ final class BuiltInGitInspectorProvider {
             guard let self else { return }
             let status = await self.repositoryService.resolveStatus(workingDirectory: directory, session: context.session)
             guard !Task.isCancelled, self.generations[context.tabID] == generation else { return }
+            if case .error(let title, let message) = status {
+                if !force {
+                    self.consecutivePollFailures[context.tabID, default: 0] += 1
+                    if let previous = oldContent, previous.repository != nil {
+                        Self.logger.debug(
+                            "Retaining stale Git snapshot after background poll error (\(title, privacy: .public)): \(message, privacy: .public)"
+                        )
+                        self.loadTasks.removeValue(forKey: context.tabID)
+                        return
+                    }
+                }
+            } else {
+                self.consecutivePollFailures[context.tabID] = 0
+            }
             self.resolvedDirectories[context.tabID] = directory
             if let repository = status.repository, repository.target == .local {
                 if self.localChangeMonitors[context.tabID]?.repository != repository {
@@ -776,7 +808,7 @@ final class BuiltInGitInspectorProvider {
         load(context: context)
     }
 
-    func pollPresentedTabs() {
+    func pollPresentedTabs(at now: Date = Date()) {
         for (tabID, context) in presentedContexts {
             guard loadTasks[tabID] == nil, let directory = context.workingDirectory, !directory.isEmpty else { continue }
             if case .sshConnecting = context.session.state { continue }
@@ -784,13 +816,25 @@ final class BuiltInGitInspectorProvider {
                let monitor = localChangeMonitors[tabID]?.monitor,
                !monitor.needsRefresh() { continue }
             if case .sshReady = context.session.state {
-                let now = Date()
-                guard now.timeIntervalSince(lastRemotePoll[tabID] ?? .distantPast) >= 10 else { continue }
+                let failures = consecutivePollFailures[tabID] ?? 0
+                if failures >= 3, lastPublishedContent[tabID]?.repository == nil {
+                    continue
+                }
+                let interval = Self.remotePollInterval(failures: failures)
+                guard now.timeIntervalSince(lastRemotePoll[tabID] ?? .distantPast) >= interval else { continue }
                 lastRemotePoll[tabID] = now
             }
             load(context: context)
-
         }
+    }
+
+    static func remotePollInterval(failures: Int) -> TimeInterval {
+        guard failures > 0 else { return 10.0 }
+        return min(300.0, 15.0 * Double(1 << min(failures - 1, 4)))
+    }
+
+    func consecutivePollFailureCount(for tabID: UUID) -> Int {
+        consecutivePollFailures[tabID] ?? 0
     }
 
     private func makeContent(from current: InspectorGitContent, activeTab: InspectorGitContent.ActiveTab? = nil,

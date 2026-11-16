@@ -115,7 +115,8 @@ struct InspectorGitView: View {
                     systemImage: "exclamationmark.triangle",
                     title: title,
                     subtitle: message,
-                    hint: nil
+                    hint: nil,
+                    retry: (title: GitL10n.text("Retry"), action: { perform(.gitAction(.refresh)) })
                 )
 
             case .ready(_, _, let headCommitID):
@@ -201,11 +202,27 @@ struct InspectorGitView: View {
         .help(GitL10n.text("Pull or Push"))
     }
 
+    static func isToolbarRefreshEnabled(for content: InspectorGitContent) -> Bool {
+        let isNetworkBusy = content.operation != nil
+        if content.repository == nil {
+            return !content.isLoading && !isNetworkBusy
+        }
+        return !isNetworkBusy
+    }
+
+    static func toolbarRefreshAction(for content: InspectorGitContent) -> InspectorGitAction {
+        content.repository == nil ? .refresh : .fetch
+    }
+
+    static func toolbarRefreshHelp(for content: InspectorGitContent) -> String {
+        content.repository == nil ? GitL10n.text("Refresh") : GitL10n.text("Fetch remote changes")
+    }
+
     private var fetchButton: some View {
         NativeActionButton(
             symbol: isFetchLoading ? "arrow.triangle.2.circlepath" : "arrow.clockwise",
-            help: GitL10n.text("Fetch remote changes"),
-            enabled: content.repository != nil && !isNetworkBusy,
+            help: Self.toolbarRefreshHelp(for: content),
+            enabled: Self.isToolbarRefreshEnabled(for: content),
             style: .plain,
             height: 24,
             identifier: "git.fetch",
@@ -213,8 +230,11 @@ struct InspectorGitView: View {
                 .action(GitL10n.text("Fetch"), enabled: content.repository != nil && !isNetworkBusy) {
                     perform(.gitAction(.fetch))
                 },
-                .action(GitL10n.text("Refresh (Local Only)")) {
-                    perform(.gitAction(.refreshLocal))
+                .action(
+                    GitL10n.text("Refresh (Local Only)"),
+                    enabled: !content.isLoading && !isNetworkBusy
+                ) {
+                    perform(.gitAction(content.repository == nil ? .refresh : .refreshLocal))
                 },
                 .separator,
                 .submenu(GitL10n.text("Auto-Fetch Interval"), entries: [0, 1, 2, 5, 10, 15, 30, 60].map { minutes in
@@ -227,10 +247,10 @@ struct InspectorGitView: View {
                     }
                 }),
             ],
-            action: { _ in perform(.gitAction(.fetch)) }
+            action: { _ in perform(.gitAction(Self.toolbarRefreshAction(for: content))) }
         )
         .frame(width: 24, height: 24)
-        .help(GitL10n.text("Fetch remote changes"))
+        .help(Self.toolbarRefreshHelp(for: content))
     }
 
     private var currentBranch: GitBranchInfo? {
@@ -455,7 +475,8 @@ struct InspectorGitView: View {
         systemImage: String,
         title: String,
         subtitle: String,
-        hint: String?
+        hint: String?,
+        retry: (title: String, action: () -> Void)? = nil
     ) -> some View {
         VStack(spacing: 12) {
             Image(systemName: systemImage)
@@ -472,6 +493,19 @@ struct InspectorGitView: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 16)
+            }
+
+            if let retry {
+                NativeActionButton(
+                    title: retry.title,
+                    symbol: "arrow.clockwise",
+                    help: retry.title,
+                    enabled: !content.isLoading && !isNetworkBusy,
+                    style: .prominent,
+                    height: 26,
+                    identifier: "git.retry",
+                    action: { _ in retry.action() }
+                )
             }
 
             if let hint {

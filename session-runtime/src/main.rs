@@ -666,6 +666,18 @@ fn main() -> io::Result<()> {
             println!();
             Ok(())
         }
+        Some("exec-local") if a.len() == 5 => {
+            let max_output_bytes = match a[3].parse::<usize>() {
+                Ok(value) => value,
+                Err(_) => {
+                    std::process::exit(exec_exit_transport(&format!(
+                        "invalid max-output-bytes: {}",
+                        a[3]
+                    )));
+                }
+            };
+            std::process::exit(exec_local(Path::new(&a[2]), max_output_bytes, &a[4]));
+        }
         Some("ensure-host") if a.len() == 3 => ensure_host(&a[2], None),
         Some("report") if a.len() >= 4 => report_cli(&a[2..]),
         Some("handoff-check") if a.len() >= 3 => {
@@ -689,8 +701,292 @@ fn main() -> io::Result<()> {
             Ok(())
         }
         _ => {
-            eprintln!("usage: omgd sessions --help | mobile --help | host DIRECTORY -- SHELL... | host-local DIRECTORY -- SHELL... | session-holder | serve SOCKET -- COMMAND... | bridge SOCKET | install-runtime CONNECTION_JSON | connect LOCAL_SOCKET CONNECTION_JSON | retry-local SOCKET [--interactive] | close-local SOCKET UUID | list-local SOCKET");
+            eprintln!("usage: omgd sessions --help | mobile --help | host DIRECTORY -- SHELL... | host-local DIRECTORY -- SHELL... | session-holder | serve SOCKET -- COMMAND... | bridge SOCKET | install-runtime CONNECTION_JSON | connect LOCAL_SOCKET CONNECTION_JSON | retry-local SOCKET [--interactive] | close-local SOCKET UUID | list-local SOCKET | exec-local SOCKET MAX_OUTPUT_BYTES COMMAND");
             std::process::exit(2)
+        }
+    }
+}
+
+fn exec_exit_unsupported(reason: &str) -> i32 {
+    let mut stderr = io::stderr().lock();
+    let _ = writeln!(stderr, "\u{1e}OMG-EXEC-UNSUPPORTED\u{1f}\n{reason}");
+    let _ = stderr.flush();
+    253
+}
+
+fn exec_exit_limit() -> i32 {
+    let mut stderr = io::stderr().lock();
+    let _ = writeln!(stderr, "\u{1e}OMG-EXEC-LIMIT\u{1f}");
+    let _ = stderr.flush();
+    252
+}
+
+fn exec_exit_transport(reason: &str) -> i32 {
+    let mut stderr = io::stderr().lock();
+    let _ = writeln!(stderr, "\u{1e}OMG-EXEC-TRANSPORT\u{1f}\n{reason}");
+    let _ = stderr.flush();
+    255
+}
+
+fn enqueue_exec_frame(
+    queue: &mut std::collections::VecDeque<Vec<u8>>,
+    queued: &mut usize,
+    frame: omg_session_runtime::Frame,
+) {
+    let encoded = frame.encode();
+    *queued += encoded.len();
+    queue.push_back(encoded);
+}
+
+fn decode_next_frame(buf: &mut Vec<u8>) -> io::Result<Option<omg_session_runtime::Frame>> {
+    if buf.len() < 13 {
+        return Ok(None);
+    }
+    let len = u32::from_be_bytes(buf[9..13].try_into().unwrap()) as usize;
+    if len > omg_session_runtime::MAX_FRAME {
+        return Err(io::Error::other("exec frame too large"));
+    }
+    if buf.len() < 13 + len {
+        return Ok(None);
+    }
+    let frame = omg_session_runtime::Frame::read(&mut &buf[..13 + len])?;
+    buf.drain(..13 + len);
+    Ok(Some(frame))
+}
+
+fn exec_local(socket_path: &Path, max_output_bytes: usize, command: &str) -> i32 {
+    use std::collections::VecDeque;
+    use std::os::fd::AsRawFd;
+
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+
+    let mut stream = match UnixStream::connect(socket_path) {
+        Ok(s) => s,
+        Err(error) => return exec_exit_unsupported(&error.to_string()),
+    };
+    if let Err(error) = stream.set_nonblocking(true) {
+        return exec_exit_transport(&error.to_string());
+    }
+
+    let open_payload = match serde_json::to_vec(&omg_session_runtime::host::ExecOpen {
+        command: command.to_owned(),
+        max_output_bytes,
+    }) {
+        Ok(bytes) => bytes,
+        Err(error) => return exec_exit_transport(&error.to_string()),
+    };
+    if open_payload.len() > omg_session_runtime::MAX_FRAME {
+        return exec_exit_transport("exec request too large");
+    }
+
+    let mut out_queue: VecDeque<Vec<u8>> = VecDeque::new();
+    let mut out_offset = 0usize;
+    let mut out_queued = 0usize;
+    let mut write_closed = false;
+    enqueue_exec_frame(
+        &mut out_queue,
+        &mut out_queued,
+        omg_session_runtime::Frame::new(b'x', 0, &open_payload),
+    );
+
+    let mut in_buf = Vec::new();
+    let mut stdin_eof = false;
+    let mut stdin_buf = vec![0u8; 64 * 1024];
+    let mut read_buf = vec![0u8; 64 * 1024];
+
+    loop {
+        while !write_closed {
+            let Some(front) = out_queue.front() else {
+                break;
+            };
+            match stream.write(&front[out_offset..]) {
+                Ok(0) => {
+                    write_closed = true;
+                    stdin_eof = true;
+                    out_queue.clear();
+                    out_offset = 0;
+                    out_queued = 0;
+                    break;
+                }
+                Ok(n) => {
+                    out_offset += n;
+                    out_queued -= n;
+                    if out_offset == front.len() {
+                        out_queue.pop_front();
+                        out_offset = 0;
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => {
+                    write_closed = true;
+                    stdin_eof = true;
+                    out_queue.clear();
+                    out_offset = 0;
+                    out_queued = 0;
+                    break;
+                }
+            }
+        }
+
+        let mut stream_eof = false;
+        let mut stream_err: Option<io::Error> = None;
+        loop {
+            match stream.read(&mut read_buf) {
+                Ok(0) => stream_eof = true,
+                Ok(n) => in_buf.extend_from_slice(&read_buf[..n]),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => stream_err = Some(error),
+            }
+
+            loop {
+                let frame = match decode_next_frame(&mut in_buf) {
+                    Ok(Some(frame)) => frame,
+                    Ok(None) => break,
+                    Err(error) => {
+                        let _ = io::stdout().flush();
+                        let _ = io::stderr().flush();
+                        return exec_exit_transport(&error.to_string());
+                    }
+                };
+                match frame.kind {
+                    b'T' => {}
+                    b'P' if frame.seq == 0 => {}
+                    b'o' => {
+                        let mut stdout = io::stdout().lock();
+                        if stdout.write_all(&frame.data).is_err() {
+                            return 255;
+                        }
+                    }
+                    b'e' => {
+                        let mut stderr = io::stderr().lock();
+                        if stderr.write_all(&frame.data).is_err() {
+                            return 255;
+                        }
+                    }
+                    b'x' => {
+                        let _ = io::stdout().flush();
+                        let _ = io::stderr().flush();
+                        let status = std::str::from_utf8(&frame.data)
+                            .ok()
+                            .and_then(|s| s.trim().parse::<i32>().ok())
+                            .map(|code| code.clamp(0, 255));
+                        return match status {
+                            Some(code) => code,
+                            None => exec_exit_transport("invalid exec exit status"),
+                        };
+                    }
+                    b'E' => {
+                        let _ = io::stdout().flush();
+                        let _ = io::stderr().flush();
+                        let reason = String::from_utf8_lossy(&frame.data);
+                        return match frame.data.as_slice() {
+                            b"relay-offline" | b"exec-unsupported" => {
+                                exec_exit_unsupported(&reason)
+                            }
+                            b"output-limit-exceeded" => exec_exit_limit(),
+                            _ => exec_exit_transport(&reason),
+                        };
+                    }
+                    _ => {
+                        let _ = io::stdout().flush();
+                        let _ = io::stderr().flush();
+                        return exec_exit_transport("unexpected frame from exec stream");
+                    }
+                }
+            }
+
+            if stream_eof || stream_err.is_some() {
+                break;
+            }
+        }
+
+        let _ = io::stdout().flush();
+        let _ = io::stderr().flush();
+
+        if stream_eof {
+            return exec_exit_transport("exec stream closed before completion");
+        }
+        if let Some(error) = stream_err {
+            return exec_exit_transport(&error.to_string());
+        }
+
+        let mut pfds = Vec::with_capacity(2);
+        let mut stream_events = libc::POLLIN;
+        if !write_closed && out_queued > 0 {
+            stream_events |= libc::POLLOUT;
+        }
+        pfds.push(libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: stream_events,
+            revents: 0,
+        });
+        let poll_stdin = !stdin_eof && !write_closed && out_queued < 1024 * 1024;
+        if poll_stdin {
+            pfds.push(libc::pollfd {
+                fd: libc::STDIN_FILENO,
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
+
+        let rc = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, -1) };
+        if rc < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return exec_exit_transport(&error.to_string());
+            }
+            continue;
+        }
+
+        if poll_stdin {
+            let revents = pfds[1].revents;
+            if revents & libc::POLLNVAL != 0 {
+                stdin_eof = true;
+                enqueue_exec_frame(
+                    &mut out_queue,
+                    &mut out_queued,
+                    omg_session_runtime::Frame::new(b'z', 0, &[]),
+                );
+            } else if revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+                let n = unsafe {
+                    libc::read(
+                        libc::STDIN_FILENO,
+                        stdin_buf.as_mut_ptr().cast(),
+                        stdin_buf.len(),
+                    )
+                };
+                if n > 0 {
+                    enqueue_exec_frame(
+                        &mut out_queue,
+                        &mut out_queued,
+                        omg_session_runtime::Frame::new(b'i', 0, &stdin_buf[..n as usize]),
+                    );
+                } else if n == 0 {
+                    stdin_eof = true;
+                    enqueue_exec_frame(
+                        &mut out_queue,
+                        &mut out_queued,
+                        omg_session_runtime::Frame::new(b'z', 0, &[]),
+                    );
+                } else {
+                    let error = io::Error::last_os_error();
+                    if !matches!(
+                        error.kind(),
+                        io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+                    ) {
+                        stdin_eof = true;
+                        enqueue_exec_frame(
+                            &mut out_queue,
+                            &mut out_queued,
+                            omg_session_runtime::Frame::new(b'z', 0, &[]),
+                        );
+                    }
+                }
+            }
         }
     }
 }

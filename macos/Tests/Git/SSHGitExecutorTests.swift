@@ -1,5 +1,7 @@
+import AppKit
 import Darwin
 import Foundation
+import SwiftUI
 import Testing
 @testable import Ghostty
 
@@ -478,5 +480,644 @@ struct SSHGitExecutorTests {
         let disconnected = await GitRepositoryService().resolveStatus(workingDirectory: path.path, session: server.session(directory: path.path))
         guard case .error = disconnected else { Issue.record("A disconnected SSH session must never fall back to local Git"); return }
 
+    }
+
+    @Test func controlPersistIsOneHourForMultiplexedConnections() throws {
+        let connection = try GitSSHConnection(destination: "user@host")
+        let multiplexed = connection.arguments(controlSocket: "/tmp/omg-test.sock")
+        #expect(multiplexed.contains("ControlMaster=auto"))
+        #expect(multiplexed.contains("ControlPersist=3600"))
+        #expect(connection.arguments.contains("ControlMaster=no"))
+        #expect(connection.arguments.contains("ControlPersist=no"))
+    }
+
+    @Test func idempotentReadOnlyClassificationSeparatesReadsFromConfigOverridesAndWrites() {
+        let readOnlyCases: [[String]] = [
+            ["--version"],
+            ["version"],
+            ["--no-optional-locks", "rev-parse", "--show-toplevel"],
+            ["-C", "/repo", "symbolic-ref", "--short", "HEAD"],
+            ["-C/repo", "status", "--porcelain=v1", "-z"],
+            ["--git-dir=/repo/.git", "--work-tree=/repo", "diff", "--cached"],
+            ["diff-index", "--cached", "HEAD"],
+            ["diff-files"],
+            ["diff-tree", "-r", "HEAD"],
+            ["log", "-n", "10"],
+            ["show", "--no-patch", "HEAD"],
+            ["for-each-ref", "refs/heads"],
+            ["ls-files", "-z"],
+            ["ls-tree", "HEAD"],
+            ["cat-file", "-p", "HEAD"],
+            ["describe", "--tags"],
+            ["--no-optional-locks", "worktree", "list", "--porcelain", "-z"],
+            ["remote"],
+            ["remote", "-v"],
+            ["remote", "--verbose"],
+            ["remote", "get-url", "origin"],
+        ]
+        for arguments in readOnlyCases {
+            #expect(SSHGitExecutor.isIdempotentReadOnly(arguments: arguments), "Expected read-only for \(arguments)")
+        }
+
+        let nonIdempotentCases: [[String]] = [
+            [],
+            ["-c", "alias.status=!touch /tmp/pwn", "status"],
+            ["-calias.status=x", "status"],
+            ["--config-env=core.fsmonitor=HOOK", "status"],
+            ["--config-env", "core.fsmonitor=HOOK", "status"],
+            ["status", "-c"],
+            ["commit", "-m", "msg"],
+            ["push", "origin", "main"],
+            ["pull"],
+            ["fetch", "--prune"],
+            ["checkout", "main"],
+            ["switch", "-c", "feature"],
+            ["restore", "file.swift"],
+            ["reset", "--quiet", "--", "file.swift"],
+            ["add", "--", "file.swift"],
+            ["rm", "file.swift"],
+            ["mv", "a", "b"],
+            ["merge", "feature"],
+            ["rebase", "main"],
+            ["cherry-pick", "abc123"],
+            ["revert", "abc123"],
+            ["stash", "push"],
+            ["clean", "-fd"],
+            ["tag", "v1.0.0"],
+            ["branch", "feature"],
+            ["config", "--get", "remote.origin.url"],
+            ["worktree", "add", "/tmp/wt"],
+            ["worktree", "remove", "/tmp/wt"],
+            ["remote", "add", "origin", "https://example.com/repo.git"],
+            ["remote", "-v", "add", "origin", "https://example.com/repo.git"],
+            ["remote", "set-url", "origin", "https://example.com/repo.git"],
+            ["hash-object", "-w", "--stdin"],
+            ["rev-list", "--count", "HEAD"],
+        ]
+        for arguments in nonIdempotentCases {
+            #expect(!SSHGitExecutor.isIdempotentReadOnly(arguments: arguments), "Expected non-idempotent for \(arguments)")
+        }
+    }
+
+    @Test func activeRelayExecLocalFastPathFallbackLimitAndTransportSentinel() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-exec-local-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let relaySocket = root.appendingPathComponent("relay.sock")
+        let sshStub = root.appendingPathComponent("ssh")
+        let omgdStub = root.appendingPathComponent("omgd")
+        let modeFile = root.appendingPathComponent("omgd.mode")
+        let omgdLog = root.appendingPathComponent("omgd.log")
+        let sshLog = root.appendingPathComponent("ssh.log")
+
+        let sshScript = """
+        #!/bin/sh
+        printf 'ssh:%s\\n' "$*" >> \(SSHGitExecutor.quote(sshLog.path))
+        printf 'via-ssh\\n'
+        exit 0
+        """
+        try sshScript.write(to: sshStub, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: sshStub.path)
+
+        let omgdScript = """
+        #!/bin/sh
+        printf '%s|%s|%s\\n' "$1" "$2" "$3" >> \(SSHGitExecutor.quote(omgdLog.path))
+        mode=$(cat \(SSHGitExecutor.quote(modeFile.path)))
+        case "$mode" in
+          ok)
+            printf 'via-omgd\\n'
+            exit 0
+            ;;
+          unsupported)
+            printf '\\036OMG-EXEC-UNSUPPORTED\\037relay unavailable\\n' >&2
+            exit 253
+            ;;
+          plain253)
+            printf 'remote exited 253\\n' >&2
+            exit 253
+            ;;
+          limit)
+            printf '\\036OMG-EXEC-LIMIT\\037output limit exceeded\\n' >&2
+            exit 252
+            ;;
+          transport-once)
+            printf 'ok\\n' > \(SSHGitExecutor.quote(modeFile.path))
+            printf '\\036OMG-EXEC-TRANSPORT\\037\\ntransport dropped\\n' >&2
+            exit 255
+            ;;
+          transport-always)
+            printf '\\036OMG-EXEC-TRANSPORT\\037\\ntransport dropped\\n' >&2
+            exit 255
+            ;;
+        esac
+        """
+        try omgdScript.write(to: omgdStub, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: omgdStub.path)
+
+        let connection = try GitSSHConnection(
+            destination: "exec-test-\(UUID().uuidString)",
+            options: ["-p", "2222"],
+            workspaceID: "ssh:exec-primary",
+            executablePath: sshStub.path,
+            localWorkingDirectory: root.path
+        )
+        defer { SessionRuntimeConnections.setTestActiveRelaySocket(nil, for: connection) }
+
+        // Missing socket file on disk must not resolve.
+        SessionRuntimeConnections.setTestActiveRelaySocket(relaySocket, for: connection)
+        #expect(SessionRuntimeConnections.activeRelaySocket(for: connection) == nil)
+
+        // Present socket matches exact connection and matching (destination, options, executablePath).
+        FileManager.default.createFile(atPath: relaySocket.path, contents: Data())
+        #expect(SessionRuntimeConnections.activeRelaySocket(for: connection) == relaySocket)
+        let siblingConnection = try GitSSHConnection(
+            destination: connection.destination,
+            options: connection.options,
+            workspaceID: "ssh:exec-sibling",
+            executablePath: sshStub.path,
+            localWorkingDirectory: "/tmp"
+        )
+        #expect(SessionRuntimeConnections.activeRelaySocket(for: siblingConnection) == relaySocket)
+
+        // 1. Fast path succeeds via omgd exec-local without touching ssh.
+        try "ok".write(to: modeFile, atomically: true, encoding: .utf8)
+        let okResult = try await SSHSessionTransport.run(
+            connection: connection,
+            command: "echo hi",
+            limit: 4096,
+            omgdExecutableOverride: omgdStub.path
+        )
+        #expect(okResult.isSuccess && okResult.stdoutString == "via-omgd\n")
+        #expect(!FileManager.default.fileExists(atPath: sshLog.path))
+        let recordedOmgd = try String(contentsOf: omgdLog, encoding: .utf8)
+        #expect(recordedOmgd.contains("exec-local|\(relaySocket.path)|4096"))
+
+        // 2. Exit 253 with sentinel falls through transparently to OpenSSH.
+        try "unsupported".write(to: modeFile, atomically: true, encoding: .utf8)
+        let fallbackResult = try await SSHSessionTransport.run(
+            connection: connection,
+            command: "echo hi",
+            limit: 4096,
+            multiplexing: true,
+            omgdExecutableOverride: omgdStub.path
+        )
+        #expect(fallbackResult.isSuccess && fallbackResult.stdoutString == "via-ssh\n")
+        #expect(try String(contentsOf: sshLog, encoding: .utf8).contains("ssh:"))
+        try? FileManager.default.removeItem(at: sshLog)
+
+        // 3. Exit 253 without sentinel returns directly without SSH fallback.
+        try "plain253".write(to: modeFile, atomically: true, encoding: .utf8)
+        let plain253Result = try await SSHSessionTransport.run(
+            connection: connection,
+            command: "echo hi",
+            limit: 4096,
+            omgdExecutableOverride: omgdStub.path
+        )
+        #expect(plain253Result.exitCode == 253)
+        #expect(plain253Result.stderrString == "remote exited 253\n")
+        #expect(!FileManager.default.fileExists(atPath: sshLog.path))
+
+        // 4. Exit 252 with sentinel throws outputLimitExceeded without SSH fallback.
+        try "limit".write(to: modeFile, atomically: true, encoding: .utf8)
+        do {
+            _ = try await SSHSessionTransport.run(
+                connection: connection,
+                command: "echo hi",
+                limit: 1234,
+                omgdExecutableOverride: omgdStub.path
+            )
+            Issue.record("Expected outputLimitExceeded for 252 sentinel")
+        } catch let error as GitExecutionError {
+            #expect(error == .outputLimitExceeded(maxBytes: 1234))
+        }
+        #expect(!FileManager.default.fileExists(atPath: sshLog.path))
+
+        // 5. Exit 255 transport sentinel strips prefix line, retries once when idempotent, and does not retry writes.
+        try "transport-once".write(to: modeFile, atomically: true, encoding: .utf8)
+        let retriedResult = try await SSHSessionTransport.run(
+            connection: connection,
+            command: "echo hi",
+            limit: 4096,
+            idempotent: true,
+            omgdExecutableOverride: omgdStub.path
+        )
+        #expect(retriedResult.isSuccess && retriedResult.stdoutString == "via-omgd\n")
+        #expect(!FileManager.default.fileExists(atPath: sshLog.path))
+
+        try "transport-always".write(to: modeFile, atomically: true, encoding: .utf8)
+        try Data().write(to: omgdLog)
+        let writeFailure = try await SSHSessionTransport.run(
+            connection: connection,
+            command: "echo hi",
+            limit: 4096,
+            idempotent: false,
+            omgdExecutableOverride: omgdStub.path
+        )
+        #expect(writeFailure.exitCode == 255)
+        #expect(writeFailure.stderrString == "transport dropped\n")
+        #expect(try String(contentsOf: omgdLog, encoding: .utf8).split(separator: "\n").count == 1)
+    }
+
+    @Test func openSSHColdHandshakeSerializesConcurrentCallsAndEvictsBrokenSockets() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-cold-handshake-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // Part A: 6 concurrent reads start cold -> cold_max == 1, then warm calls run concurrently (<= 4).
+        let stateDir = root.appendingPathComponent("state", isDirectory: true)
+        try FileManager.default.createDirectory(at: stateDir, withIntermediateDirectories: true)
+        let coldSSH = root.appendingPathComponent("ssh-cold")
+        let coldScript = """
+        #!/bin/sh
+        STATE=\(SSHGitExecutor.quote(stateDir.path))
+        SOCKET=""
+        PREV=""
+        for arg in "$@"; do
+          if [ "$PREV" = "-S" ]; then
+            SOCKET="$arg"
+            break
+          fi
+          PREV="$arg"
+        done
+        LOCK="$STATE/lock"
+        acquire_lock() {
+          while ! mkdir "$LOCK" 2>/dev/null; do
+            sleep 0.005
+          done
+        }
+        release_lock() {
+          rmdir "$LOCK"
+        }
+        acquire_lock
+        IS_COLD=0
+        if [ -n "$SOCKET" ] && [ ! -e "$SOCKET" ]; then
+          IS_COLD=1
+          c=$(cat "$STATE/cold_active" 2>/dev/null || echo 0)
+          c=$((c + 1))
+          echo "$c" > "$STATE/cold_active"
+          m=$(cat "$STATE/cold_max" 2>/dev/null || echo 0)
+          if [ "$c" -gt "$m" ]; then echo "$c" > "$STATE/cold_max"; fi
+        else
+          w=$(cat "$STATE/warm_active" 2>/dev/null || echo 0)
+          w=$((w + 1))
+          echo "$w" > "$STATE/warm_active"
+          wm=$(cat "$STATE/warm_max" 2>/dev/null || echo 0)
+          if [ "$w" -gt "$wm" ]; then echo "$w" > "$STATE/warm_max"; fi
+        fi
+        release_lock
+        if [ "$IS_COLD" -eq 1 ]; then
+          sleep 0.05
+        else
+          sleep 0.12
+        fi
+        acquire_lock
+        if [ "$IS_COLD" -eq 1 ]; then
+          touch "$SOCKET"
+          c=$(cat "$STATE/cold_active" 2>/dev/null || echo 1)
+          echo $((c - 1)) > "$STATE/cold_active"
+        else
+          w=$(cat "$STATE/warm_active" 2>/dev/null || echo 1)
+          echo $((w - 1)) > "$STATE/warm_active"
+        fi
+        release_lock
+        printf 'ok\\n'
+        exit 0
+        """
+        try coldScript.write(to: coldSSH, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: coldSSH.path)
+
+        let coldConnection = try GitSSHConnection(
+            destination: "cold-host-\(UUID().uuidString)",
+            executablePath: coldSSH.path,
+            localWorkingDirectory: root.path
+        )
+        let coldSocket = try GitSSHControlSocket.path(for: coldConnection, executablePath: coldSSH.path)
+        defer { Darwin.unlink(coldSocket) }
+        try? FileManager.default.removeItem(atPath: coldSocket)
+
+        try await withThrowingTaskGroup(of: GitExecutionResult.self) { group in
+            for _ in 0..<6 {
+                group.addTask {
+                    try await SSHSessionTransport.run(
+                        connection: coldConnection,
+                        command: "echo ok",
+                        executable: coldSSH.path,
+                        idempotent: true
+                    )
+                }
+            }
+            var count = 0
+            for try await result in group {
+                #expect(result.isSuccess)
+                count += 1
+            }
+            #expect(count == 6)
+        }
+        let maxCold = Int(try String(contentsOf: stateDir.appendingPathComponent("cold_max"), encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines))
+        let maxWarm = Int(try String(contentsOf: stateDir.appendingPathComponent("warm_max"), encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines))
+        #expect(maxCold == 1)
+        #expect((maxWarm ?? 0) >= 2 && (maxWarm ?? 0) <= 4)
+
+        // Part B: exit 255 evicts broken control socket, retries idempotent reads once, never retries writes.
+        let evictSSH = root.appendingPathComponent("ssh-evict")
+        let evictLog = root.appendingPathComponent("evict.log")
+        let failFlag = root.appendingPathComponent("fail_once")
+        let evictScript = """
+        #!/bin/sh
+        printf '%s\\n' "$*" >> \(SSHGitExecutor.quote(evictLog.path))
+        for arg in "$@"; do
+          if [ "$arg" = "check" ]; then
+            exit 255
+          fi
+          if [ "$arg" = "exit" ]; then
+            exit 0
+          fi
+        done
+        if [ -f \(SSHGitExecutor.quote(failFlag.path)) ]; then
+          rm -f \(SSHGitExecutor.quote(failFlag.path))
+          printf 'ControlSocket broken\\n' >&2
+          exit 255
+        fi
+        printf '\\036OMG-GIT-v1\\037recovered\\n'
+        exit 0
+        """
+        try evictScript.write(to: evictSSH, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: evictSSH.path)
+
+        let evictConnection = try GitSSHConnection(
+            destination: "evict-host-\(UUID().uuidString)",
+            executablePath: evictSSH.path,
+            localWorkingDirectory: root.path
+        )
+        let evictSocket = try GitSSHControlSocket.path(for: evictConnection, executablePath: evictSSH.path)
+        defer { Darwin.unlink(evictSocket) }
+        FileManager.default.createFile(atPath: evictSocket, contents: Data())
+        FileManager.default.createFile(atPath: failFlag.path, contents: Data())
+
+        let executor = SSHGitExecutor(connection: evictConnection)
+        let readResult = try await executor.execute(arguments: ["status"], workingDirectory: root.path)
+        #expect(readResult.isSuccess && readResult.stdoutString == "recovered\n")
+        #expect(!FileManager.default.fileExists(atPath: evictSocket))
+        let readLog = try String(contentsOf: evictLog, encoding: .utf8)
+        #expect(readLog.contains("-O check"))
+        #expect(readLog.contains("-O exit"))
+
+        // Mutating command must evict broken socket on 255 and must NOT retry.
+        try Data().write(to: evictLog)
+        FileManager.default.createFile(atPath: evictSocket, contents: Data())
+        FileManager.default.createFile(atPath: failFlag.path, contents: Data())
+        await #expect(throws: GitExecutionError.self) {
+            try await executor.execute(arguments: ["commit", "-m", "write"], workingDirectory: root.path)
+        }
+        #expect(!FileManager.default.fileExists(atPath: evictSocket))
+        let writeLogLines = try String(contentsOf: evictLog, encoding: .utf8).split(separator: "\n")
+        let commandInvocations = writeLogLines.filter { !$0.contains("-O check") && !$0.contains("-O exit") }
+        #expect(commandInvocations.count == 1)
+    }
+
+    @Test func gitInspectorProviderAppliesPollBackoffPauseRecoveryAndStaleWhileRevalidate() async throws {
+        actor MockSSHExecutor: GitExecutor {
+            var shouldFail = true
+            var revParseAttempts = 0
+
+            func setShouldFail(_ value: Bool) {
+                shouldFail = value
+            }
+
+            func execute(
+                arguments: [String],
+                workingDirectory: String,
+                stdin: Data?,
+                maxOutputBytes: Int?
+            ) async throws -> GitExecutionResult {
+                if shouldFail {
+                    if arguments.contains("rev-parse"), arguments.contains("--is-inside-work-tree") {
+                        revParseAttempts += 1
+                    }
+                    throw GitExecutionError.executionFailed("Jump host rate limit")
+                }
+                if arguments.contains("rev-parse") && arguments.contains("--is-inside-work-tree") {
+                    revParseAttempts += 1
+                    let out = "true\n/remote/repo\n/remote/repo/.git\n/remote/repo/.git\n\n"
+                    return GitExecutionResult(exitCode: 0, stdout: Data(out.utf8), stderr: Data())
+                }
+                if arguments.contains("symbolic-ref") {
+                    return GitExecutionResult(exitCode: 0, stdout: Data("main\n".utf8), stderr: Data())
+                }
+                if arguments.contains("rev-parse") && arguments.contains("--verify") {
+                    let sha = "0123456789abcdef0123456789abcdef01234567\n"
+                    return GitExecutionResult(exitCode: 0, stdout: Data(sha.utf8), stderr: Data())
+                }
+                if arguments.contains("config") {
+                    return GitExecutionResult(exitCode: 1, stdout: Data(), stderr: Data())
+                }
+                return GitExecutionResult(exitCode: 0, stdout: Data(), stderr: Data())
+            }
+        }
+
+        #expect(BuiltInGitInspectorProvider.remotePollInterval(failures: 0) == 10)
+        #expect(BuiltInGitInspectorProvider.remotePollInterval(failures: 1) == 15)
+        #expect(BuiltInGitInspectorProvider.remotePollInterval(failures: 2) == 30)
+        #expect(BuiltInGitInspectorProvider.remotePollInterval(failures: 3) == 60)
+        #expect(BuiltInGitInspectorProvider.remotePollInterval(failures: 4) == 120)
+        #expect(BuiltInGitInspectorProvider.remotePollInterval(failures: 5) == 240)
+        #expect(BuiltInGitInspectorProvider.remotePollInterval(failures: 8) == 240)
+
+        let executor = MockSSHExecutor()
+        let registry = InspectorRegistry()
+        let provider = BuiltInGitInspectorProvider(registry: registry, executor: executor)
+        try provider.register()
+
+        var session = PaneSessionContext(workingDirectory: "/tmp", terminalTitle: "SSH")
+        let replay = SSHReplayDescriptor(
+            version: 1,
+            ssh: "/usr/bin/ssh",
+            forwardEnv: false,
+            terminfo: false,
+            cache: false,
+            args: ["user@host"]
+        )
+        let remoteDir = "/remote/repo"
+        let hex = remoteDir.utf8.map { String(format: "%02x", $0) }.joined()
+        session.apply(
+            .init(action: .start, id: "omg-ssh-mock-backoff", metadata: "type=remote;targethost=host;cwdhex=" + hex),
+            currentWorkingDirectory: "/tmp",
+            currentTerminalTitle: "SSH",
+            sshReplay: replay
+        )
+        guard case .sshReady = session.state else {
+            Issue.record("Expected .sshReady state after applying mock SSH signal")
+            return
+        }
+
+        let tabID = UUID()
+        let context = InspectorPaneContext(
+            tabID: tabID,
+            surfaceID: UUID(),
+            title: "SSH",
+            workingDirectory: remoteDir,
+            session: session
+        )
+        defer {
+            registry.presentationDidChange(to: nil, context: context)
+            provider.forgetTab(tabID)
+        }
+
+        func waitUntil(_ predicate: (InspectorGitContent) -> Bool) async throws -> InspectorGitContent {
+            for _ in 0..<200 {
+                if case .git(let value) = registry.content(for: BuiltInGitInspectorProvider.paneID, context: context),
+                   !value.isLoading,
+                   !value.history.isLoading,
+                   predicate(value) {
+                    return value
+                }
+                try await Task.sleep(for: .milliseconds(15))
+            }
+            throw GitExecutionError.executionFailed("Timed out waiting for Git inspector provider update.")
+        }
+
+        // Initial load fails -> consecutivePollFailures == 1, .error published.
+        registry.presentationDidChange(to: BuiltInGitInspectorProvider.paneID, context: context)
+        let firstError = try await waitUntil {
+            if case .error = $0.status { return true }
+            return false
+        }
+        #expect(firstError.repository == nil)
+        #expect(provider.consecutivePollFailureCount(for: tabID) == 1)
+        #expect(await executor.revParseAttempts == 1)
+
+        // Poll #2 at t0 -> fails -> failures == 2.
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+        provider.pollPresentedTabs(at: t0)
+        for _ in 0..<100 where provider.consecutivePollFailureCount(for: tabID) < 2 {
+            try await Task.sleep(for: .milliseconds(15))
+        }
+        #expect(provider.consecutivePollFailureCount(for: tabID) == 2)
+        #expect(await executor.revParseAttempts == 2)
+
+        // Poll at +15s is skipped because interval for 2 failures is 30s.
+        provider.pollPresentedTabs(at: t0.addingTimeInterval(15))
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(await executor.revParseAttempts == 2)
+
+        // Poll #3 at +30s -> fails -> failures == 3.
+        provider.pollPresentedTabs(at: t0.addingTimeInterval(30))
+        for _ in 0..<100 where provider.consecutivePollFailureCount(for: tabID) < 3 {
+            try await Task.sleep(for: .milliseconds(15))
+        }
+        #expect(provider.consecutivePollFailureCount(for: tabID) == 3)
+        #expect(await executor.revParseAttempts == 3)
+
+        // After 3 initial .sshReady failures with repository == nil, auto-polling pauses indefinitely.
+        provider.pollPresentedTabs(at: t0.addingTimeInterval(1_000))
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(await executor.revParseAttempts == 3)
+
+        // Manual .refresh clears failure count and recovers into .ready.
+        await executor.setShouldFail(false)
+        registry.performAction(
+            paneID: BuiltInGitInspectorProvider.paneID,
+            action: .init(context: context, kind: .gitAction(.refresh))
+        )
+        let ready = try await waitUntil { $0.repository != nil }
+        #expect(ready.repository?.worktreePath == remoteDir)
+        #expect(provider.consecutivePollFailureCount(for: tabID) == 0)
+
+        // Stale-while-revalidate: transient background poll error preserves working repository view.
+        await executor.setShouldFail(true)
+        let beforeTransientPoll = await executor.revParseAttempts
+        provider.pollPresentedTabs(at: t0.addingTimeInterval(2_000))
+        for _ in 0..<100 where provider.consecutivePollFailureCount(for: tabID) < 1 {
+            try await Task.sleep(for: .milliseconds(15))
+        }
+        #expect(await executor.revParseAttempts == beforeTransientPoll + 1)
+        #expect(provider.consecutivePollFailureCount(for: tabID) == 1)
+        if case .git(let staleKept) = registry.content(for: BuiltInGitInspectorProvider.paneID, context: context) {
+            #expect(staleKept.repository?.worktreePath == remoteDir)
+            #expect(!staleKept.isLoading)
+            if case .ready = staleKept.status {
+                // Expected stale repository state retained.
+            } else {
+                Issue.record("Expected stale .ready state to be preserved on transient background poll error")
+            }
+        } else {
+            Issue.record("Expected .git content after stale-while-revalidate poll error")
+        }
+    }
+
+    @Test func inspectorGitViewEnablesRefreshAndRetryInErrorState() async throws {
+        let errorContent = InspectorGitContent(
+            repository: nil,
+            status: .error(title: "SSH Git Error", message: "Connection failed"),
+            isLoading: false
+        )
+        let loadingErrorContent = InspectorGitContent(
+            repository: nil,
+            status: .error(title: "SSH Git Error", message: "Connection failed"),
+            isLoading: true
+        )
+        let repo = GitRepositoryIdentity(
+            worktreePath: "/repo",
+            gitDirPath: "/repo/.git",
+            commonGitDirPath: "/repo/.git"
+        )
+        let readyContent = InspectorGitContent(
+            repository: repo,
+            branch: "main",
+            status: .ready(repository: repo, branch: "main", headCommitID: nil),
+            isLoading: false
+        )
+
+        #expect(InspectorGitView.isToolbarRefreshEnabled(for: errorContent))
+        #expect(!InspectorGitView.isToolbarRefreshEnabled(for: loadingErrorContent))
+        #expect(InspectorGitView.toolbarRefreshAction(for: errorContent) == .refresh)
+        #expect(InspectorGitView.toolbarRefreshAction(for: readyContent) == .fetch)
+
+        var actions: [InspectorPaneActionKind] = []
+        let view = NSHostingView(
+            rootView: InspectorGitView(content: errorContent) { actions.append($0) }
+                .background(Color(NSColor.windowBackgroundColor))
+        )
+        view.sizingOptions = []
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 480),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = view
+        window.orderFront(nil)
+        defer { window.contentView = nil; window.close() }
+
+        func allViews(_ root: NSView) -> [NSView] {
+            [root] + root.subviews.flatMap(allViews)
+        }
+
+        try await Task.sleep(for: .milliseconds(100))
+        view.layoutSubtreeIfNeeded()
+
+        let fetchButton = try #require(allViews(view).first { $0.accessibilityIdentifier() == "git.fetch" } as? NSButton)
+        let retryButton = try #require(allViews(view).first { $0.accessibilityIdentifier() == "git.retry" } as? NSButton)
+        #expect(fetchButton.isEnabled)
+        #expect(retryButton.isEnabled)
+
+        retryButton.performClick(nil)
+        fetchButton.performClick(nil)
+        #expect(actions == [.gitAction(.refresh), .gitAction(.refresh)])
+
+        view.rootView = InspectorGitView(content: loadingErrorContent) { actions.append($0) }
+            .background(Color(NSColor.windowBackgroundColor))
+        try await Task.sleep(for: .milliseconds(80))
+        view.layoutSubtreeIfNeeded()
+        let loadingFetch = try #require(allViews(view).first { $0.accessibilityIdentifier() == "git.fetch" } as? NSButton)
+        let loadingRetry = try #require(allViews(view).first { $0.accessibilityIdentifier() == "git.retry" } as? NSButton)
+        #expect(!loadingFetch.isEnabled)
+        #expect(!loadingRetry.isEnabled)
     }
 }

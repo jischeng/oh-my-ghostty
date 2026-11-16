@@ -2,6 +2,7 @@ import AppKit
 import CryptoKit
 import Darwin
 import Foundation
+import os
 
 struct SessionRuntimePolicy: Codable, Equatable, Sendable {
     var detachedTTLSeconds = 259_200
@@ -546,6 +547,76 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
     private var relays: [String: Relay] = [:]
     private var installationTasks: [String: Task<Void, Error>] = [:]
 
+    nonisolated private static let activeRemoteRelaySockets = OSAllocatedUnfairLock(
+        initialState: [String: (connection: GitSSHConnection, socket: URL)]()
+    )
+    nonisolated private static let activeRemoteRelayOwners = OSAllocatedUnfairLock(
+        initialState: [String: ObjectIdentifier]()
+    )
+
+    nonisolated private static func registerActiveRemoteRelaySocket(
+        identity: String,
+        connection: GitSSHConnection,
+        socket: URL,
+        process: Process
+    ) {
+        let owner = ObjectIdentifier(process)
+        activeRemoteRelayOwners.withLock { $0[identity] = owner }
+        activeRemoteRelaySockets.withLock { $0[identity] = (connection: connection, socket: socket) }
+    }
+
+    nonisolated private static func unregisterActiveRemoteRelaySocket(
+        identity: String,
+        socket: URL,
+        process: Process
+    ) {
+        let owner = ObjectIdentifier(process)
+        let shouldRemove = activeRemoteRelayOwners.withLock { owners -> Bool in
+            guard owners[identity] == owner else { return false }
+            owners.removeValue(forKey: identity)
+            return true
+        }
+        guard shouldRemove else { return }
+        activeRemoteRelaySockets.withLock { sockets in
+            if sockets[identity]?.socket == socket {
+                sockets.removeValue(forKey: identity)
+            }
+        }
+    }
+
+    nonisolated private static func clearActiveRemoteRelaySocket(identity: String) {
+        activeRemoteRelayOwners.withLock { $0.removeValue(forKey: identity) }
+        activeRemoteRelaySockets.withLock { $0.removeValue(forKey: identity) }
+    }
+
+    nonisolated static func setTestActiveRelaySocket(_ socket: URL?, for connection: GitSSHConnection) {
+        let key = "test:\(connection.identity)"
+        activeRemoteRelaySockets.withLock { sockets in
+            if let socket {
+                sockets[key] = (connection: connection, socket: socket)
+            } else {
+                sockets.removeValue(forKey: key)
+            }
+        }
+    }
+
+    nonisolated static func activeRelaySocket(for connection: GitSSHConnection) -> URL? {
+        let entries = activeRemoteRelaySockets.withLock { Array($0.values) }
+        for entry in entries where entry.connection == connection {
+            if FileManager.default.fileExists(atPath: entry.socket.path) {
+                return entry.socket
+            }
+        }
+        for entry in entries where entry.connection.destination == connection.destination
+            && entry.connection.options == connection.options
+            && entry.connection.executablePath == connection.executablePath {
+            if FileManager.default.fileExists(atPath: entry.socket.path) {
+                return entry.socket
+            }
+        }
+        return nil
+    }
+
     nonisolated static var resources: URL {
         Bundle.main.resourceURL!.appendingPathComponent("session-runtime", isDirectory: true)
     }
@@ -931,7 +1002,17 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
         interactive: Bool = true,
         runtimeRoot: URL? = nil
     ) throws -> URL {
-        if let relay = relays[descriptor.identity], relay.process.isRunning { return relay.socket }
+        if let relay = relays[descriptor.identity], relay.process.isRunning {
+            if let remoteConnection = descriptor.connection {
+                Self.registerActiveRemoteRelaySocket(
+                    identity: descriptor.identity,
+                    connection: remoteConnection,
+                    socket: relay.socket,
+                    process: relay.process
+                )
+            }
+            return relay.socket
+        }
         // Darwin sockaddr_un paths are capped near 104 bytes; the user's
         // /var/folders temporary path plus a host identity can exceed that.
         let root = runtimeRoot ?? URL(fileURLWithPath: "/tmp", isDirectory: true)
@@ -942,6 +1023,7 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
         let socket = root.appendingPathComponent(key + ".sock")
         let configURL = root.appendingPathComponent(key + ".json")
         try writeConnectionConfiguration(descriptor, to: configURL, interactive: interactive)
+        Self.clearActiveRemoteRelaySocket(identity: descriptor.identity)
         try? FileManager.default.removeItem(at: socket)
         let process = Process()
         // Use the current transport optimizations for compatible cached runtimes;
@@ -967,7 +1049,15 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
         environment["DISPLAY"] = environment["DISPLAY"] ?? "omg:0"
         process.environment = environment
         let identity = descriptor.identity
+        let remoteConnection = descriptor.connection
         process.terminationHandler = { [weak self] terminatedProcess in
+            if remoteConnection != nil {
+                Self.unregisterActiveRemoteRelaySocket(
+                    identity: identity,
+                    socket: socket,
+                    process: terminatedProcess
+                )
+            }
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 if self.relays[identity]?.process === terminatedProcess {
@@ -988,6 +1078,21 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
                 socket: socket,
                 allowsInteractiveFirstAttempt: interactive
             )
+            if let remoteConnection {
+                Self.registerActiveRemoteRelaySocket(
+                    identity: identity,
+                    connection: remoteConnection,
+                    socket: socket,
+                    process: process
+                )
+                if !process.isRunning {
+                    Self.unregisterActiveRemoteRelaySocket(
+                        identity: identity,
+                        socket: socket,
+                        process: process
+                    )
+                }
+            }
         }
         SessionRuntimeCatalog.shared.remember(descriptor)
         return socket
@@ -1000,6 +1105,14 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
     func prepareInteractiveSession(_ descriptor: SessionRuntimeDescriptor) throws -> URL {
         guard let relay = relays[descriptor.identity], relay.process.isRunning else {
             return try prepare(descriptor, interactive: true)
+        }
+        if let remoteConnection = descriptor.connection {
+            Self.registerActiveRemoteRelaySocket(
+                identity: descriptor.identity,
+                connection: remoteConnection,
+                socket: relay.socket,
+                process: relay.process
+            )
         }
         if !relay.allowsInteractiveFirstAttempt, descriptor.connection != nil {
             try launchRetryRequest(socket: relay.socket, interactive: true)
@@ -1037,11 +1150,15 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
         // A relay leads its own process group; its SSH tunnel child shares it.
         // Signalling only the relay leaves that ssh in the app coalition, so
         // LaunchServices reports the quit app as running in the background.
+        let activeIdentities = Array(relays.keys)
         for relay in relays.values where relay.process.isRunning {
             let pid = relay.process.processIdentifier
             if getpgid(pid) == pid { kill(-pid, SIGTERM) } else { relay.process.terminate() }
         }
         relays.removeAll()
+        for identity in activeIdentities {
+            Self.clearActiveRemoteRelaySocket(identity: identity)
+        }
         GitSSHControlSocket.closeAll()
         Self.terminateDirectSSHChildren()
     }

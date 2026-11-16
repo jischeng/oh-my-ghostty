@@ -72,6 +72,20 @@ session, including when Close arrives before Create. This revokes the whole
 pane UUID across Agent resume generations. Old pinned hosts keep the attached
 Close path but cannot confirm durable cleanup; requests remain visible as pending.
 
+Remote hosts advertising `exec/1` also accept multiplexed host-owned command
+execution through `omgd exec-local <relay-socket> <max-output-bytes> <command>`
+over the live relay tunnel, avoiding extra SSH handshakes and OpenSSH
+ControlMaster connections for Git and auxiliary probes. When the relay is
+offline/missing or the remote host lacks `exec/1`, `omgd exec-local` exits `253`
+with stderr prefix `\x1eOMG-EXEC-UNSUPPORTED\x1f` so the Mac transport falls
+through transparently to OpenSSH `ControlMaster`. Exit `252` with stderr prefix
+`\x1eOMG-EXEC-LIMIT\x1f` reports an enforced output cap (`outputLimitExceeded`)
+without falling through, exit `255` with stderr prefix
+`\x1eOMG-EXEC-TRANSPORT\x1f` reports relay transport loss (retried once for
+idempotent read-only commands after stripping the sentinel prefix), and all
+other exit codes (including remote commands exiting `252` or `253` without the
+sentinel) pass through directly without falling back to `ssh`.
+
 App termination separately controls local and SSH retention through
 `sessions.keepLocalOnQuit` and `sessions.keepSSHOnQuit`, both defaulting to true.
 After quit is accepted, disabled categories enqueue durable Close requests for
@@ -3141,13 +3155,24 @@ flags such as `-4vp2222`; unknown options fail closed. Foreground
 OpenSSH sessions capture argv boundaries via `KERN_PROCARGS2` (not a whitespace
 split of ps output); if exact options cannot be recovered, Git asks for a
 reconnection rather than guessing a port. Existing SSH config and
-agent authentication apply. Git commands use a private OpenSSH master with
-`ControlMaster=auto` and a 60-second idle `ControlPersist`, instead of a fresh
-connection per query. Its socket key includes the full connection identity,
+agent authentication apply. When an active remote `omgd` relay socket is
+registered for the connection, `SSHSessionTransport.run` routes commands over
+`omgd exec-local` (`exec/1`) first and falls back transparently to OpenSSH only
+when `exec-local` exits `253` with `\x1eOMG-EXEC-UNSUPPORTED\x1f`. On the OpenSSH
+path, Git commands use a private OpenSSH master with `ControlMaster=auto` and a
+3600-second (1-hour) idle `ControlPersist`, instead of a fresh connection per
+query. Cold handshakes (and cold `sftp` connections) are serialized single-flight
+per executable and destination (`coldHandshakeLimiter`, concurrency `1`), while
+subsequent calls share the warm master concurrently (up to `4` per connection).
+Its socket key includes the full connection identity,
 executable, original cwd and application-session salt. The short socket directory
 is owned by the current user with mode 0700; interactive terminal control sockets
-are not reused or modified. OpenSSH owns concurrent channels and idle expiry;
-mutations are never retried automatically after a transport failure. Auxiliary commands disable terminal
+are not reused or modified. On exit `255`, broken OpenSSH control sockets are
+checked (`-O check`) and evicted (`-O exit` + `unlink`). Only explicitly
+allowlisted idempotent read-only Git commands (`SSHGitExecutor.isIdempotentReadOnly`,
+excluding `-c`, `--config-env`, and all mutating commands) and working-file reads
+retry once after a `150ms` delay on transport `255` failures; mutations are never
+retried automatically after a transport failure. Auxiliary commands disable terminal
 allocation, port forwards, LocalCommand and RemoteCommand side effects.
 Configured agent forwarding, including explicit `-A`, is preserved.
 Auxiliary execution retains the original local launch directory, so relative
@@ -3183,7 +3208,16 @@ non-regular files retain the patch fallback. A lost connection during a write
 reports an uncertain outcome and keeps the draft for refresh/reconciliation.
 
 Remote polling is throttled to ten seconds; explicit refresh and completed
-mutations refresh immediately. No fetch, force-push, stash, or host-key bypass
+mutations refresh immediately. When `repository == nil` (including `.error`
+states), the toolbar refresh button (`git.fetch`) switches to `.refresh` and
+stays enabled whenever not actively loading, and the `.error` view renders an
+enabled Retry action (`git.retry`). Background polls apply
+stale-while-revalidate: non-forced poll failures retain a previously loaded
+working repository snapshot instead of blanking the view, while remote `.sshReady`
+failures apply exponential backoff (`15s`, `30s`, `60s`, `120s`, `240s` capped at
+`300s`) and pause automatic polling after 3 consecutive initial failures
+(`repository == nil`) until explicit manual refresh or directory/session change.
+No fetch, force-push, stash, or host-key bypass
 is added. Remote branch switching also protects unsaved editor documents in
 the SSH workspace conservatively, since symlink aliases cannot be resolved
 through the Mac filesystem. Tests run an isolated loopback sshd with private

@@ -21,6 +21,7 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
         -> QuickInputHistoryNavigationResult)?
     var onHistoryCaretMoved: (() -> Void)?
     var companionSurfaceID: UUID?
+    var onEditorMouseDown: (() -> Void)?
     var onPresentationReady: (() -> Void)?
 
     func makeCoordinator() -> Coordinator {
@@ -62,6 +63,7 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
         editor.onRecallHistory = onRecallHistory
         editor.onNavigateHistory = onNavigateHistory
         editor.onHistoryCaretMoved = onHistoryCaretMoved
+        editor.onEditorMouseDown = onEditorMouseDown
         editor.companionSurfaceID = companionSurfaceID
         scrollView.documentView = editor
         scrollView.isHidden = !isPresented
@@ -87,6 +89,7 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
         editor.onRecallHistory = onRecallHistory
         editor.onNavigateHistory = onNavigateHistory
         editor.onHistoryCaretMoved = onHistoryCaretMoved
+        editor.onEditorMouseDown = onEditorMouseDown
         editor.companionSurfaceID = companionSurfaceID
         let paneChanged = context.coordinator.lastCompanionSurfaceID != companionSurfaceID
         if paneChanged {
@@ -289,8 +292,14 @@ final class ComposerTextView: NSTextView, TerminalCompanionResponder {
         -> QuickInputHistoryNavigationResult)?
     var onHistoryCaretMoved: (() -> Void)?
     var performMovementSelector: ((Selector) -> Bool)?
+    var onEditorMouseDown: (() -> Void)?
     var companionSurfaceID: UUID?
     private(set) var isRestoringHistory = false
+
+    override func mouseDown(with event: NSEvent) {
+        onEditorMouseDown?()
+        super.mouseDown(with: event)
+    }
 
     override func resignFirstResponder() -> Bool {
         let result = super.resignFirstResponder()

@@ -2,33 +2,79 @@ import AppKit
 import SwiftUI
 
 enum QuickInputHistoryLayout {
-    static let minimumListHeight: CGFloat = 48
-    static let maximumListHeight: CGFloat = 360
-    static func rowHeight(_ entry: QuickInputHistoryEntry) -> CGFloat {
-        let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineSpacing = 1
-        let lineHeight = ceil(font.ascender - font.descender + font.leading) + 1
-        let text = NSAttributedString(string: String(entry.text.prefix(400)), attributes: [
-            .font: font, .paragraphStyle: paragraph,
-        ])
-        let bounds = text.boundingRect(with: NSSize(width: 368, height: CGFloat.greatestFiniteMagnitude),
-                                      options: [.usesLineFragmentOrigin, .usesFontLeading])
-        return 30 + min(max(ceil(bounds.height), lineHeight), lineHeight * 3)
-    }
+    static let entryCapsuleHeight: CGFloat = 34
+    static let controlCapsuleHeight: CGFloat = 32
+    static let capsuleSpacing: CGFloat = 7
+    static let maxVisibleEntries = 5
+    static let minimumCapsuleWidth: CGFloat = 248
+    static let maximumCapsuleWidth: CGFloat = 430
+    static let controlCapsuleWidth: CGFloat = 296
 
-    static func listHeight(_ entries: [QuickInputHistoryEntry]) -> CGFloat {
-        guard !entries.isEmpty else { return 96 }
-        var height: CGFloat = 0
-        for entry in entries {
-            height += rowHeight(entry)
-            if height >= maximumListHeight { return maximumListHeight }
+    static func entryPreview(_ text: String) -> String {
+        var collapsed = ""
+        collapsed.reserveCapacity(min(text.count, 80))
+        var lastWasNewline = false
+        for scalar in text.unicodeScalars {
+            if CharacterSet.newlines.contains(scalar) {
+                if !lastWasNewline {
+                    collapsed.append(" ↵ ")
+                    lastWasNewline = true
+                }
+            } else {
+                collapsed.unicodeScalars.append(scalar)
+                lastWasNewline = false
+            }
         }
-        return max(height, minimumListHeight)
+        let trimmed = collapsed.trimmingCharacters(in: .whitespaces)
+        let source = trimmed.isEmpty ? text : trimmed
+        return source.count > 52 ? String(source.prefix(52)) + "…" : source
     }
 
-    static func popoverHeight(_ entries: [QuickInputHistoryEntry], searching: Bool, storageError: Bool) -> CGFloat {
-        48 + listHeight(entries) + 38 + (searching ? 42 : 0) + (storageError ? 26 : 0)
+    static func naturalEntriesHeight(entryCount: Int) -> CGFloat {
+        let count = min(max(entryCount, 1), maxVisibleEntries)
+        return CGFloat(count) * entryCapsuleHeight + CGFloat(max(0, count - 1)) * capsuleSpacing
+    }
+
+    static func stackHeight(
+        entryCount: Int,
+        storageError: Bool = false,
+        maxHeight: CGFloat = .greatestFiniteMagnitude
+    ) -> CGFloat {
+        let entriesHeight = naturalEntriesHeight(entryCount: entryCount)
+        let errorHeight = storageError ? entryCapsuleHeight + capsuleSpacing : 0
+        return min(maxHeight, entriesHeight + capsuleSpacing + controlCapsuleHeight + errorHeight)
+    }
+
+    static func capsuleWidth(
+        previewCount: Int,
+        hasDeliveryBadge: Bool,
+        availableWidth: CGFloat
+    ) -> CGFloat {
+        let estimated = CGFloat(previewCount) * 7.3 + 118 + (hasDeliveryBadge ? 46 : 0)
+        let maxAllowed = min(
+            maximumCapsuleWidth,
+            max(minimumCapsuleWidth, availableWidth - AgentQuickInputMetrics.floatingHorizontalInset * 2)
+        )
+        return min(max(estimated, minimumCapsuleWidth), maxAllowed)
+    }
+
+    static func stackWidth(
+        entries: [QuickInputHistoryEntry],
+        availableWidth: CGFloat
+    ) -> CGFloat {
+        let maxAllowed = min(
+            maximumCapsuleWidth,
+            max(minimumCapsuleWidth, availableWidth - AgentQuickInputMetrics.floatingHorizontalInset * 2)
+        )
+        let baseControl = min(controlCapsuleWidth, maxAllowed)
+        let entriesMax = entries.prefix(20).map { entry in
+            capsuleWidth(
+                previewCount: entryPreview(entry.text).count,
+                hasDeliveryBadge: entry.deliveryState != .sent,
+                availableWidth: availableWidth
+            )
+        }.max() ?? minimumCapsuleWidth
+        return max(baseControl, entriesMax)
     }
 }
 
@@ -37,372 +83,571 @@ struct QuickInputHistoryView: View {
     @ObservedObject var store: QuickInputHistoryStore
     @ObservedObject var settings: OhMyGhosttySettings
     @ObservedObject var presentation: QuickInputHistoryPresentation
+    let chromeBackground: Color
+    let isExpanded: Bool
+    let availableWidth: CGFloat
+    let maxHeight: CGFloat
     let onSelect: (String) -> Void
 
-    init(model: AgentQuickInputModel, store: QuickInputHistoryStore,
-         settings: OhMyGhosttySettings, onSelect: @escaping (String) -> Void) {
+    @State private var visualExpanded = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    init(
+        model: AgentQuickInputModel,
+        store: QuickInputHistoryStore,
+        settings: OhMyGhosttySettings,
+        chromeBackground: Color = Color(nsColor: .windowBackgroundColor),
+        isExpanded: Bool = true,
+        availableWidth: CGFloat = 1_000,
+        maxHeight: CGFloat = .greatestFiniteMagnitude,
+        onSelect: @escaping (String) -> Void
+    ) {
         self.model = model
         self.store = store
         self.settings = settings
         self.presentation = model.historyPresentation
+        self.chromeBackground = chromeBackground
+        self.isExpanded = isExpanded
+        self.availableWidth = availableWidth
+        self.maxHeight = maxHeight
         self.onSelect = onSelect
     }
 
     private var entries: [QuickInputHistoryEntry] {
-        store.visibleEntries(paneID: model.targetSurfaceID, tabID: model.historyTabID,
-                             scope: settings.quickInputHistoryScope,
-                             query: presentation.isSearching ? presentation.query : "")
+        store.visibleEntries(
+            paneID: model.targetSurfaceID,
+            tabID: model.historyTabID,
+            scope: settings.quickInputHistoryScope,
+            query: presentation.isSearching ? presentation.query : ""
+        )
+    }
+
+    private var strings: SettingsStrings {
+        SettingsStrings(language: settings.language)
     }
 
     var body: some View {
         let matches = entries
-        QuickInputHistoryNativeView(model: model, store: store, settings: settings,
-                                    presentation: presentation, entries: matches, onSelect: onSelect)
-            .frame(width: 400, height: QuickInputHistoryLayout.popoverHeight(
-                matches, searching: presentation.isSearching, storageError: store.storageError != nil))
-            .fixedSize()
-            .onAppear {
-                store.pruneExpired()
-                presentation.reconcile(entries: entries)
+        let stackWidth = QuickInputHistoryLayout.stackWidth(entries: matches, availableWidth: availableWidth)
+        let totalHeight = QuickInputHistoryLayout.stackHeight(
+            entryCount: matches.count,
+            storageError: store.storageError != nil,
+            maxHeight: maxHeight
+        )
+        let controlWidth = min(QuickInputHistoryLayout.controlCapsuleWidth, stackWidth)
+        let nonEntryHeight = QuickInputHistoryLayout.capsuleSpacing
+            + QuickInputHistoryLayout.controlCapsuleHeight
+            + (store.storageError != nil
+                ? QuickInputHistoryLayout.entryCapsuleHeight + QuickInputHistoryLayout.capsuleSpacing
+                : 0)
+        let entriesMaxHeight = max(
+            QuickInputHistoryLayout.entryCapsuleHeight,
+            totalHeight - nonEntryHeight
+        )
+        let needsScroll = matches.count > QuickInputHistoryLayout.maxVisibleEntries
+            || entriesMaxHeight < QuickInputHistoryLayout.naturalEntriesHeight(entryCount: matches.count)
+        let totalAnimatedCount = 1 + max(matches.count, 1) + (store.storageError != nil ? 1 : 0)
+
+        VStack(alignment: .leading, spacing: QuickInputHistoryLayout.capsuleSpacing) {
+            if store.storageError != nil {
+                QuickInputHistoryErrorCapsule(
+                    text: strings.quickInputHistoryStorageError,
+                    chromeBackground: chromeBackground,
+                    isExpanded: isExpanded
+                )
+                .modifier(
+                    HistoryCapsuleFanOutModifier(
+                        visualExpanded: visualExpanded,
+                        distanceFromSwitch: max(matches.count, 1) + 1,
+                        totalCount: totalAnimatedCount,
+                        reduceMotion: reduceMotion
+                    )
+                )
+            }
+
+            if matches.isEmpty {
+                QuickInputHistoryEmptyCapsule(
+                    text: presentation.isSearching
+                        ? strings.quickInputHistoryNoMatches
+                        : strings.quickInputHistoryEmpty,
+                    width: QuickInputHistoryLayout.minimumCapsuleWidth,
+                    chromeBackground: chromeBackground,
+                    isExpanded: isExpanded
+                )
+                .modifier(
+                    HistoryCapsuleFanOutModifier(
+                        visualExpanded: visualExpanded,
+                        distanceFromSwitch: 1,
+                        totalCount: totalAnimatedCount,
+                        reduceMotion: reduceMotion
+                    )
+                )
+            } else if needsScroll {
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical, showsIndicators: false) {
+                        entriesColumn(matches: matches, totalAnimatedCount: totalAnimatedCount)
+                    }
+                    .frame(height: entriesMaxHeight)
+                    .onAppear {
+                        if let firstID = matches.first?.id {
+                            proxy.scrollTo(firstID, anchor: .bottom)
+                        }
+                    }
+                    .onChange(of: presentation.keyboardSelectionRevision) { _ in
+                        if let selectedID = presentation.selectedID {
+                            proxy.scrollTo(selectedID)
+                        }
+                    }
+                }
+            } else {
+                entriesColumn(matches: matches, totalAnimatedCount: totalAnimatedCount)
+            }
+
+            QuickInputHistoryControlCapsule(
+                presentation: presentation,
+                settings: settings,
+                strings: strings,
+                companionSurfaceID: model.targetSurfaceID,
+                entries: matches,
+                width: controlWidth,
+                chromeBackground: chromeBackground,
+                isExpanded: isExpanded,
+                onMove: { delta in
+                    presentation.moveSelection(by: -delta, entries: matches)
+                },
+                onSelect: {
+                    guard let entry = matches.first(where: { $0.id == presentation.selectedID })
+                        ?? matches.first else {
+                        return
+                    }
+                    onSelect(entry.text)
+                },
+                onEscape: {
+                    if presentation.escape() {
+                        model.requestFocus()
+                    }
+                },
+                onToggle: {
+                    presentation.close()
+                    model.requestFocus()
+                }
+            )
+            .modifier(
+                HistoryCapsuleFanOutModifier(
+                    visualExpanded: visualExpanded,
+                    distanceFromSwitch: 0,
+                    totalCount: totalAnimatedCount,
+                    reduceMotion: reduceMotion
+                )
+            )
+        }
+        .frame(width: stackWidth, height: totalHeight, alignment: .bottomLeading)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(strings.quickInputHistoryTitle)
+        .onAppear {
+            store.pruneExpired()
+            presentation.reconcile(entries: matches)
+            if isExpanded {
+                presentation.requestFocus()
+                Task { @MainActor in
+                    visualExpanded = true
+                }
+            } else {
+                visualExpanded = false
+            }
+        }
+        .onChange(of: isExpanded) { expanded in
+            visualExpanded = expanded
+            if expanded {
+                presentation.reconcile(entries: matches)
                 presentation.requestFocus()
             }
-            .onChange(of: matches.map(\.id)) { _ in presentation.reconcile(entries: entries) }
-    }
-}
-
-struct QuickInputHistoryNativeView: NSViewControllerRepresentable {
-    let model: AgentQuickInputModel
-    let store: QuickInputHistoryStore
-    let settings: OhMyGhosttySettings
-    let presentation: QuickInputHistoryPresentation
-    let entries: [QuickInputHistoryEntry]
-    let onSelect: (String) -> Void
-
-    func makeNSViewController(context: Context) -> QuickInputHistoryController {
-        QuickInputHistoryController()
-    }
-
-    func updateNSViewController(_ controller: QuickInputHistoryController, context: Context) {
-        controller.update(self)
-    }
-}
-
-/// The search input stays mounted even at zero height. AppKit owns list reuse,
-/// scrolling and pointer hit testing; the existing presentation owns selection.
-final class QuickInputHistoryController: NSViewController, NSTableViewDataSource,
-    NSTableViewDelegate, NSTextViewDelegate {
-    private let root = QuickInputHistoryContainer()
-    private let titleLabel = NSTextField(labelWithString: "")
-    private let scope = NSTextField(labelWithString: "")
-    private let toggle = NSButton()
-    private let clear = NSButton()
-    private let searchContainer = NSView()
-    private let editor = QuickInputHistorySearchTextView()
-    private let scroll = NSScrollView()
-    private let table = QuickInputHistoryTable()
-    private let empty = NSTextField(labelWithString: "")
-    private let hint = NSTextField(labelWithString: "")
-    private let error = NSTextField(labelWithString: "")
-    private var snapshot: QuickInputHistoryNativeView?
-    private var entries: [QuickInputHistoryEntry] = []
-    private var handledFocusID = -1
-    private var keyboardRevision = -1
-    private var rowHeights: [UUID: CGFloat] = [:]
-    private let dateFormatter = DateFormatter()
-    private var languageCode: String?
-
-    override func loadView() {
-        view = root
-        root.onLayout = { [weak self] in self?.layoutContent() }
-        [titleLabel, scope, toggle, searchContainer, scroll, empty, hint, error].forEach(root.addSubview)
-        titleLabel.font = .boldSystemFont(ofSize: 13)
-        [scope, hint, error].forEach { $0.font = .systemFont(ofSize: 11); $0.textColor = .secondaryLabelColor }
-        error.textColor = .systemOrange
-        empty.font = .systemFont(ofSize: 13)
-        empty.textColor = .secondaryLabelColor
-        empty.alignment = .center
-        toggle.isBordered = false
-        toggle.target = self
-        toggle.action = #selector(toggleSearch)
-        clear.isBordered = false
-        clear.target = self
-        clear.action = #selector(clearSearch)
-        clear.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: nil)
-        searchContainer.wantsLayer = true
-        searchContainer.layer?.masksToBounds = true
-        searchContainer.layer?.cornerRadius = 7
-        searchContainer.addSubview(editor)
-        searchContainer.addSubview(clear)
-        editor.delegate = self
-        editor.isRichText = false
-        editor.drawsBackground = false
-        editor.font = .systemFont(ofSize: 13)
-        editor.textColor = .labelColor
-        editor.textContainerInset = NSSize(width: 0, height: 7)
-        editor.textContainer?.lineFragmentPadding = 0
-        editor.isAutomaticQuoteSubstitutionEnabled = false
-        editor.isAutomaticDashSubstitutionEnabled = false
-        editor.isAutomaticSpellingCorrectionEnabled = false
-        editor.textContainer?.heightTracksTextView = false
-        editor.textContainer?.containerSize.height = .greatestFiniteMagnitude
-        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("history"))
-        column.resizingMask = .autoresizingMask
-        table.addTableColumn(column)
-        table.headerView = nil
-        table.backgroundColor = .clear
-        table.selectionHighlightStyle = .regular
-        table.intercellSpacing = .zero
-        table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
-        table.dataSource = self
-        table.delegate = self
-        table.onHover = { [weak self] row in
-            guard let self, self.entries.indices.contains(row) else { return }
-            self.snapshot?.presentation.hover(self.entries[row].id)
-            self.syncSelection(scroll: false)
-        }
-        table.onChoose = { [weak self] row in
-            guard let self, self.entries.indices.contains(row) else { return }
-            self.snapshot?.presentation.select(self.entries[row].id)
-            self.snapshot?.onSelect(self.entries[row].text)
-        }
-        scroll.drawsBackground = false
-        scroll.hasVerticalScroller = true
-        scroll.scrollerStyle = .overlay
-        scroll.autohidesScrollers = true
-        scroll.documentView = table
-    }
-
-    func update(_ next: QuickInputHistoryNativeView) {
-        _ = view
-        snapshot = next
-        preferredContentSize = NSSize(width: 400, height: QuickInputHistoryLayout.popoverHeight(
-            next.entries, searching: next.presentation.isSearching, storageError: next.store.storageError != nil))
-        root.contentSize = preferredContentSize
-        let strings = SettingsStrings(language: next.settings.language)
-        let languageChanged = languageCode != strings.languageCode
-        languageCode = strings.languageCode
-        dateFormatter.locale = Locale(identifier: strings.languageCode)
-        dateFormatter.dateStyle = .short
-        dateFormatter.timeStyle = .short
-        titleLabel.stringValue = strings.quickInputHistoryTitle
-        scope.stringValue = "\(strings.quickInputHistoryScopeName(next.settings.quickInputHistoryScope))  \(next.entries.count)"
-        toggle.image = NSImage(systemSymbolName: next.presentation.isSearching ? "xmark" : "magnifyingglass",
-                               accessibilityDescription: nil)
-        toggle.toolTip = next.presentation.isSearching ? strings.quickInputHistoryExitSearch : strings.quickInputHistorySearch
-        toggle.setAccessibilityLabel(toggle.toolTip)
-        clear.setAccessibilityLabel(strings.quickInputHistoryClearSearch)
-        clear.isHidden = next.presentation.query.isEmpty
-        hint.stringValue = next.settings.quickInputHistoryInsertionMode == .append
-            ? strings.quickInputHistoryAppendHint : strings.quickInputHistoryReplaceHint
-        error.stringValue = strings.quickInputHistoryStorageError
-        error.isHidden = next.store.storageError == nil
-        empty.stringValue = next.presentation.isSearching ? strings.quickInputHistoryNoMatches : strings.quickInputHistoryEmpty
-        empty.isHidden = !next.entries.isEmpty
-        scroll.isHidden = next.entries.isEmpty
-        editor.placeholder = strings.quickInputHistorySearch
-        editor.isSearching = next.presentation.isSearching
-        editor.onBeginSearch = { [weak self] in self?.snapshot?.presentation.beginSearch(clearQuery: true) }
-        editor.onMove = { [weak self] delta in
-            guard let self, let snapshot = self.snapshot else { return }
-            snapshot.presentation.moveSelection(by: delta, entries: self.entries)
-            self.syncSelection(scroll: true)
-        }
-        editor.onSelect = { [weak self] in
-            guard let self, let snapshot = self.snapshot,
-                  let entry = self.entries.first(where: { $0.id == snapshot.presentation.selectedID }) else { return }
-            snapshot.onSelect(entry.text)
-        }
-        editor.onEscape = { [weak self] in
-            guard let snapshot = self?.snapshot else { return }
-            if snapshot.presentation.escape() { snapshot.model.requestFocus() }
-        }
-        editor.onToggle = { [weak self] in
-            self?.snapshot?.presentation.close()
-            self?.snapshot?.model.requestFocus()
-        }
-        editor.canRequestFocus = { [weak self] in self?.snapshot?.presentation.isPresented == true }
-        if !editor.hasMarkedText(), editor.string != next.presentation.query {
-            editor.string = next.presentation.query
-            editor.setSelectedRange(NSRange(location: (editor.string as NSString).length, length: 0))
-        }
-        updateEntries(next.entries)
-        if languageChanged, !entries.isEmpty {
-            table.reloadData(forRowIndexes: IndexSet(entries.indices), columnIndexes: IndexSet(integer: 0))
-        }
-        let shouldScroll = keyboardRevision != next.presentation.keyboardSelectionRevision
-        keyboardRevision = next.presentation.keyboardSelectionRevision
-        syncSelection(scroll: shouldScroll)
-        root.needsLayout = true
-        if handledFocusID != next.presentation.focusRequestID {
-            handledFocusID = next.presentation.focusRequestID
-            editor.requestKeyboardFocus()
         }
     }
 
-    private func updateEntries(_ newEntries: [QuickInputHistoryEntry]) {
-        guard entries != newEntries else { return }
-        let previous = entries
-        let difference = newEntries.map(\.id).difference(from: previous.map(\.id))
-        entries = newEntries
-        table.beginUpdates()
-        for change in difference {
-            switch change {
-            case let .remove(offset, _, _): table.removeRows(at: IndexSet(integer: offset), withAnimation: [])
-            case let .insert(offset, _, _): table.insertRows(at: IndexSet(integer: offset), withAnimation: [])
+    private func entriesColumn(
+        matches: [QuickInputHistoryEntry],
+        totalAnimatedCount: Int
+    ) -> some View {
+        let bottomUpEntries = Array(matches.enumerated().reversed())
+        return VStack(alignment: .leading, spacing: QuickInputHistoryLayout.capsuleSpacing) {
+            ForEach(bottomUpEntries, id: \.element.id) { index, entry in
+                let width = QuickInputHistoryLayout.capsuleWidth(
+                    previewCount: QuickInputHistoryLayout.entryPreview(entry.text).count,
+                    hasDeliveryBadge: entry.deliveryState != .sent,
+                    availableWidth: availableWidth
+                )
+                QuickInputHistoryEntryCapsule(
+                    entry: entry,
+                    width: width,
+                    isSelected: presentation.selectedID == entry.id,
+                    isExpanded: isExpanded,
+                    chromeBackground: chromeBackground,
+                    strings: strings,
+                    onHoverChanged: { hovered in
+                        if hovered {
+                            presentation.hover(entry.id)
+                        }
+                    },
+                    onChoose: {
+                        presentation.select(entry.id)
+                        onSelect(entry.text)
+                    }
+                )
+                .id(entry.id)
+                .modifier(
+                    HistoryCapsuleFanOutModifier(
+                        visualExpanded: visualExpanded,
+                        distanceFromSwitch: index + 1,
+                        totalCount: totalAnimatedCount,
+                        reduceMotion: reduceMotion
+                    )
+                )
             }
         }
-        table.endUpdates()
-        let oldByID = Dictionary(uniqueKeysWithValues: previous.map { ($0.id, $0) })
-        let nextByID = Dictionary(uniqueKeysWithValues: newEntries.map { ($0.id, $0) })
-        let changed = IndexSet(newEntries.indices.filter {
-            oldByID[newEntries[$0].id] != newEntries[$0]
-        })
-        rowHeights = rowHeights.filter { id, _ in
-            oldByID[id] == nextByID[id]
+    }
+}
+
+private struct HistoryCapsuleFanOutModifier: ViewModifier {
+    let visualExpanded: Bool
+    let distanceFromSwitch: Int
+    let totalCount: Int
+    let reduceMotion: Bool
+
+    func body(content: Content) -> some View {
+        let travel = CGFloat(min(distanceFromSwitch + 1, 6)) * 22
+        content
+            .scaleEffect(visualExpanded ? 1.0 : 0.80, anchor: .bottomLeading)
+            .offset(y: visualExpanded ? 0 : travel)
+            .opacity(visualExpanded ? 1.0 : 0.0)
+            .animation(animation, value: visualExpanded)
+    }
+
+    private var animation: Animation {
+        if reduceMotion {
+            return .linear(duration: 0.01)
         }
-        table.reloadData(forRowIndexes: changed, columnIndexes: IndexSet(integer: 0))
-        table.noteHeightOfRows(withIndexesChanged: changed)
+        if visualExpanded {
+            let delay = Double(min(distanceFromSwitch, 6)) * 0.032
+            return .spring(response: 0.30, dampingFraction: 0.76).delay(delay)
+        }
+        let reverseOrder = max(0, min(totalCount - 1 - distanceFromSwitch, 5))
+        return .spring(response: 0.22, dampingFraction: 0.88).delay(Double(reverseOrder) * 0.020)
+    }
+}
+
+private struct QuickInputHistoryEntryCapsule: View {
+    let entry: QuickInputHistoryEntry
+    let width: CGFloat
+    let isSelected: Bool
+    let isExpanded: Bool
+    let chromeBackground: Color
+    let strings: SettingsStrings
+    let onHoverChanged: (Bool) -> Void
+    let onChoose: () -> Void
+
+    @State private var isHovered = false
+
+    private var colorScheme: ColorScheme {
+        NSColor(chromeBackground).isLightColor ? .light : .dark
     }
 
-    private func syncSelection(scroll shouldScroll: Bool) {
-        let row = entries.firstIndex { $0.id == snapshot?.presentation.selectedID }
-        table.selectRowIndexes(row.map { IndexSet(integer: $0) } ?? IndexSet(), byExtendingSelection: false)
-        if shouldScroll, let row { table.scrollRowToVisible(row) }
-    }
-
-    private func layoutContent() {
-        guard let snapshot else { return }
-        let width = root.bounds.width
-        titleLabel.frame = NSRect(x: 14, y: 14, width: 170, height: 22)
-        scope.frame = NSRect(x: 184, y: 17, width: max(0, width - 228), height: 18)
-        toggle.frame = NSRect(x: width - 38, y: 12, width: 24, height: 24)
-        let searchHeight: CGFloat = snapshot.presentation.isSearching ? 42 : 0
-        searchContainer.frame = NSRect(x: 14, y: 48, width: width - 28, height: max(0, searchHeight - 10))
-        editor.frame = NSRect(x: 9, y: 0, width: width - 68, height: 32)
-        clear.frame = NSRect(x: width - 54, y: 4, width: 22, height: 24)
-        let listY = 48 + searchHeight
-        let listHeight = QuickInputHistoryLayout.listHeight(entries)
-        scroll.frame = NSRect(x: 0, y: listY, width: width, height: listHeight)
-        empty.frame = NSRect(x: 14, y: listY + 38, width: width - 28, height: 22)
-        hint.frame = NSRect(x: 14, y: listY + listHeight + 10, width: width - 28, height: 18)
-        error.frame = NSRect(x: 14, y: listY + listHeight + 38, width: width - 28, height: 18)
-    }
-
-    @objc private func toggleSearch() {
-        guard let presentation = snapshot?.presentation else { return }
-        if presentation.isSearching { presentation.endSearch() } else { presentation.beginSearch() }
-    }
-
-    @objc private func clearSearch() {
-        snapshot?.presentation.query = ""
-        snapshot?.presentation.requestFocus()
-    }
-
-    func textDidChange(_ notification: Notification) { snapshot?.presentation.query = editor.string }
-    func numberOfRows(in tableView: NSTableView) -> Int { entries.count }
-
-    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        let entry = entries[row]
-        if let cached = rowHeights[entry.id] { return cached }
-        let height = QuickInputHistoryLayout.rowHeight(entry)
-        rowHeights[entry.id] = height
-        return height
-    }
-
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let identifier = NSUserInterfaceItemIdentifier("history-entry")
-        let cell = tableView.makeView(withIdentifier: identifier, owner: nil) as? QuickInputHistoryCell
-            ?? QuickInputHistoryCell()
-        cell.identifier = identifier
-        let entry = entries[row]
-        let strings = SettingsStrings(language: snapshot?.settings.language ?? .system)
-        let delivery: String
+    private var deliveryLabel: String? {
         switch entry.deliveryState {
-        case .sent: delivery = strings.t("Sent", "已发送")
-        case .queued: delivery = strings.t("Queued", "排队中")
-        case .cancelled: delivery = strings.t("Cancelled", "已取消")
+        case .sent: nil
+        case .queued: strings.t("Queued", "排队中")
+        case .cancelled: strings.t("Cancelled", "已取消")
         }
-        cell.configure(entry, date: dateFormatter.string(from: entry.sentAt) + " · " + delivery)
-        cell.onChoose = { [weak self] in
-            self?.snapshot?.presentation.select(entry.id)
-            self?.snapshot?.onSelect(entry.text)
+    }
+
+    private var compactTimestamp: String {
+        Self.formatter(isToday: Calendar.current.isDateInToday(entry.sentAt))
+            .string(from: entry.sentAt)
+    }
+
+    private var tooltipText: String {
+        let dateText = Self.tooltipFormatter(locale: Locale(identifier: strings.languageCode))
+            .string(from: entry.sentAt)
+        let deliveryText: String = switch entry.deliveryState {
+        case .sent: strings.t("Sent", "已发送")
+        case .queued: strings.t("Queued", "排队中")
+        case .cancelled: strings.t("Cancelled", "已取消")
         }
-        return cell
+        let capped = entry.text.count > 2_000
+            ? String(entry.text.prefix(2_000)) + "\n…"
+            : entry.text
+        return "\(dateText) · \(deliveryText)\n\n\(capped)"
+    }
+
+    private static func formatter(isToday: Bool) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.dateFormat = isToday ? "HH:mm" : "MM/dd HH:mm"
+        return formatter
+    }
+
+    private static func tooltipFormatter(locale: Locale) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = locale
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter
+    }
+
+    var body: some View {
+        Button(action: onChoose) {
+            HStack(spacing: 6) {
+                Image(systemName: isSelected ? "return" : "clock")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                    .frame(width: 12)
+                Text(QuickInputHistoryLayout.entryPreview(entry.text))
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(.primary.opacity(0.94))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 4)
+                if let deliveryLabel {
+                    Text(deliveryLabel)
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundStyle(entry.deliveryState == .queued ? Color.accentColor : .secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(
+                            (entry.deliveryState == .queued ? Color.accentColor : Color.primary)
+                                .opacity(0.14),
+                            in: Capsule()
+                        )
+                        .fixedSize()
+                }
+                Text(compactTimestamp)
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+            }
+            .padding(.horizontal, 11)
+            .frame(width: width, height: QuickInputHistoryLayout.entryCapsuleHeight)
+            .background(
+                QuickInputGlassSurface(
+                    cornerRadius: QuickInputHistoryLayout.entryCapsuleHeight * 0.5,
+                    themeColor: chromeBackground,
+                    tintOpacity: (isSelected || isHovered) ? 0.88 : 0.80,
+                    colorScheme: colorScheme,
+                    borderColor: isSelected ? Color.accentColor.opacity(0.82) : nil,
+                    materialOverride: colorScheme == .light ? .popover : .hudWindow
+                )
+            )
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .shadow(color: .black.opacity(0.34), radius: 9, y: 3)
+        .onHover { hovering in
+            isHovered = hovering
+            onHoverChanged(hovering)
+        }
+        .pointingHandCursor()
+        .help(tooltipText)
+        .accessibilityLabel("\(compactTimestamp), \(entry.text)")
+        .background(FloatingAccessoryAnchor(isActive: isExpanded))
+        .allowsHitTesting(isExpanded)
+        .environment(\.colorScheme, colorScheme)
     }
 }
 
-private final class QuickInputHistoryContainer: NSView {
-    var contentSize = NSSize(width: 400, height: 166) {
-        didSet { if oldValue != contentSize { invalidateIntrinsicContentSize() } }
+private struct QuickInputHistoryControlCapsule: View {
+    @ObservedObject var presentation: QuickInputHistoryPresentation
+    @ObservedObject var settings: OhMyGhosttySettings
+    let strings: SettingsStrings
+    let companionSurfaceID: UUID?
+    let entries: [QuickInputHistoryEntry]
+    let width: CGFloat
+    let chromeBackground: Color
+    let isExpanded: Bool
+    let onMove: (Int) -> Void
+    let onSelect: () -> Void
+    let onEscape: () -> Void
+    let onToggle: () -> Void
+
+    private var colorScheme: ColorScheme {
+        NSColor(chromeBackground).isLightColor ? .light : .dark
     }
-    override var intrinsicContentSize: NSSize { contentSize }
-    var onLayout: (() -> Void)?
-    override var isFlipped: Bool { true }
-    override func layout() { super.layout(); onLayout?() }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button {
+                if presentation.isSearching {
+                    presentation.endSearch()
+                } else {
+                    presentation.beginSearch()
+                }
+            } label: {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(presentation.isSearching ? Color.accentColor : .secondary)
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .pointingHandCursor()
+            .help(presentation.isSearching ? strings.quickInputHistoryExitSearch : strings.quickInputHistorySearch)
+            .accessibilityLabel(
+                presentation.isSearching ? strings.quickInputHistoryExitSearch : strings.quickInputHistorySearch
+            )
+
+            QuickInputHistorySearchEditor(
+                query: $presentation.query,
+                placeholder: strings.quickInputHistorySearch,
+                isSearching: presentation.isSearching,
+                focusRequestID: presentation.focusRequestID,
+                onBeginSearch: { presentation.beginSearch(clearQuery: true) },
+                onMove: onMove,
+                onSelect: onSelect,
+                onEscape: onEscape,
+                onToggle: onToggle,
+                entries: entries,
+                onEntriesChanged: { presentation.reconcile(entries: $0) },
+                companionSurfaceID: companionSurfaceID,
+                canRequestFocus: { isExpanded && presentation.isPresented }
+            )
+            .frame(maxWidth: .infinity, maxHeight: 26)
+
+            if !presentation.query.isEmpty {
+                Button {
+                    presentation.query = ""
+                    presentation.requestFocus()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .pointingHandCursor()
+                .help(strings.quickInputHistoryClearSearch)
+                .accessibilityLabel(strings.quickInputHistoryClearSearch)
+            }
+
+            Button(action: cycleScope) {
+                Text("\(strings.quickInputHistoryScopeName(settings.quickInputHistoryScope)) · \(entries.count)")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .fixedSize()
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Color.primary.opacity(0.08), in: Capsule())
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .pointingHandCursor()
+            .help(strings.quickInputHistoryScopeLabel)
+            .accessibilityLabel(strings.quickInputHistoryScopeLabel)
+        }
+        .padding(.horizontal, 10)
+        .frame(width: width, height: QuickInputHistoryLayout.controlCapsuleHeight)
+        .background(
+            QuickInputGlassSurface(
+                cornerRadius: QuickInputHistoryLayout.controlCapsuleHeight * 0.5,
+                themeColor: chromeBackground,
+                tintOpacity: presentation.isSearching ? 0.88 : 0.80,
+                colorScheme: colorScheme,
+                borderColor: presentation.isSearching ? Color.accentColor.opacity(0.65) : nil,
+                materialOverride: colorScheme == .light ? .popover : .hudWindow
+            )
+        )
+        .contentShape(Capsule())
+        .shadow(color: .black.opacity(0.34), radius: 9, y: 3)
+        .background(FloatingAccessoryAnchor(isActive: isExpanded))
+        .allowsHitTesting(isExpanded)
+        .environment(\.colorScheme, colorScheme)
+    }
+
+    private func cycleScope() {
+        switch settings.quickInputHistoryScope {
+        case .pane: settings.quickInputHistoryScope = .tab
+        case .tab: settings.quickInputHistoryScope = .global
+        case .global: settings.quickInputHistoryScope = .pane
+        }
+        presentation.requestFocus()
+    }
 }
 
-private final class QuickInputHistoryTable: NSTableView {
-    var onHover: ((Int) -> Void)?
-    var onChoose: ((Int) -> Void)?
-    private var hoverArea: NSTrackingArea?
-    // Search remains the sole input client, including when clicking a row.
-    override var acceptsFirstResponder: Bool { false }
-    override func mouseDown(with event: NSEvent) {
-        let row = row(at: convert(event.locationInWindow, from: nil))
-        if row >= 0 { onChoose?(row) }
+private struct QuickInputHistoryEmptyCapsule: View {
+    let text: String
+    let width: CGFloat
+    let chromeBackground: Color
+    let isExpanded: Bool
+
+    private var colorScheme: ColorScheme {
+        NSColor(chromeBackground).isLightColor ? .light : .dark
     }
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let hoverArea { removeTrackingArea(hoverArea) }
-        let area = NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect],
-                                  owner: self, userInfo: nil)
-        addTrackingArea(area)
-        hoverArea = area
-    }
-    override func mouseMoved(with event: NSEvent) {
-        let row = row(at: convert(event.locationInWindow, from: nil))
-        if row >= 0 { onHover?(row) }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "clock")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Text(text)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 12)
+        .frame(width: width, height: QuickInputHistoryLayout.entryCapsuleHeight)
+        .background(
+            QuickInputGlassSurface(
+                cornerRadius: QuickInputHistoryLayout.entryCapsuleHeight * 0.5,
+                themeColor: chromeBackground,
+                tintOpacity: 0.80,
+                colorScheme: colorScheme,
+                materialOverride: colorScheme == .light ? .popover : .hudWindow
+            )
+        )
+        .contentShape(Capsule())
+        .shadow(color: .black.opacity(0.34), radius: 9, y: 3)
+        .background(FloatingAccessoryAnchor(isActive: isExpanded))
+        .allowsHitTesting(isExpanded)
+        .environment(\.colorScheme, colorScheme)
     }
 }
 
-private final class QuickInputHistoryCell: NSTableCellView {
-    var onChoose: (() -> Void)?
-    override func accessibilityPerformPress() -> Bool {
-        onChoose?()
-        return onChoose != nil
+private struct QuickInputHistoryErrorCapsule: View {
+    let text: String
+    let chromeBackground: Color
+    let isExpanded: Bool
+
+    private var colorScheme: ColorScheme {
+        NSColor(chromeBackground).isLightColor ? .light : .dark
     }
-    private let timestamp = NSTextField(labelWithString: "")
-    private let preview = NSTextField(wrappingLabelWithString: "")
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        timestamp.font = .systemFont(ofSize: 11)
-        timestamp.textColor = .secondaryLabelColor
-        preview.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        preview.maximumNumberOfLines = 3
-        preview.lineBreakMode = .byTruncatingTail
-        addSubview(timestamp)
-        addSubview(preview)
-    }
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    override var isFlipped: Bool { true }
-    override func layout() {
-        super.layout()
-        timestamp.frame = NSRect(x: 16, y: 6, width: bounds.width - 32, height: 14)
-        preview.frame = NSRect(x: 16, y: 23, width: bounds.width - 32, height: max(0, bounds.height - 29))
-    }
-    func configure(_ entry: QuickInputHistoryEntry, date: String) {
-        timestamp.stringValue = date
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineSpacing = 1
-        paragraph.lineBreakMode = .byTruncatingTail
-        preview.attributedStringValue = NSAttributedString(string: String(entry.text.prefix(400)), attributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
-            .foregroundColor: NSColor.labelColor,
-            .paragraphStyle: paragraph,
-        ])
-        toolTip = String(entry.text.prefix(1_000))
-        setAccessibilityElement(true)
-        setAccessibilityRole(.button)
-        setAccessibilityLabel("\(date), \(entry.text)")
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(.orange)
+            Text(text)
+                .font(.system(size: 11.5))
+                .foregroundStyle(.orange)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .padding(.horizontal, 12)
+        .frame(height: QuickInputHistoryLayout.entryCapsuleHeight)
+        .background(
+            QuickInputGlassSurface(
+                cornerRadius: QuickInputHistoryLayout.entryCapsuleHeight * 0.5,
+                themeColor: chromeBackground,
+                tintOpacity: 0.80,
+                colorScheme: colorScheme,
+                borderColor: Color.orange.opacity(0.55),
+                materialOverride: colorScheme == .light ? .popover : .hudWindow
+            )
+        )
+        .contentShape(Capsule())
+        .shadow(color: .black.opacity(0.34), radius: 9, y: 3)
+        .background(FloatingAccessoryAnchor(isActive: isExpanded))
+        .allowsHitTesting(isExpanded)
+        .environment(\.colorScheme, colorScheme)
     }
 }

@@ -14,7 +14,8 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
     let composerHeight: CGFloat
     let queueHeight: CGFloat
     var queueWidth: CGFloat?
-    var composerQueueLeadingOffset: CGFloat?
+    var composerAccessoryOrigin: CGPoint?
+    var onOutsideAccessoryMouseDown: (() -> Void)?
     var isPinned: Bool = false
 
     func makeNSView(context: Context) -> Container { Container() }
@@ -27,7 +28,8 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
             composerHeight: composerHeight,
             queueHeight: queueHeight,
             queueWidth: queueWidth,
-            composerQueueLeadingOffset: composerQueueLeadingOffset,
+            composerAccessoryOrigin: composerAccessoryOrigin,
+            onOutsideAccessoryMouseDown: onOutsideAccessoryMouseDown,
             isPinned: isPinned
         )
     }
@@ -49,9 +51,7 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
             let localPoint = convert(point, from: superview)
             guard bounds.contains(localPoint) else { return nil }
             let hitsActiveAnchor = anchors.contains { anchor in
-                guard !anchor.isHiddenOrHasHiddenAncestor, anchor.isActive else { return false }
-                let pointInAnchor = anchor.convert(localPoint, from: self)
-                return anchor.bounds.contains(pointInAnchor)
+                anchor.containsActivePoint(anchor.convert(localPoint, from: self))
             }
             guard hitsActiveAnchor else { return nil }
             return super.hitTest(point)
@@ -78,9 +78,58 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
         private var requestedComposerHeight: CGFloat = 0
         private var requestedQueueHeight: CGFloat = 0
         private var requestedQueueWidth: CGFloat?
-        private var requestedComposerQueueLeadingOffset: CGFloat?
+        private var requestedComposerAccessoryOrigin: CGPoint?
+        private var onOutsideAccessoryMouseDown: (() -> Void)?
+        private var mouseDownMonitor: Any?
         private(set) var isPinned: Bool = false
         private let floatingAccessoryViews = NSHashTable<NSView>.weakObjects()
+
+        deinit {
+            if let mouseDownMonitor {
+                NSEvent.removeMonitor(mouseDownMonitor)
+            }
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            updateMouseDownMonitor()
+        }
+
+        private func updateMouseDownMonitor() {
+            if window == nil {
+                if let mouseDownMonitor {
+                    NSEvent.removeMonitor(mouseDownMonitor)
+                    self.mouseDownMonitor = nil
+                }
+                return
+            }
+            guard mouseDownMonitor == nil else { return }
+            mouseDownMonitor = NSEvent.addLocalMonitorForEvents(
+                matching: [.leftMouseDown, .rightMouseDown]
+            ) { [weak self] event in
+                self?.handleLocalMouseDown(event) ?? event
+            }
+        }
+
+        @discardableResult
+        func handleLocalMouseDown(_ event: NSEvent) -> NSEvent {
+            guard let window, event.window === window,
+                  !queueHost.isHidden,
+                  let onOutsideAccessoryMouseDown else {
+                return event
+            }
+            let pt = convert(event.locationInWindow, from: nil)
+            if queueHost.hitTest(pt) != nil {
+                return event
+            }
+            if !composerHost.isHidden,
+               composerHost.frame.contains(pt),
+               pt.y < composerHost.frame.minY + 36 {
+                return event
+            }
+            onOutsideAccessoryMouseDown()
+            return event
+        }
 
         func registerFloatingAccessoryView(_ view: NSView) {
             floatingAccessoryViews.add(view)
@@ -102,7 +151,11 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
                 for accessory in floatingAccessoryViews.allObjects
                 where !accessory.isHiddenOrHasHiddenAncestor && accessory.window === window {
                     let accessoryPoint = accessory.convert(pointInWindow, from: nil)
-                    if accessory.bounds.contains(accessoryPoint) {
+                    if let anchor = accessory as? FloatingAccessoryAnchor.AnchorView {
+                        if anchor.containsActivePoint(accessoryPoint) {
+                            return true
+                        }
+                    } else if accessory.bounds.contains(accessoryPoint) {
                         return true
                     }
                 }
@@ -140,13 +193,15 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
             composerHeight: CGFloat,
             queueHeight: CGFloat,
             queueWidth: CGFloat? = nil,
-            composerQueueLeadingOffset: CGFloat? = nil,
+            composerAccessoryOrigin: CGPoint? = nil,
+            onOutsideAccessoryMouseDown: (() -> Void)? = nil,
             isPinned: Bool = false
         ) {
             requestedComposerHeight = max(0, composerHeight)
             requestedQueueHeight = max(0, queueHeight)
             requestedQueueWidth = queueWidth.map { max(0, $0) }
-            requestedComposerQueueLeadingOffset = composerQueueLeadingOffset
+            requestedComposerAccessoryOrigin = composerAccessoryOrigin
+            self.onOutsideAccessoryMouseDown = onOutsideAccessoryMouseDown
             self.isPinned = isPinned
             applyAccessoryFrames()
             // Preserve the Surface and ComposerTextView instances, including
@@ -198,36 +253,47 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
                     height: nextComposerHeight
                 )
 
-                let stackGap = nextComposerHeight > 0
-                    ? AgentQuickInputMetrics.floatingStackSpacing
-                    : 0
-                let remainingForQueue = max(0, availableOverlay - nextComposerHeight - stackGap)
-                let nextQueueHeight = cardWidth > 0
-                    ? min(requestedQueueHeight, remainingForQueue)
-                    : 0
-                let queueY: CGFloat = if nextQueueHeight > 0 {
-                    nextComposerHeight > 0
-                        ? composerY + nextComposerHeight + AgentQuickInputMetrics.floatingStackSpacing
-                        : min(AgentQuickInputMetrics.floatingBottomInset, max(0, safeHeight - nextQueueHeight))
-                } else {
-                    0
-                }
+                let nextQueueHeight: CGFloat
                 let queueFrame: NSRect
-                if nextQueueHeight > 0,
-                   nextComposerHeight == 0,
-                   let requestedQueueWidth {
-                    let resolvedWidth = min(cardWidth, requestedQueueWidth)
-                    let queueX = max(insetX, safeWidth - insetX - resolvedWidth)
-                    queueFrame = NSRect(x: queueX, y: queueY, width: resolvedWidth, height: nextQueueHeight)
-                } else if nextQueueHeight > 0,
-                          nextComposerHeight > 0,
-                          let requestedQueueWidth {
-                    let resolvedWidth = min(cardWidth, requestedQueueWidth)
-                    let leadingOffset = max(0, requestedComposerQueueLeadingOffset ?? 0)
-                    let queueX = min(insetX + leadingOffset, max(insetX, safeWidth - insetX - resolvedWidth))
-                    queueFrame = NSRect(x: queueX, y: queueY, width: resolvedWidth, height: nextQueueHeight)
+                if nextComposerHeight > 0, requestedQueueHeight > 0, let origin = requestedComposerAccessoryOrigin {
+                    let rawY = composerFrame.minY + origin.y
+                    nextQueueHeight = cardWidth > 0
+                        ? min(requestedQueueHeight, max(0, safeHeight - topMargin - rawY))
+                        : 0
+                    let resolvedWidth = min(cardWidth, requestedQueueWidth ?? cardWidth)
+                    let minQueueX = insetX
+                    let maxQueueX = max(insetX, safeWidth - insetX - resolvedWidth)
+                    let queueX = min(max(minQueueX, composerFrame.minX + origin.x), maxQueueX)
+                    queueFrame = NSRect(
+                        x: queueX,
+                        y: nextQueueHeight > 0 ? rawY : 0,
+                        width: resolvedWidth,
+                        height: nextQueueHeight
+                    )
                 } else {
-                    queueFrame = NSRect(x: insetX, y: queueY, width: cardWidth, height: nextQueueHeight)
+                    let stackGap = nextComposerHeight > 0
+                        ? AgentQuickInputMetrics.floatingStackSpacing
+                        : 0
+                    let remainingForQueue = max(0, availableOverlay - nextComposerHeight - stackGap)
+                    nextQueueHeight = cardWidth > 0
+                        ? min(requestedQueueHeight, remainingForQueue)
+                        : 0
+                    let queueY: CGFloat = if nextQueueHeight > 0 {
+                        nextComposerHeight > 0
+                            ? composerY + nextComposerHeight + AgentQuickInputMetrics.floatingStackSpacing
+                            : min(AgentQuickInputMetrics.floatingBottomInset, max(0, safeHeight - nextQueueHeight))
+                    } else {
+                        0
+                    }
+                    if nextQueueHeight > 0,
+                       nextComposerHeight == 0,
+                       let requestedQueueWidth {
+                        let resolvedWidth = min(cardWidth, requestedQueueWidth)
+                        let queueX = max(insetX, safeWidth - insetX - resolvedWidth)
+                        queueFrame = NSRect(x: queueX, y: queueY, width: resolvedWidth, height: nextQueueHeight)
+                    } else {
+                        queueFrame = NSRect(x: insetX, y: queueY, width: cardWidth, height: nextQueueHeight)
+                    }
                 }
 
                 let frames: [(NSView, NSRect)] = [
@@ -338,6 +404,16 @@ struct FloatingAccessoryAnchor: NSViewRepresentable {
         }
 
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        func containsActivePoint(_ pointInAnchor: NSPoint) -> Bool {
+            guard isActive, !isHiddenOrHasHiddenAncestor, bounds.contains(pointInAnchor) else {
+                return false
+            }
+            if let clipView = enclosingScrollView?.contentView {
+                return clipView.bounds.contains(convert(pointInAnchor, to: clipView))
+            }
+            return true
+        }
 
         override func viewDidMoveToSuperview() {
             super.viewDidMoveToSuperview()

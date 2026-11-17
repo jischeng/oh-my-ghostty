@@ -14,6 +14,9 @@ struct QuickInputHistorySearchEditor: NSViewRepresentable {
     let onSelect: () -> Void
     let onEscape: () -> Void
     let onToggle: () -> Void
+    var entries: [QuickInputHistoryEntry] = []
+    var onEntriesChanged: (([QuickInputHistoryEntry]) -> Void)?
+    var companionSurfaceID: UUID?
     var canRequestFocus: (() -> Bool)?
 
     func makeCoordinator() -> Coordinator { Coordinator(query: $query) }
@@ -23,9 +26,9 @@ struct QuickInputHistorySearchEditor: NSViewRepresentable {
         editor.delegate = context.coordinator
         editor.isRichText = false
         editor.drawsBackground = false
-        editor.font = .systemFont(ofSize: 13)
+        editor.font = .systemFont(ofSize: 12)
         editor.textColor = .labelColor
-        editor.textContainerInset = NSSize(width: 0, height: 7)
+        editor.textContainerInset = NSSize(width: 0, height: 6)
         editor.textContainer?.lineFragmentPadding = 0
         editor.isAutomaticQuoteSubstitutionEnabled = false
         editor.isAutomaticDashSubstitutionEnabled = false
@@ -33,11 +36,13 @@ struct QuickInputHistorySearchEditor: NSViewRepresentable {
         editor.textContainer?.heightTracksTextView = false
         editor.textContainer?.containerSize.height = CGFloat.greatestFiniteMagnitude
         configure(editor)
+        reconcileEntriesIfNeeded(coordinator: context.coordinator)
         return editor
     }
 
     func updateNSView(_ editor: QuickInputHistorySearchTextView, context: Context) {
         configure(editor)
+        reconcileEntriesIfNeeded(coordinator: context.coordinator)
         if !editor.hasMarkedText(), editor.string != query {
             editor.string = query
             editor.setSelectedRange(NSRange(location: (query as NSString).length, length: 0))
@@ -45,6 +50,19 @@ struct QuickInputHistorySearchEditor: NSViewRepresentable {
         if context.coordinator.handledFocusID != focusRequestID {
             context.coordinator.handledFocusID = focusRequestID
             editor.requestKeyboardFocus()
+        }
+    }
+
+    private func reconcileEntriesIfNeeded(coordinator: Coordinator) {
+        coordinator.latestEntries = entries
+        coordinator.onEntriesChanged = onEntriesChanged
+        let entryIDs = entries.map(\.id)
+        if coordinator.lastEntryIDs != entryIDs {
+            coordinator.lastEntryIDs = entryIDs
+            DispatchQueue.main.async { [weak coordinator] in
+                guard let coordinator else { return }
+                coordinator.onEntriesChanged?(coordinator.latestEntries)
+            }
         }
     }
 
@@ -56,12 +74,16 @@ struct QuickInputHistorySearchEditor: NSViewRepresentable {
         editor.onSelect = onSelect
         editor.onEscape = onEscape
         editor.onToggle = onToggle
+        editor.companionSurfaceID = companionSurfaceID
         editor.canRequestFocus = canRequestFocus
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         @Binding var query: String
         var handledFocusID = -1
+        var lastEntryIDs: [UUID]?
+        var latestEntries: [QuickInputHistoryEntry] = []
+        var onEntriesChanged: (([QuickInputHistoryEntry]) -> Void)?
         init(query: Binding<String>) { _query = query }
         func textDidChange(_ notification: Notification) {
             guard let editor = notification.object as? NSTextView else { return }
@@ -70,7 +92,7 @@ struct QuickInputHistorySearchEditor: NSViewRepresentable {
     }
 }
 
-final class QuickInputHistorySearchTextView: NSTextView {
+final class QuickInputHistorySearchTextView: NSTextView, TerminalCompanionResponder {
     var isSearching = false
     var placeholder = "" { didSet { needsDisplay = true } }
     var onBeginSearch: (() -> Void)?
@@ -78,6 +100,7 @@ final class QuickInputHistorySearchTextView: NSTextView {
     var onSelect: (() -> Void)?
     var onEscape: (() -> Void)?
     var onToggle: (() -> Void)?
+    var companionSurfaceID: UUID?
     var canRequestFocus: (() -> Bool)?
 
     override func viewDidMoveToWindow() {
@@ -85,20 +108,52 @@ final class QuickInputHistorySearchTextView: NSTextView {
         if window != nil { requestKeyboardFocus() }
     }
 
+    override func resignFirstResponder() -> Bool {
+        let result = super.resignFirstResponder()
+        if result {
+            let window = self.window
+            let companionID = self.companionSurfaceID
+            DispatchQueue.main.async { [weak window] in
+                guard let window,
+                      let controller = window.windowController as? BaseTerminalController else {
+                    return
+                }
+                if let companionID,
+                   (window.firstResponder as? Ghostty.SurfaceView)?.id == companionID {
+                    return
+                }
+                controller.syncFocusToSurfaceTree()
+            }
+        }
+        return result
+    }
+
     func requestKeyboardFocus() {
         DispatchQueue.main.async { [weak self] in
             guard let self, self.canRequestFocus?() != false,
                   let window = self.window else { return }
-            window.makeFirstResponder(self)
+            if let controller = window.windowController as? TerminalController {
+                controller.focusQuickInputCompanion(self, for: self.companionSurfaceID)
+            } else {
+                window.makeFirstResponder(self)
+            }
         }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if !isSearching {
+            isSearching = true
+            onBeginSearch?()
+        }
+        super.mouseDown(with: event)
     }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        if isSearching, string.isEmpty, !hasMarkedText() {
-            placeholder.draw(at: NSPoint(x: 0, y: 7), withAttributes: [
-                .font: font ?? NSFont.systemFont(ofSize: 13),
-                .foregroundColor: NSColor.placeholderTextColor,
+        if string.isEmpty, !hasMarkedText(), !placeholder.isEmpty {
+            placeholder.draw(at: NSPoint(x: 0, y: 6), withAttributes: [
+                .font: font ?? NSFont.systemFont(ofSize: 12),
+                .foregroundColor: isSearching ? NSColor.placeholderTextColor : NSColor.tertiaryLabelColor,
             ])
         }
     }

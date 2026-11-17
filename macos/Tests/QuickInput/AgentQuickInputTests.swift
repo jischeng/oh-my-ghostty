@@ -1592,4 +1592,42 @@ struct AgentQuickInputTests {
         model.dismiss()
         #expect(!model.isQueueExpanded)
     }
+
+    @Test @MainActor
+    func collapseAccessoryStacksAndTypingDraftCloseHistoryWhileRetainingQuery() throws {
+        let store = QuickInputHistoryStore()
+        let model = AgentQuickInputModel(dockHeight: 148, historyStore: store)
+        let pane = UUID()
+        let tab = UUID()
+        model.bindHistory(to: tab, paneIDs: [pane])
+        model.present(for: pane, requestFocus: false)
+        model.recordSentText("first command", for: pane)
+        model.draft = "pending task"
+        _ = try #require(model.enqueueDraft())
+
+        model.toggleHistory(scope: .tab)
+        model.historyPresentation.beginSearch()
+        model.historyPresentation.query = "first"
+        #expect(model.historyPresentation.isPresented)
+        #expect(!model.isQueueExpanded)
+
+        // Typing into the composer draft collapses History while keeping its search query.
+        model.draft = "hello"
+        #expect(!model.historyPresentation.isPresented)
+        #expect(model.historyPresentation.query == "first")
+        #expect(model.historyPresentation.isSearching)
+
+        // Reopening preserves the search query, and collapseAccessoryStacks closes either active stack.
+        model.toggleHistory(scope: .tab)
+        #expect(model.historyPresentation.isPresented)
+        model.collapseAccessoryStacks()
+        #expect(!model.historyPresentation.isPresented)
+        #expect(!model.isQueueExpanded)
+        #expect(model.historyPresentation.query == "first")
+
+        model.toggleQueueExpanded()
+        #expect(model.isQueueExpanded)
+        model.collapseAccessoryStacks()
+        #expect(!model.isQueueExpanded)
+    }
 }

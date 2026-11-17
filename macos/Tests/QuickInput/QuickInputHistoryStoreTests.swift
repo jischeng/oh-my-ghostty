@@ -96,7 +96,7 @@ struct QuickInputHistoryStoreTests {
         let twoRowHeight = hosting.fittingSize.height
         // Two short entries must both fit, without inheriting a one-row viewport.
         #expect(twoRowHeight > compactHeight + 25)
-        #expect(twoRowHeight < 220)
+        #expect(twoRowHeight < 140)
         for index in 0..<15 {
             store.record("Prompt \(index)\nSecond line with context\nThird line", paneID: pane, tabID: tab)
         }
@@ -105,9 +105,9 @@ struct QuickInputHistoryStoreTests {
         try await Task.sleep(for: .milliseconds(100))
         hosting.layoutSubtreeIfNeeded()
         let expandedHeight = hosting.fittingSize.height
-        #expect(hosting.fittingSize.width == 400)
+        #expect(hosting.fittingSize.width >= QuickInputHistoryLayout.controlCapsuleWidth)
         #expect(compactHeight < expandedHeight)
-        #expect(expandedHeight == 86 + QuickInputHistoryLayout.maximumListHeight)
+        #expect(expandedHeight == QuickInputHistoryLayout.stackHeight(entryCount: 17))
         store.clear()
         store.record("Back to two rows", paneID: pane, tabID: tab)
         store.record("Another short prompt", paneID: pane, tabID: tab)

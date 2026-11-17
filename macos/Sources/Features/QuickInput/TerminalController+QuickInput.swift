@@ -527,15 +527,19 @@ extension TerminalController {
     }
 
     func focusQuickInputEditor(_ editor: ComposerTextView, for surfaceID: UUID?) {
+        focusQuickInputCompanion(editor, for: surfaceID)
+    }
+
+    func focusQuickInputCompanion(_ responder: NSResponder, for surfaceID: UUID?) {
         guard let window else { return }
         if let surfaceID,
            let surface = surfaceTree.first(where: { $0.id == surfaceID }),
            window.firstResponder === surface {
             _ = surface.transferFocusToCompanion {
-                window.makeFirstResponder(editor)
+                window.makeFirstResponder(responder)
             }
         } else {
-            window.makeFirstResponder(editor)
+            window.makeFirstResponder(responder)
         }
     }
 

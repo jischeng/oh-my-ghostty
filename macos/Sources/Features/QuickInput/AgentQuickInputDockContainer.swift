@@ -14,6 +14,7 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
     let composerHeight: CGFloat
     let queueHeight: CGFloat
     var queueWidth: CGFloat?
+    var composerQueueLeadingOffset: CGFloat?
     var isPinned: Bool = false
 
     func makeNSView(context: Context) -> Container { Container() }
@@ -26,6 +27,7 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
             composerHeight: composerHeight,
             queueHeight: queueHeight,
             queueWidth: queueWidth,
+            composerQueueLeadingOffset: composerQueueLeadingOffset,
             isPinned: isPinned
         )
     }
@@ -34,13 +36,49 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
         CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
     }
 
+    final class CapsuleStackHostingView: NSHostingView<AnyView> {
+        var hasAnchorViews: Bool {
+            !anchorViews(in: self).isEmpty
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            let anchors = anchorViews(in: self)
+            guard !anchors.isEmpty else {
+                return super.hitTest(point)
+            }
+            let localPoint = convert(point, from: superview)
+            guard bounds.contains(localPoint) else { return nil }
+            let hitsActiveAnchor = anchors.contains { anchor in
+                guard !anchor.isHiddenOrHasHiddenAncestor, anchor.isActive else { return false }
+                let pointInAnchor = anchor.convert(localPoint, from: self)
+                return anchor.bounds.contains(pointInAnchor)
+            }
+            guard hitsActiveAnchor else { return nil }
+            return super.hitTest(point)
+        }
+
+        private func anchorViews(in view: NSView) -> [FloatingAccessoryAnchor.AnchorView] {
+            var result: [FloatingAccessoryAnchor.AnchorView] = []
+            for subview in view.subviews {
+                if let anchor = subview as? FloatingAccessoryAnchor.AnchorView {
+                    result.append(anchor)
+                } else {
+                    result.append(contentsOf: anchorViews(in: subview))
+                }
+            }
+            return result
+        }
+    }
+
     final class Container: NSView, FloatingAccessoryOcclusionContainer {
         let contentHost = NSHostingView(rootView: AnyView(EmptyView()))
         let composerHost = NSHostingView(rootView: AnyView(EmptyView()))
-        let queueHost = NSHostingView(rootView: AnyView(EmptyView()))
+        let queueHost = CapsuleStackHostingView(rootView: AnyView(EmptyView()))
+        let composerShadowLayer = CALayer()
         private var requestedComposerHeight: CGFloat = 0
         private var requestedQueueHeight: CGFloat = 0
         private var requestedQueueWidth: CGFloat?
+        private var requestedComposerQueueLeadingOffset: CGFloat?
         private(set) var isPinned: Bool = false
         private let floatingAccessoryViews = NSHashTable<NSView>.weakObjects()
 
@@ -57,7 +95,7 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
             if !composerHost.isHidden, composerHost.frame.contains(local) {
                 return true
             }
-            if !queueHost.isHidden, queueHost.frame.contains(local) {
+            if !queueHost.isHidden, !queueHost.hasAnchorViews, queueHost.frame.contains(local) {
                 return true
             }
             if let window = self.window {
@@ -77,8 +115,15 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
             wantsLayer = true
             layer?.masksToBounds = true
             for host in [contentHost, composerHost, queueHost] {
+                host.wantsLayer = true
                 host.sizingOptions = []
                 addSubview(host)
+            }
+            composerShadowLayer.backgroundColor = NSColor.clear.cgColor
+            composerShadowLayer.isOpaque = false
+            composerShadowLayer.isHidden = true
+            if let containerLayer = layer, let composerLayer = composerHost.layer {
+                containerLayer.insertSublayer(composerShadowLayer, below: composerLayer)
             }
             configureOverlayLayers(composerVisible: false)
             composerHost.isHidden = true
@@ -95,11 +140,13 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
             composerHeight: CGFloat,
             queueHeight: CGFloat,
             queueWidth: CGFloat? = nil,
+            composerQueueLeadingOffset: CGFloat? = nil,
             isPinned: Bool = false
         ) {
             requestedComposerHeight = max(0, composerHeight)
             requestedQueueHeight = max(0, queueHeight)
             requestedQueueWidth = queueWidth.map { max(0, $0) }
+            requestedComposerQueueLeadingOffset = composerQueueLeadingOffset
             self.isPinned = isPinned
             applyAccessoryFrames()
             // Preserve the Surface and ComposerTextView instances, including
@@ -141,14 +188,6 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
                 let nextComposerHeight = cardWidth > 0
                     ? min(requestedComposerHeight, availableOverlay)
                     : 0
-                let stackGap = nextComposerHeight > 0
-                    ? AgentQuickInputMetrics.floatingStackSpacing
-                    : 0
-                let remainingForQueue = max(0, availableOverlay - nextComposerHeight - stackGap)
-                let nextQueueHeight = cardWidth > 0
-                    ? min(requestedQueueHeight, remainingForQueue)
-                    : 0
-
                 let composerY = nextComposerHeight > 0
                     ? min(AgentQuickInputMetrics.floatingBottomInset, max(0, safeHeight - nextComposerHeight))
                     : 0
@@ -158,6 +197,14 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
                     width: cardWidth,
                     height: nextComposerHeight
                 )
+
+                let stackGap = nextComposerHeight > 0
+                    ? AgentQuickInputMetrics.floatingStackSpacing
+                    : 0
+                let remainingForQueue = max(0, availableOverlay - nextComposerHeight - stackGap)
+                let nextQueueHeight = cardWidth > 0
+                    ? min(requestedQueueHeight, remainingForQueue)
+                    : 0
                 let queueY: CGFloat = if nextQueueHeight > 0 {
                     nextComposerHeight > 0
                         ? composerY + nextComposerHeight + AgentQuickInputMetrics.floatingStackSpacing
@@ -171,6 +218,13 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
                    let requestedQueueWidth {
                     let resolvedWidth = min(cardWidth, requestedQueueWidth)
                     let queueX = max(insetX, safeWidth - insetX - resolvedWidth)
+                    queueFrame = NSRect(x: queueX, y: queueY, width: resolvedWidth, height: nextQueueHeight)
+                } else if nextQueueHeight > 0,
+                          nextComposerHeight > 0,
+                          let requestedQueueWidth {
+                    let resolvedWidth = min(cardWidth, requestedQueueWidth)
+                    let leadingOffset = max(0, requestedComposerQueueLeadingOffset ?? 0)
+                    let queueX = min(insetX + leadingOffset, max(insetX, safeWidth - insetX - resolvedWidth))
                     queueFrame = NSRect(x: queueX, y: queueY, width: resolvedWidth, height: nextQueueHeight)
                 } else {
                     queueFrame = NSRect(x: insetX, y: queueY, width: cardWidth, height: nextQueueHeight)
@@ -193,26 +247,62 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
         }
 
         private func configureOverlayLayers(composerVisible: Bool) {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            defer { CATransaction.commit() }
+
             for host in [composerHost, queueHost] {
                 host.wantsLayer = true
                 host.layer?.masksToBounds = false
                 host.layer?.backgroundColor = NSColor.clear.cgColor
             }
-            guard let layer = composerHost.layer else { return }
+            // Keep composerHost completely unmasked and shadow-free so an
+            // in-window NSVisualEffectView samples underlying layers cleanly.
+            composerHost.layer?.shadowOpacity = 0
+            composerHost.layer?.shadowPath = nil
+            composerHost.layer?.mask = nil
+
+            if composerShadowLayer.superlayer == nil,
+               let containerLayer = layer,
+               let composerLayer = composerHost.layer {
+                containerLayer.insertSublayer(composerShadowLayer, below: composerLayer)
+            }
+
             if composerVisible, !composerHost.bounds.isEmpty {
-                layer.shadowColor = NSColor.black.cgColor
-                layer.shadowOpacity = 0.34
-                layer.shadowRadius = 18
-                layer.shadowOffset = CGSize(width: 0, height: -5)
-                layer.shadowPath = CGPath(
-                    roundedRect: composerHost.bounds,
+                let pad: CGFloat = 44
+                composerShadowLayer.frame = composerHost.frame.insetBy(dx: -pad, dy: -pad)
+                let localCard = CGRect(
+                    x: pad,
+                    y: pad,
+                    width: composerHost.bounds.width,
+                    height: composerHost.bounds.height
+                )
+                let cardPath = CGPath(
+                    roundedRect: localCard,
                     cornerWidth: AgentQuickInputMetrics.cardCornerRadius,
                     cornerHeight: AgentQuickInputMetrics.cardCornerRadius,
                     transform: nil
                 )
+                composerShadowLayer.shadowColor = NSColor.black.cgColor
+                composerShadowLayer.shadowOpacity = 0.30
+                composerShadowLayer.shadowRadius = 18
+                composerShadowLayer.shadowOffset = CGSize(width: 0, height: -5)
+                composerShadowLayer.shadowPath = cardPath
+                composerShadowLayer.isHidden = false
+
+                let maskPath = CGMutablePath()
+                maskPath.addRect(composerShadowLayer.bounds)
+                maskPath.addPath(cardPath)
+                let maskLayer = (composerShadowLayer.mask as? CAShapeLayer) ?? CAShapeLayer()
+                maskLayer.frame = composerShadowLayer.bounds
+                maskLayer.fillRule = .evenOdd
+                maskLayer.path = maskPath
+                composerShadowLayer.mask = maskLayer
             } else {
-                layer.shadowOpacity = 0
-                layer.shadowPath = nil
+                composerShadowLayer.shadowOpacity = 0
+                composerShadowLayer.shadowPath = nil
+                composerShadowLayer.mask = nil
+                composerShadowLayer.isHidden = true
             }
         }
     }
@@ -221,9 +311,16 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
 /// Registers an overlaid per-pane floating badge with the enclosing dock
 /// container so terminal hover/link hints stay suppressed underneath it.
 struct FloatingAccessoryAnchor: NSViewRepresentable {
-    func makeNSView(context: Context) -> AnchorView { AnchorView() }
+    var isActive: Bool = true
+
+    func makeNSView(context: Context) -> AnchorView {
+        let view = AnchorView()
+        view.isActive = isActive
+        return view
+    }
 
     func updateNSView(_ view: AnchorView, context: Context) {
+        view.isActive = isActive
         view.syncRegistration()
     }
 
@@ -233,6 +330,12 @@ struct FloatingAccessoryAnchor: NSViewRepresentable {
 
     final class AnchorView: NSView {
         private weak var registeredContainer: AgentQuickInputDockContainer.Container?
+        var isActive: Bool = true {
+            didSet {
+                guard isActive != oldValue else { return }
+                syncRegistration()
+            }
+        }
 
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
@@ -248,6 +351,12 @@ struct FloatingAccessoryAnchor: NSViewRepresentable {
 
         func syncRegistration() {
             let container = enclosingDockContainer()
+            guard isActive else {
+                registeredContainer?.unregisterFloatingAccessoryView(self)
+                container?.unregisterFloatingAccessoryView(self)
+                registeredContainer = container
+                return
+            }
             if registeredContainer !== container {
                 registeredContainer?.unregisterFloatingAccessoryView(self)
                 registeredContainer = container

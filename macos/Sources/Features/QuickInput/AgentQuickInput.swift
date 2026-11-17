@@ -233,9 +233,9 @@ enum AgentQuickInputMetrics {
     static let collapsedQueueHeight: CGFloat = 28
     static let collapsedQueueMinimumWidth: CGFloat = 96
     static let collapsedQueueMaximumWidth: CGFloat = 224
-    static let composerTintOpacity: Double = 0.74
-    static let queueCardTintOpacity: Double = 0.70
-    static let collapsedQueueTintOpacity: Double = 0.58
+    static let composerTintOpacity: Double = 0.22
+    static let queueCardTintOpacity: Double = 0.36
+    static let collapsedQueueTintOpacity: Double = 0.24
     static let queueButtonHitSize: CGFloat = 30
     static let queueHoverDelayMilliseconds = 300
     static let queueMinimumWidth: CGFloat = 150
@@ -327,6 +327,7 @@ final class AgentQuickInputModel: ObservableObject {
     @Published var draft = "" {
         didSet {
             guard !isApplyingState, let targetSurfaceID else { return }
+            if isQueueExpanded { isQueueExpanded = false }
             historyNavigation.edited()
             var state = paneStates[targetSurfaceID] ?? .init()
             state.draft = draft
@@ -339,6 +340,8 @@ final class AgentQuickInputModel: ObservableObject {
     @Published private(set) var editingQueueItemID: UUID?
     @Published private(set) var focusRequestID = 0
     @Published private(set) var isPinned = false
+    @Published var isQueueExpanded = false
+    @Published var composerQueueLeadingOffset: CGFloat = 110
     let historyPresentation = QuickInputHistoryPresentation()
     private var historyNavigation = QuickInputHistoryNavigation()
     private var presentationObserver: AnyCancellable?
@@ -403,6 +406,7 @@ final class AgentQuickInputModel: ObservableObject {
             present(for: surfaceID, requestFocus: false)
         } else {
             if isEditingQueuedItem { cancelQueuedItemEdit() }
+            isQueueExpanded = false
             historyPresentation.close()
             historyNavigation.edited()
             if isPresented { isPresented = false }
@@ -495,11 +499,19 @@ final class AgentQuickInputModel: ObservableObject {
             historyPresentation.close()
             requestFocus()
         } else {
+            isQueueExpanded = false
             historyPresentation.open(entries: historyStore.visibleEntries(
                 paneID: targetSurfaceID, tabID: historyTabID, scope: scope,
                 query: historyPresentation.isSearching ? historyPresentation.query : ""
             ))
         }
+    }
+
+    func toggleQueueExpanded() {
+        if !isQueueExpanded {
+            historyPresentation.close()
+        }
+        isQueueExpanded.toggle()
     }
 
     func historyCaretMoved() { historyNavigation.caretMoved() }
@@ -547,7 +559,10 @@ final class AgentQuickInputModel: ObservableObject {
             isSynchronizingGlobal = wasSynchronizingGlobal
         }
         historyNavigation.edited()
-        if targetSurfaceID != surfaceID { historyPresentation.close() }
+        if targetSurfaceID != surfaceID {
+            historyPresentation.close()
+            isQueueExpanded = false
+        }
         targetSurfaceID = surfaceID
         applyDraft(paneStates[surfaceID]?.draft ?? "")
         statusMessage = nil
@@ -561,6 +576,7 @@ final class AgentQuickInputModel: ObservableObject {
     }
 
     func dismiss(preservingDraft: Bool = true) {
+        isQueueExpanded = false
         historyPresentation.close()
         historyNavigation.edited()
         if isEditingQueuedItem {
@@ -599,6 +615,9 @@ final class AgentQuickInputModel: ObservableObject {
         guard var state = paneStates[surfaceID], !state.queue.isEmpty else { return nil }
         let item = state.queue.removeFirst()
         paneStates[surfaceID] = state
+        if targetSurfaceID == surfaceID, state.queue.isEmpty {
+            isQueueExpanded = false
+        }
         return item
     }
 
@@ -609,6 +628,9 @@ final class AgentQuickInputModel: ObservableObject {
         }
         state.queue.removeAll { $0.id == itemID }
         paneStates[surfaceID] = state
+        if targetSurfaceID == surfaceID, state.queue.isEmpty {
+            isQueueExpanded = false
+        }
         historyStore.cancelQueuedEntry(itemID)
     }
 
@@ -617,6 +639,7 @@ final class AgentQuickInputModel: ObservableObject {
               let item = state.queue.first(where: { $0.id == itemID }) else {
             return
         }
+        isQueueExpanded = false
         historyNavigation.edited()
         historyPresentation.close()
         editingQueueItemID = itemID
@@ -728,6 +751,7 @@ final class AgentQuickInputModel: ObservableObject {
         if targetSurfaceID == surfaceID {
             isSynchronizingGlobal = true
             defer { isSynchronizingGlobal = false }
+            isQueueExpanded = false
             historyPresentation.close()
             historyNavigation.edited()
             isPresented = false
@@ -843,6 +867,9 @@ struct AgentQuickInputDock<Content: View>: View {
     @ObservedObject private var secureInput = SecureInput.shared
     let content: Content
 
+    @State private var isQueueStackMounted = false
+    @State private var queueUnmountTask: Task<Void, Never>?
+
     init(
         controller: TerminalController,
         model: AgentQuickInputModel,
@@ -854,17 +881,106 @@ struct AgentQuickInputDock<Content: View>: View {
     }
 
     private var strings: SettingsStrings { SettingsStrings(language: settings.language) }
+    private var shouldShowQueueStack: Bool {
+        model.isPresented && model.isQueueExpanded && !model.targetQueue.isEmpty
+    }
+    private var hasRenderableQueue: Bool {
+        model.isPresented && !model.targetQueue.isEmpty && model.targetSurfaceID != nil
+    }
+    private var isPasswordLocked: Bool {
+        _ = secureInput.enabled
+        return controller.isQuickInputPasswordLocked(for: model.targetSurfaceID)
+    }
 
     var body: some View {
+        let queue = model.targetQueue
+        let showStackHost = hasRenderableQueue && isQueueStackMounted
+        let availableWidth = controller.window?.contentLayoutRect.width ?? 1_000
+        let maxStackHeight = max(
+            QuickInputQueueStackLayout.capsuleHeight,
+            controller.quickInputAvailableHeight() - model.dockHeight - AgentQuickInputMetrics.floatingStackSpacing
+        )
+        let stackWidth = showStackHost
+            ? QuickInputQueueStackLayout.stackWidth(
+                items: queue,
+                editingItemID: model.editingQueueItemID,
+                availableWidth: availableWidth
+            )
+            : nil
+        let stackHeight = showStackHost
+            ? QuickInputQueueStackLayout.stackHeight(itemCount: queue.count, maxHeight: maxStackHeight)
+            : 0
+        let stackLeadingOffset = showStackHost ? model.composerQueueLeadingOffset : nil
+
         AgentQuickInputDockContainer(
             content: AnyView(content),
             composer: AnyView(composer),
-            queue: AnyView(EmptyView()),
+            queue: AnyView(queueStackOverlay(availableWidth: availableWidth, maxHeight: maxStackHeight)),
             composerHeight: model.isPresented ? model.dockHeight : 0,
-            queueHeight: 0,
-            queueWidth: nil,
+            queueHeight: stackHeight,
+            queueWidth: stackWidth,
+            composerQueueLeadingOffset: stackLeadingOffset,
             isPinned: model.isPinned
         )
+        .onAppear {
+            syncQueueStackMount(expanded: shouldShowQueueStack, immediateDismiss: true)
+        }
+        .onChange(of: model.isQueueExpanded) { _ in
+            syncQueueStackMount(
+                expanded: shouldShowQueueStack,
+                immediateDismiss: !model.isPresented || queue.isEmpty
+            )
+        }
+        .onChange(of: model.isPresented) { presented in
+            if !presented { model.isQueueExpanded = false }
+            syncQueueStackMount(expanded: shouldShowQueueStack, immediateDismiss: !presented)
+        }
+        .onChange(of: queue.isEmpty) { empty in
+            if empty { model.isQueueExpanded = false }
+            syncQueueStackMount(expanded: shouldShowQueueStack, immediateDismiss: empty)
+        }
+    }
+
+    private func syncQueueStackMount(expanded: Bool, immediateDismiss: Bool) {
+        queueUnmountTask?.cancel()
+        queueUnmountTask = nil
+        if expanded {
+            isQueueStackMounted = true
+            return
+        }
+        if immediateDismiss {
+            isQueueStackMounted = false
+            return
+        }
+        queueUnmountTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(260))
+            guard !Task.isCancelled else { return }
+            isQueueStackMounted = false
+        }
+    }
+
+    @ViewBuilder
+    private func queueStackOverlay(availableWidth: CGFloat, maxHeight: CGFloat) -> some View {
+        if hasRenderableQueue, isQueueStackMounted, let surfaceID = model.targetSurfaceID {
+            AgentQuickInputQueueCapsuleStack(
+                items: model.targetQueue,
+                editingItemID: model.editingQueueItemID,
+                isSendLocked: isPasswordLocked,
+                chromeBackground: controller.quickInputAccessoryBackground(isPinned: model.isPinned),
+                strings: strings,
+                isExpanded: model.isQueueExpanded,
+                alignment: .leading,
+                scaleAnchor: .bottomLeading,
+                availableWidth: availableWidth,
+                maxHeight: maxHeight,
+                send: { controller.sendQueuedQuickInput($0, from: surfaceID) },
+                edit: { controller.editQueuedQuickInput($0, from: surfaceID) },
+                remove: { controller.removeQueuedQuickInput($0, from: surfaceID) }
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+        } else {
+            EmptyView()
+        }
     }
 
     private var composer: some View {
@@ -881,6 +997,7 @@ struct AgentQuickInputPaneQueueOverlay: View {
     @Environment(\.editorTerminalController) private var controller
     let surfaceView: Ghostty.SurfaceView
     var availableWidth: CGFloat = 1_000
+    var availableHeight: CGFloat = 1_000
 
     var body: some View {
         if let controller {
@@ -888,7 +1005,8 @@ struct AgentQuickInputPaneQueueOverlay: View {
                 controller: controller,
                 model: controller.quickInputModel,
                 surfaceID: surfaceView.id,
-                availableWidth: availableWidth
+                availableWidth: availableWidth,
+                availableHeight: availableHeight
             )
         }
     }
@@ -899,9 +1017,12 @@ private struct AgentQuickInputPaneQueueBadgeHost: View {
     @ObservedObject var model: AgentQuickInputModel
     let surfaceID: UUID
     let availableWidth: CGFloat
+    let availableHeight: CGFloat
     @ObservedObject private var settings = OhMyGhosttySettings.shared
     @ObservedObject private var secureInput = SecureInput.shared
-    @State private var isPopoverPresented = false
+    @State private var isExpanded = false
+    @State private var isStackMounted = false
+    @State private var unmountTask: Task<Void, Never>?
 
     private var strings: SettingsStrings { SettingsStrings(language: settings.language) }
     private var queue: [AgentQuickInputQueueItem] {
@@ -917,6 +1038,9 @@ private struct AgentQuickInputPaneQueueBadgeHost: View {
         _ = secureInput.enabled
         return controller.isQuickInputPasswordLocked(for: surfaceID)
     }
+    private var maxStackHeight: CGFloat {
+        max(QuickInputQueueStackLayout.capsuleHeight, availableHeight - 68)
+    }
 
     var body: some View {
         if shouldShow {
@@ -925,39 +1049,73 @@ private struct AgentQuickInputPaneQueueBadgeHost: View {
                 labelCount: label.count,
                 availableWidth: availableWidth
             )
-            AgentQuickInputCollapsedQueuePill(
-                items: queue,
-                chromeBackground: controller.quickInputAccessoryBackground(isPinned: model.isPinned),
-                strings: strings,
-                isPopoverPresented: isPopoverPresented
-            ) {
-                isPopoverPresented.toggle()
-            }
-            .frame(width: pillWidth, height: AgentQuickInputMetrics.collapsedQueueHeight)
-            .background(FloatingAccessoryAnchor())
-            .popover(isPresented: $isPopoverPresented, arrowEdge: .top) {
-                AgentQuickInputQueuePopoverView(
+            let chromeBackground = controller.quickInputAccessoryBackground(isPinned: model.isPinned)
+            VStack(alignment: .trailing, spacing: QuickInputQueueStackLayout.capsuleSpacing) {
+                if isStackMounted {
+                    AgentQuickInputQueueCapsuleStack(
+                        items: queue,
+                        editingItemID: model.targetSurfaceID == surfaceID ? model.editingQueueItemID : nil,
+                        isSendLocked: isSendLocked,
+                        chromeBackground: chromeBackground,
+                        strings: strings,
+                        isExpanded: isExpanded,
+                        alignment: .trailing,
+                        scaleAnchor: .bottomTrailing,
+                        availableWidth: availableWidth,
+                        maxHeight: maxStackHeight,
+                        send: { controller.sendQueuedQuickInput($0, from: surfaceID) },
+                        edit: { itemID in
+                            collapseStack(immediate: true)
+                            controller.editQueuedQuickInput(itemID, from: surfaceID)
+                        },
+                        remove: { controller.removeQueuedQuickInput($0, from: surfaceID) }
+                    )
+                }
+
+                AgentQuickInputCollapsedQueuePill(
                     items: queue,
-                    surfaceID: surfaceID,
-                    model: model,
-                    isSendLocked: isSendLocked,
+                    chromeBackground: chromeBackground,
                     strings: strings,
-                    send: { controller.sendQueuedQuickInput($0, from: surfaceID) },
-                    edit: { itemID in
-                        isPopoverPresented = false
-                        controller.editQueuedQuickInput(itemID, from: surfaceID)
-                    },
-                    remove: { controller.removeQueuedQuickInput($0, from: surfaceID) }
+                    isExpanded: isExpanded,
+                    toggle: toggleExpanded
                 )
+                .frame(width: pillWidth, height: AgentQuickInputMetrics.collapsedQueueHeight)
+                .background(FloatingAccessoryAnchor())
             }
             .padding(.trailing, 16)
             .padding(.bottom, 14)
             .onChange(of: queue.isEmpty) { empty in
-                if empty { isPopoverPresented = false }
+                if empty { collapseStack(immediate: true) }
             }
             .onChange(of: isTargetedByOpenComposer) { hidden in
-                if hidden { isPopoverPresented = false }
+                if hidden { collapseStack(immediate: true) }
             }
+        }
+    }
+
+    private func toggleExpanded() {
+        unmountTask?.cancel()
+        unmountTask = nil
+        if isExpanded {
+            collapseStack(immediate: false)
+        } else {
+            isStackMounted = true
+            isExpanded = true
+        }
+    }
+
+    private func collapseStack(immediate: Bool) {
+        unmountTask?.cancel()
+        unmountTask = nil
+        isExpanded = false
+        if immediate {
+            isStackMounted = false
+            return
+        }
+        unmountTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(260))
+            guard !Task.isCancelled else { return }
+            isStackMounted = false
         }
     }
 
@@ -985,95 +1143,194 @@ private struct AgentQuickInputResizeHandle: View {
     }
 }
 
-enum QuickInputQueuePopoverLayout {
-    static let width: CGFloat = 360
-    static let headerHeight: CGFloat = 38
-    static let rowEstimatedHeight: CGFloat = 60
-    static let minimumListHeight: CGFloat = 52
-    static let maximumListHeight: CGFloat = 280
+enum QuickInputQueueStackLayout {
+    static let capsuleHeight: CGFloat = 34
+    static let capsuleSpacing: CGFloat = 7
+    static let maxVisibleCapsules = 5
+    static let minimumCapsuleWidth: CGFloat = 176
+    static let maximumCapsuleWidth: CGFloat = 380
 
-    static func listHeight(itemCount: Int) -> CGFloat {
-        guard itemCount > 0 else { return minimumListHeight }
-        let estimated = CGFloat(itemCount) * rowEstimatedHeight
-        return min(max(estimated, minimumListHeight), maximumListHeight)
+    static func naturalStackHeight(itemCount: Int) -> CGFloat {
+        guard itemCount > 0 else { return 0 }
+        let visibleCount = min(itemCount, maxVisibleCapsules)
+        return CGFloat(visibleCount) * capsuleHeight
+            + CGFloat(max(0, visibleCount - 1)) * capsuleSpacing
+    }
+
+    static func stackHeight(
+        itemCount: Int,
+        maxHeight: CGFloat = .greatestFiniteMagnitude
+    ) -> CGFloat {
+        let natural = naturalStackHeight(itemCount: itemCount)
+        guard natural > 0 else { return 0 }
+        return min(maxHeight, natural)
+    }
+
+    static func capsuleWidth(
+        previewCount: Int,
+        isEditing: Bool = false,
+        availableWidth: CGFloat
+    ) -> CGFloat {
+        let estimated = CGFloat(previewCount) * 7.4 + 132 + (isEditing ? 46 : 0)
+        let maxAllowed = min(
+            maximumCapsuleWidth,
+            max(minimumCapsuleWidth, availableWidth - AgentQuickInputMetrics.floatingHorizontalInset * 2)
+        )
+        return min(max(estimated, minimumCapsuleWidth), maxAllowed)
+    }
+
+    static func stackWidth(
+        items: [AgentQuickInputQueueItem],
+        editingItemID: UUID?,
+        availableWidth: CGFloat
+    ) -> CGFloat {
+        guard !items.isEmpty else { return minimumCapsuleWidth }
+        return items.map { item in
+            capsuleWidth(
+                previewCount: item.preview.count,
+                isEditing: item.id == editingItemID,
+                availableWidth: availableWidth
+            )
+        }.max() ?? minimumCapsuleWidth
     }
 }
 
-private struct AgentQuickInputQueuePopoverView: View {
+private struct AgentQuickInputQueueCapsuleStack: View {
     let items: [AgentQuickInputQueueItem]
-    let surfaceID: UUID
-    @ObservedObject var model: AgentQuickInputModel
+    let editingItemID: UUID?
     let isSendLocked: Bool
+    let chromeBackground: Color
     let strings: SettingsStrings
+    let isExpanded: Bool
+    let alignment: HorizontalAlignment
+    let scaleAnchor: UnitPoint
+    let availableWidth: CGFloat
+    let maxHeight: CGFloat
     let send: (UUID) -> Void
     let edit: (UUID) -> Void
     let remove: (UUID) -> Void
 
+    @State private var visualExpanded = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var stackHeight: CGFloat {
+        QuickInputQueueStackLayout.stackHeight(itemCount: items.count, maxHeight: maxHeight)
+    }
+
+    private var needsScroll: Bool {
+        items.count > QuickInputQueueStackLayout.maxVisibleCapsules
+            || maxHeight < QuickInputQueueStackLayout.naturalStackHeight(itemCount: items.count)
+    }
+
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: "tray.full")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
-                Text(strings.quickInputQueuePopoverTitle)
-                    .font(.system(size: 13, weight: .semibold))
-                Text("\(items.count)")
-                    .font(.system(size: 11, weight: .medium))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 1)
-                    .background(Color.primary.opacity(0.08), in: Capsule())
-                Spacer(minLength: 4)
-                Text(strings.quickInputQueuePopoverSubtitle)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            .padding(.horizontal, 12)
-            .frame(height: QuickInputQueuePopoverLayout.headerHeight)
-
-            Divider()
-
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                        AgentQuickInputQueuePopoverRow(
-                            index: index + 1,
-                            item: item,
-                            isEditing: model.editingQueueItemID == item.id && model.targetSurfaceID == surfaceID,
-                            isSendLocked: isSendLocked,
-                            strings: strings,
-                            send: { send(item.id) },
-                            edit: { edit(item.id) },
-                            remove: { remove(item.id) }
-                        )
-                        if index + 1 < items.count {
-                            Divider()
-                                .padding(.leading, 12)
+        Group {
+            if needsScroll {
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical, showsIndicators: false) {
+                        capsuleColumn
+                    }
+                    .onAppear {
+                        if let firstID = items.first?.id {
+                            proxy.scrollTo(firstID, anchor: .bottom)
                         }
                     }
                 }
-                .animation(AgentQuickInputMotion.queue, value: items.map(\.id))
+                .frame(height: stackHeight)
+            } else {
+                capsuleColumn
             }
-            .frame(height: QuickInputQueuePopoverLayout.listHeight(itemCount: items.count))
         }
-        .frame(width: QuickInputQueuePopoverLayout.width)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Queued Agent Messages")
+        .onAppear {
+            guard isExpanded else {
+                visualExpanded = false
+                return
+            }
+            Task { @MainActor in
+                visualExpanded = isExpanded
+            }
+        }
+        .onChange(of: isExpanded) { expanded in
+            visualExpanded = expanded
+        }
+    }
+
+    private var capsuleColumn: some View {
+        let bottomUpItems = Array(items.enumerated().reversed())
+        return VStack(alignment: alignment, spacing: QuickInputQueueStackLayout.capsuleSpacing) {
+            ForEach(bottomUpItems, id: \.element.id) { index, item in
+                let distanceFromSwitch = index
+                let travel = CGFloat(min(distanceFromSwitch + 1, 5)) * 24
+                let width = QuickInputQueueStackLayout.capsuleWidth(
+                    previewCount: item.preview.count,
+                    isEditing: editingItemID == item.id,
+                    availableWidth: availableWidth
+                )
+                AgentQuickInputQueueItemCapsule(
+                    index: index + 1,
+                    item: item,
+                    width: width,
+                    isEditing: editingItemID == item.id,
+                    isSendLocked: isSendLocked,
+                    isExpanded: isExpanded,
+                    chromeBackground: chromeBackground,
+                    strings: strings,
+                    send: { send(item.id) },
+                    edit: { edit(item.id) },
+                    remove: { remove(item.id) }
+                )
+                .id(item.id)
+                .scaleEffect(visualExpanded ? 1.0 : 0.80, anchor: scaleAnchor)
+                .offset(y: visualExpanded ? 0 : travel)
+                .opacity(visualExpanded ? 1.0 : 0.0)
+                .animation(
+                    capsuleAnimation(
+                        opening: visualExpanded,
+                        distanceFromSwitch: distanceFromSwitch,
+                        totalCount: items.count
+                    ),
+                    value: visualExpanded
+                )
+            }
+        }
+        .animation(AgentQuickInputMotion.queue, value: items.map(\.id))
+    }
+
+    private func capsuleAnimation(
+        opening: Bool,
+        distanceFromSwitch: Int,
+        totalCount: Int
+    ) -> Animation {
+        if reduceMotion {
+            return .linear(duration: 0.01)
+        }
+        if opening {
+            let delay = Double(min(distanceFromSwitch, 6)) * 0.035
+            return .spring(response: 0.30, dampingFraction: 0.76).delay(delay)
+        }
+        let reverseOrder = max(0, min(totalCount - 1 - distanceFromSwitch, 4))
+        return .spring(response: 0.22, dampingFraction: 0.88).delay(Double(reverseOrder) * 0.022)
     }
 }
 
-private struct AgentQuickInputQueuePopoverRow: View {
+private struct AgentQuickInputQueueItemCapsule: View {
     let index: Int
     let item: AgentQuickInputQueueItem
+    let width: CGFloat
     let isEditing: Bool
     let isSendLocked: Bool
+    let isExpanded: Bool
+    let chromeBackground: Color
     let strings: SettingsStrings
     let send: () -> Void
     let edit: () -> Void
     let remove: () -> Void
     @State private var isHovered = false
+
+    private var colorScheme: ColorScheme {
+        NSColor(chromeBackground).isLightColor ? .light : .dark
+    }
 
     private var fullTooltip: String {
         guard item.text.count > 4_000 else { return item.text }
@@ -1081,34 +1338,33 @@ private struct AgentQuickInputQueuePopoverRow: View {
     }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 8) {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text("#\(index)")
-                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                    if isEditing {
-                        Text(strings.quickInputEditingBadge)
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(Color.accentColor)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(Color.accentColor.opacity(0.14), in: Capsule())
-                    }
-                }
-                Text(item.text)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(.primary)
-                    .lineLimit(3)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+        HStack(spacing: 6) {
+            Text("#\(index)")
+                .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .fixedSize()
+            if isEditing {
+                Text(strings.quickInputEditingBadge)
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Color.accentColor.opacity(0.16), in: Capsule())
+                    .fixedSize()
             }
-            .help(fullTooltip)
-
-            HStack(spacing: 2) {
+            Text(item.preview)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(.primary.opacity(0.92))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .help(fullTooltip)
+            Spacer(minLength: 2)
+            HStack(spacing: 1) {
                 QuickInputQueueIconButton(
                     symbol: isSendLocked ? "lock.fill" : "arrow.turn.down.right",
                     helpText: isSendLocked ? strings.quickInputPasswordLockedMessage : "Send now",
+                    hitSize: 26,
+                    boxSize: 22,
                     action: send
                 )
                 .disabled(isSendLocked)
@@ -1116,6 +1372,8 @@ private struct AgentQuickInputQueuePopoverRow: View {
                 QuickInputQueueIconButton(
                     symbol: "pencil",
                     helpText: "Edit queued message",
+                    hitSize: 26,
+                    boxSize: 22,
                     action: edit
                 )
 
@@ -1123,31 +1381,72 @@ private struct AgentQuickInputQueuePopoverRow: View {
                     symbol: "trash",
                     helpText: "Remove queued message",
                     isDestructive: true,
+                    hitSize: 26,
+                    boxSize: 22,
                     action: remove
                 )
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.leading, 11)
+        .padding(.trailing, 7)
+        .frame(width: width, height: QuickInputQueueStackLayout.capsuleHeight)
         .background(
-            isEditing
-                ? Color.accentColor.opacity(0.10)
-                : (isHovered ? Color.primary.opacity(0.05) : .clear)
+            QuickInputGlassSurface(
+                cornerRadius: QuickInputQueueStackLayout.capsuleHeight * 0.5,
+                themeColor: chromeBackground,
+                tintOpacity: (isHovered || isEditing)
+                    ? 0.50
+                    : AgentQuickInputMetrics.queueCardTintOpacity,
+                colorScheme: colorScheme,
+                borderColor: isEditing ? Color.accentColor.opacity(0.65) : nil
+            )
         )
-        .contentShape(Rectangle())
+        .contentShape(Capsule())
+        .shadow(color: .black.opacity(0.22), radius: 7, y: 2)
         .onHover { isHovered = $0 }
+        .background(FloatingAccessoryAnchor(isActive: isExpanded))
+        .allowsHitTesting(isExpanded)
+        .environment(\.colorScheme, colorScheme)
     }
 }
 
-private struct QuickInputGlassSurface<S: InsettableShape>: View {
-    let shape: S
+private struct QuickInputBackdropBlurView: NSViewRepresentable {
+    let cornerRadius: CGFloat
+    let isLight: Bool
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        configure(view)
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {
+        configure(view)
+    }
+
+    private func configure(_ view: NSVisualEffectView) {
+        view.blendingMode = .withinWindow
+        view.state = .active
+        view.material = isLight ? .selection : .fullScreenUI
+        view.appearance = NSAppearance(named: isLight ? .aqua : .darkAqua)
+        view.wantsLayer = true
+        view.layer?.cornerRadius = cornerRadius
+        view.layer?.cornerCurve = .continuous
+        view.layer?.masksToBounds = true
+    }
+}
+
+private struct QuickInputGlassSurface: View {
+    let cornerRadius: CGFloat
     let themeColor: Color
     let tintOpacity: Double
     let colorScheme: ColorScheme
     var borderOpacity: Double?
+    var borderColor: Color?
 
     var body: some View {
-        let topRim = colorScheme == .light ? 0.52 : 0.18
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        let topRim = colorScheme == .light ? 0.52 : 0.22
         let bottomRim = colorScheme == .light ? 0.10 : 0.08
         let rimStroke = LinearGradient(
             colors: [
@@ -1157,14 +1456,25 @@ private struct QuickInputGlassSurface<S: InsettableShape>: View {
             startPoint: .top,
             endPoint: .bottom
         )
+        let reduceTransparency = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
 
         ZStack {
-            shape.fill(.ultraThinMaterial)
-            shape.fill(themeColor.opacity(tintOpacity))
+            if reduceTransparency {
+                shape.fill(themeColor)
+            } else {
+                QuickInputBackdropBlurView(
+                    cornerRadius: cornerRadius,
+                    isLight: colorScheme == .light
+                )
+                shape.fill(themeColor.opacity(tintOpacity))
+            }
         }
-        .clipShape(shape)
         .overlay {
-            if let borderOpacity {
+            if let borderColor {
+                shape
+                    .strokeBorder(borderColor, lineWidth: 1.2)
+                    .allowsHitTesting(false)
+            } else if let borderOpacity {
                 shape
                     .strokeBorder(Color.primary.opacity(borderOpacity), lineWidth: 1)
                     .allowsHitTesting(false)
@@ -1181,7 +1491,7 @@ private struct AgentQuickInputCollapsedQueuePill: View {
     let items: [AgentQuickInputQueueItem]
     let chromeBackground: Color
     let strings: SettingsStrings
-    var isPopoverPresented = false
+    var isExpanded = false
     let toggle: () -> Void
     @State private var isHovered = false
 
@@ -1206,7 +1516,7 @@ private struct AgentQuickInputCollapsedQueuePill: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .foregroundStyle(.primary.opacity(0.88))
-                Image(systemName: isPopoverPresented ? "chevron.down" : "chevron.up")
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.up")
                     .font(.system(size: 8.5, weight: .semibold))
                     .foregroundStyle(.secondary)
             }
@@ -1214,10 +1524,10 @@ private struct AgentQuickInputCollapsedQueuePill: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(
                 QuickInputGlassSurface(
-                    shape: Capsule(),
+                    cornerRadius: AgentQuickInputMetrics.collapsedQueueHeight * 0.5,
                     themeColor: chromeBackground,
-                    tintOpacity: (isHovered || isPopoverPresented)
-                        ? 0.74
+                    tintOpacity: (isHovered || isExpanded)
+                        ? 0.40
                         : AgentQuickInputMetrics.collapsedQueueTintOpacity,
                     colorScheme: colorScheme
                 )
@@ -1236,6 +1546,8 @@ private struct AgentQuickInputCollapsedQueuePill: View {
 
 private struct QuickInputQueueIconButtonStyle: ButtonStyle {
     var isDestructive = false
+    var hitSize: CGFloat = AgentQuickInputMetrics.queueButtonHitSize
+    var boxSize: CGFloat = 26
     @Environment(\.isEnabled) private var isEnabled
     @State private var isHovered = false
 
@@ -1260,14 +1572,11 @@ private struct QuickInputQueueIconButtonStyle: ButtonStyle {
         return configuration.label
             .font(.system(size: 11.5, weight: .medium))
             .foregroundStyle(iconColor)
-            .frame(
-                width: AgentQuickInputMetrics.queueButtonHitSize,
-                height: AgentQuickInputMetrics.queueButtonHitSize
-            )
+            .frame(width: hitSize, height: hitSize)
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .fill(boxFill)
-                    .frame(width: 26, height: 26)
+                    .frame(width: boxSize, height: boxSize)
             )
             .contentShape(Rectangle())
             .opacity(isEnabled ? 1 : 0.4)
@@ -1279,13 +1588,21 @@ private struct QuickInputQueueIconButton: View {
     let symbol: String
     let helpText: String
     var isDestructive = false
+    var hitSize: CGFloat = AgentQuickInputMetrics.queueButtonHitSize
+    var boxSize: CGFloat = 26
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
         }
-        .buttonStyle(QuickInputQueueIconButtonStyle(isDestructive: isDestructive))
+        .buttonStyle(
+            QuickInputQueueIconButtonStyle(
+                isDestructive: isDestructive,
+                hitSize: hitSize,
+                boxSize: boxSize
+            )
+        )
         .help(helpText)
         .accessibilityLabel(helpText)
         .pointingHandCursor()
@@ -1343,13 +1660,19 @@ private struct QuickInputPillButtonStyle: ButtonStyle {
     }
 }
 
+private struct QuickInputQueueButtonMinXPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat?
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
+        value = nextValue() ?? value
+    }
+}
+
 private struct AgentQuickInputComposer: View {
     @ObservedObject var controller: TerminalController
     @ObservedObject var model: AgentQuickInputModel
 
     @ObservedObject private var settings = OhMyGhosttySettings.shared
     @ObservedObject private var secureInput = SecureInput.shared
-    @State private var isQueuePopoverPresented = false
     private var strings: SettingsStrings { SettingsStrings(language: settings.language) }
     private var isPasswordLocked: Bool {
         _ = secureInput.enabled
@@ -1359,7 +1682,7 @@ private struct AgentQuickInputComposer: View {
         isPasswordLocked && !model.isEditingQueuedItem
     }
 
-    /// Always paints an opaque terminal-theme card background over the terminal.
+    /// Paints the terminal-theme translucent frosted glass card over the terminal.
     private var chromeBackground: Color {
         controller.quickInputAccessoryBackground(isPinned: model.isPinned)
     }
@@ -1440,20 +1763,21 @@ private struct AgentQuickInputComposer: View {
                 ), arrowEdge: .bottom) {
                     historyPopover
                 }
-                if !model.targetQueue.isEmpty, let surfaceID = model.targetSurfaceID {
+                if !model.targetQueue.isEmpty {
                     QuickInputQueueButton(
                         title: strings.quickInputQueueButtonHelp,
                         count: model.targetQueue.count,
-                        isActive: isQueuePopoverPresented
-                    ) {
-                        if !isQueuePopoverPresented {
-                            model.historyPresentation.close()
+                        isActive: model.isQueueExpanded,
+                        action: model.toggleQueueExpanded
+                    )
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear.preference(
+                                key: QuickInputQueueButtonMinXPreferenceKey.self,
+                                value: proxy.frame(in: .named("quickInputComposerCard")).minX
+                            )
                         }
-                        isQueuePopoverPresented.toggle()
-                    }
-                    .popover(isPresented: $isQueuePopoverPresented, arrowEdge: .top) {
-                        queuePopover(for: surfaceID)
-                    }
+                    )
                 }
                 if isPasswordLocked {
                     Text("·")
@@ -1527,7 +1851,7 @@ private struct AgentQuickInputComposer: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
             QuickInputGlassSurface(
-                shape: cardShape,
+                cornerRadius: AgentQuickInputMetrics.cardCornerRadius,
                 themeColor: chromeBackground,
                 tintOpacity: AgentQuickInputMetrics.composerTintOpacity,
                 colorScheme: cardColorScheme
@@ -1540,18 +1864,17 @@ private struct AgentQuickInputComposer: View {
                 color: .clear
             )
         }
-        .clipShape(cardShape)
+        .coordinateSpace(name: "quickInputComposerCard")
+        .onPreferenceChange(QuickInputQueueButtonMinXPreferenceKey.self) { minX in
+            guard let minX else { return }
+            Task { @MainActor in
+                if abs(model.composerQueueLeadingOffset - minX) > 0.5 {
+                    model.composerQueueLeadingOffset = minX
+                }
+            }
+        }
         .contentShape(cardShape)
         .environment(\.colorScheme, cardColorScheme)
-        .onChange(of: model.historyPresentation.isPresented) { open in
-            if open { isQueuePopoverPresented = false }
-        }
-        .onChange(of: model.targetQueue.isEmpty) { empty in
-            if empty { isQueuePopoverPresented = false }
-        }
-        .onChange(of: model.targetSurfaceID) { _ in
-            isQueuePopoverPresented = false
-        }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Agent Quick Input")
     }
@@ -1561,22 +1884,6 @@ private struct AgentQuickInputComposer: View {
             model.historyPresentation.close()
             model.useHistoryText(text, mode: settings.quickInputHistoryInsertionMode)
         }
-    }
-
-    private func queuePopover(for surfaceID: UUID) -> some View {
-        AgentQuickInputQueuePopoverView(
-            items: model.targetQueue,
-            surfaceID: surfaceID,
-            model: model,
-            isSendLocked: isPasswordLocked,
-            strings: strings,
-            send: { controller.sendQueuedQuickInput($0, from: surfaceID) },
-            edit: { itemID in
-                isQueuePopoverPresented = false
-                controller.editQueuedQuickInput(itemID, from: surfaceID)
-            },
-            remove: { controller.removeQueuedQuickInput($0, from: surfaceID) }
-        )
     }
 
     private var editorFont: NSFont {

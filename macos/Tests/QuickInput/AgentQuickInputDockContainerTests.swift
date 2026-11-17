@@ -48,6 +48,8 @@ struct AgentQuickInputDockContainerTests {
         container.layoutSubtreeIfNeeded()
         #expect(container.contentHost.frame == NSRect(x: 0, y: 0, width: 800, height: 600))
         #expect(container.composerHost.layer?.shadowOpacity == 0)
+        #expect(container.composerShadowLayer.shadowOpacity == 0)
+        #expect(container.composerShadowLayer.isHidden)
         terminal.frameChangeCount = 0
 
         let insetX = AgentQuickInputMetrics.floatingHorizontalInset
@@ -96,13 +98,17 @@ struct AgentQuickInputDockContainerTests {
             #expect(container.queueHost.isHidden == (queueHeight == 0))
             #expect(container.composerHost.layer?.masksToBounds == false)
             #expect(container.queueHost.layer?.masksToBounds == false)
+            #expect(container.composerHost.layer?.shadowOpacity == 0)
             if composerHeight > 0 {
-                #expect(abs((container.composerHost.layer?.shadowOpacity ?? 0) - 0.34) < 0.001)
-                #expect(container.composerHost.layer?.shadowRadius == 18)
-                #expect(container.composerHost.layer?.shadowOffset == CGSize(width: 0, height: -5))
-                #expect(container.composerHost.layer?.shadowPath != nil)
+                #expect(abs(container.composerShadowLayer.shadowOpacity - 0.30) < 0.001)
+                #expect(container.composerShadowLayer.shadowRadius == 18)
+                #expect(container.composerShadowLayer.shadowOffset == CGSize(width: 0, height: -5))
+                #expect(container.composerShadowLayer.shadowPath != nil)
+                #expect(container.composerShadowLayer.mask != nil)
+                #expect(!container.composerShadowLayer.isHidden)
             } else {
-                #expect(container.composerHost.layer?.shadowOpacity == 0)
+                #expect(container.composerShadowLayer.shadowOpacity == 0)
+                #expect(container.composerShadowLayer.isHidden)
             }
             #expect(container.subviews == [container.contentHost, container.composerHost, container.queueHost])
 
@@ -312,5 +318,80 @@ struct AgentQuickInputDockContainerTests {
         container.layoutSubtreeIfNeeded()
 
         #expect(!container.occludesContentPoint(inWindow: NSPoint(x: 700, y: 24)))
+    }
+
+    @Test func composerQueueLeadingOffsetPositionsStackAboveComposerWithPerCapsuleHitTest() async throws {
+        let container = AgentQuickInputDockContainer.Container(
+            frame: NSRect(x: 0, y: 0, width: 800, height: 600)
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = container
+        defer { window.contentView = nil; window.close() }
+
+        let capsuleStack = VStack(alignment: .leading, spacing: 7) {
+            Color.clear
+                .frame(width: 180, height: 34)
+                .background(FloatingAccessoryAnchor(isActive: true))
+            Color.clear
+                .frame(width: 280, height: 34)
+                .background(FloatingAccessoryAnchor(isActive: true))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+
+        container.update(
+            content: AnyView(Color.clear),
+            composer: AnyView(Color.clear),
+            queue: AnyView(capsuleStack),
+            composerHeight: 148,
+            queueHeight: 75,
+            queueWidth: 280,
+            composerQueueLeadingOffset: 110
+        )
+        container.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(30))
+        container.layoutSubtreeIfNeeded()
+
+        // insetX = 16, composerY = 12, stackSpacing = 8 -> queueX = 16 + 110 = 126, queueY = 12 + 148 + 8 = 168
+        #expect(container.queueHost.frame == NSRect(x: 126, y: 168, width: 280, height: 75))
+        #expect(container.queueHost.hasAnchorViews)
+
+        // Points inside bottom capsule (y = 168..202) and shorter top capsule (y = 209..243, x = 126..306) hit.
+        #expect(container.queueHost.hitTest(NSPoint(x: 200, y: 185)) != nil)
+        #expect(container.queueHost.hitTest(NSPoint(x: 200, y: 225)) != nil)
+        #expect(container.occludesContentPoint(inWindow: NSPoint(x: 200, y: 185)))
+        #expect(container.occludesContentPoint(inWindow: NSPoint(x: 200, y: 225)))
+
+        // Gap between capsules (y = 205) and empty space beside shorter top capsule (x = 360, y = 225) pass through.
+        #expect(container.queueHost.hitTest(NSPoint(x: 200, y: 205)) == nil)
+        #expect(container.queueHost.hitTest(NSPoint(x: 360, y: 225)) == nil)
+        #expect(!container.occludesContentPoint(inWindow: NSPoint(x: 360, y: 225)))
+        #expect(!container.occludesContentPoint(inWindow: NSPoint(x: 200, y: 205)))
+
+        // Deactivating anchors stops occlusion and passes clicks through immediately.
+        let inactiveStack = VStack(alignment: .leading, spacing: 7) {
+            Color.clear
+                .frame(width: 180, height: 34)
+                .background(FloatingAccessoryAnchor(isActive: false))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+        container.update(
+            content: AnyView(Color.clear),
+            composer: AnyView(Color.clear),
+            queue: AnyView(inactiveStack),
+            composerHeight: 148,
+            queueHeight: 34,
+            queueWidth: 180,
+            composerQueueLeadingOffset: 110
+        )
+        container.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(30))
+        container.layoutSubtreeIfNeeded()
+
+        #expect(container.queueHost.hitTest(NSPoint(x: 200, y: 185)) == nil)
+        #expect(!container.occludesContentPoint(inWindow: NSPoint(x: 200, y: 185)))
     }
 }

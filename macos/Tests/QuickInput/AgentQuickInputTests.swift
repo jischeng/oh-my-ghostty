@@ -439,10 +439,34 @@ struct AgentQuickInputTests {
             availableWidth: 140
         ) == 108)
         #expect(AgentQuickInputMetrics.queueHoverDelayMilliseconds == 300)
-        #expect(QuickInputQueuePopoverLayout.listHeight(itemCount: 0) == QuickInputQueuePopoverLayout.minimumListHeight)
-        #expect(QuickInputQueuePopoverLayout.listHeight(itemCount: 1) == 60)
-        #expect(QuickInputQueuePopoverLayout.listHeight(itemCount: 4) == 240)
-        #expect(QuickInputQueuePopoverLayout.listHeight(itemCount: 10) == QuickInputQueuePopoverLayout.maximumListHeight)
+        #expect(QuickInputQueueStackLayout.stackHeight(itemCount: 0) == 0)
+        #expect(QuickInputQueueStackLayout.stackHeight(itemCount: 1) == 34)
+        #expect(QuickInputQueueStackLayout.stackHeight(itemCount: 3) == 116)
+        #expect(QuickInputQueueStackLayout.stackHeight(itemCount: 5) == 198)
+        #expect(QuickInputQueueStackLayout.stackHeight(itemCount: 9) == 198)
+        #expect(QuickInputQueueStackLayout.stackHeight(itemCount: 5, maxHeight: 120) == 120)
+        #expect(QuickInputQueueStackLayout.capsuleWidth(
+            previewCount: 2,
+            availableWidth: 1_000
+        ) == QuickInputQueueStackLayout.minimumCapsuleWidth)
+        #expect(QuickInputQueueStackLayout.capsuleWidth(
+            previewCount: 20,
+            isEditing: false,
+            availableWidth: 1_000
+        ) == 280)
+        #expect(QuickInputQueueStackLayout.capsuleWidth(
+            previewCount: 20,
+            isEditing: true,
+            availableWidth: 1_000
+        ) == 326)
+        #expect(QuickInputQueueStackLayout.capsuleWidth(
+            previewCount: 100,
+            availableWidth: 1_000
+        ) == QuickInputQueueStackLayout.maximumCapsuleWidth)
+        #expect(QuickInputQueueStackLayout.capsuleWidth(
+            previewCount: 100,
+            availableWidth: 160
+        ) == QuickInputQueueStackLayout.minimumCapsuleWidth)
     }
 
     @Test func accessoryHeightNeverReservesInFlowTerminalSpace() {
@@ -1504,5 +1528,68 @@ struct AgentQuickInputTests {
         #expect(controller.quickInputModel.draft == "task for pane A")
         #expect(controller.quickInputModel.focusRequestID == baselineFocusID + 1)
         #expect(controller.quickInputLastTerminalSurfaceID == paneA.id)
+    }
+
+    @Test @MainActor
+    func composerQueueExpandedStateResetsAcrossLifecycleTransitions() throws {
+        let model = AgentQuickInputModel(dockHeight: 148)
+        let paneA = UUID()
+        let paneB = UUID()
+
+        model.present(for: paneA, requestFocus: false)
+        model.draft = "queued one"
+        let item1 = try #require(model.enqueueDraft())
+        model.draft = "queued two"
+        let item2 = try #require(model.enqueueDraft())
+
+        // Toggling open closes History if open; toggling again closes it.
+        model.toggleHistory(scope: .pane)
+        #expect(model.historyPresentation.isPresented)
+        model.toggleQueueExpanded()
+        #expect(model.isQueueExpanded)
+        #expect(!model.historyPresentation.isPresented)
+
+        // Opening History closes the expanded queue stack.
+        model.toggleHistory(scope: .pane)
+        #expect(model.historyPresentation.isPresented)
+        #expect(!model.isQueueExpanded)
+
+        // Typing into the composer draft collapses the queue stack.
+        model.toggleHistory(scope: .pane)
+        model.toggleQueueExpanded()
+        #expect(model.isQueueExpanded)
+        model.draft = "typing"
+        #expect(!model.isQueueExpanded)
+
+        // Switching target pane collapses the queue stack.
+        model.toggleQueueExpanded()
+        #expect(model.isQueueExpanded)
+        model.present(for: paneB, requestFocus: false)
+        #expect(!model.isQueueExpanded)
+
+        // Editing a queued item collapses the queue stack.
+        model.present(for: paneA, requestFocus: false)
+        model.toggleQueueExpanded()
+        #expect(model.isQueueExpanded)
+        model.editQueuedItem(item1.id, for: paneA)
+        #expect(!model.isQueueExpanded)
+        model.cancelQueuedItemEdit()
+
+        // Removing/dequeuing only collapses once the target queue empties, and dismiss resets it.
+        model.present(for: paneA, requestFocus: false)
+        model.toggleQueueExpanded()
+        #expect(model.isQueueExpanded)
+        model.removeQueuedItem(item1.id, for: paneA)
+        #expect(model.isQueueExpanded)
+        _ = model.dequeue(for: paneA)
+        #expect(!model.isQueueExpanded)
+        _ = item2
+
+        model.draft = "another"
+        _ = try #require(model.enqueueDraft())
+        model.toggleQueueExpanded()
+        #expect(model.isQueueExpanded)
+        model.dismiss()
+        #expect(!model.isQueueExpanded)
     }
 }

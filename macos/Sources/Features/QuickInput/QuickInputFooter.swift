@@ -101,6 +101,9 @@ struct QuickInputQueueButton: View {
                 Text("\(count)")
                     .font(QuickInputFooterStyle.font)
                     .monospacedDigit()
+                Image(systemName: isActive ? "chevron.down" : "chevron.up")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.secondary)
             }
             .contentShape(Rectangle())
         }

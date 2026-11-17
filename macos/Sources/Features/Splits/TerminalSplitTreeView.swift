@@ -133,7 +133,8 @@ private struct TerminalSplitLeaf: View {
             .overlay(alignment: .bottomTrailing) {
                 AgentQuickInputPaneQueueOverlay(
                     surfaceView: surfaceView,
-                    availableWidth: geometry.size.width
+                    availableWidth: geometry.size.width,
+                    availableHeight: geometry.size.height
                 )
             }
             .background {

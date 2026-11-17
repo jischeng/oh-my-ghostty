@@ -441,12 +441,6 @@ struct SettingsStrings: Equatable, Sendable {
     var quickInputQueueButtonHelp: String {
         t("Queued Messages", "排队消息")
     }
-    var quickInputQueuePopoverTitle: String {
-        t("Queued Messages", "排队消息")
-    }
-    var quickInputQueuePopoverSubtitle: String {
-        t("Sent in order when Agent finishes", "Agent 完成后按序发送")
-    }
     var quickInputEditingBadge: String {
         t("Editing", "编辑中")
     }

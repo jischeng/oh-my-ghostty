@@ -85,3 +85,27 @@ struct QuickInputHistoryButton: View {
                                   isActive: isActive, action: action)
     }
 }
+
+struct QuickInputQueueButton: View {
+    let title: String
+    let count: Int
+    var isActive = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: "tray.full")
+                    .font(QuickInputFooterStyle.iconFont)
+                    .frame(width: 16, height: 16)
+                Text("\(count)")
+                    .font(QuickInputFooterStyle.font)
+                    .monospacedDigit()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(QuickInputFooterButtonStyle(isActive: isActive))
+        .accessibilityLabel("\(count) queued messages")
+        .help(title)
+    }
+}

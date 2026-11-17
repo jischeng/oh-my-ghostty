@@ -436,7 +436,19 @@ struct SettingsStrings: Equatable, Sendable {
         t("\(count) queued", "排队 \(count)")
     }
     var quickInputCollapsedQueueHelp: String {
-        t("Show queued messages in Quick Input", "展开输入框查看排队消息")
+        t("View queued messages", "查看排队消息")
+    }
+    var quickInputQueueButtonHelp: String {
+        t("Queued Messages", "排队消息")
+    }
+    var quickInputQueuePopoverTitle: String {
+        t("Queued Messages", "排队消息")
+    }
+    var quickInputQueuePopoverSubtitle: String {
+        t("Sent in order when Agent finishes", "Agent 完成后按序发送")
+    }
+    var quickInputEditingBadge: String {
+        t("Editing", "编辑中")
     }
     var quickInputImportInvalid: String {
         t("Use up to four comma-separated shortcuts with control, option or shift and a letter or digit.",

@@ -42,6 +42,15 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
         private var requestedQueueHeight: CGFloat = 0
         private var requestedQueueWidth: CGFloat?
         private(set) var isPinned: Bool = false
+        private let floatingAccessoryViews = NSHashTable<NSView>.weakObjects()
+
+        func registerFloatingAccessoryView(_ view: NSView) {
+            floatingAccessoryViews.add(view)
+        }
+
+        func unregisterFloatingAccessoryView(_ view: NSView) {
+            floatingAccessoryViews.remove(view)
+        }
 
         func occludesContentPoint(inWindow pointInWindow: NSPoint) -> Bool {
             let local = convert(pointInWindow, from: nil)
@@ -50,6 +59,15 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
             }
             if !queueHost.isHidden, queueHost.frame.contains(local) {
                 return true
+            }
+            if let window = self.window {
+                for accessory in floatingAccessoryViews.allObjects
+                where !accessory.isHiddenOrHasHiddenAncestor && accessory.window === window {
+                    let accessoryPoint = accessory.convert(pointInWindow, from: nil)
+                    if accessory.bounds.contains(accessoryPoint) {
+                        return true
+                    }
+                }
             }
             return false
         }
@@ -196,6 +214,61 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
                 layer.shadowOpacity = 0
                 layer.shadowPath = nil
             }
+        }
+    }
+}
+
+/// Registers an overlaid per-pane floating badge with the enclosing dock
+/// container so terminal hover/link hints stay suppressed underneath it.
+struct FloatingAccessoryAnchor: NSViewRepresentable {
+    func makeNSView(context: Context) -> AnchorView { AnchorView() }
+
+    func updateNSView(_ view: AnchorView, context: Context) {
+        view.syncRegistration()
+    }
+
+    static func dismantleNSView(_ view: AnchorView, coordinator: ()) {
+        view.unregister()
+    }
+
+    final class AnchorView: NSView {
+        private weak var registeredContainer: AgentQuickInputDockContainer.Container?
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToSuperview() {
+            super.viewDidMoveToSuperview()
+            syncRegistration()
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            syncRegistration()
+        }
+
+        func syncRegistration() {
+            let container = enclosingDockContainer()
+            if registeredContainer !== container {
+                registeredContainer?.unregisterFloatingAccessoryView(self)
+                registeredContainer = container
+            }
+            container?.registerFloatingAccessoryView(self)
+        }
+
+        func unregister() {
+            registeredContainer?.unregisterFloatingAccessoryView(self)
+            registeredContainer = nil
+        }
+
+        private func enclosingDockContainer() -> AgentQuickInputDockContainer.Container? {
+            var current = superview
+            while let view = current {
+                if let container = view as? AgentQuickInputDockContainer.Container {
+                    return container
+                }
+                current = view.superview
+            }
+            return nil
         }
     }
 }

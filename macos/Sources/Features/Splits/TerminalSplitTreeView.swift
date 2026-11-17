@@ -130,6 +130,12 @@ private struct TerminalSplitLeaf: View {
                     presentationLease: presentationLease,
                     isSplit: isSplit)
             }
+            .overlay(alignment: .bottomTrailing) {
+                AgentQuickInputPaneQueueOverlay(
+                    surfaceView: surfaceView,
+                    availableWidth: geometry.size.width
+                )
+            }
             .background {
                 // If we're dragging ourself, we hide the entire drop zone. This makes
                 // it so that a released drop animates back to its source properly

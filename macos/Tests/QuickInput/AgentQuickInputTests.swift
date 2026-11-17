@@ -439,6 +439,10 @@ struct AgentQuickInputTests {
             availableWidth: 140
         ) == 108)
         #expect(AgentQuickInputMetrics.queueHoverDelayMilliseconds == 300)
+        #expect(QuickInputQueuePopoverLayout.listHeight(itemCount: 0) == QuickInputQueuePopoverLayout.minimumListHeight)
+        #expect(QuickInputQueuePopoverLayout.listHeight(itemCount: 1) == 60)
+        #expect(QuickInputQueuePopoverLayout.listHeight(itemCount: 4) == 240)
+        #expect(QuickInputQueuePopoverLayout.listHeight(itemCount: 10) == QuickInputQueuePopoverLayout.maximumListHeight)
     }
 
     @Test func accessoryHeightNeverReservesInFlowTerminalSpace() {
@@ -1177,7 +1181,7 @@ struct AgentQuickInputTests {
         #expect(controller.quickInputModel.dockHeight == 188)
         #expect(settings.quickInputHeight == 188)
 
-        // 3. Visible queue reservation and floating vertical insets are subtracted from available height.
+        // 3. Floating vertical insets are subtracted from available height without queue lane reservation.
         let surface = try #require(controller.focusedSurface)
         controller.quickInputModel.present(for: surface.id, requestFocus: false)
         controller.quickInputModel.draft = "queued"
@@ -1189,7 +1193,6 @@ struct AgentQuickInputTests {
             contentHeight
                 - AgentQuickInputMetrics.floatingBottomInset
                 - AgentQuickInputMetrics.floatingTopMargin
-                - (AgentQuickInputMetrics.queueFloatingHeight + AgentQuickInputMetrics.floatingStackSpacing)
         )
         #expect(abs(controller.quickInputAvailableHeight() - expectedAvailable) < 0.01)
         controller.updateQuickInputHeight(400, persist: true)
@@ -1466,5 +1469,40 @@ struct AgentQuickInputTests {
         controller.presentQuickInput(forSurfaceID: surface.id)
         #expect(controller.quickInputModel.isPresented)
         #expect(controller.quickInputModel.targetSurfaceID == surface.id)
+    }
+
+    @Test @MainActor
+    func perPaneQueuedEditOpensQuickInputTargetsOwningPaneAndRequestsFocus() throws {
+        let app = try #require((NSApp.delegate as? AppDelegate)?.ghostty)
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 30"
+        let controller = TerminalController(app, withBaseConfig: config)
+        let window = try #require(controller.window)
+        defer { window.delegate = nil; window.close() }
+
+        let paneA = try #require(controller.surfaceTree.first)
+        let paneB = try #require(controller.newSplit(at: paneA, direction: .right, baseConfig: config))
+
+        controller.quickInputModel.present(for: paneA.id, requestFocus: false)
+        controller.quickInputModel.draft = "task for pane A"
+        let itemA = try #require(controller.quickInputModel.enqueueDraft())
+
+        controller.quickInputModel.present(for: paneB.id, requestFocus: false)
+        controller.quickInputModel.draft = "task for pane B"
+        let itemB = try #require(controller.quickInputModel.enqueueDraft())
+        controller.quickInputModel.dismiss()
+
+        #expect(controller.quickInputModel.state(for: paneA.id)?.queue == [itemA])
+        #expect(controller.quickInputModel.state(for: paneB.id)?.queue == [itemB])
+
+        let baselineFocusID = controller.quickInputModel.focusRequestID
+        controller.editQueuedQuickInput(itemA.id, from: paneA.id)
+
+        #expect(controller.quickInputModel.isPresented)
+        #expect(controller.quickInputModel.targetSurfaceID == paneA.id)
+        #expect(controller.quickInputModel.editingQueueItemID == itemA.id)
+        #expect(controller.quickInputModel.draft == "task for pane A")
+        #expect(controller.quickInputModel.focusRequestID == baselineFocusID + 1)
+        #expect(controller.quickInputLastTerminalSurfaceID == paneA.id)
     }
 }

@@ -261,4 +261,56 @@ struct AgentQuickInputDockContainerTests {
         #expect(!container.occludesContentPoint(inWindow: NSPoint(x: 500, y: 20)))
         #expect(container.occludesContentPoint(inWindow: NSPoint(x: 680, y: 20)))
     }
+
+    @Test func registeredPerPaneAccessoryViewOccludesOnlyItsOwnBounds() async throws {
+        let container = AgentQuickInputDockContainer.Container(
+            frame: NSRect(x: 0, y: 0, width: 800, height: 600)
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = container
+        defer { window.contentView = nil; window.close() }
+
+        container.update(
+            content: AnyView(
+                ZStack(alignment: .bottomTrailing) {
+                    Color.clear
+                    Color.clear
+                        .frame(width: 140, height: 28)
+                        .background(FloatingAccessoryAnchor())
+                        .padding(.trailing, 16)
+                        .padding(.bottom, 14)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            ),
+            composer: AnyView(Color.clear),
+            queue: AnyView(Color.clear),
+            composerHeight: 0,
+            queueHeight: 0
+        )
+        container.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(30))
+        container.layoutSubtreeIfNeeded()
+
+        #expect(container.occludesContentPoint(inWindow: NSPoint(x: 700, y: 24)))
+        #expect(!container.occludesContentPoint(inWindow: NSPoint(x: 100, y: 24)))
+        #expect(!container.occludesContentPoint(inWindow: NSPoint(x: 792, y: 24)))
+        #expect(!container.occludesContentPoint(inWindow: NSPoint(x: 700, y: 6)))
+
+        container.update(
+            content: AnyView(Color.clear),
+            composer: AnyView(Color.clear),
+            queue: AnyView(Color.clear),
+            composerHeight: 0,
+            queueHeight: 0
+        )
+        container.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(30))
+        container.layoutSubtreeIfNeeded()
+
+        #expect(!container.occludesContentPoint(inWindow: NSPoint(x: 700, y: 24)))
+    }
 }

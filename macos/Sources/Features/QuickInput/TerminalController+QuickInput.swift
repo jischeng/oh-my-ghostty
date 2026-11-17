@@ -38,16 +38,8 @@ extension TerminalController {
         defaultHeight: CGFloat = AgentQuickInputMetrics.maximumHeight * 2
     ) -> CGFloat {
         let baseHeight = window?.contentLayoutRect.height ?? defaultHeight
-        let queueSurfaceID = quickInputModel.isPresented
-            ? quickInputModel.targetSurfaceID
-            : (focusedSurface ?? surfaceTree.first)?.id
-        let hasQueue = queueSurfaceID.flatMap { quickInputModel.state(for: $0)?.queue.isEmpty } == false
-        let queueAllowance = hasQueue
-            ? AgentQuickInputMetrics.queueFloatingHeight + AgentQuickInputMetrics.floatingStackSpacing
-            : 0
         let insets = AgentQuickInputMetrics.floatingBottomInset
             + AgentQuickInputMetrics.floatingTopMargin
-            + queueAllowance
         return max(0, baseHeight - insets)
     }
 
@@ -270,6 +262,7 @@ extension TerminalController {
 
     func editQueuedQuickInput(_ itemID: UUID, from surfaceID: UUID) {
         guard quickInputSubmissionTasks[surfaceID] == nil else { return }
+        quickInputLastTerminalSurfaceID = surfaceID
         quickInputModel.editQueuedItem(itemID, for: surfaceID)
     }
 

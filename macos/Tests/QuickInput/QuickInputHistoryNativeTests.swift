@@ -176,7 +176,15 @@ struct QuickInputHistoryNativeTests {
         }
 
         let scrollView = try #require(find(NSScrollView.self, in: host))
+        #expect(scrollView.verticalScrollElasticity == .none)
+        #expect(scrollView.horizontalScrollElasticity == .none)
         #expect(scrollView.frame.width > expectedWidth)
+        #expect(
+            abs(
+                scrollView.frame.height
+                    - QuickInputHistoryLayout.naturalEntriesHeight(entryCount: entries.count)
+            ) < 0.5
+        )
         #expect(
             scrollView.contentView.frame.width
                 >= expectedWidth + QuickInputHistoryLayout.scrollHorizontalShadowOutset * 2 - 0.5
@@ -192,6 +200,67 @@ struct QuickInputHistoryNativeTests {
             #expect(dedicatedLayers.contains(ObjectIdentifier(layer)))
             #expect(layer.mask != nil)
         }
+    }
+
+    @Test func dockContainerBridgesAllVerticalGapsOfScrollingHistoryStack() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let settings = OhMyGhosttySettings(fileURL: home.appendingPathComponent("settings.json"))
+        let store = QuickInputHistoryStore()
+        let model = AgentQuickInputModel(dockHeight: 252, historyStore: store)
+        let pane = UUID()
+        let tab = UUID()
+        model.bindHistory(to: tab, paneIDs: [pane])
+        model.present(for: pane, requestFocus: false)
+
+        for index in 0..<8 {
+            store.record("history item \(index)", paneID: pane, tabID: tab)
+        }
+        let entries = store.visibleEntries(paneID: pane, tabID: tab, scope: .tab)
+        let stackWidth = QuickInputHistoryLayout.stackWidth(entries: entries, availableWidth: 800)
+        let stackHeight = QuickInputHistoryLayout.stackHeight(entryCount: entries.count)
+        model.historyPresentation.open(entries: entries)
+
+        let historyView = QuickInputHistoryView(
+            model: model,
+            store: store,
+            settings: settings,
+            availableWidth: 800,
+            onSelect: { _ in }
+        )
+        let container = AgentQuickInputDockContainer.Container(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = container
+        defer { window.contentView = nil; window.close() }
+
+        container.update(
+            content: AnyView(Color.clear),
+            composer: AnyView(Color.clear),
+            queue: AnyView(historyView),
+            composerHeight: 148,
+            queueHeight: stackHeight,
+            queueWidth: stackWidth,
+            composerAccessoryOrigin: CGPoint(x: 40, y: 38)
+        )
+        container.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(80))
+        container.layoutSubtreeIfNeeded()
+
+        // insetX = 16 -> queueX = 56, composerY = 12 -> queueY = 50
+        let queueX: CGFloat = 56
+        let queueY: CGFloat = 50
+        let sampleX = queueX + stackWidth * 0.5
+        for offset in stride(from: CGFloat(4), through: stackHeight - 4, by: 3) {
+            let pt = NSPoint(x: sampleX, y: queueY + offset)
+            #expect(container.queueHost.hitTest(pt) != nil, "Gap or capsule at yOffset=\(offset) must stay hit-tested")
+            #expect(container.occludesContentPoint(inWindow: pt))
+        }
+        #expect(container.queueHost.hitTest(NSPoint(x: queueX + stackWidth + 12, y: queueY + 130)) == nil)
+        #expect(!container.occludesContentPoint(inWindow: NSPoint(x: queueX + stackWidth + 12, y: queueY + 130)))
     }
 
     private func find<T: NSView>(_ type: T.Type, in view: NSView) -> T? {

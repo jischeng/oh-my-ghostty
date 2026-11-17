@@ -10,7 +10,6 @@ enum QuickInputHistoryLayout {
     static let maximumCapsuleWidth: CGFloat = 430
     static let controlCapsuleWidth: CGFloat = 296
     static let scrollHorizontalShadowOutset: CGFloat = 14
-    static let scrollVerticalShadowOutset: CGFloat = 4
 
     static func entryPreview(_ text: String) -> String {
         var collapsed = ""
@@ -92,6 +91,7 @@ struct QuickInputHistoryView: View {
     let onSelect: (String) -> Void
 
     @State private var visualExpanded = false
+    @State private var isLiveScrolling = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(
@@ -187,39 +187,34 @@ struct QuickInputHistoryView: View {
             } else if needsScroll {
                 ScrollViewReader { proxy in
                     ScrollView(.vertical, showsIndicators: false) {
-                        VStack(alignment: .leading, spacing: 0) {
-                            Color.clear
-                                .frame(width: 1, height: QuickInputHistoryLayout.scrollVerticalShadowOutset)
-                                .id("history-scroll-top")
-                            entriesColumn(
-                                matches: matches,
-                                width: stackWidth,
-                                totalAnimatedCount: totalAnimatedCount
-                            )
-                            Color.clear
-                                .frame(width: 1, height: QuickInputHistoryLayout.scrollVerticalShadowOutset)
-                                .id("history-scroll-bottom")
-                        }
+                        entriesColumn(
+                            matches: matches,
+                            width: stackWidth,
+                            totalAnimatedCount: totalAnimatedCount,
+                            isScrollingContainer: true
+                        )
+                        .quickInputScrollTargetLayout()
+                        .background(
+                            QuickInputScrollViewConfigurator { live in
+                                isLiveScrolling = live
+                            }
+                        )
                         .padding(.horizontal, QuickInputHistoryLayout.scrollHorizontalShadowOutset)
                     }
+                    .quickInputViewAlignedScroll()
                     .frame(
                         width: stackWidth + QuickInputHistoryLayout.scrollHorizontalShadowOutset * 2,
-                        height: entriesMaxHeight + QuickInputHistoryLayout.scrollVerticalShadowOutset * 2
+                        height: entriesMaxHeight
                     )
                     .padding(.horizontal, -QuickInputHistoryLayout.scrollHorizontalShadowOutset)
-                    .padding(.vertical, -QuickInputHistoryLayout.scrollVerticalShadowOutset)
                     .onAppear {
-                        if !matches.isEmpty {
-                            proxy.scrollTo("history-scroll-bottom", anchor: .bottom)
-                        }
+                        scrollToActiveSelection(proxy: proxy, matches: matches)
+                    }
+                    .onChange(of: matches.map(\.id)) { _ in
+                        scrollToActiveSelection(proxy: proxy, matches: matches)
                     }
                     .onChange(of: presentation.keyboardSelectionRevision) { _ in
-                        guard let selectedID = presentation.selectedID else { return }
-                        if selectedID == matches.first?.id {
-                            proxy.scrollTo("history-scroll-bottom", anchor: .bottom)
-                        } else if selectedID == matches.last?.id {
-                            proxy.scrollTo("history-scroll-top", anchor: .top)
-                        } else {
+                        if let selectedID = presentation.selectedID {
                             proxy.scrollTo(selectedID)
                         }
                     }
@@ -228,7 +223,8 @@ struct QuickInputHistoryView: View {
                 entriesColumn(
                     matches: matches,
                     width: stackWidth,
-                    totalAnimatedCount: totalAnimatedCount
+                    totalAnimatedCount: totalAnimatedCount,
+                    isScrollingContainer: false
                 )
             }
 
@@ -290,14 +286,30 @@ struct QuickInputHistoryView: View {
             if expanded {
                 presentation.reconcile(entries: matches)
                 presentation.requestFocus()
+            } else {
+                isLiveScrolling = false
             }
+        }
+    }
+
+    private func scrollToActiveSelection(
+        proxy: ScrollViewProxy,
+        matches: [QuickInputHistoryEntry]
+    ) {
+        let targetID = matches.first(where: { $0.id == presentation.selectedID })?.id ?? matches.first?.id
+        guard let targetID else { return }
+        if targetID == matches.first?.id {
+            proxy.scrollTo(targetID, anchor: .bottom)
+        } else {
+            proxy.scrollTo(targetID)
         }
     }
 
     private func entriesColumn(
         matches: [QuickInputHistoryEntry],
         width: CGFloat,
-        totalAnimatedCount: Int
+        totalAnimatedCount: Int,
+        isScrollingContainer: Bool
     ) -> some View {
         let bottomUpEntries = Array(matches.enumerated().reversed())
         return VStack(alignment: .leading, spacing: QuickInputHistoryLayout.capsuleSpacing) {
@@ -307,9 +319,11 @@ struct QuickInputHistoryView: View {
                     width: width,
                     isSelected: presentation.selectedID == entry.id,
                     isExpanded: isExpanded,
+                    suppressHover: isLiveScrolling,
                     chromeBackground: chromeBackground,
                     strings: strings,
                     onHoverChanged: { hovered in
+                        guard !isLiveScrolling else { return }
                         if hovered {
                             presentation.hover(entry.id)
                         }
@@ -320,6 +334,10 @@ struct QuickInputHistoryView: View {
                     }
                 )
                 .id(entry.id)
+                .quickInputScrollCapsuleTransition(
+                    enabled: isScrollingContainer,
+                    anchor: .leading
+                )
                 .modifier(
                     HistoryCapsuleFanOutModifier(
                         visualExpanded: visualExpanded,
@@ -366,6 +384,7 @@ private struct QuickInputHistoryEntryCapsule: View {
     let width: CGFloat
     let isSelected: Bool
     let isExpanded: Bool
+    var suppressHover = false
     let chromeBackground: Color
     let strings: SettingsStrings
     let onHoverChanged: (Bool) -> Void
@@ -468,6 +487,7 @@ private struct QuickInputHistoryEntryCapsule: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering in
+            guard !(suppressHover && hovering) else { return }
             isHovered = hovering
             onHoverChanged(hovering)
         }

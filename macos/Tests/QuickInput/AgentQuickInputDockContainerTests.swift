@@ -365,8 +365,10 @@ struct AgentQuickInputDockContainerTests {
         #expect(container.queueHost.hitTest(NSPoint(x: 200, y: 67)) != nil)
         #expect(container.queueHost.hitTest(NSPoint(x: 200, y: 108)) != nil)
 
-        // Gap between capsules (y = 87) and empty space beside shorter top capsule (x = 360, y = 108) pass through.
-        #expect(container.queueHost.hitTest(NSPoint(x: 200, y: 87)) == nil)
+        // The 7pt vertical gap between active capsules inside the shared column span (y = 87, x = 200)
+        // is bridged so scrolling across gaps never falls through; empty space beside the shorter
+        // top capsule (x = 360, y = 108) still passes through.
+        #expect(container.queueHost.hitTest(NSPoint(x: 200, y: 87)) != nil)
         #expect(container.queueHost.hitTest(NSPoint(x: 360, y: 108)) == nil)
 
         func mouseDown(at point: NSPoint) throws -> NSEvent {
@@ -393,7 +395,7 @@ struct AgentQuickInputDockContainerTests {
         _ = container.handleLocalMouseDown(try mouseDown(at: NSPoint(x: 500, y: 300)))
         #expect(outsideDismissCount == 2)
 
-        // Above-composer placement covers only active capsule frames in occludesContentPoint.
+        // Above-composer placement occludes active capsules and bridged gaps inside the column span.
         container.update(
             content: AnyView(Color.clear),
             composer: AnyView(Color.clear),
@@ -410,7 +412,7 @@ struct AgentQuickInputDockContainerTests {
         #expect(container.occludesContentPoint(inWindow: NSPoint(x: 200, y: 185)))
         #expect(container.occludesContentPoint(inWindow: NSPoint(x: 200, y: 225)))
         #expect(!container.occludesContentPoint(inWindow: NSPoint(x: 360, y: 225)))
-        #expect(!container.occludesContentPoint(inWindow: NSPoint(x: 200, y: 205)))
+        #expect(container.occludesContentPoint(inWindow: NSPoint(x: 200, y: 205)))
 
         // Deactivating anchors stops occlusion and passes clicks through immediately.
         let inactiveStack = VStack(alignment: .leading, spacing: 7) {
@@ -434,5 +436,68 @@ struct AgentQuickInputDockContainerTests {
 
         #expect(container.queueHost.hitTest(NSPoint(x: 200, y: 185)) == nil)
         #expect(!container.occludesContentPoint(inWindow: NSPoint(x: 200, y: 185)))
+    }
+
+    @Test func capsuleStackAndComposerSwallowScrollWheelEvents() async throws {
+        final class ScrollSpyParentView: NSView {
+            var scrollWheelCount = 0
+            override func scrollWheel(with event: NSEvent) {
+                scrollWheelCount += 1
+            }
+        }
+
+        let spy = ScrollSpyParentView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        let container = AgentQuickInputDockContainer.Container(frame: spy.bounds)
+        spy.addSubview(container)
+        let window = NSWindow(
+            contentRect: spy.bounds,
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = spy
+        defer { window.contentView = nil; window.close() }
+
+        let capsuleStack = VStack(alignment: .leading, spacing: 7) {
+            Color.clear
+                .frame(width: 220, height: 34)
+                .background(FloatingAccessoryAnchor(isActive: true))
+            Color.clear
+                .frame(width: 220, height: 34)
+                .background(FloatingAccessoryAnchor(isActive: true))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+
+        container.update(
+            content: AnyView(Color.clear),
+            composer: AnyView(Color.clear),
+            queue: AnyView(capsuleStack),
+            composerHeight: 148,
+            queueHeight: 75,
+            queueWidth: 220,
+            composerAccessoryOrigin: CGPoint(x: 40, y: 38)
+        )
+        container.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(30))
+        container.layoutSubtreeIfNeeded()
+
+        // Directly deliver a CGEvent-backed scrollWheel targeted inside queueHost gap and composerHost.
+        let winPointGap = NSPoint(x: 100, y: 87)
+        let cgGap = try #require(CGEvent(
+            scrollWheelEvent2Source: nil,
+            units: .pixel,
+            wheelCount: 1,
+            wheel1: 30,
+            wheel2: 0,
+            wheel3: 0
+        ))
+        let screenPoint = window.convertPoint(toScreen: winPointGap)
+        let primaryScreenHeight = NSScreen.screens.first?.frame.height ?? window.frame.height
+        cgGap.location = CGPoint(x: screenPoint.x, y: primaryScreenHeight - screenPoint.y)
+        let wheelAtGap = try #require(NSEvent(cgEvent: cgGap))
+
+        #expect(container.queueHost.hitTest(winPointGap) != nil)
+        container.queueHost.scrollWheel(with: wheelAtGap)
+        container.composerHost.scrollWheel(with: wheelAtGap)
+        #expect(spy.scrollWheelCount == 0)
     }
 }

@@ -38,23 +38,123 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
         CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
     }
 
+    final class ComposerHostingView: NSHostingView<AnyView> {
+        override func scrollWheel(with event: NSEvent) {
+            // Swallow scroll events over Quick Input chrome so unhandled wheel deltas
+            // cannot propagate through to the background terminal surface.
+        }
+    }
+
     final class CapsuleStackHostingView: NSHostingView<AnyView> {
+        private var isForwardingScrollWheel = false
+
         var hasAnchorViews: Bool {
             !anchorViews(in: self).isEmpty
         }
 
         override func hitTest(_ point: NSPoint) -> NSView? {
+            let localPoint = convert(point, from: superview)
             let anchors = anchorViews(in: self)
             guard !anchors.isEmpty else {
                 return super.hitTest(point)
             }
-            let localPoint = convert(point, from: superview)
-            guard bounds.contains(localPoint) else { return nil }
-            let hitsActiveAnchor = anchors.contains { anchor in
-                anchor.containsActivePoint(anchor.convert(localPoint, from: self))
+            guard containsActiveColumnPoint(localPoint, anchors: anchors) else { return nil }
+            if let hit = super.hitTest(point) {
+                return hit
             }
-            guard hitsActiveAnchor else { return nil }
-            return super.hitTest(point)
+            if let scrollView = descendantScrollView(),
+               !scrollView.isHiddenOrHasHiddenAncestor {
+                let pointInScroll = scrollView.convert(localPoint, from: self)
+                if scrollView.bounds.contains(pointInScroll) {
+                    let pointInScrollSuper = scrollView.superview?.convert(localPoint, from: self) ?? pointInScroll
+                    return scrollView.hitTest(pointInScrollSuper) ?? scrollView
+                }
+            }
+            return self
+        }
+
+        override func scrollWheel(with event: NSEvent) {
+            guard !isForwardingScrollWheel else { return }
+            let localPoint = convert(event.locationInWindow, from: nil)
+            guard containsActiveColumnPoint(localPoint) else {
+                super.scrollWheel(with: event)
+                return
+            }
+            if let scrollView = descendantScrollView(),
+               !scrollView.isHiddenOrHasHiddenAncestor {
+                let pointInScroll = scrollView.convert(event.locationInWindow, from: nil)
+                if !scrollView.bounds.contains(pointInScroll) {
+                    isForwardingScrollWheel = true
+                    defer { isForwardingScrollWheel = false }
+                    scrollView.scrollWheel(with: event)
+                }
+            }
+            // Swallow scroll events inside active capsule stacks so they never leak
+            // to the underlying composer or terminal surface.
+        }
+
+        override func resetCursorRects() {
+            super.resetCursorRects()
+            if anchorViews(in: self).contains(where: { $0.isActive && !$0.isHiddenOrHasHiddenAncestor }) {
+                addCursorRect(bounds, cursor: .arrow)
+            }
+        }
+
+        func containsActiveColumnPoint(_ localPoint: NSPoint) -> Bool {
+            containsActiveColumnPoint(localPoint, anchors: anchorViews(in: self))
+        }
+
+        private func containsActiveColumnPoint(
+            _ localPoint: NSPoint,
+            anchors: [FloatingAccessoryAnchor.AnchorView]
+        ) -> Bool {
+            guard bounds.contains(localPoint) else { return false }
+            guard !anchors.isEmpty else { return true }
+
+            var activeRects: [NSRect] = []
+            var clippedScrollRects: [NSRect] = []
+            for anchor in anchors where anchor.isActive && !anchor.isHiddenOrHasHiddenAncestor {
+                let rectInHost = convert(anchor.bounds, from: anchor)
+                if let clipView = anchor.enclosingScrollView?.contentView {
+                    let clipInHost = convert(clipView.bounds, from: clipView)
+                    let clipped = rectInHost.intersection(clipInHost)
+                    guard !clipped.isNull, clipped.width > 0.5, clipped.height > 0.5 else { continue }
+                    activeRects.append(clipped)
+                    clippedScrollRects.append(clipped)
+                } else {
+                    guard rectInHost.width > 0.5, rectInHost.height > 0.5 else { continue }
+                    activeRects.append(rectInHost)
+                }
+            }
+
+            guard !activeRects.isEmpty else { return false }
+            if activeRects.contains(where: { $0.contains(localPoint) }) {
+                return true
+            }
+
+            let hasAbove = activeRects.contains { rect in
+                localPoint.x >= rect.minX && localPoint.x <= rect.maxX && rect.minY >= localPoint.y
+            }
+            let hasBelow = activeRects.contains { rect in
+                localPoint.x >= rect.minX && localPoint.x <= rect.maxX && rect.maxY <= localPoint.y
+            }
+            if hasAbove && hasBelow {
+                return true
+            }
+
+            if let scrollView = descendantScrollView(),
+               !scrollView.isHiddenOrHasHiddenAncestor {
+                let scrollClipRect = convert(scrollView.contentView.bounds, from: scrollView.contentView)
+                if scrollClipRect.contains(localPoint) {
+                    let horizontalRects = clippedScrollRects.isEmpty ? activeRects : clippedScrollRects
+                    if let minX = horizontalRects.map(\.minX).min(),
+                       let maxX = horizontalRects.map(\.maxX).max(),
+                       localPoint.x >= minX, localPoint.x <= maxX {
+                        return true
+                    }
+                }
+            }
+            return false
         }
 
         private func anchorViews(in view: NSView) -> [FloatingAccessoryAnchor.AnchorView] {
@@ -72,7 +172,7 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
 
     final class Container: NSView, FloatingAccessoryOcclusionContainer {
         let contentHost = NSHostingView(rootView: AnyView(EmptyView()))
-        let composerHost = NSHostingView(rootView: AnyView(EmptyView()))
+        let composerHost = ComposerHostingView(rootView: AnyView(EmptyView()))
         let queueHost = CapsuleStackHostingView(rootView: AnyView(EmptyView()))
         let composerShadowLayer = CALayer()
         private var requestedComposerHeight: CGFloat = 0
@@ -144,8 +244,11 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
             if !composerHost.isHidden, composerHost.frame.contains(local) {
                 return true
             }
-            if !queueHost.isHidden, !queueHost.hasAnchorViews, queueHost.frame.contains(local) {
-                return true
+            if !queueHost.isHidden {
+                let queueLocal = queueHost.convert(pointInWindow, from: nil)
+                if queueHost.containsActiveColumnPoint(queueLocal) {
+                    return true
+                }
             }
             if let window = self.window {
                 for accessory in floatingAccessoryViews.allObjects
@@ -444,16 +547,124 @@ struct FloatingAccessoryAnchor: NSViewRepresentable {
             registeredContainer?.unregisterFloatingAccessoryView(self)
             registeredContainer = nil
         }
+    }
+}
 
-        private func enclosingDockContainer() -> AgentQuickInputDockContainer.Container? {
-            var current = superview
-            while let view = current {
-                if let container = view as? AgentQuickInputDockContainer.Container {
-                    return container
-                }
-                current = view.superview
+/// Bridges inter-capsule gaps in standalone floating stacks (such as the per-pane
+/// bottom-right Queue overlay) so wheel events and cursors stay out of the terminal.
+struct QuickInputScrollTrapBackground: NSViewRepresentable {
+    var isActive: Bool = true
+
+    func makeNSView(context: Context) -> TrapView {
+        let view = TrapView()
+        view.isActive = isActive
+        return view
+    }
+
+    func updateNSView(_ view: TrapView, context: Context) {
+        view.isActive = isActive
+        view.syncRegistration()
+    }
+
+    static func dismantleNSView(_ view: TrapView, coordinator: ()) {
+        view.unregister()
+    }
+
+    final class TrapView: NSView {
+        private weak var registeredContainer: AgentQuickInputDockContainer.Container?
+        private var isForwardingScrollWheel = false
+        var isActive: Bool = true {
+            didSet {
+                guard isActive != oldValue else { return }
+                syncRegistration()
+                window?.invalidateCursorRects(for: self)
             }
-            return nil
         }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            guard isActive, !isHiddenOrHasHiddenAncestor else { return nil }
+            let localPoint = convert(point, from: superview)
+            return bounds.contains(localPoint) ? self : nil
+        }
+
+        override func scrollWheel(with event: NSEvent) {
+            guard isActive else {
+                super.scrollWheel(with: event)
+                return
+            }
+            guard !isForwardingScrollWheel else { return }
+            if let root = superview?.superview,
+               let scrollView = root.descendantScrollView(),
+               !scrollView.isHiddenOrHasHiddenAncestor {
+                let pointInScroll = scrollView.convert(event.locationInWindow, from: nil)
+                if !scrollView.bounds.contains(pointInScroll) {
+                    isForwardingScrollWheel = true
+                    defer { isForwardingScrollWheel = false }
+                    scrollView.scrollWheel(with: event)
+                }
+            }
+        }
+
+        override func resetCursorRects() {
+            super.resetCursorRects()
+            if isActive {
+                addCursorRect(bounds, cursor: .arrow)
+            }
+        }
+
+        override func viewDidMoveToSuperview() {
+            super.viewDidMoveToSuperview()
+            syncRegistration()
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            syncRegistration()
+        }
+
+        func syncRegistration() {
+            let container = enclosingDockContainer()
+            guard isActive else {
+                registeredContainer?.unregisterFloatingAccessoryView(self)
+                container?.unregisterFloatingAccessoryView(self)
+                registeredContainer = container
+                return
+            }
+            if registeredContainer !== container {
+                registeredContainer?.unregisterFloatingAccessoryView(self)
+                registeredContainer = container
+            }
+            container?.registerFloatingAccessoryView(self)
+        }
+
+        func unregister() {
+            registeredContainer?.unregisterFloatingAccessoryView(self)
+            registeredContainer = nil
+        }
+    }
+}
+
+private extension NSView {
+    func enclosingDockContainer() -> AgentQuickInputDockContainer.Container? {
+        var current = superview
+        while let view = current {
+            if let container = view as? AgentQuickInputDockContainer.Container {
+                return container
+            }
+            current = view.superview
+        }
+        return nil
+    }
+
+    func descendantScrollView() -> NSScrollView? {
+        if let scrollView = self as? NSScrollView {
+            return scrollView
+        }
+        for subview in subviews {
+            if let found = subview.descendantScrollView() {
+                return found
+            }
+        }
+        return nil
     }
 }

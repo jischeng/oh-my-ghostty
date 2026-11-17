@@ -270,9 +270,9 @@ fn host_connection_with_limit(
                         .unwrap_or_else(|p| p.into_inner())
                         .is_local();
                     let capabilities = if is_local {
-                        b"durable-close/1,strict-open/1,local-launch/1,local-resurrect/1,inline-viewer/1,agent-state/1,holder-presentation/1,recreate-if-gone/1,exec/1".as_slice()
+                        b"durable-close/1,strict-open/1,local-launch/1,local-resurrect/1,inline-viewer/1,agent-state/1,holder-presentation/1,recreate-if-gone/1,exec/1,init-size/1,remote-env/1".as_slice()
                     } else {
-                        b"durable-close/1,strict-open/1,inline-viewer/1,agent-state/1,recreate-if-gone/1,exec/1".as_slice()
+                        b"durable-close/1,strict-open/1,inline-viewer/1,agent-state/1,recreate-if-gone/1,exec/1,init-size/1,remote-env/1".as_slice()
                     };
                     transport.push(Frame::new(b'P', 0, capabilities));
                 }
@@ -462,9 +462,15 @@ fn host_connection_with_limit(
                 _ => return Err(io::Error::other("invalid multiplex frame")),
             }
         }
+        const PTY_TRANSPORT_HIGH_WATER: usize = 1024 * 1024;
         for (&id, entry) in &mut streams {
-            if transport.queued_bytes() < crate::MAX_QUEUE / 2 {
-                let max_reads = if entry.is_exec { 64 } else { 1 };
+            let queue_limit = if entry.is_exec {
+                crate::MAX_QUEUE / 2
+            } else {
+                PTY_TRANSPORT_HIGH_WATER
+            };
+            if transport.queued_bytes() < queue_limit {
+                let max_reads = if entry.is_exec { 64 } else { 16 };
                 for _ in 0..max_reads {
                     let prev_incoming = entry.peer.incoming.len();
                     match entry.peer.read() {
@@ -473,7 +479,7 @@ fn host_connection_with_limit(
                             for f in frames {
                                 transport.push(Frame::new(b'D', id, &f.encode()));
                             }
-                            if transport.queued_bytes() >= crate::MAX_QUEUE / 2
+                            if transport.queued_bytes() >= queue_limit
                                 || (!got_frames && entry.peer.incoming.len() == prev_incoming)
                             {
                                 break;
@@ -503,12 +509,17 @@ fn host_connection_with_limit(
         if transport.dead {
             return Err(io::Error::other("transport backlog exceeded"));
         }
-        let allow_stream_read = transport.queued_bytes() < crate::MAX_QUEUE / 2;
+        let queued = transport.queued_bytes();
         let mut descriptors = Vec::with_capacity(streams.len() + 1);
         descriptors.push(transport.poll_fd());
         for entry in streams.values() {
             let mut pfd = entry.peer.poll_fd();
-            if !allow_stream_read {
+            let stream_limit = if entry.is_exec {
+                crate::MAX_QUEUE / 2
+            } else {
+                PTY_TRANSPORT_HIGH_WATER
+            };
+            if queued >= stream_limit {
                 pfd.events &= !libc::POLLIN;
             }
             if entry.write_closed {

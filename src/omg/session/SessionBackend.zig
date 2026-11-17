@@ -10,6 +10,7 @@ const ProcessInfo = @import("../../pty.zig").ProcessInfo;
 const LocalLaunch = @import("LocalLaunch.zig");
 const internal_os = @import("../../os/main.zig");
 const SnapshotPresentation = @import("SnapshotPresentation.zig");
+const build_config = @import("../../build_config.zig");
 const connect_wait_budget_us: u64 = 60_000_000;
 const c = @cImport({
     @cInclude("sys/socket.h");
@@ -24,6 +25,11 @@ path: [:0]u8,
 pane_id: ?[]u8 = null,
 is_local: bool = false,
 creating: bool = false,
+remote_term: ?[]u8 = null,
+remote_foreground: ?[3]u8 = null,
+remote_background: ?[3]u8 = null,
+remote_cursor: ?[3]u8 = null,
+remote_dark_scheme: ?bool = null,
 pending_resurrect: std.atomic.Value(bool) = .init(false),
 initial_cwd: ?[]u8 = null,
 initial_input: std.ArrayList(u8) = .empty,
@@ -60,6 +66,11 @@ writer_resize_generation: std.atomic.Value(u64) = .init(0),
 pub const Options = struct {
     is_local: bool = false,
     working_directory: ?[]const u8 = null,
+    remote_term: ?[]const u8 = null,
+    foreground: ?[3]u8 = null,
+    background: ?[3]u8 = null,
+    cursor: ?[3]u8 = null,
+    dark_scheme: ?bool = null,
 };
 
 pub fn init(alloc: std.mem.Allocator, path: []const u8, pane_id: ?[]const u8, options: Options) !Self {
@@ -67,6 +78,11 @@ pub fn init(alloc: std.mem.Allocator, path: []const u8, pane_id: ?[]const u8, op
     errdefer alloc.free(owned_path);
     const owned_id = if (pane_id) |id| try alloc.dupe(u8, id) else null;
     errdefer if (owned_id) |id| alloc.free(id);
+    const owned_term = if (!options.is_local)
+        if (options.remote_term) |term| try alloc.dupe(u8, term) else null
+    else
+        null;
+    errdefer if (owned_term) |term| alloc.free(term);
     const creating = LocalLaunch.createsSession(alloc, pane_id);
     const pending_resurrect = options.is_local and !creating and LocalLaunch.hasResurrectLaunch(alloc, pane_id);
     return .{
@@ -75,6 +91,11 @@ pub fn init(alloc: std.mem.Allocator, path: []const u8, pane_id: ?[]const u8, op
         .pane_id = owned_id,
         .is_local = options.is_local,
         .creating = creating,
+        .remote_term = owned_term,
+        .remote_foreground = options.foreground,
+        .remote_background = options.background,
+        .remote_cursor = options.cursor,
+        .remote_dark_scheme = options.dark_scheme,
         .pending_resurrect = .init(pending_resurrect),
         .startup_input_enabled = .init(options.is_local and creating),
         .initial_cwd = if (options.working_directory) |cwd| try alloc.dupe(u8, cwd) else null,
@@ -86,6 +107,7 @@ pub fn deinit(self: *Self) void {
         std.crypto.secureZero(u8, id);
         self.alloc.free(id);
     }
+    if (self.remote_term) |term| self.alloc.free(term);
     if (self.initial_cwd) |cwd| self.alloc.free(cwd);
     std.crypto.secureZero(u8, self.initial_input.items);
     self.initial_input.deinit(self.alloc);
@@ -837,6 +859,23 @@ fn readLoop(self: *Self, io: *HostIO, epoch: u64, attached: *bool, connected_onc
                 self.alloc.free(request);
             }
             try self.sendForAttachment('H', 0, request, epoch);
+        } else if (!self.is_local) {
+            const request = try LocalLaunch.withRemoteClientContext(
+                self.alloc,
+                id,
+                self.requested_size.load(.acquire),
+                self.requested_pixels.load(.acquire),
+                .{
+                    .term = self.remote_term,
+                    .version = build_config.version_string,
+                    .dark_scheme = self.remote_dark_scheme,
+                    .foreground = self.remote_foreground,
+                    .background = self.remote_background,
+                    .cursor = self.remote_cursor,
+                },
+            );
+            defer self.alloc.free(request);
+            try self.sendForAttachment('H', 0, request, epoch);
         } else {
             try self.sendForAttachment('H', 0, id, epoch);
         }
@@ -1060,9 +1099,12 @@ fn publishActivitySnapshot(self: *Self, io: *HostIO, bytes: []const u8, is_resto
     for (parsed.value.records) |signal| try self.publishContext(io, signal.id, signal.metadata);
     try self.publishContext(io, "omg-agent-sync", "end");
     if (parsed.value.pending) |records| {
-        try self.publishContext(io, "omg-agent-sync", mode_metadata);
-        try self.publishContext(io, "omg-agent-sync", "begin");
-        for (records) |signal| try self.publishContext(io, signal.id, signal.metadata);
+        if (records.len > 0) {
+            try self.publishContext(io, "omg-agent-sync", mode_metadata);
+            try self.publishContext(io, "omg-agent-sync", "begin");
+            for (records) |signal| try self.publishContext(io, signal.id, signal.metadata);
+            try self.publishContext(io, "omg-agent-sync", "end");
+        }
     }
     self.activity_revision.store(parsed.value.revision, .release);
 }

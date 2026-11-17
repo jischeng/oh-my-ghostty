@@ -59,9 +59,106 @@ fn valid_component(s: &str) -> bool {
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
 }
+pub const GHOSTTY_TERMINFO: &str = include_str!(concat!(env!("OUT_DIR"), "/ghostty.terminfo"));
+
 pub fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
+
+fn ssh_option_key(value: &str) -> Option<String> {
+    let (key, _) = value.split_once('=')?;
+    Some(key.trim().to_ascii_lowercase())
+}
+
+fn ssh_transport_arguments(arguments: &[String]) -> Vec<String> {
+    let mut has_compression = false;
+    let mut has_alive_interval = false;
+    let mut has_alive_count = false;
+    let mut i = 0;
+    while i < arguments.len() {
+        let arg = &arguments[i];
+        if arg == "--" {
+            break;
+        }
+        if arg == "-o" {
+            if let Some(opt) = arguments.get(i + 1) {
+                match ssh_option_key(opt).as_deref() {
+                    Some("compression") => has_compression = true,
+                    Some("serveraliveinterval") => has_alive_interval = true,
+                    Some("serveralivecountmax") => has_alive_count = true,
+                    _ => {}
+                }
+                i += 2;
+                continue;
+            }
+            break;
+        }
+        if let Some(opt) = arg.strip_prefix("-o") {
+            match ssh_option_key(opt).as_deref() {
+                Some("compression") => has_compression = true,
+                Some("serveraliveinterval") => has_alive_interval = true,
+                Some("serveralivecountmax") => has_alive_count = true,
+                _ => {}
+            }
+            i += 1;
+            continue;
+        }
+        // Skip arguments belonging to OpenSSH value-taking flags so a host path or
+        // command string isn't misread as an option.
+        if matches!(
+            arg.as_str(),
+            "-B" | "-b"
+                | "-c"
+                | "-D"
+                | "-E"
+                | "-e"
+                | "-F"
+                | "-I"
+                | "-i"
+                | "-J"
+                | "-L"
+                | "-l"
+                | "-m"
+                | "-O"
+                | "-P"
+                | "-p"
+                | "-Q"
+                | "-R"
+                | "-S"
+                | "-W"
+                | "-w"
+        ) {
+            i += 2;
+            continue;
+        }
+        if arg.starts_with('-') && !arg.starts_with("--") {
+            if arg[1..].contains('C') {
+                has_compression = true;
+            }
+            i += 1;
+            continue;
+        }
+        // First non-option token is the destination; everything after is remote cmd.
+        break;
+    }
+
+    let mut out = Vec::with_capacity(arguments.len() + 6);
+    if !has_compression {
+        out.push("-o".into());
+        out.push("Compression=yes".into());
+    }
+    if !has_alive_interval {
+        out.push("-o".into());
+        out.push("ServerAliveInterval=15".into());
+    }
+    if !has_alive_count {
+        out.push("-o".into());
+        out.push("ServerAliveCountMax=3".into());
+    }
+    out.extend(arguments.iter().cloned());
+    out
+}
+
 fn ssh(config: &Connection, script: &str, interactive: bool) -> io::Result<Command> {
     if !config.executable.starts_with('/')
         || config.arguments.is_empty()
@@ -71,7 +168,7 @@ fn ssh(config: &Connection, script: &str, interactive: bool) -> io::Result<Comma
     }
     let mut c = Command::new(&config.executable);
     c.current_dir(&config.cwd)
-        .args(&config.arguments)
+        .args(ssh_transport_arguments(&config.arguments))
         .arg(format!("exec /bin/sh -c {}", quote(script)))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -218,7 +315,13 @@ pub fn prepare(config: &Connection, interactive: bool) -> io::Result<(String, St
         ));
     }
     config.policy.validate()?;
-    let probe=run(config,"printf '\\nOMG_RUNTIME_PROBE\\n'; uname -s; uname -m; printf '%s\\n' \"$HOME\"; command -v tar >/dev/null",None,interactive)?;
+    let probe = run(
+        config,
+        "printf '\\nOMG_RUNTIME_PROBE\\n'; uname -s; uname -m; printf '%s\\n' \"$HOME\"; command -v tar >/dev/null; \
+if (command -v infocmp >/dev/null 2>&1 && infocmp xterm-ghostty >/dev/null 2>&1) || [ -r \"$HOME/.terminfo/x/xterm-ghostty\" ] || [ -r \"$HOME/.terminfo/78/xterm-ghostty\" ]; then printf 'HAVE\\n'; elif command -v tic >/dev/null 2>&1; then printf 'TIC\\n'; else printf 'NONE\\n'; fi",
+        None,
+        interactive,
+    )?;
     let text = String::from_utf8(probe).map_err(io::Error::other)?;
     let mut lines = text
         .split("OMG_RUNTIME_PROBE\n")
@@ -228,6 +331,7 @@ pub fn prepare(config: &Connection, interactive: bool) -> io::Result<(String, St
     let os = lines.next().unwrap_or("");
     let arch = lines.next().unwrap_or("");
     let home = lines.next().unwrap_or("");
+    let terminfo_probe = lines.next().unwrap_or("");
     if !home.starts_with('/') || home.contains('\0') || home.len() > 1024 {
         return Err(io::Error::other("invalid remote home"));
     }
@@ -396,6 +500,34 @@ if [ ! -d "$version" ]; then mv "$staging" "$version"; fi
             ));
         }
     }
+    if terminfo_probe == "TIC" {
+        let terminfo_script = format!(
+            r#"set -eu
+umask 077
+if [ -r {state}/terminfo/x/xterm-ghostty ] || [ -r {state}/terminfo/78/xterm-ghostty ]; then
+  cat >/dev/null
+else
+  tmp_terminfo=$(mktemp "${{TMPDIR:-/tmp}}/omg-terminfo.XXXXXX")
+  trap 'rm -f "$tmp_terminfo"' EXIT
+  cat > "$tmp_terminfo"
+  if mkdir -p "$HOME/.terminfo" 2>/dev/null && tic -x "$tmp_terminfo" >/dev/null 2>&1; then
+    if command -v infocmp >/dev/null 2>&1; then
+      infocmp xterm-ghostty >/dev/null 2>&1 || true
+    fi
+  elif mkdir -p {state}/terminfo 2>/dev/null && TERMINFO={state}/terminfo tic -x "$tmp_terminfo" >/dev/null 2>&1; then
+    true
+  fi
+fi
+"#,
+            state = quote(&state)
+        );
+        let _ = run(
+            config,
+            &terminfo_script,
+            Some(GHOSTTY_TERMINFO.as_bytes()),
+            interactive,
+        );
+    }
     let policy = serde_json::to_string(&config.policy)?;
     // Policy updates are atomic. Existing sessions retain their policy snapshot;
     // the host reloads the file for newly created sessions without restarting.
@@ -552,6 +684,7 @@ pub fn load(path: &Path) -> io::Result<Connection> {
 #[cfg(test)]
 mod fast_tests {
     use super::*;
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     fn fixture(reply: &str) -> (PathBuf, Connection) {
         let root =
@@ -697,5 +830,77 @@ mod fast_tests {
         let _ = fs::remove_file(&archive);
         let _ = fs::set_permissions(&readonly_parent, fs::Permissions::from_mode(0o700));
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ssh_transport_arguments_inject_defaults_and_respect_explicit_user_overrides() {
+        let base = vec!["-p".into(), "2222".into(), "omgtest@example.com".into()];
+        let args = ssh_transport_arguments(&base);
+        assert_eq!(
+            args,
+            vec![
+                "-o",
+                "Compression=yes",
+                "-o",
+                "ServerAliveInterval=15",
+                "-o",
+                "ServerAliveCountMax=3",
+                "-p",
+                "2222",
+                "omgtest@example.com",
+            ]
+        );
+
+        let custom = vec![
+            "-T".into(),
+            "-o".into(),
+            "Compression=no".into(),
+            "-oServerAliveInterval=45".into(),
+            "-o".into(),
+            "ServerAliveCountMax=5".into(),
+            "--".into(),
+            "host".into(),
+        ];
+        assert_eq!(ssh_transport_arguments(&custom), custom);
+
+        let short_c = vec!["-CT".into(), "host".into()];
+        let with_short_c = ssh_transport_arguments(&short_c);
+        assert!(!with_short_c.iter().any(|a| a.contains("Compression=")));
+        assert!(with_short_c.iter().any(|a| a == "ServerAliveInterval=15"));
+    }
+
+    #[test]
+    fn embedded_ghostty_terminfo_compiles_cleanly_with_tic() {
+        assert!(GHOSTTY_TERMINFO.starts_with("xterm-ghostty|ghostty|Ghostty,\n"));
+        assert!(GHOSTTY_TERMINFO.contains("\tSync="));
+        if !Path::new("/usr/bin/tic").exists() {
+            return;
+        }
+        let nonce = crate::record::nonce().unwrap();
+        let dir = std::env::temp_dir().join(format!("omg-terminfo-test-{}", &nonce[..8]));
+        fs::create_dir_all(&dir).unwrap();
+        let mut child = Command::new("/usr/bin/tic")
+            .args(["-x", "-o"])
+            .arg(&dir)
+            .arg("-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(GHOSTTY_TERMINFO.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "tic failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(dir.join("78/xterm-ghostty").exists() || dir.join("x/xterm-ghostty").exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

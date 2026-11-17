@@ -216,6 +216,99 @@ pub fn withInitialInput(
     return std.json.Stringify.valueAlloc(alloc, parsed.value, .{});
 }
 
+pub const ClientContext = struct {
+    term: ?[]const u8 = null,
+    colorterm: []const u8 = "truecolor",
+    term_program: []const u8 = "ghostty",
+    version: []const u8 = "",
+    dark_scheme: ?bool = null,
+    foreground: ?[3]u8 = null,
+    background: ?[3]u8 = null,
+    cursor: ?[3]u8 = null,
+};
+
+fn putRgbArray(
+    arena: std.mem.Allocator,
+    obj: *std.json.ObjectMap,
+    key: []const u8,
+    rgb: [3]u8,
+) !void {
+    var arr = std.json.Array.init(arena);
+    try arr.append(.{ .integer = rgb[0] });
+    try arr.append(.{ .integer = rgb[1] });
+    try arr.append(.{ .integer = rgb[2] });
+    try obj.put(arena, key, .{ .array = arr });
+}
+
+/// Attach runtime client dimensions, identity, and theme colors to a remote
+/// creation/recreate `OpenRequest` without disturbing attach-only payloads.
+pub fn withRemoteClientContext(
+    alloc: std.mem.Allocator,
+    request: []const u8,
+    grid: u32,
+    pixels: u32,
+    context: ?ClientContext,
+) ![]u8 {
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, request, .{}) catch {
+        return alloc.dupe(u8, request);
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) return alloc.dupe(u8, request);
+
+    const create = if (parsed.value.object.get("create")) |v| v == .bool and v.bool else false;
+    const recreate = if (parsed.value.object.get("recreate_if_gone")) |v| v == .bool and v.bool else false;
+    if (!create and !recreate) return alloc.dupe(u8, request);
+
+    const arena = parsed.arena.allocator();
+    const cols: u16 = @intCast(grid >> 16);
+    const rows: u16 = @intCast(grid & 0xffff);
+    const px_w: u16 = @intCast(pixels >> 16);
+    const px_h: u16 = @intCast(pixels & 0xffff);
+    if (cols > 0 and cols <= 500) try parsed.value.object.put(arena, "cols", .{ .integer = cols });
+    if (rows > 0 and rows <= 300) try parsed.value.object.put(arena, "rows", .{ .integer = rows });
+    if (px_w > 0) try parsed.value.object.put(arena, "pixel_width", .{ .integer = px_w });
+    if (px_h > 0) try parsed.value.object.put(arena, "pixel_height", .{ .integer = px_h });
+
+    if (context) |ctx| {
+        if (ctx.term) |term| {
+            if (term.len > 0 and term.len <= 128 and !parsed.value.object.contains("term")) {
+                try parsed.value.object.put(arena, "term", .{ .string = term });
+            }
+        }
+        if (ctx.colorterm.len > 0 and ctx.colorterm.len <= 128 and !parsed.value.object.contains("colorterm")) {
+            try parsed.value.object.put(arena, "colorterm", .{ .string = ctx.colorterm });
+        }
+        if (ctx.term_program.len > 0 and ctx.term_program.len <= 128 and !parsed.value.object.contains("term_program")) {
+            try parsed.value.object.put(arena, "term_program", .{ .string = ctx.term_program });
+        }
+        if (ctx.version.len > 0 and ctx.version.len <= 128 and !parsed.value.object.contains("term_program_version")) {
+            try parsed.value.object.put(arena, "term_program_version", .{ .string = ctx.version });
+        }
+        if (ctx.dark_scheme) |dark| {
+            if (!parsed.value.object.contains("color_scheme")) {
+                try parsed.value.object.put(arena, "color_scheme", .{ .string = if (dark) "dark" else "light" });
+            }
+        }
+        if (ctx.foreground) |fg| {
+            if (!parsed.value.object.contains("foreground")) {
+                try putRgbArray(arena, &parsed.value.object, "foreground", fg);
+            }
+        }
+        if (ctx.background) |bg| {
+            if (!parsed.value.object.contains("background")) {
+                try putRgbArray(arena, &parsed.value.object, "background", bg);
+            }
+        }
+        if (ctx.cursor) |cursor| {
+            if (!parsed.value.object.contains("cursor")) {
+                try putRgbArray(arena, &parsed.value.object, "cursor", cursor);
+            }
+        }
+    }
+
+    return std.json.Stringify.valueAlloc(alloc, parsed.value, .{});
+}
+
 pub fn attachOnly(alloc: std.mem.Allocator, request: []const u8) ![]u8 {
     const parsed = try std.json.parseFromSlice(OpenRequest, alloc, request, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
@@ -413,4 +506,37 @@ test "local session launch preserves recreate_if_gone in prepareResurrect and om
     );
     defer alloc.free(without_recreate);
     try std.testing.expect(std.mem.indexOf(u8, without_recreate, "recreate_if_gone") == null);
+}
+
+test "remote client context enriches create and recreate requests only" {
+    const alloc = std.testing.allocator;
+    const grid = (@as(u32, 120) << 16) | 36;
+    const pixels = (@as(u32, 1200) << 16) | 720;
+    const ctx: ClientContext = .{
+        .term = "xterm-ghostty",
+        .version = "0.21.4-test",
+        .dark_scheme = true,
+        .foreground = .{ 0xff, 0xff, 0xff },
+        .background = .{ 0x28, 0x2c, 0x34 },
+        .cursor = .{ 0xff, 0xaa, 0x00 },
+    };
+
+    const created = try withRemoteClientContext(alloc, "{\"id\":\"pane\",\"policy\":{},\"create\":true}", grid, pixels, ctx);
+    defer alloc.free(created);
+    const parsed_created = try std.json.parseFromSlice(std.json.Value, alloc, created, .{});
+    defer parsed_created.deinit();
+    try std.testing.expectEqual(@as(i64, 120), parsed_created.value.object.get("cols").?.integer);
+    try std.testing.expectEqual(@as(i64, 36), parsed_created.value.object.get("rows").?.integer);
+    try std.testing.expectEqual(@as(i64, 1200), parsed_created.value.object.get("pixel_width").?.integer);
+    try std.testing.expectEqual(@as(i64, 720), parsed_created.value.object.get("pixel_height").?.integer);
+    try std.testing.expectEqualStrings("xterm-ghostty", parsed_created.value.object.get("term").?.string);
+    try std.testing.expectEqualStrings("truecolor", parsed_created.value.object.get("colorterm").?.string);
+    try std.testing.expectEqualStrings("ghostty", parsed_created.value.object.get("term_program").?.string);
+    try std.testing.expectEqualStrings("0.21.4-test", parsed_created.value.object.get("term_program_version").?.string);
+    try std.testing.expectEqualStrings("dark", parsed_created.value.object.get("color_scheme").?.string);
+
+    const attached = try withRemoteClientContext(alloc, "{\"id\":\"pane\",\"policy\":{},\"create\":false}", grid, pixels, ctx);
+    defer alloc.free(attached);
+    try std.testing.expect(std.mem.indexOf(u8, attached, "cols") == null);
+    try std.testing.expect(std.mem.indexOf(u8, attached, "term_program") == null);
 }

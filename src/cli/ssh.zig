@@ -411,6 +411,11 @@ fn runInner(
     // remote OMG service or persistent installation. +ssh owns the final
     // OpenSSH child lifetime; its transient remote startup hooks only annotate
     // that one terminal connection.
+    const forward_osc7501: ?[]const u8 = if (opts.@"forward-env")
+        resolvedOsc7501Setting(alloc)
+    else
+        null;
+
     const lifecycle: ?struct {
         id: []const u8,
         label: []const u8,
@@ -425,13 +430,14 @@ fn runInner(
             "omg-ssh-{d}",
             .{std.Io.Timestamp.now(global.io(), .real).toNanoseconds()},
         ) catch break :lifecycle null;
-        const remote_command = remoteShellCommand(
+        const remote_command = remoteShellCommandWithEnv(
             alloc,
             label,
             id,
             opts.@"remote-working-directory",
             remote_agent,
             opts.@"remote-agent-session",
+            forward_osc7501,
         ) orelse break :lifecycle null;
         const local_cwd = std.Io.Dir.cwd().realPathFileAlloc(
             global.io(),
@@ -455,8 +461,14 @@ fn runInner(
             "SetEnv=TERM={s}",
             .{session.term},
         );
+        const set_osc7501 = try std.fmt.allocPrint(
+            alloc,
+            "SetEnv=AGY_CLI_OSC7501={s}",
+            .{forward_osc7501 orelse "on"},
+        );
         break :env_opts &.{
             "-o", set_term,
+            "-o", set_osc7501,
             "-o", "SendEnv=COLORTERM",
             "-o", "SendEnv=TERM_PROGRAM",
             "-o", "SendEnv=TERM_PROGRAM_VERSION",
@@ -744,6 +756,16 @@ fn validAgentSessionID(value: []const u8) bool {
     return true;
 }
 
+fn resolvedOsc7501Setting(alloc: Allocator) []const u8 {
+    var env = global.environMap() catch return "on";
+    defer env.deinit();
+    const raw = env.get("AGY_CLI_OSC7501") orelse return "on";
+    for (raw) |byte| {
+        if (byte == 0 or byte == '\n' or byte == '\r') return "on";
+    }
+    return alloc.dupe(u8, raw) catch "on";
+}
+
 fn remoteShellCommand(
     alloc: Allocator,
     label: []const u8,
@@ -751,6 +773,26 @@ fn remoteShellCommand(
     remote_working_directory: ?[]const u8,
     remote_agent: ?RemoteAgent,
     remote_agent_session: ?[]const u8,
+) ?[]const u8 {
+    return remoteShellCommandWithEnv(
+        alloc,
+        label,
+        context_id,
+        remote_working_directory,
+        remote_agent,
+        remote_agent_session,
+        "on",
+    );
+}
+
+fn remoteShellCommandWithEnv(
+    alloc: Allocator,
+    label: []const u8,
+    context_id: []const u8,
+    remote_working_directory: ?[]const u8,
+    remote_agent: ?RemoteAgent,
+    remote_agent_session: ?[]const u8,
+    forward_osc7501: ?[]const u8,
 ) ?[]const u8 {
     const fish = remoteFishCommand(
         alloc,
@@ -810,6 +852,13 @@ fn remoteShellCommand(
         \\fi
         \\export OMG_SSH_SERVER_ID="$__omg_server_id"
         \\
+    ) catch return null;
+    if (forward_osc7501) |osc7501| {
+        script.writer.writeAll("if [ -z \"${AGY_CLI_OSC7501+x}\" ]; then AGY_CLI_OSC7501=") catch return null;
+        writeShellSingleQuoted(&script.writer, osc7501) catch return null;
+        script.writer.writeAll("; export AGY_CLI_OSC7501; fi\n") catch return null;
+    }
+    script.writer.writeAll(
         \\case ${SHELL##*/} in
         \\fish)
     ) catch return null;
@@ -1307,6 +1356,35 @@ test remoteShellCommand {
     try testing.expect(std.mem.indexOf(u8, full_cwd_command, "OMG_REMOTE_CWD=") != null);
     try testing.expect(std.mem.indexOf(u8, full_cwd_command, "project") != null);
     try testing.expect(std.mem.indexOf(u8, full_cwd_command, "export OMG_REMOTE_CWD") != null);
+    try testing.expect(std.mem.indexOf(u8, full_cwd_command, "AGY_CLI_OSC7501='on'") != null);
+
+    const disabled_osc_command = remoteShellCommandWithEnv(
+        testing.allocator,
+        "cloud",
+        "omg-ssh-no-env",
+        null,
+        null,
+        null,
+        null,
+    ).?;
+    defer testing.allocator.free(disabled_osc_command);
+    const decoded_no_env = try decodeBootstrapForTest(testing.allocator, disabled_osc_command);
+    defer testing.allocator.free(decoded_no_env);
+    try testing.expect(std.mem.indexOf(u8, decoded_no_env, "AGY_CLI_OSC7501") == null);
+
+    const explicit_off_command = remoteShellCommandWithEnv(
+        testing.allocator,
+        "cloud",
+        "omg-ssh-off",
+        null,
+        null,
+        null,
+        "off",
+    ).?;
+    defer testing.allocator.free(explicit_off_command);
+    const decoded_off = try decodeBootstrapForTest(testing.allocator, explicit_off_command);
+    defer testing.allocator.free(decoded_off);
+    try testing.expect(std.mem.indexOf(u8, decoded_off, "AGY_CLI_OSC7501='off'") != null);
 
     var fish_buffer: [128]u8 = undefined;
     var fish_writer: std.Io.Writer = .fixed(&fish_buffer);

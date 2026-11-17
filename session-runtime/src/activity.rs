@@ -104,7 +104,7 @@ impl Snapshot {
             );
         }
         bytes.extend_from_slice(format!("\x1b]3008;start={SYNC};end\x07").as_bytes());
-        if let Some(pending) = &self.pending {
+        if let Some(pending) = self.pending.as_ref().filter(|pending| !pending.is_empty()) {
             bytes.extend_from_slice(
                 format!("\x1b]3008;start={SYNC};mode={tag}\x07\x1b]3008;start={SYNC};begin\x07")
                     .as_bytes(),
@@ -114,6 +114,7 @@ impl Snapshot {
                     format!("\x1b]3008;start={};{}\x07", signal.id, signal.metadata).as_bytes(),
                 );
             }
+            bytes.extend_from_slice(format!("\x1b]3008;start={SYNC};end\x07").as_bytes());
         }
         bytes
     }
@@ -3068,5 +3069,36 @@ mod tests {
         assert_eq!(tracker.presentation().unwrap().state, "idle");
 
         drop(guard);
+    }
+
+    #[test]
+    fn inline_bytes_closes_pending_sync_transaction_and_ignores_empty_pending() {
+        let mut source = Vt::new(80, 24).unwrap();
+        source.write(b"\x1b]7501;state=working:app=antigravity:id=t1\x07");
+        source.write(b"\x1b]3008;start=omg-agent-sync;begin\x07");
+        source.write(b"\x1b]7501;state=blocked:app=antigravity:id=t2:kind=permission\x07");
+        let with_pending = source.activity().snapshot().inline_bytes_with_mode("live");
+        let text = String::from_utf8_lossy(&with_pending);
+        assert_eq!(
+            text.matches("start=omg-agent-sync;begin\x07").count(),
+            text.matches("start=omg-agent-sync;end\x07").count(),
+            "every omg-agent-sync;begin must be balanced by end: {text:?}"
+        );
+        // Subsequent OSC 7501 update after inline_bytes must commit cleanly (not trapped open).
+        let mut receiver = Vt::new(80, 24).unwrap();
+        receiver.write(&with_pending);
+        receiver.write(b"\x1b]7501;state=done:app=antigravity:id=t2\x07");
+        let snap = receiver.activity().snapshot();
+        assert!(snap.pending.is_none());
+        assert_eq!(snap.presentation().unwrap().state, "done");
+
+        // Empty pending (`Some([])`) after committed records must not open an empty wipe batch.
+        let mut empty_pending_src = Vt::new(80, 24).unwrap();
+        empty_pending_src.write(b"\x1b]7501;state=working:app=antigravity:id=t3\x07");
+        empty_pending_src.write(b"\x1b]3008;start=omg-agent-sync;begin\x07");
+        let encoded = empty_pending_src.activity().snapshot().inline_bytes_with_mode("restore");
+        let mut rx2 = Vt::new(80, 24).unwrap();
+        rx2.write(&encoded);
+        assert_eq!(rx2.activity().snapshot().presentation().unwrap().state, "working");
     }
 }

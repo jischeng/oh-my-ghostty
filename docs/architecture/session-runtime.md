@@ -47,7 +47,7 @@ SSH 子进程使用普通管道与 `ssh -T`，它不持有 Agent PTY。Bridge �
 
 SSH handoff 保留当前 Surface、pane UUID 和本地 PTY。经过 pane capability 验证后，GUI 只返回私有连接配置；前台 helper 在原 PTY 内作为远端会话的字节流 viewer，本地 shell 等待它结束。首次输出接在本地历史之后，正常退出恢复终端模式和退出码并返回同一个本地 shell，不新增 tab。helper 自己持有 relay，GUI 退出不切断这条连接。传输失败按既有策略重连同一远端 UUID；明确的认证/配置错误回到本地 prompt。TTY 认证不强制 Askpass 窗口。设置页显式连接仍可建立独立原生远端 tab。
 
-输入、resize、writer 和 snapshot ACK 继续受 generation 限制；断线输入不重放。重连快照恢复终端模式与程序颜色，已由权威 VT 回答的查询不再交给外层终端重复回答。借鉴的 Herdr Core viewer/relay 代码记录在 `session-runtime/THIRD-PARTY-NOTICES`，许可证随 App 打包。
+输入、resize、writer 和 snapshot ACK 继续受 generation 限制；断线输入不重放。重连快照恢复终端模式与程序颜色，已由权威 VT 回答的查询不再交给外层终端重复回答（覆盖 `XTVERSION`、`DA1`/`DA2`、`DECRQM`、`DSR 6n`、配色与窗口/cell 尺寸及精确分类的 OSC 颜色/`7501` 查询），`inline` 也不在 `DEC 2026` 同步输出帧或未闭合控制序列中插入 `OSC 3008` 元数据。远端创建协商 `init-size/1` 与 `remote-env/1`，直接以目标行列/像素尺寸创建 PTY，在远端部署 `xterm-ghostty` terminfo 并透传/设置终端身份与 `AGY_CLI_OSC7501=on`；SSH 传输默认启用压缩与 keepalive，并对慢读取应用 `?2026h..l` 合并窗口与 `POLLIN` 背压。借鉴的 Herdr Core viewer/relay 代码记录在 `session-runtime/THIRD-PARTY-NOTICES`，许可证随 App 打包。
 
 私有 inline owner 记录关联远端 UUID、本地 PTY、helper PID 和 OS boot UUID；恢复 GUI 时恢复远端目录与文件上下文，split 使用远端目录，新 tab 使用原本地目录。会话库优先聚焦 inline pane；窗口已关闭时重新 attach 其本地 PTY，避免争抢远端 writer。显式关闭 pane 同时持久化本地和远端 Close。GUI detach 后，本地 PTY 内的 viewer 仍然运行，远端也仍附着于该 viewer。运行时状态使用延迟显示的紧凑浮层，不再挤压终端或触发 PTY resize；托管 SSH 不在终端内自动弹出 Agent hook 接入面板。
 

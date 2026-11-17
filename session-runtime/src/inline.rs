@@ -7,16 +7,18 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::{
     ffi::c_void,
+    fs::File,
     io::{self, Read, Write},
+    mem::ManuallyDrop,
     net::Shutdown,
-    os::fd::AsRawFd,
+    os::fd::{AsRawFd, FromRawFd},
     os::unix::net::UnixStream,
     path::Path,
     sync::{
         atomic::{AtomicI32, Ordering},
         mpsc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 static INTERRUPTED: AtomicI32 = AtomicI32::new(0);
@@ -207,7 +209,49 @@ const RESET: &[u8] = b"\x18\x1b[?2026l\x1b[?1049h\x1b[=0;1u\x1b[?1049l\x1b[?1047
 
 /// The local PTY (not the GUI) owns this blocking viewer. Transport reconnects
 /// retain its socket and discard input until the new writer generation is ready.
-pub fn view(path: &Path, open: Value, session: &Context) -> io::Result<i32> {
+fn enrich_open_request(open: &mut Value) {
+    let Some(obj) = open.as_object_mut() else {
+        return;
+    };
+    let spawns = obj.get("create").and_then(Value::as_bool) == Some(true)
+        || obj.get("recreate_if_gone").and_then(Value::as_bool) == Some(true);
+    if !spawns {
+        return;
+    }
+    let size = dimensions();
+    let cols = u16::from_be_bytes([size[0], size[1]]);
+    let rows = u16::from_be_bytes([size[2], size[3]]);
+    let pixel_width = u16::from_be_bytes([size[4], size[5]]);
+    let pixel_height = u16::from_be_bytes([size[6], size[7]]);
+    obj.entry("cols").or_insert_with(|| Value::from(cols));
+    obj.entry("rows").or_insert_with(|| Value::from(rows));
+    if pixel_width > 0 {
+        obj.entry("pixel_width")
+            .or_insert_with(|| Value::from(pixel_width));
+    }
+    if pixel_height > 0 {
+        obj.entry("pixel_height")
+            .or_insert_with(|| Value::from(pixel_height));
+    }
+    for (env_key, json_key) in [
+        ("TERM", "term"),
+        ("COLORTERM", "colorterm"),
+        ("TERM_PROGRAM", "term_program"),
+        ("TERM_PROGRAM_VERSION", "term_program_version"),
+    ] {
+        if !obj.contains_key(json_key) {
+            if let Ok(val) = std::env::var(env_key) {
+                let trimmed = val.trim();
+                if !trimmed.is_empty() && trimmed.len() <= 128 && trimmed != "dumb" {
+                    obj.insert(json_key.into(), Value::String(trimmed.to_owned()));
+                }
+            }
+        }
+    }
+}
+
+pub fn view(path: &Path, mut open: Value, session: &Context) -> io::Result<i32> {
+    enrich_open_request(&mut open);
     let (mut wake_read, mut wake_write) = UnixStream::pair()?;
     wake_read.set_nonblocking(true)?;
     wake_write.set_nonblocking(true)?;
@@ -256,11 +300,14 @@ fn view_loop(
     let mut writer = false;
     let mut raw = None;
     let mut first_picture = true;
+    let mut preserved_local_prefix = false;
     let mut initial_output = None;
     let mut password_input = false;
     let mut pending_password = None;
     let mut pending_cwd = None;
     let mut pending_output = Vec::new();
+    let mut out_buf: Vec<u8> = Vec::new();
+    let mut sync_hold_started: Option<Instant> = None;
     let mut pending_activity: Option<&'static str> = None;
     let mut activity_hydrated = false;
     let mut size = dimensions();
@@ -268,25 +315,43 @@ fn view_loop(
         u16::from_be_bytes([size[0], size[1]]),
         u16::from_be_bytes([size[2], size[3]]),
     )?;
-    let mut stdout = io::stdout().lock();
-    stdout.write_all(&context(session, None, None))?;
-    stdout.flush()?;
+    {
+        let mut stdout = io::stdout().lock();
+        stdout.write_all(&context(session, None, None))?;
+        stdout.flush()?;
+    }
+    let mut raw_stdout = ManuallyDrop::new(unsafe { File::from_raw_fd(libc::STDOUT_FILENO) });
     loop {
         let signal = INTERRUPTED.load(Ordering::Relaxed);
         if signal != 0 {
+            if !out_buf.is_empty() {
+                let _ = raw_stdout.write_all(&out_buf);
+            }
             return Ok(128 + signal);
         }
+        let mut drained_frames = 0usize;
         for _ in 0..32 {
             let frame = match rx.try_recv() {
-                Ok(frame) => frame?,
+                Ok(frame) => {
+                    drained_frames += 1;
+                    frame?
+                }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    return Err(io::ErrorKind::UnexpectedEof.into())
+                    if !out_buf.is_empty() {
+                        let _ = raw_stdout.write_all(&out_buf);
+                    }
+                    return Err(io::ErrorKind::UnexpectedEof.into());
                 }
             };
             match frame.kind {
                 b'T' => {
                     let status: Value = serde_json::from_slice(&frame.data)?;
+                    if !out_buf.is_empty() {
+                        raw_stdout.write_all(&out_buf)?;
+                        out_buf.clear();
+                    }
+                    sync_hold_started = None;
                     generation = frame.seq;
                     ready = false;
                     writer = false;
@@ -322,7 +387,8 @@ fn view_loop(
                         .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
                 }
                 b'S' => {
-                    if first_picture && initial_output.is_some() {
+                    let had_first_picture = first_picture;
+                    if had_first_picture && initial_output.is_some() {
                         screen = Screen::new(
                             u16::from_be_bytes([size[0], size[1]]),
                             u16::from_be_bytes([size[2], size[3]]),
@@ -331,9 +397,20 @@ fn view_loop(
                         screen.write(&pending_output);
                     } else {
                         screen.restore(&frame.data)?;
-                        let current = dimensions();
-                        pending_output =
-                            screen.repaint(Some(u16::from_be_bytes([current[2], current[3]])))?;
+                        let (_, alt_screen, cursor_visible, mouse_active) = screen.ui_modes();
+                        let preserve_rows = if !had_first_picture
+                            && !preserved_local_prefix
+                            && !alt_screen
+                            && cursor_visible
+                            && !mouse_active
+                        {
+                            preserved_local_prefix = true;
+                            let current = dimensions();
+                            Some(u16::from_be_bytes([current[2], current[3]]))
+                        } else {
+                            None
+                        };
+                        pending_output = screen.repaint(preserve_rows)?;
                         pending_output.extend(screen.continuation()?);
                     }
                     screen.take_responses();
@@ -358,7 +435,7 @@ fn view_loop(
                     }
                     ready = true;
                     writer = true;
-                    stdout.write_all(&pending_output)?;
+                    out_buf.extend_from_slice(&pending_output);
                     pending_output.clear();
                     persist_record(
                         session,
@@ -376,7 +453,7 @@ fn view_loop(
                     }
                     ready = true;
                     writer = false;
-                    stdout.write_all(&pending_output)?;
+                    out_buf.extend_from_slice(&pending_output);
                     pending_output.clear();
                     persist_record(
                         session,
@@ -395,7 +472,7 @@ fn view_loop(
                     }
                     screen.write(&frame.data);
                     if ready {
-                        stdout.write_all(&frame.data)?;
+                        out_buf.extend_from_slice(&frame.data);
                     } else {
                         if pending_output.len() + frame.data.len() > crate::MAX_QUEUE {
                             return Err(io::Error::other(
@@ -420,10 +497,19 @@ fn view_loop(
                     pending_activity = Some(mode);
                 }
                 b'R' if frame.data.len() == 4 || frame.data.len() == 8 => {
-                    screen.vt.resize(
-                        u16::from_be_bytes([frame.data[0], frame.data[1]]),
-                        u16::from_be_bytes([frame.data[2], frame.data[3]]),
-                    )?;
+                    let cols = u16::from_be_bytes([frame.data[0], frame.data[1]]);
+                    let rows = u16::from_be_bytes([frame.data[2], frame.data[3]]);
+                    if frame.data.len() == 8 {
+                        let px_w = u16::from_be_bytes([frame.data[4], frame.data[5]]);
+                        let px_h = u16::from_be_bytes([frame.data[6], frame.data[7]]);
+                        if px_w > 0 && px_h > 0 {
+                            screen.vt.resize_pixels(cols, rows, px_w, px_h)?;
+                        } else {
+                            screen.vt.resize(cols, rows)?;
+                        }
+                    } else {
+                        screen.vt.resize(cols, rows)?;
+                    }
                     screen.take_responses();
                 }
                 b'M' => {
@@ -443,11 +529,14 @@ fn view_loop(
                     }
                 }
                 b'X' => {
+                    if !out_buf.is_empty() {
+                        raw_stdout.write_all(&out_buf)?;
+                        out_buf.clear();
+                    }
                     if !pending_output.is_empty() {
                         let mut ended = Screen::new(80, 24)?;
                         let mut filter = crate::terminal_output::Relay::default();
-                        stdout.write_all(&filter.feed(&mut ended, &pending_output))?;
-                        stdout.flush()?;
+                        raw_stdout.write_all(&filter.feed(&mut ended, &pending_output))?;
                     }
                     return std::str::from_utf8(&frame.data)
                         .ok()
@@ -455,33 +544,54 @@ fn view_loop(
                         .ok_or_else(|| io::Error::other("invalid remote exit status"));
                 }
                 b'E' => {
+                    if !out_buf.is_empty() {
+                        let _ = raw_stdout.write_all(&out_buf);
+                        out_buf.clear();
+                    }
                     return Err(io::Error::other(
                         String::from_utf8_lossy(&frame.data).into_owned(),
-                    ))
+                    ));
                 }
                 _ => {}
             }
-            // Do not splice host metadata into a split CSI/OSC/image sequence.
-            if ready && screen.continuation().is_ok_and(|bytes| bytes.is_empty()) {
-                if let Some(mode) = pending_activity.take() {
-                    stdout
-                        .write_all(&screen.vt.activity().snapshot().inline_bytes_with_mode(mode))?;
-                }
-                if let Some(password) = pending_password.take() {
-                    if password != password_input {
-                        stdout.write_all(if password {
-                            b"\x1b]3008;start=omg-inline-password;1\x07"
-                        } else {
-                            b"\x1b]3008;start=omg-inline-password;0\x07"
-                        })?;
-                        password_input = password;
-                    }
-                }
-                if let Some(cwd) = pending_cwd.take() {
-                    stdout.write_all(&context(session, Some(&cwd), None))?;
+        }
+        const INLINE_SYNC_HOLD_LIMIT: Duration = Duration::from_millis(12);
+        const INLINE_OUT_BUF_LIMIT: usize = 256 * 1024;
+        let in_sync = screen.in_sync();
+        // Do not splice host metadata into a split CSI/OSC/image sequence or
+        // an open DEC 2026 synchronized-output frame.
+        if ready && !in_sync && screen.continuation().is_ok_and(|bytes| bytes.is_empty()) {
+            if let Some(cwd) = pending_cwd.take() {
+                out_buf.extend_from_slice(&context(session, Some(&cwd), None));
+            }
+            if let Some(mode) = pending_activity.take() {
+                out_buf.extend_from_slice(
+                    &screen.vt.activity().snapshot().inline_bytes_with_mode(mode),
+                );
+            }
+            if let Some(password) = pending_password.take() {
+                if password != password_input {
+                    out_buf.extend_from_slice(if password {
+                        b"\x1b]3008;start=omg-inline-password;1\x07"
+                    } else {
+                        b"\x1b]3008;start=omg-inline-password;0\x07"
+                    });
+                    password_input = password;
                 }
             }
-            stdout.flush()?;
+        }
+        if out_buf.is_empty() {
+            sync_hold_started = None;
+        } else if !in_sync
+            || !ready
+            || out_buf.len() >= INLINE_OUT_BUF_LIMIT
+            || sync_hold_started.is_some_and(|started| started.elapsed() >= INLINE_SYNC_HOLD_LIMIT)
+        {
+            raw_stdout.write_all(&out_buf)?;
+            out_buf.clear();
+            sync_hold_started = None;
+        } else {
+            sync_hold_started.get_or_insert_with(Instant::now);
         }
         if ready && writer {
             let current = dimensions();
@@ -504,7 +614,14 @@ fn view_loop(
                 revents: 0,
             },
         ];
-        let count = unsafe { libc::poll(fds.as_mut_ptr(), 2, 500) };
+        let poll_timeout_ms = if drained_frames == 32 {
+            0
+        } else if sync_hold_started.is_some() {
+            4
+        } else {
+            500
+        };
+        let count = unsafe { libc::poll(fds.as_mut_ptr(), 2, poll_timeout_ms) };
         if count > 0 {
             if fds[1].revents & libc::POLLIN != 0 {
                 let _ = wake.read(&mut [0; 256]);
@@ -576,6 +693,12 @@ impl Screen {
     fn take_responses(&mut self) -> Vec<u8> {
         std::mem::take(&mut *self.replies)
     }
+    fn in_sync(&self) -> bool {
+        self.vt.in_sync()
+    }
+    fn ui_modes(&self) -> (bool, bool, bool, bool) {
+        self.vt.ui_modes().unwrap_or((false, false, true, false))
+    }
     fn continuation(&self) -> io::Result<Vec<u8>> {
         let mut data = std::ptr::null_mut();
         let mut len = 0;
@@ -608,7 +731,7 @@ impl Screen {
 \x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?2004l\x1b[?1l\
 \x1b[?66l\x1b[?2031l\x1b[?2048l\x1b[=0;1u\x1b[?1049l\x1b[?1047l\x1b[?47l"
             .to_vec();
-        if let Some(rows) = preserve_rows {
+        if let Some(rows) = preserve_rows.filter(|&r| r > 0 && !alternate) {
             // Retain the local prefix in outer scrollback before a reconnect
             // replaces the remote viewport. The whole repaint is synchronized.
             out.extend_from_slice(b"\x1b[?6l\x1b[?69l\x1b[r\x1b[999;1H");
@@ -702,5 +825,25 @@ mod tests {
         let styled = screen.repaint(None).unwrap();
         let color = b"]11;rgb:11/22/33\x1b\\";
         assert!(styled.windows(color.len()).any(|s| s == color));
+    }
+
+    #[test]
+    fn repaint_skips_preserve_rows_scroll_when_in_alt_screen() {
+        let mut screen = Screen::new(80, 24).unwrap();
+        let primary_repaint = screen.repaint(Some(24)).unwrap();
+        assert!(
+            primary_repaint
+                .windows(b"\x1b[999;1H\r\n".len())
+                .any(|w| w == b"\x1b[999;1H\r\n")
+        );
+
+        screen.write(b"\x1b[?1049halt-app");
+        let alt_repaint = screen.repaint(Some(24)).unwrap();
+        assert!(
+            !alt_repaint
+                .windows(b"\x1b[999;1H".len())
+                .any(|w| w == b"\x1b[999;1H"),
+            "alt-screen repaint must not emit scrollback newlines"
+        );
     }
 }

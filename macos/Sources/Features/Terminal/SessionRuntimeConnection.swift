@@ -180,7 +180,15 @@ struct SessionRuntimeDescriptor: Codable, Equatable, Sendable {
         pane: UUID,
         attachExisting: Bool,
         recreateIfGone: Bool = false,
-        fallbackWorkingDirectory: String? = nil
+        fallbackWorkingDirectory: String? = nil,
+        cols: UInt16? = nil,
+        rows: UInt16? = nil,
+        pixelWidth: UInt16? = nil,
+        pixelHeight: UInt16? = nil,
+        term: String? = nil,
+        colorterm: String? = nil,
+        termProgram: String? = nil,
+        termProgramVersion: String? = nil
     ) throws -> String {
         struct Request: Encodable {
             let id: String
@@ -188,10 +196,24 @@ struct SessionRuntimeDescriptor: Codable, Equatable, Sendable {
             let create: Bool
             let cwd: String?
             let recreateIfGone: Bool?
+            let cols: UInt16?
+            let rows: UInt16?
+            let pixelWidth: UInt16?
+            let pixelHeight: UInt16?
+            let term: String?
+            let colorterm: String?
+            let termProgram: String?
+            let termProgramVersion: String?
 
             enum CodingKeys: String, CodingKey {
                 case id, policy, create, cwd
                 case recreateIfGone = "recreate_if_gone"
+                case cols, rows
+                case pixelWidth = "pixel_width"
+                case pixelHeight = "pixel_height"
+                case term, colorterm
+                case termProgram = "term_program"
+                case termProgramVersion = "term_program_version"
             }
         }
         let directory: String? = if attachExisting {
@@ -205,12 +227,23 @@ struct SessionRuntimeDescriptor: Codable, Equatable, Sendable {
                 fallbackWorkingDirectory ?? initialWorkingDirectory ?? (isLocal ? localWorkingDirectory : nil)
             )
         }
+        let remoteSpawns = !isLocal && (!attachExisting || recreateIfGone)
+        let bundleVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         let data = try JSONEncoder().encode(Request(
             id: pane.uuidString.lowercased(),
             policy: policy,
             create: !attachExisting,
             cwd: directory,
-            recreateIfGone: attachExisting && recreateIfGone ? true : nil
+            recreateIfGone: attachExisting && recreateIfGone ? true : nil,
+            cols: cols,
+            rows: rows,
+            pixelWidth: pixelWidth,
+            pixelHeight: pixelHeight,
+            term: term ?? (remoteSpawns ? "xterm-ghostty" : nil),
+            colorterm: colorterm ?? (remoteSpawns ? "truecolor" : nil),
+            termProgram: termProgram ?? (remoteSpawns ? "ghostty" : nil),
+            termProgramVersion: termProgramVersion ?? (remoteSpawns ? (bundleVersion?.isEmpty == false ? bundleVersion : nil) : nil)
         ))
         guard let result = String(data: data, encoding: .utf8) else { throw CocoaError(.fileReadCorruptFile) }
         return result

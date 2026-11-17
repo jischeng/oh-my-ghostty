@@ -71,6 +71,35 @@ unsafe extern "C" {
     fn omg_vt_continuation(vt: *mut c_void, data: *mut *mut u8, len: *mut usize) -> i32;
     fn omg_vt_screen_only(vt: *mut c_void) -> i32;
     fn omg_vt_in_alt_screen(vt: *mut c_void) -> i32;
+    fn omg_vt_in_sync_and_screen(vt: *mut c_void, in_sync: *mut bool, alt_screen: *mut bool) -> i32;
+    fn omg_vt_ui_modes(
+        vt: *mut c_void,
+        in_sync: *mut bool,
+        alt_screen: *mut bool,
+        cursor_visible: *mut bool,
+        mouse_active: *mut bool,
+    ) -> i32;
+    fn omg_vt_build_version(data: *mut *const u8, len: *mut usize) -> i32;
+    fn omg_vt_set_identity(
+        vt: *mut c_void,
+        term_program: *const u8,
+        term_program_len: usize,
+        version: *const u8,
+        version_len: usize,
+        terminfo: *const u8,
+        terminfo_len: usize,
+    ) -> i32;
+    fn omg_vt_set_theme(
+        vt: *mut c_void,
+        has_scheme: bool,
+        dark_scheme: i32,
+        has_fg: bool,
+        fg_rgb: *const u8,
+        has_bg: bool,
+        bg_rgb: *const u8,
+        has_cursor: bool,
+        cursor_rgb: *const u8,
+    ) -> i32;
     fn omg_vt_dynamic_color(vt: *mut c_void, index: u32, rgb: *mut u8) -> i32;
     fn omg_vt_paint(
         vt: *mut c_void,
@@ -228,6 +257,83 @@ impl Vt {
     }
     pub fn in_alt_screen(&self) -> bool {
         unsafe { omg_vt_in_alt_screen(self.0) != 0 }
+    }
+    pub fn in_sync_and_screen(&self) -> io::Result<(bool, bool)> {
+        let mut in_sync = false;
+        let mut alt_screen = false;
+        check(unsafe { omg_vt_in_sync_and_screen(self.0, &mut in_sync, &mut alt_screen) })?;
+        Ok((in_sync, alt_screen))
+    }
+    pub fn in_sync(&self) -> bool {
+        self.in_sync_and_screen()
+            .map(|(in_sync, _)| in_sync)
+            .unwrap_or(false)
+    }
+    pub fn ui_modes(&self) -> io::Result<(bool, bool, bool, bool)> {
+        let mut in_sync = false;
+        let mut alt_screen = false;
+        let mut cursor_visible = true;
+        let mut mouse_active = false;
+        check(unsafe {
+            omg_vt_ui_modes(
+                self.0,
+                &mut in_sync,
+                &mut alt_screen,
+                &mut cursor_visible,
+                &mut mouse_active,
+            )
+        })?;
+        Ok((in_sync, alt_screen, cursor_visible, mouse_active))
+    }
+    pub fn build_version() -> Option<String> {
+        let mut ptr = std::ptr::null();
+        let mut len = 0;
+        let res = unsafe { omg_vt_build_version(&mut ptr, &mut len) };
+        if res != 0 || ptr.is_null() || len == 0 {
+            return None;
+        }
+        let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+        std::str::from_utf8(slice).ok().map(str::to_owned)
+    }
+    pub fn set_identity(
+        &mut self,
+        term_program: Option<&str>,
+        version: Option<&str>,
+        terminfo: Option<&str>,
+    ) -> io::Result<()> {
+        let tp = term_program.filter(|s| !s.is_empty() && s.len() <= 64);
+        let ver = version.filter(|s| !s.is_empty() && s.len() <= 64);
+        let ti = terminfo.filter(|s| !s.is_empty() && s.len() <= 128);
+        let (tp_ptr, tp_len) = tp.map_or((std::ptr::null(), 0), |s| (s.as_ptr(), s.len()));
+        let (ver_ptr, ver_len) = ver.map_or((std::ptr::null(), 0), |s| (s.as_ptr(), s.len()));
+        let (ti_ptr, ti_len) = ti.map_or((std::ptr::null(), 0), |s| (s.as_ptr(), s.len()));
+        check(unsafe {
+            omg_vt_set_identity(self.0, tp_ptr, tp_len, ver_ptr, ver_len, ti_ptr, ti_len)
+        })
+    }
+    pub fn set_theme(
+        &mut self,
+        dark_scheme: Option<bool>,
+        fg: Option<[u8; 3]>,
+        bg: Option<[u8; 3]>,
+        cursor: Option<[u8; 3]>,
+    ) -> io::Result<()> {
+        let fg_ptr = fg.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
+        let bg_ptr = bg.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
+        let cursor_ptr = cursor.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
+        check(unsafe {
+            omg_vt_set_theme(
+                self.0,
+                dark_scheme.is_some(),
+                i32::from(dark_scheme.unwrap_or(true)),
+                fg.is_some(),
+                fg_ptr,
+                bg.is_some(),
+                bg_ptr,
+                cursor.is_some(),
+                cursor_ptr,
+            )
+        })
     }
     fn bytes(&self, text: bool) -> io::Result<Vec<u8>> {
         let mut p = std::ptr::null_mut();
@@ -1073,5 +1179,62 @@ mod tests {
         restored_alt.write(b"\x1b[?1049l");
         assert!(!restored_alt.in_alt_screen());
         assert!(restored_alt.text().unwrap().contains("before alt"));
+    }
+
+    #[test]
+    fn vt_exposes_ghostty_identity_size_colors_and_sync_modes_across_restore() {
+        use std::sync::{Arc, Mutex};
+        extern "C" fn capture(ctx: *mut c_void, data: *const u8, len: usize) {
+            let buf = unsafe { &*ctx.cast::<Arc<Mutex<Vec<u8>>>>() };
+            buf.lock()
+                .unwrap()
+                .extend_from_slice(unsafe { std::slice::from_raw_parts(data, len) });
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let ctx = Box::into_raw(Box::new(captured.clone()));
+        let mut vt = Vt::with_reply_pixels(120, 36, 1200, 720, Some(capture), ctx.cast()).unwrap();
+        vt.set_identity(Some("ghostty"), Some("1.3.2-test"), Some("xterm-ghostty"))
+            .unwrap();
+        vt.set_theme(
+            Some(true),
+            Some([0xff, 0xff, 0xff]),
+            Some([0x28, 0x2c, 0x34]),
+            Some([0xaa, 0xbb, 0xcc]),
+        )
+        .unwrap();
+
+        vt.write(
+            b"\x1b[>q\x1b[c\x1b[>c\x1bP+q544e\x1b\\\x1b[?996n\x1b[14t\x1b[16t\x1b[18t\x1b]10;?\x07\x1b]11;?\x07\x1b]12;?\x07\x1b]7501;?\x07",
+        );
+        let replies = String::from_utf8_lossy(&captured.lock().unwrap()).into_owned();
+        assert!(replies.contains("\x1bP>|ghostty 1.3.2-test\x1b\\"), "{replies:?}");
+        assert!(replies.contains("\x1b[?62;22;52c"), "{replies:?}");
+        assert!(replies.contains("\x1b[>1;10;0c"), "{replies:?}");
+        assert!(replies.contains("1+r544E=787465726D2D67686F73747479\x1b\\"), "{replies:?}");
+        assert!(replies.contains("\x1b[?997;1n"), "{replies:?}");
+        assert!(replies.contains("\x1b[4;720;1200t"), "{replies:?}");
+        assert!(replies.contains("\x1b[6;20;10t"), "{replies:?}");
+        assert!(replies.contains("\x1b[8;36;120t"), "{replies:?}");
+        assert!(replies.contains("\x1b]10;rgb:ffff/ffff/ffff\x07"), "{replies:?}");
+        assert!(replies.contains("\x1b]11;rgb:2828/2c2c/3434\x07"), "{replies:?}");
+        assert!(replies.contains("\x1b]12;rgb:aaaa/bbbb/cccc\x07"), "{replies:?}");
+        assert!(replies.contains("\x1b]7501;?:states="), "{replies:?}");
+
+        vt.write(b"\x1b[?2026h\x1b[?1049h\x1b[?25l\x1b[?1000h");
+        assert_eq!(vt.in_sync_and_screen().unwrap(), (true, true));
+        assert_eq!(vt.ui_modes().unwrap(), (true, true, false, true));
+
+        let snap = vt.snapshot().unwrap();
+        captured.lock().unwrap().clear();
+        vt.restore(&snap).unwrap();
+        assert_eq!(vt.in_sync_and_screen().unwrap(), (true, true));
+        vt.write(b"\x1b[?2026l\x1b[>q\x1b[18t");
+        assert!(!vt.in_sync());
+        let after = String::from_utf8_lossy(&captured.lock().unwrap()).into_owned();
+        assert!(after.contains("\x1bP>|ghostty 1.3.2-test\x1b\\"), "{after:?}");
+        assert!(after.contains("\x1b[8;36;120t"), "{after:?}");
+        drop(vt);
+        unsafe { drop(Box::from_raw(ctx)) };
     }
 }

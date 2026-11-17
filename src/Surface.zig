@@ -741,7 +741,21 @@ pub fn init(
                     .working_directory = if (creates) cwd else null,
                 }) };
             }
-            const backend = try termio.OmgSession.init(alloc, path, request, .{ .is_local = local });
+            const cursor_rgb: ?[3]u8 = if (config.@"cursor-color") |cursor| switch (cursor) {
+                .color => |rgb| .{ rgb.r, rgb.g, rgb.b },
+                else => null,
+            } else null;
+            const bg_luma = (@as(u32, config.background.r) * 2126) +
+                (@as(u32, config.background.g) * 7152) +
+                (@as(u32, config.background.b) * 722);
+            const backend = try termio.OmgSession.init(alloc, path, request, .{
+                .is_local = local,
+                .remote_term = if (!local) config.term else null,
+                .foreground = if (!local) .{ config.foreground.r, config.foreground.g, config.foreground.b } else null,
+                .background = if (!local) .{ config.background.r, config.background.g, config.background.b } else null,
+                .cursor = if (!local) cursor_rgb else null,
+                .dark_scheme = if (!local) (bg_luma < 1_280_000) else null,
+            });
             env.deinit();
             env_owned = false;
             break :session .{ .omg_session = backend };

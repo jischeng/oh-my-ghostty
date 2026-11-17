@@ -363,7 +363,7 @@ impl LocalLaunchSpec {
     }
 }
 
-#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(Default, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpenRequest {
     pub id: String,
@@ -379,6 +379,91 @@ pub struct OpenRequest {
     pub inline_viewer: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub recreate_if_gone: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cols: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pixel_width: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pixel_height: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub term: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colorterm: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub term_program: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub term_program_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_scheme: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground: Option<[u8; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<[u8; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<[u8; 3]>,
+}
+
+fn valid_remote_header_value(value: Option<&String>) -> bool {
+    value.is_none_or(|s| s.len() <= 128 && !s.chars().any(char::is_control))
+}
+
+impl OpenRequest {
+    pub fn validate_remote_options(&self) -> io::Result<()> {
+        if self.cols.is_some_and(|c| c == 0 || c > 500)
+            || self.rows.is_some_and(|r| r == 0 || r > 300)
+            || !valid_remote_header_value(self.term.as_ref())
+            || !valid_remote_header_value(self.colorterm.as_ref())
+            || !valid_remote_header_value(self.term_program.as_ref())
+            || !valid_remote_header_value(self.term_program_version.as_ref())
+            || !valid_remote_header_value(self.color_scheme.as_ref())
+        {
+            return Err(io::Error::other("invalid remote session options"));
+        }
+        Ok(())
+    }
+
+    pub fn clear_remote_options(&mut self) {
+        self.clear_init_size();
+        self.clear_remote_env();
+    }
+
+    pub fn clear_init_size(&mut self) {
+        self.cols = None;
+        self.rows = None;
+        self.pixel_width = None;
+        self.pixel_height = None;
+    }
+
+    pub fn clear_remote_env(&mut self) {
+        self.term = None;
+        self.colorterm = None;
+        self.term_program = None;
+        self.term_program_version = None;
+        self.color_scheme = None;
+        self.foreground = None;
+        self.background = None;
+        self.cursor = None;
+    }
+
+    fn to_remote_launch(&self, state_dir: &Path) -> server::RemoteSessionLaunch {
+        server::RemoteSessionLaunch {
+            cols: self.cols,
+            rows: self.rows,
+            pixel_width: self.pixel_width,
+            pixel_height: self.pixel_height,
+            term: self.term.clone(),
+            colorterm: self.colorterm.clone(),
+            term_program: self.term_program.clone(),
+            term_program_version: self.term_program_version.clone(),
+            color_scheme: self.color_scheme.clone(),
+            foreground: self.foreground,
+            background: self.background,
+            cursor: self.cursor,
+            state_dir: Some(state_dir.to_path_buf()),
+        }
+    }
 }
 
 fn is_false(value: &bool) -> bool {
@@ -390,6 +475,7 @@ struct ConnectOptions<'a> {
     cwd: Option<&'a str>,
     launch: Option<LocalLaunchSpec>,
     resurrect_launch: Option<LocalLaunchSpec>,
+    remote_launch: Option<server::RemoteSessionLaunch>,
     inline_viewer: bool,
     recreate_if_gone: bool,
 }
@@ -1465,6 +1551,7 @@ impl Registry {
     }
     pub fn open(&mut self, request: &OpenRequest) -> io::Result<UnixStream> {
         request.policy.validate()?;
+        request.validate_remote_options()?;
         let request_size = serde_json::to_vec(request)?.len();
         if request_size > MAX_OPEN_REQUEST_BYTES {
             return Err(io::Error::other("session open request exceeds limit"));
@@ -1522,6 +1609,7 @@ impl Registry {
                 cwd: request.cwd.as_deref(),
                 launch: local_launch,
                 resurrect_launch: request.resurrect_launch.clone(),
+                remote_launch: Some(request.to_remote_launch(&self.root)),
                 inline_viewer: request.inline_viewer,
                 recreate_if_gone: request.recreate_if_gone,
             },
@@ -1566,6 +1654,7 @@ impl Registry {
             cwd: initial_cwd,
             launch: local_launch,
             resurrect_launch,
+            remote_launch,
             inline_viewer,
             recreate_if_gone,
         } = options;
@@ -1607,6 +1696,7 @@ impl Registry {
                     cwd: initial_cwd,
                     launch: local_launch,
                     resurrect_launch,
+                    remote_launch,
                     inline_viewer,
                     recreate_if_gone,
                 },
@@ -1761,6 +1851,7 @@ impl Registry {
                         containment_root,
                         initial_cwd: working_directory,
                         local_launch: None,
+                        remote_launch,
                         presentation: Some(worker_presentation),
                         resurrect: false,
                         shutdown_wake: None,
@@ -2986,6 +3077,7 @@ impl Registry {
                 cwd: request.cwd.as_deref(),
                 launch: local_launch,
                 resurrect_launch: request.resurrect_launch.clone(),
+                remote_launch: None,
                 inline_viewer: request.inline_viewer,
                 recreate_if_gone: request.recreate_if_gone,
             },
@@ -3913,6 +4005,7 @@ mod tests {
                 resurrect_launch: Some(spec.clone()),
                 inline_viewer: false,
                 recreate_if_gone: false,
+                ..Default::default()
             })
             .unwrap_err();
         assert!(remote_err.to_string().contains("SSH"));
@@ -3927,6 +4020,7 @@ mod tests {
                 resurrect_launch: Some(spec.clone()),
                 inline_viewer: false,
                 recreate_if_gone: false,
+                ..Default::default()
             })
             .unwrap_err();
         assert!(create_err.to_string().contains("creating"));
@@ -3943,6 +4037,7 @@ mod tests {
                 resurrect_launch: Some(with_input),
                 inline_viewer: false,
                 recreate_if_gone: false,
+                ..Default::default()
             })
             .unwrap_err();
         assert!(input_err.to_string().contains("initial input"));
@@ -4859,6 +4954,7 @@ mod tests {
                 resurrect_launch: Some(res_launch.clone()),
                 inline_viewer: false,
                 recreate_if_gone: false,
+                ..Default::default()
             })
             .unwrap_err();
         assert!(unknown_err.to_string().contains("unknown"));
@@ -4895,6 +4991,7 @@ mod tests {
                     resurrect_launch: Some(res_launch.clone()),
                     inline_viewer: false,
                     recreate_if_gone: true,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -4956,6 +5053,7 @@ mod tests {
                                 resurrect_launch: Some(res_launch.clone()),
                                 inline_viewer: false,
                                 recreate_if_gone: false,
+                                ..Default::default()
                             },
                         )
                         .err()
@@ -4982,6 +5080,7 @@ mod tests {
                         },
                         inline_viewer: true,
                         recreate_if_gone: true,
+                        ..Default::default()
                     },
                 )
                 .unwrap();
@@ -5031,6 +5130,7 @@ mod tests {
                 resurrect_launch: None,
                 inline_viewer: false,
                 recreate_if_gone: false,
+                ..Default::default()
             })
             .unwrap_err();
         assert!(strict_missing.to_string().contains("unknown"));
@@ -5045,6 +5145,7 @@ mod tests {
                 resurrect_launch: None,
                 inline_viewer: false,
                 recreate_if_gone: true,
+                ..Default::default()
             })
             .unwrap();
         let _ = crate::Frame::new(crate::CLOSE, 0, &[]).send(&mut stream);
@@ -5091,6 +5192,7 @@ mod tests {
                     resurrect_launch: None,
                     inline_viewer: false,
                     recreate_if_gone: false,
+                    ..Default::default()
                 })
                 .unwrap_err();
             assert!(!strict_err.to_string().is_empty());
@@ -5105,6 +5207,7 @@ mod tests {
                     resurrect_launch: None,
                     inline_viewer: false,
                     recreate_if_gone: true,
+                    ..Default::default()
                 })
                 .unwrap();
             let updated = Record::load(&rec_path).unwrap();

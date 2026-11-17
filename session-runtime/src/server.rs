@@ -566,11 +566,88 @@ fn peer_wants_write(peer: &Peer) -> bool {
     peer.wants_write()
 }
 
+#[cfg(test)]
 fn pty_poll_interests(eof: bool, input_pending: bool) -> libc::c_short {
+    pty_poll_interests_with_backpressure(eof, input_pending, false)
+}
+
+fn pty_poll_interests_with_backpressure(
+    eof: bool,
+    input_pending: bool,
+    pty_backpressured: bool,
+) -> libc::c_short {
     if eof {
         return 0;
     }
-    libc::POLLIN | if input_pending { libc::POLLOUT } else { 0 }
+    (if pty_backpressured { 0 } else { libc::POLLIN })
+        | if input_pending { libc::POLLOUT } else { 0 }
+}
+
+const PTY_BACKPRESSURE_HIGH_WATER: usize = 512 * 1024;
+const PTY_BACKPRESSURE_LOW_WATER: usize = 128 * 1024;
+const PTY_COALESCE_MAX_BYTES: usize = 256 * 1024;
+const PTY_COALESCE_MAX_READS: usize = 16;
+const PTY_SYNC_COALESCE_WINDOW: Duration = Duration::from_millis(6);
+
+fn update_pty_backpressure(pty_backpressured: &mut bool, peers: &[Peer]) {
+    if peers.is_empty()
+        || peers
+            .iter()
+            .any(|p| !p.dead && p.queued <= PTY_BACKPRESSURE_LOW_WATER)
+    {
+        *pty_backpressured = false;
+    } else if peers
+        .iter()
+        .all(|p| !p.dead && p.queued >= PTY_BACKPRESSURE_HIGH_WATER)
+    {
+        *pty_backpressured = true;
+    }
+}
+
+fn has_xterm_ghostty_in_dir(dir: &Path) -> bool {
+    let x_path = dir.join("x/xterm-ghostty");
+    if fs::metadata(&x_path).is_ok_and(|m| m.is_file() && m.len() > 0) {
+        return true;
+    }
+    let hex_path = dir.join("78/xterm-ghostty");
+    fs::metadata(&hex_path).is_ok_and(|m| m.is_file() && m.len() > 0)
+}
+
+/// Check whether `xterm-ghostty` terminfo is resolvable on this host.
+/// Returns `Some(None)` if system / `$TERMINFO` / `~/.terminfo` already finds it,
+/// `Some(Some(dir))` if found only under `<state_dir>/terminfo`, or `None` if unavailable.
+fn resolve_xterm_ghostty_terminfo_dir(state_dir: Option<&Path>) -> Option<Option<PathBuf>> {
+    if let Some(dir) = std::env::var_os("TERMINFO").filter(|v| !v.is_empty()) {
+        if has_xterm_ghostty_in_dir(Path::new(&dir)) {
+            return Some(None);
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+        if has_xterm_ghostty_in_dir(&Path::new(&home).join(".terminfo")) {
+            return Some(None);
+        }
+    }
+    for system_dir in ["/etc/terminfo", "/lib/terminfo", "/usr/share/terminfo"] {
+        if has_xterm_ghostty_in_dir(Path::new(system_dir)) {
+            return Some(None);
+        }
+    }
+    if let Some(state_terminfo) = state_dir.map(|d| d.join("terminfo")) {
+        if has_xterm_ghostty_in_dir(&state_terminfo) {
+            return Some(Some(state_terminfo));
+        }
+    }
+    if std::process::Command::new("infocmp")
+        .arg("xterm-ghostty")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+    {
+        return Some(None);
+    }
+    None
 }
 
 fn queue_snapshot(peer: &mut Peer, seq: u64, snapshot: io::Result<Vec<u8>>) -> bool {
@@ -733,12 +810,30 @@ pub fn serve(path: &Path, argv: &[String]) -> io::Result<()> {
     serve_managed(path, argv.to_vec(), None)
 }
 
+#[derive(Clone, Default)]
+pub struct RemoteSessionLaunch {
+    pub cols: Option<u16>,
+    pub rows: Option<u16>,
+    pub pixel_width: Option<u16>,
+    pub pixel_height: Option<u16>,
+    pub term: Option<String>,
+    pub colorterm: Option<String>,
+    pub term_program: Option<String>,
+    pub term_program_version: Option<String>,
+    pub color_scheme: Option<String>,
+    pub foreground: Option<[u8; 3]>,
+    pub background: Option<[u8; 3]>,
+    pub cursor: Option<[u8; 3]>,
+    pub state_dir: Option<PathBuf>,
+}
+
 pub struct ManagedSession {
     pub path: PathBuf,
     pub record: Record,
     pub containment_root: Option<PathBuf>,
     pub initial_cwd: Option<PathBuf>,
     pub local_launch: Option<LocalLaunchSpec>,
+    pub remote_launch: Option<RemoteSessionLaunch>,
     pub presentation: Option<std::sync::Arc<std::sync::Mutex<crate::activity::Snapshot>>>,
     pub resurrect: bool,
     pub shutdown_wake: Option<crate::WakePipe>,
@@ -806,20 +901,47 @@ pub fn serve_managed(
     if let Some(launch) = &mut local_launch {
         launch.input_base64 = None;
     }
-    let mut size = local_launch.as_ref().map_or(
+    let remote_launch = managed
+        .as_ref()
+        .and_then(|value| value.remote_launch.as_ref());
+    let mut size = if let Some(launch) = local_launch.as_ref() {
+        libc::winsize {
+            ws_row: launch.rows,
+            ws_col: launch.cols,
+            ws_xpixel: launch.pixel_width,
+            ws_ypixel: launch.pixel_height,
+        }
+    } else if let Some(remote) = remote_launch {
+        let ws_col = remote
+            .cols
+            .filter(|&c| (1..=500).contains(&c))
+            .unwrap_or(80);
+        let ws_row = remote
+            .rows
+            .filter(|&r| (1..=300).contains(&r))
+            .unwrap_or(24);
+        let ws_xpixel = remote
+            .pixel_width
+            .filter(|&p| p > 0)
+            .unwrap_or_else(|| ws_col.saturating_mul(8));
+        let ws_ypixel = remote
+            .pixel_height
+            .filter(|&p| p > 0)
+            .unwrap_or_else(|| ws_row.saturating_mul(16));
+        libc::winsize {
+            ws_row,
+            ws_col,
+            ws_xpixel,
+            ws_ypixel,
+        }
+    } else {
         libc::winsize {
             ws_row: 24,
             ws_col: 80,
             ws_xpixel: 640,
             ws_ypixel: 384,
-        },
-        |launch| libc::winsize {
-            ws_row: launch.rows,
-            ws_col: launch.cols,
-            ws_xpixel: launch.pixel_width,
-            ws_ypixel: launch.pixel_height,
-        },
-    );
+        }
+    };
     if unsafe {
         libc::openpty(
             &mut master,
@@ -861,6 +983,49 @@ pub fn serve_managed(
         .as_ref()
         .map(|m| m.record.generation.clone())
         .unwrap_or_else(|| token.clone());
+    let remote_cfg = managed
+        .as_ref()
+        .and_then(|value| value.remote_launch.clone());
+    let terminfo_dir = if local_launch.is_none() {
+        resolve_xterm_ghostty_terminfo_dir(remote_cfg.as_ref().and_then(|r| r.state_dir.as_deref()))
+    } else {
+        None
+    };
+    let resolved_term = if let Some(launch) = local_launch.as_ref() {
+        launch
+            .env
+            .get("TERM")
+            .filter(|term| !term.trim().is_empty() && term.as_str() != "dumb")
+            .cloned()
+            .unwrap_or_else(|| "xterm-256color".to_owned())
+    } else {
+        let requested_term = remote_cfg
+            .as_ref()
+            .and_then(|r| r.term.as_deref())
+            .filter(|t| !t.trim().is_empty() && *t != "dumb");
+        match requested_term {
+            Some("xterm-ghostty") | None => {
+                if terminfo_dir.is_some() {
+                    "xterm-ghostty".to_owned()
+                } else {
+                    "xterm-256color".to_owned()
+                }
+            }
+            Some(other) => other.to_owned(),
+        }
+    };
+    let resolved_term_program = remote_cfg
+        .as_ref()
+        .and_then(|r| r.term_program.as_deref())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("ghostty")
+        .to_owned();
+    let resolved_term_program_version = remote_cfg
+        .as_ref()
+        .and_then(|r| r.term_program_version.as_deref())
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_owned)
+        .or_else(Vt::build_version);
     let mut command = Command::new(&argv[0]);
     let has_explicit_osc7501 = if let Some(launch) = local_launch.as_ref() {
         command.env_clear().envs(launch.env.iter());
@@ -876,7 +1041,22 @@ pub fn serve_managed(
         }
         launch.env.contains_key("AGY_CLI_OSC7501")
     } else {
-        command.env("TERM", "xterm-256color");
+        command.env("TERM", &resolved_term);
+        if let Some(Some(dir)) = terminfo_dir.as_ref() {
+            if std::env::var_os("TERMINFO").is_none() {
+                command.env("TERMINFO", dir);
+            }
+        }
+        let colorterm = remote_cfg
+            .as_ref()
+            .and_then(|r| r.colorterm.as_deref())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("truecolor");
+        command.env("COLORTERM", colorterm);
+        command.env("TERM_PROGRAM", &resolved_term_program);
+        if let Some(version) = resolved_term_program_version.as_deref() {
+            command.env("TERM_PROGRAM_VERSION", version);
+        }
         std::env::var_os("AGY_CLI_OSC7501").is_some()
     };
     if !has_explicit_osc7501 {
@@ -1031,6 +1211,32 @@ pub fn serve_managed(
         Some(reply),
         (&mut *input as *mut ReplyBuffer).cast(),
     )?;
+    let vt_dark_scheme = remote_cfg
+        .as_ref()
+        .and_then(|r| r.color_scheme.as_deref())
+        .map(|s| !s.eq_ignore_ascii_case("light"))
+        .or(Some(true));
+    let vt_fg = remote_cfg
+        .as_ref()
+        .and_then(|r| r.foreground)
+        .or(Some([0xff, 0xff, 0xff]));
+    let vt_bg = remote_cfg
+        .as_ref()
+        .and_then(|r| r.background)
+        .or(Some([0x28, 0x2c, 0x34]));
+    let vt_cursor = remote_cfg
+        .as_ref()
+        .and_then(|r| r.cursor)
+        .or(vt_fg);
+    let vt_term_program = resolved_term_program.clone();
+    let vt_term_version = resolved_term_program_version.clone();
+    let vt_terminfo = resolved_term.clone();
+    let _ = vt.set_identity(
+        Some(&vt_term_program),
+        vt_term_version.as_deref(),
+        Some(&vt_terminfo),
+    );
+    let _ = vt.set_theme(vt_dark_scheme, vt_fg, vt_bg, vt_cursor);
     let mut seq = 0u64;
     let mut snapshot_schedule = SnapshotSchedule::new(Instant::now());
     if is_resurrect {
@@ -1119,6 +1325,7 @@ pub fn serve_managed(
             }
         }
     }
+    let mut pty_backpressured = false;
     loop {
         if let Some(wake) = &shutdown_wake {
             wake.drain();
@@ -1635,40 +1842,85 @@ pub fn serve_managed(
                     peer.push(Frame::new(b'M', seq, &metadata));
                 }
             }
-            let mut bytes = [0; 65536];
-            match pty.read(&mut bytes) {
-                Ok(0) => eof = true,
-                Ok(n) => {
-                    if last_ssh.is_some() {
-                        sniff_remote_cwd(&bytes[..n], &mut sniffed_remote_cwd);
+            if !pty_backpressured {
+                let mut bytes = [0; 65536];
+                let mut coalesced = Vec::new();
+                let mut read_count = 0usize;
+                let mut sync_wait_start: Option<Instant> = None;
+                loop {
+                    match pty.read(&mut bytes) {
+                        Ok(0) => {
+                            eof = true;
+                            break;
+                        }
+                        Ok(n) => {
+                            read_count += 1;
+                            if last_ssh.is_some() {
+                                sniff_remote_cwd(&bytes[..n], &mut sniffed_remote_cwd);
+                            }
+                            let visible = output.feed(
+                                &mut OutputScreen {
+                                    vt: &mut vt,
+                                    replies: &*input,
+                                },
+                                &bytes[..n],
+                            );
+                            if n > 0 {
+                                snapshot_schedule.mark_dirty(Instant::now());
+                            }
+                            coalesced.extend_from_slice(&visible);
+                            if coalesced.len() >= PTY_COALESCE_MAX_BYTES
+                                || read_count >= PTY_COALESCE_MAX_READS
+                            {
+                                break;
+                            }
+                        }
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                            if !coalesced.is_empty()
+                                && coalesced.len() < PTY_COALESCE_MAX_BYTES
+                                && vt.in_sync()
+                            {
+                                let started = *sync_wait_start.get_or_insert_with(Instant::now);
+                                let remaining =
+                                    PTY_SYNC_COALESCE_WINDOW.saturating_sub(started.elapsed());
+                                if !remaining.is_zero() {
+                                    let wait_ms = remaining.as_millis().clamp(1, 2) as libc::c_int;
+                                    let mut pfd = libc::pollfd {
+                                        fd: master,
+                                        events: libc::POLLIN,
+                                        revents: 0,
+                                    };
+                                    let rc = unsafe { libc::poll(&mut pfd, 1, wait_ms) };
+                                    if rc > 0
+                                        && (pfd.revents & (libc::POLLIN | libc::POLLHUP)) != 0
+                                    {
+                                        continue;
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        Err(e) if e.raw_os_error() == Some(libc::EIO) => {
+                            eof = true;
+                            break;
+                        }
+                        Err(e) => return Err(e),
                     }
-                    let visible = output.feed(
-                        &mut OutputScreen {
-                            vt: &mut vt,
-                            replies: &*input,
-                        },
-                        &bytes[..n],
-                    );
-                    if n > 0 {
-                        snapshot_schedule.mark_dirty(Instant::now());
-                    }
+                }
+                if !coalesced.is_empty() {
                     if let Some(prefix) = &mut initial_output {
-                        if prefix.len() + visible.len() <= 8 * 1024 {
-                            prefix.extend_from_slice(&visible);
+                        if prefix.len() + coalesced.len() <= 8 * 1024 {
+                            prefix.extend_from_slice(&coalesced);
                         } else {
                             initial_output = None;
                         }
                     }
-                    seq += visible.len() as u64;
-                    if !visible.is_empty() {
-                        for peer in &mut peers {
-                            peer.push(Frame::new(OUTPUT, seq, &visible));
-                        }
+                    seq += coalesced.len() as u64;
+                    for peer in &mut peers {
+                        peer.push(Frame::new(OUTPUT, seq, &coalesced));
                     }
                 }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-                Err(e) if e.raw_os_error() == Some(libc::EIO) => eof = true,
-                Err(e) => return Err(e),
             }
         }
         // Keep the session leader unreaped during termination escalation. A
@@ -1919,11 +2171,14 @@ pub fn serve_managed(
                 return Ok(());
             }
         }
+        update_pty_backpressure(&mut pty_backpressured, &peers);
         let mut descriptors = Vec::with_capacity(peers.len() + 4);
-        if !eof {
+        let master_events =
+            pty_poll_interests_with_backpressure(eof, !input.is_empty(), pty_backpressured);
+        if !eof && master_events != 0 {
             descriptors.push(libc::pollfd {
                 fd: master,
-                events: pty_poll_interests(eof, !input.is_empty()),
+                events: master_events,
                 revents: 0,
             });
         }
@@ -1979,6 +2234,7 @@ pub fn serve_managed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
 
     #[test]
     fn inline_writer_delegates_queries_and_detached_host_answers_them_once() {
@@ -2279,6 +2535,7 @@ mod tests {
             containment_root: None,
             initial_cwd: None,
             local_launch: None,
+            remote_launch: None,
             presentation: None,
             resurrect: false,
             shutdown_wake: None,
@@ -2386,6 +2643,7 @@ mod tests {
             containment_root: None,
             initial_cwd: None,
             local_launch: None,
+            remote_launch: None,
             presentation: None,
             resurrect: false,
             shutdown_wake: None,
@@ -2438,5 +2696,188 @@ mod tests {
         assert!(hermes_breadcrumb_matches_tty(&dir, tty, "conv-a"));
 
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pty_backpressure_hysteresis_pauses_only_when_all_peers_exceed_high_water() {
+        let (s1, _r1) = UnixStream::pair().unwrap();
+        let (s2, _r2) = UnixStream::pair().unwrap();
+        let mut slow = Peer::new(s1, 1).unwrap();
+        let mut fast = Peer::new(s2, 2).unwrap();
+        let mut paused = false;
+
+        // No peers -> never pause.
+        update_pty_backpressure(&mut paused, &[]);
+        assert!(!paused);
+        assert_ne!(
+            pty_poll_interests_with_backpressure(false, false, paused) & libc::POLLIN,
+            0
+        );
+
+        // One slow peer (> high water) alongside one fast peer (<= low water) -> stay unpaused.
+        slow.queued = PTY_BACKPRESSURE_HIGH_WATER;
+        fast.queued = 0;
+        update_pty_backpressure(&mut paused, &[slow, fast]);
+        assert!(!paused);
+
+        // Single slow peer hits high water -> pause POLLIN until queue drains below low water.
+        let (s3, _r3) = UnixStream::pair().unwrap();
+        let mut solo = Peer::new(s3, 3).unwrap();
+        solo.queued = PTY_BACKPRESSURE_HIGH_WATER;
+        update_pty_backpressure(&mut paused, &[solo]);
+        assert!(paused);
+        assert_eq!(
+            pty_poll_interests_with_backpressure(false, false, paused) & libc::POLLIN,
+            0
+        );
+        assert_ne!(
+            pty_poll_interests_with_backpressure(false, true, paused) & libc::POLLOUT,
+            0
+        );
+
+        let (s4, _r4) = UnixStream::pair().unwrap();
+        let mut mid = Peer::new(s4, 4).unwrap();
+        mid.queued = PTY_BACKPRESSURE_LOW_WATER + 1;
+        update_pty_backpressure(&mut paused, &[mid]);
+        assert!(paused);
+
+        let (s5, _r5) = UnixStream::pair().unwrap();
+        let mut drained = Peer::new(s5, 5).unwrap();
+        drained.queued = PTY_BACKPRESSURE_LOW_WATER;
+        update_pty_backpressure(&mut paused, &[drained]);
+        assert!(!paused);
+    }
+
+    #[test]
+    fn serve_managed_applies_remote_initial_size_env_terminfo_and_coalesces_sync_frames() {
+        let dir = PathBuf::from(format!(
+            "/tmp/omg-srv-remote-{}",
+            &crate::record::nonce().unwrap()[..8]
+        ));
+        let sessions = dir.join("sessions");
+        let terminfo_x = dir.join("terminfo/x");
+        let terminfo_hex = dir.join("terminfo/78");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::create_dir_all(&terminfo_x).unwrap();
+        fs::create_dir_all(&terminfo_hex).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&sessions, fs::Permissions::from_mode(0o700)).unwrap();
+        // Provide synthetic compiled xterm-ghostty entries in state_dir/terminfo.
+        fs::write(terminfo_x.join("xterm-ghostty"), b"synthetic-terminfo").unwrap();
+        fs::write(terminfo_hex.join("xterm-ghostty"), b"synthetic-terminfo").unwrap();
+
+        let id = "44444444-4444-4444-4444-444444444444";
+        let sock_path = dir.join("sess.sock");
+        let rec_path = sessions.join(format!("{id}.json"));
+        let mut rec = Record::new(id, crate::lifecycle::Policy::default()).unwrap();
+        rec.save(&rec_path).unwrap();
+
+        let sock_clone = sock_path.clone();
+        let rec_clone = rec_path.clone();
+        let dir_clone = dir.clone();
+        let handle = thread::spawn(move || {
+            let cmd = "python3 -c 'import fcntl,os,struct,sys,termios,time; \
+ws=fcntl.ioctl(1,termios.TIOCGWINSZ,b\"\\0\"*8); rows,cols,xp,yp=struct.unpack(\"HHHH\",ws); \
+sys.stdout.write(\"SIZE=%dx%d:%dx%d\\n\" % (cols,rows,xp,yp)); \
+sys.stdout.write(\"ENV=%s|%s|%s|%s\\n\" % (os.environ.get(\"TERM\"),os.environ.get(\"COLORTERM\"),os.environ.get(\"TERM_PROGRAM\"),os.environ.get(\"AGY_CLI_OSC7501\"))); \
+sys.stdout.flush(); \
+os.write(1, b\"\\x1b[?2026h\\x1b[2JPART1\"); time.sleep(0.001); os.write(1, b\"PART2\\x1b[?2026l\"); \
+time.sleep(0.05)'";
+            serve_managed(
+                &sock_clone,
+                vec!["/bin/sh".into(), "-c".into(), cmd.into()],
+                Some(ManagedSession {
+                    path: rec_clone,
+                    record: rec,
+                    containment_root: None,
+                    initial_cwd: None,
+                    local_launch: None,
+                    remote_launch: Some(RemoteSessionLaunch {
+                        cols: Some(120),
+                        rows: Some(36),
+                        pixel_width: Some(1200),
+                        pixel_height: Some(720),
+                        term: Some("xterm-ghostty".into()),
+                        colorterm: Some("truecolor".into()),
+                        term_program: Some("ghostty".into()),
+                        term_program_version: Some("1.3.2-test".into()),
+                        color_scheme: Some("dark".into()),
+                        foreground: Some([0xff, 0xff, 0xff]),
+                        background: Some([0x28, 0x2c, 0x34]),
+                        cursor: Some([0xff, 0xff, 0xff]),
+                        state_dir: Some(dir_clone),
+                    }),
+                    presentation: None,
+                    resurrect: false,
+                    shutdown_wake: None,
+                }),
+            )
+        });
+
+        let mut client = None;
+        for _ in 0..100 {
+            if sock_path.exists() {
+                if let Ok(s) = UnixStream::connect(&sock_path) {
+                    client = Some(s);
+                    break;
+                }
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let mut client = client.expect("session socket ready");
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+
+        let mut collected = Vec::new();
+        let mut output_frames = Vec::new();
+        let mut info_size = None;
+        loop {
+            let f = Frame::read(&mut client).unwrap();
+            match f.kind {
+                INFO => {
+                    let info: serde_json::Value = serde_json::from_slice(&f.data).unwrap();
+                    info_size = Some((
+                        info["cols"].as_u64(),
+                        info["rows"].as_u64(),
+                        info["pixel_width"].as_u64(),
+                        info["pixel_height"].as_u64(),
+                    ));
+                }
+                SNAPSHOT => {
+                    Frame::new(ACK, f.seq, &0u64.to_be_bytes())
+                        .send(&mut client)
+                        .unwrap();
+                }
+                OUTPUT => {
+                    output_frames.push(f.data.clone());
+                    collected.extend_from_slice(&f.data);
+                }
+                EXIT => break,
+                _ => {}
+            }
+        }
+        drop(client);
+        handle.join().unwrap().unwrap();
+
+        assert_eq!(info_size, Some((Some(120), Some(36), Some(1200), Some(720))));
+        let text = String::from_utf8_lossy(&collected);
+        assert!(text.contains("SIZE=120x36:1200x720"), "{text:?}");
+        assert!(
+            text.contains("ENV=xterm-ghostty|truecolor|ghostty|on"),
+            "{text:?}"
+        );
+        // Fragmented 1ms-apart `?2026h..l` write should arrive coalesced without dangling partial `?2026h`.
+        let sync_frame = output_frames
+            .iter()
+            .find(|f| f.windows(8).any(|w| w == b"\x1b[?2026h"))
+            .expect("expected sync output frame");
+        assert!(
+            sync_frame.windows(8).any(|w| w == b"\x1b[?2026l"),
+            "sync frame should coalesce closing ?2026l cleanly: {:?}",
+            String::from_utf8_lossy(sync_frame)
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -736,6 +736,7 @@ fn read_session_activity(
             recreate_if_gone: false,
             launch: None,
             resurrect_launch: None,
+            ..Default::default()
         };
         let Ok(open_bytes) = serde_json::to_vec(&open) else {
             return (None, false);

@@ -75,9 +75,10 @@ impl Relay {
             Some(b']') | Some(b'P') => {
                 let ended = last == BEL && h[1] == b']' || h.ends_with(b"\x1b\\") && h.len() > 3;
                 if ended {
-                    let body = &h[2..];
+                    let end_len = if last == BEL { 1 } else { 2 };
+                    let body = &h[2..h.len() - end_len];
                     let query = match h[1] {
-                        b']' => body.contains(&b'?'),
+                        b']' => is_osc_query(body),
                         _ => body.starts_with(b"$q") || body.starts_with(b"+q"),
                     };
                     Seq::Done { maybe_query: query }
@@ -92,9 +93,92 @@ impl Relay {
     }
 }
 
+fn is_osc_query(body: &[u8]) -> bool {
+    if let Some(rest) = body
+        .strip_prefix(b"4;")
+        .or_else(|| body.strip_prefix(b"10;"))
+        .or_else(|| body.strip_prefix(b"11;"))
+        .or_else(|| body.strip_prefix(b"12;"))
+        .or_else(|| body.strip_prefix(b"52;"))
+    {
+        return rest.split(|&b| b == b';').any(|part| part == b"?");
+    }
+    if let Some(rest) = body.strip_prefix(b"21;") {
+        return rest
+            .split(|&b| b == b';')
+            .any(|part| part == b"?" || part.ends_with(b"=?"));
+    }
+    if let Some(rest) = body.strip_prefix(b"7501;") {
+        let start = rest
+            .iter()
+            .position(|b| !b.is_ascii_whitespace())
+            .unwrap_or(rest.len());
+        let end = rest[start..]
+            .iter()
+            .rposition(|b| !b.is_ascii_whitespace())
+            .map_or(start, |idx| start + idx + 1);
+        return &rest[start..end] == b"?";
+    }
+    false
+}
+
 fn pass(screen: &mut impl Screen, out: &mut Vec<u8>, bytes: &[u8]) {
     if !bytes.is_empty() {
         screen.write(bytes);
         out.extend_from_slice(bytes);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct MockScreen {
+        written: Vec<u8>,
+        replies_pending: usize,
+    }
+
+    impl Screen for MockScreen {
+        fn write(&mut self, bytes: &[u8]) {
+            self.written.extend_from_slice(bytes);
+            if bytes.starts_with(b"\x1b") && bytes.contains(&b'?') {
+                self.replies_pending += 1;
+            }
+        }
+        fn pending_responses(&self) -> usize {
+            self.replies_pending
+        }
+    }
+
+    #[test]
+    fn relay_strips_exact_osc_queries_while_preserving_hyperlinks_titles_and_reports() {
+        let mut screen = MockScreen {
+            written: Vec::new(),
+            replies_pending: 0,
+        };
+        let mut relay = Relay::default();
+        let hyperlink = b"\x1b]8;;https://example.com/q?a=1&b=2\x07link\x1b]8;;\x07";
+        let title = b"\x1b]2;What?\x07";
+        let cwd = b"\x1b]7;file://host/dir?x\x07";
+        let status = b"\x1b]7501;state=working:app=antigravity\x07";
+        let queries = concat!(
+            "\x1b]4;0;?\x07",
+            "\x1b]10;?\x07",
+            "\x1b]11;?\x1b\\",
+            "\x1b]12;?\x07",
+            "\x1b]21;foreground=?\x07",
+            "\x1b]52;c;?\x07",
+            "\x1b]7501;?\x07",
+        )
+        .as_bytes();
+
+        let mut visible = Vec::new();
+        for chunk in [hyperlink.as_slice(), title, cwd, status, queries] {
+            visible.extend_from_slice(&relay.feed(&mut screen, chunk));
+        }
+        let expected: Vec<u8> = [hyperlink.as_slice(), title, cwd, status].concat();
+        assert_eq!(visible, expected);
+        assert!(screen.written.windows(b"\x1b]10;?\x07".len()).any(|w| w == b"\x1b]10;?\x07"));
+        assert!(screen.written.windows(b"\x1b]7501;?\x07".len()).any(|w| w == b"\x1b]7501;?\x07"));
     }
 }

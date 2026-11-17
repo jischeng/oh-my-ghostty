@@ -308,6 +308,7 @@ pub fn run_from_stdin() -> io::Result<()> {
         containment_root: None,
         initial_cwd,
         local_launch: Some(request.launch),
+        remote_launch: None,
         presentation: Some(presentation.clone()),
         resurrect: request.resurrect,
         shutdown_wake: Some(shutdown_wake),

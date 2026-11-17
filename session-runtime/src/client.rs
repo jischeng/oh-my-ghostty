@@ -110,6 +110,8 @@ struct RemoteCapabilities {
     inline_viewer: bool,
     recreate_if_gone: bool,
     exec: bool,
+    init_size: bool,
+    remote_env: bool,
 }
 
 impl RemoteCapabilities {
@@ -126,6 +128,8 @@ impl RemoteCapabilities {
         self.inline_viewer = has_capability(data, "inline-viewer/1");
         self.recreate_if_gone = has_capability(data, "recreate-if-gone/1");
         self.exec = has_capability(data, "exec/1");
+        self.init_size = has_capability(data, "init-size/1");
+        self.remote_env = has_capability(data, "remote-env/1");
     }
 }
 
@@ -203,16 +207,14 @@ fn set_peer_status(peer: &mut LocalPeer, attempt: u32) {
     }
 }
 
-fn open_request(
-    peer: &LocalPeer,
-    allow_local_resurrect: bool,
-    allow_recreate_if_gone: bool,
-) -> io::Result<(u8, Vec<u8>)> {
+fn open_request(peer: &LocalPeer, capabilities: &RemoteCapabilities) -> io::Result<(u8, Vec<u8>)> {
     let bytes = peer
         .open
         .as_ref()
         .ok_or_else(|| io::Error::other("missing open request"))?;
     let mut request: OpenRequest = serde_json::from_slice(bytes)?;
+    let allow_local_resurrect = capabilities.local_launch && capabilities.local_resurrect;
+    let allow_recreate_if_gone = capabilities.recreate_if_gone;
     // A snapshot-confirmed session is attach-only. An unconfirmed initial create
     // may still retry create=true after transient pre-open errors.
     request.create = request.create && !peer.snapshot_confirmed;
@@ -223,6 +225,13 @@ fn open_request(
     }
     if request.create || peer.snapshot_confirmed || !allow_local_resurrect {
         request.resurrect_launch = None;
+    }
+    let spawns_session = request.create || request.recreate_if_gone;
+    if !capabilities.init_size || peer.snapshot_confirmed || !spawns_session {
+        request.clear_init_size();
+    }
+    if !capabilities.remote_env || peer.snapshot_confirmed || !spawns_session {
+        request.clear_remote_env();
     }
     Ok((b'C', serde_json::to_vec(&request)?))
 }
@@ -247,6 +256,7 @@ fn clear_launch_data(peer: &mut LocalPeer, clear_resurrect: bool) {
     request.create = false;
     request.launch = None;
     request.recreate_if_gone = false;
+    request.clear_remote_options();
     if clear_resurrect {
         request.resurrect_launch = None;
     }
@@ -271,8 +281,7 @@ fn begin_open(
     peers: &mut HashMap<u64, LocalPeer>,
     remote_streams: &mut HashMap<u64, u64>,
     next_stream: &mut u64,
-    allow_local_resurrect: bool,
-    allow_recreate_if_gone: bool,
+    capabilities: &RemoteCapabilities,
 ) -> io::Result<()> {
     let ids: Vec<_> = peers
         .iter()
@@ -288,7 +297,7 @@ fn begin_open(
     for id in ids {
         let (kind, data) = {
             let peer = peers.get(&id).unwrap();
-            open_request(peer, allow_local_resurrect, allow_recreate_if_gone)?
+            open_request(peer, capabilities)?
         };
         let stream = *next_stream;
         *next_stream = next_generation(*next_stream);
@@ -934,11 +943,7 @@ fn supervise_with_timeouts(
                             ));
                             continue;
                         }
-                        match open_request(
-                            peer,
-                            capabilities.local_launch && capabilities.local_resurrect,
-                            capabilities.recreate_if_gone,
-                        ) {
+                        match open_request(peer, &capabilities) {
                             Ok((kind, data)) => {
                                 let stream = next_stream;
                                 next_stream = next_generation(next_stream);
@@ -984,8 +989,7 @@ fn supervise_with_timeouts(
                     &mut peers,
                     &mut remote_streams,
                     &mut next_stream,
-                    capabilities.local_launch && capabilities.local_resurrect,
-                    capabilities.recreate_if_gone,
+                    &capabilities,
                 ) {
                     eprintln!("session runtime open failed: {error}");
                 }
@@ -1283,8 +1287,7 @@ fn supervise_with_timeouts(
                                 &mut peers,
                                 &mut remote_streams,
                                 &mut next_stream,
-                                capabilities.local_launch && capabilities.local_resurrect,
-                                capabilities.recreate_if_gone,
+                                &capabilities,
                             ) {
                                 eprintln!("session runtime open failed: {error}");
                             }
@@ -1643,6 +1646,7 @@ mod error_classification_tests {
             resurrect_launch: None,
             inline_viewer: false,
             recreate_if_gone: false,
+            ..Default::default()
         };
         Frame::new(b'H', 0, &serde_json::to_vec(&request).unwrap())
             .send(&mut peer)
@@ -1784,6 +1788,7 @@ mod error_classification_tests {
                 }),
                 inline_viewer: false,
                 recreate_if_gone: false,
+                ..Default::default()
             };
             Frame::new(b'H', 0, &serde_json::to_vec(&req).unwrap())
                 .send(&mut peer)
@@ -1890,6 +1895,7 @@ mod error_classification_tests {
             resurrect_launch: None,
             inline_viewer: false,
             recreate_if_gone: false,
+            ..Default::default()
         };
         Frame::new(b'H', 0, &serde_json::to_vec(&req).unwrap())
             .send(&mut peer)
@@ -2023,6 +2029,7 @@ mod error_classification_tests {
             resurrect_launch: None,
             inline_viewer: false,
             recreate_if_gone: true,
+            ..Default::default()
         };
         Frame::new(b'H', 0, &serde_json::to_vec(&req).unwrap())
             .send(&mut peer)
@@ -2134,6 +2141,7 @@ mod error_classification_tests {
             resurrect_launch: None,
             inline_viewer: false,
             recreate_if_gone: true,
+            ..Default::default()
         };
         Frame::new(b'H', 0, &serde_json::to_vec(&req).unwrap())
             .send(&mut peer)
@@ -2246,6 +2254,7 @@ mod error_classification_tests {
             resurrect_launch: None,
             inline_viewer: false,
             recreate_if_gone: false,
+            ..Default::default()
         };
         Frame::new(b'H', 0, &serde_json::to_vec(&req).unwrap())
             .send(&mut peer)
@@ -2418,6 +2427,7 @@ mod error_classification_tests {
             resurrect_launch: None,
             inline_viewer: false,
             recreate_if_gone: false,
+            ..Default::default()
         };
         Frame::new(b'H', 0, &serde_json::to_vec(&req).unwrap())
             .send(&mut peer)
@@ -2754,5 +2764,60 @@ mod error_classification_tests {
         drop(inflight_peer);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn init_size_and_remote_env_are_gated_on_capabilities_and_session_creation() {
+        let req = OpenRequest {
+            id: "d2956168-0ade-4c3e-ade4-3bc908d7dfdf".into(),
+            policy: Policy::default(),
+            create: true,
+            cols: Some(120),
+            rows: Some(36),
+            pixel_width: Some(1200),
+            pixel_height: Some(720),
+            term: Some("xterm-ghostty".into()),
+            colorterm: Some("truecolor".into()),
+            term_program: Some("ghostty".into()),
+            term_program_version: Some("1.3.2-dev".into()),
+            color_scheme: Some("dark".into()),
+            foreground: Some([0xff, 0xff, 0xff]),
+            background: Some([0x28, 0x2c, 0x34]),
+            cursor: Some([0xff, 0xff, 0xff]),
+            ..Default::default()
+        };
+        let (sock, _other) = UnixStream::pair().unwrap();
+        let mut peer = super::LocalPeer::new(super::Peer::new(sock, 1).unwrap(), 1);
+        peer.open = Some(serde_json::to_vec(&req).unwrap());
+
+        // Legacy host without init-size/1 or remote-env/1: must strip all new fields cleanly.
+        let legacy_caps = super::RemoteCapabilities::default();
+        let (_, encoded_legacy) = super::open_request(&peer, &legacy_caps).unwrap();
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct PinnedLegacyOpen {
+            id: String,
+            policy: Policy,
+            create: bool,
+            cwd: Option<String>,
+            launch: Option<crate::registry::LocalLaunchSpec>,
+        }
+        assert!(serde_json::from_slice::<PinnedLegacyOpen>(&encoded_legacy).is_ok());
+
+        // Modern host advertising init-size/1 and remote-env/1: forwards all create fields.
+        let mut modern_caps = super::RemoteCapabilities::default();
+        modern_caps.update(b"init-size/1,remote-env/1,recreate-if-gone/1");
+        let (_, encoded_modern) = super::open_request(&peer, &modern_caps).unwrap();
+        let parsed: OpenRequest = serde_json::from_slice(&encoded_modern).unwrap();
+        assert_eq!(parsed.cols, Some(120));
+        assert_eq!(parsed.rows, Some(36));
+        assert_eq!(parsed.term.as_deref(), Some("xterm-ghostty"));
+        assert_eq!(parsed.colorterm.as_deref(), Some("truecolor"));
+
+        // Confirmed reattach omits create-only size/env metadata.
+        peer.snapshot_confirmed = true;
+        let (_, encoded_reattach) = super::open_request(&peer, &modern_caps).unwrap();
+        assert!(serde_json::from_slice::<PinnedLegacyOpen>(&encoded_reattach).is_ok());
     }
 }

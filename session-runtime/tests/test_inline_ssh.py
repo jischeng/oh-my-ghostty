@@ -14,6 +14,7 @@ import struct
 import sys
 import tempfile
 import termios
+import textwrap
 import time
 import unittest
 import uuid
@@ -172,6 +173,144 @@ class InlineSSHTests(unittest.TestCase):
                 self.assertIn(f"LOCAL_AFTER:{parent}:7".encode(), output)
                 self.assertIn(f"REMOTE_QUERY_COUNT:{2 if resize else 1}".encode(), output)
                 self.assertFalse(active.exists())
+            finally:
+                if (host / "host.sock").exists():
+                    try:
+                        with socket.socket(socket.AF_UNIX) as control:
+                            control.settimeout(2)
+                            control.connect(str(host / "host.sock"))
+                            control.sendall(encode(b"K", 1, remote_id.encode()))
+                            frame(control)
+                    except OSError:
+                        pass
+                if local_status is None:
+                    try:
+                        os.kill(parent, signal.SIGTERM)
+                        os.waitpid(parent, 0)
+                    except ProcessLookupError:
+                        pass
+                if daemon.poll() is None:
+                    daemon.terminate()
+                    daemon.wait(timeout=5)
+                os.close(master)
+
+    def test_inline_never_splices_osc3008_inside_open_sync_output_frame(self):
+        with tempfile.TemporaryDirectory(prefix="omg-inline-sync-", dir="/tmp") as directory:
+            root = Path(directory)
+            host = root / "host"
+            host.mkdir(mode=0o700)
+            private_json(host / "policy.json", dict(
+                detached_ttl_seconds=30, expires_at=None, close_on_agent_done=False,
+                host_idle_seconds=1, record_retention_seconds=60,
+            ))
+            daemon = subprocess.Popen([str(BINARY), "host-local", str(host), "--", "/bin/sh"])
+            parent, master = pty.fork()
+            if parent == 0:
+                env = dict(os.environ, OMG_SSH_HANDOFF_DIRECTORY=directory,
+                           OMG_SSH_HANDOFF_TOKEN="inline-sync-fixture", OMGD=str(BINARY))
+                os.execve("/bin/sh", ["/bin/sh", "-c", '"$OMGD" handoff /usr/bin/ssh sync-fixture'], env)
+            output = bytearray()
+            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 640, 384))
+            remote_id = str(uuid.uuid4())
+            active = root / "active.json"
+            local_status = None
+            try:
+                def read_output():
+                    r, _, _ = select.select([master], [], [], 0.05)
+                    if r:
+                        chunk = os.read(master, 65536)
+                        output.extend(chunk)
+                        if b"\x1b[6n" in chunk:
+                            os.write(master, b"\x1b[1;1R")
+                        return len(chunk) > 0
+                    return False
+
+                def wait_until(pred, timeout=5):
+                    end = time.monotonic() + timeout
+                    while time.monotonic() < end:
+                        read_output()
+                        if pred():
+                            return
+                    raise AssertionError(f"timed out; output={bytes(output[-1200:])!r}")
+
+                req = None
+                req_file = None
+                wait_until(lambda: any(
+                    p.suffix == ".json" and p.name != "active.json"
+                    for p in root.iterdir()
+                ))
+                req_file = next(
+                    p for p in root.iterdir()
+                    if p.suffix == ".json" and p.name != "active.json"
+                )
+                req = json.loads(req_file.read_text())
+                wait_until(lambda: (host / "host.sock").exists())
+                remote = root / "remote.py"
+                remote.write_text(textwrap.dedent("""\
+                    import os, sys, time
+                    # Begin ?2026h synchronized update, pause while agent status/cwd changes
+                    # happen concurrently, then close ?2026l cleanly.
+                    sys.stdout.write("\\x1b[?2026h\\x1b[2JFRAME_HEAD")
+                    sys.stdout.flush()
+                    time.sleep(0.03)
+                    sys.stdout.write("\\x1b]7501;state=working:app=antigravity\\x07")
+                    sys.stdout.flush()
+                    time.sleep(0.03)
+                    sys.stdout.write("FRAME_TAIL\\x1b[?2026l\\nDONE_SYNC\\n")
+                    sys.stdout.flush()
+                    time.sleep(0.1)
+                """))
+                private_json(active, dict(connectionID="omg-ssh-inline-sync"))
+                config = root / "connection.json"
+                private_json(config, dict(
+                    transport="local", executable=str(BINARY), arguments=[],
+                    cwd=str(root), bundle=str(BINARY.parent), revision="fixture",
+                    local_shell="/bin/sh", local_state_directory=str(host),
+                    tty_authentication=True,
+                    policy=dict(detached_ttl_seconds=30, expires_at=None,
+                                close_on_agent_done=False, host_idle_seconds=1,
+                                record_retention_seconds=60),
+                ))
+                private_json(req_file.with_suffix(".accepted"), dict(
+                    helper=str(BINARY),
+                    token=req["token"], configuration=str(config), socket=str(root / "relay.sock"),
+                    open=dict(
+                        id=remote_id,
+                        policy=dict(
+                            detached_ttl_seconds=30, expires_at=None,
+                            close_on_agent_done=False, host_idle_seconds=1,
+                            record_retention_seconds=60),
+                        create=True,
+                        cwd=str(root),
+                        inline_viewer=True,
+                        launch=dict(
+                            argv=[sys.executable, str(remote)],
+                            env=dict(os.environ),
+                            cwd=str(root),
+                            cols=80,
+                            rows=24,
+                            pixel_width=640,
+                            pixel_height=384,
+                        ),
+                    ),
+                    context=dict(connection_id="omg-ssh-inline-sync", target="sync-fixture",
+                                 local_cwd=str(root), active_record=str(active)),
+                ))
+                wait_until(lambda: b"DONE_SYNC" in output and b"omg-agent-sync" in output)
+                done = False
+                for _ in range(50):
+                    pid_done, local_status = os.waitpid(parent, os.WNOHANG)
+                    if pid_done:
+                        done = True
+                        break
+                    read_output()
+                self.assertTrue(done)
+                raw = bytes(output)
+                start_sync = raw.index(b"\x1b[?2026h\x1b[2JFRAME_HEAD")
+                end_sync = raw.index(b"\x1b[?2026l", start_sync)
+                between = raw[start_sync:end_sync]
+                self.assertNotIn(b"\x1b]3008;", between, f"OSC 3008 spliced inside ?2026h..l: {between!r}")
+                self.assertIn(b"omg-program-status", raw[end_sync:])
             finally:
                 if (host / "host.sock").exists():
                     try:

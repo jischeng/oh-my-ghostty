@@ -48,6 +48,20 @@ the relay omits the field on the wire and performs a one-time `create=true` fall
 if the host reports the session unknown or ended. Calls with `recreate_if_gone: false`
 (such as the Session Library) preserve strict attach/error behavior.
 
+Remote session creation also negotiates `init-size/1` and `remote-env/1` on `P` frames.
+When supported on initial creation or `recreate_if_gone` spawn, `OpenRequest` may carry
+optional initial PTY/pixel geometry (`cols`, `rows`, `pixel_width`, `pixel_height`) and
+client environment/theme hints (`term`, `colorterm`, `term_program`,
+`term_program_version`, `color_scheme`, `foreground`, `background`, `cursor`). The relay
+strips these fields for legacy hosts or confirmed attach/reconnect retries. Remote hosts
+open the PTY directly at the requested initial geometry, configure `libghostty-vt`
+identity/theme query replies, preserve `COLORTERM`/`TERM_PROGRAM`/`TERM_PROGRAM_VERSION`
+and default `AGY_CLI_OSC7501=on` when unset, and select `TERM=xterm-ghostty` whenever
+the provisioned `xterm-ghostty` terminfo resolves cleanly (falling back to
+`xterm-256color`). SSH deployment provisions Ghostty's embedded terminfo via `tic -x`
+when available and injects `-o Compression=yes`, `-o ServerAliveInterval=15`, and
+`-o ServerAliveCountMax=3` while letting explicit user SSH options win.
+
 `list-local SOCKET` sends the read-only L sequence-zero request through an
 already running relay. It does not create or attach a session and does not
 refresh detached lifetime. Concurrent catalogue requests share one host query.
@@ -78,8 +92,14 @@ routing variables have been removed.
 
 Output queues and active-session counts are bounded (`MAX_STREAMS = 512` and
 `64` host connections; `MAX_PEERS = 512` per relay) with a `64 MiB` per-peer output
-queue limit and `256 MiB` buffer budget, plus host-side read backpressure when the
-transport queue reaches half capacity (`queued_bytes() >= MAX_QUEUE / 2`). Slow readers
+queue limit and `256 MiB` buffer budget, plus host-side read backpressure (`1 MiB`
+queued-byte high-water for interactive PTY streams and `MAX_QUEUE / 2` for other streams).
+Remote actors also batch PTY reads with a bounded `6 ms` DEC 2026 (`?2026h..l`) sync
+completion window and apply `512 KiB`/`128 KiB` `POLLIN` backpressure hysteresis when
+peers fall behind, while `inline` batches stdout writes, defers `OSC 3008` host metadata
+until `!in_sync && continuation.is_empty()`, and skips spurious scrollback
+newline emissions on initial attach, alt-screen, active TUI modes, or repeated
+reconnects. Slow readers
 disconnect when either budget is exhausted; PTY reading and lifetime enforcement
 continue. Exceeding `MAX_STREAMS` rejects only the extra open with stream `E`
 instead of tearing down the shared host transport. Snapshot format compatibility

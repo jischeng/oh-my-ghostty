@@ -1,4 +1,5 @@
 #include <ghostty/vt.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #ifdef __APPLE__
@@ -92,6 +93,22 @@ typedef struct {
     size_t scrollback_max_bytes;
     bool has_scrollback_max_lines;
     size_t scrollback_max_lines;
+    unsigned short cols;
+    unsigned short rows;
+    unsigned short cell_width;
+    unsigned short cell_height;
+    char xtversion[128];
+    size_t xtversion_len;
+    char terminfo_name[128];
+    size_t terminfo_name_len;
+    bool has_color_scheme;
+    GhosttyColorScheme color_scheme;
+    bool has_fg;
+    GhosttyColorRgb fg;
+    bool has_bg;
+    GhosttyColorRgb bg;
+    bool has_cursor;
+    GhosttyColorRgb cursor;
 } Vt;
 static void context_signal(GhosttyTerminal terminal, void *context, bool ended,
                            GhosttyString id, GhosttyString metadata) {
@@ -110,6 +127,64 @@ static void reply(GhosttyTerminal terminal, void *context, const uint8_t *bytes,
     Vt *vt = context;
     if (vt->reply) vt->reply(vt->context, bytes, len);
 }
+static GhosttyString xtversion_callback(GhosttyTerminal terminal, void *context) {
+    (void)terminal;
+    Vt *vt = context;
+    GhosttyString empty = { NULL, 0 };
+    if (!vt || vt->xtversion_len == 0) return empty;
+    GhosttyString s = { (const uint8_t *)vt->xtversion, vt->xtversion_len };
+    return s;
+}
+static bool device_attributes_callback(GhosttyTerminal terminal, void *context,
+                                       GhosttyDeviceAttributes *out_attrs) {
+    (void)terminal;
+    (void)context;
+    if (!out_attrs) return false;
+    memset(out_attrs, 0, sizeof(*out_attrs));
+    out_attrs->primary.conformance_level = 62;
+    out_attrs->primary.features[0] = 22;
+    out_attrs->primary.features[1] = 52;
+    out_attrs->primary.num_features = 2;
+    out_attrs->secondary.device_type = 1;
+    out_attrs->secondary.firmware_version = 10;
+    out_attrs->secondary.rom_cartridge = 0;
+    out_attrs->tertiary.unit_id = 0;
+    return true;
+}
+static bool size_callback(GhosttyTerminal terminal, void *context,
+                          GhosttySizeReportSize *out_size) {
+    (void)terminal;
+    Vt *vt = context;
+    if (!vt || !out_size || !vt->cols || !vt->rows) return false;
+    out_size->rows = vt->rows;
+    out_size->columns = vt->cols;
+    out_size->cell_width = vt->cell_width ? vt->cell_width : 8;
+    out_size->cell_height = vt->cell_height ? vt->cell_height : 16;
+    return true;
+}
+static bool color_scheme_callback(GhosttyTerminal terminal, void *context,
+                                  GhosttyColorScheme *out_scheme) {
+    (void)terminal;
+    Vt *vt = context;
+    if (!vt || !out_scheme || !vt->has_color_scheme) return false;
+    *out_scheme = vt->color_scheme;
+    return true;
+}
+static void init_default_identity(Vt *vt) {
+    GhosttyString ver = { NULL, 0 };
+    if (ghostty_build_info(GHOSTTY_BUILD_INFO_VERSION_STRING, &ver) == GHOSTTY_SUCCESS && ver.ptr && ver.len > 0) {
+        int n = snprintf(vt->xtversion, sizeof(vt->xtversion), "ghostty %.*s", (int)ver.len, (const char *)ver.ptr);
+        if (n > 0) {
+            vt->xtversion_len = (size_t)n >= sizeof(vt->xtversion) ? sizeof(vt->xtversion) - 1 : (size_t)n;
+        }
+    }
+    if (vt->xtversion_len == 0) {
+        memcpy(vt->xtversion, "ghostty", 7);
+        vt->xtversion_len = 7;
+    }
+    memcpy(vt->terminfo_name, "xterm-ghostty", 13);
+    vt->terminfo_name_len = 13;
+}
 static int apply_vt_options(Vt *vt) {
     int result = ghostty_terminal_set(
         vt->terminal, GHOSTTY_TERMINAL_OPT_CONTINUATION_MAX_BYTES, &vt->continuation_max_bytes);
@@ -125,6 +200,33 @@ static int apply_vt_options(Vt *vt) {
     if (!result) {
         result = ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_WRITE_PTY, (const void *)reply);
     }
+    if (!result) {
+        result = ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_XTVERSION, (const void *)xtversion_callback);
+    }
+    if (!result) {
+        result = ghostty_terminal_set(
+            vt->terminal, GHOSTTY_TERMINAL_OPT_DEVICE_ATTRIBUTES, (const void *)device_attributes_callback);
+    }
+    if (!result) {
+        result = ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_SIZE, (const void *)size_callback);
+    }
+    if (!result) {
+        result = ghostty_terminal_set(
+            vt->terminal, GHOSTTY_TERMINAL_OPT_COLOR_SCHEME, (const void *)color_scheme_callback);
+    }
+    if (!result && vt->terminfo_name_len > 0) {
+        GhosttyString tn = { (const uint8_t *)vt->terminfo_name, vt->terminfo_name_len };
+        result = ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_TERMINFO_NAME, &tn);
+    }
+    if (!result && vt->has_fg) {
+        result = ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND, &vt->fg);
+    }
+    if (!result && vt->has_bg) {
+        result = ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND, &vt->bg);
+    }
+    if (!result && vt->has_cursor) {
+        result = ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_COLOR_CURSOR, &vt->cursor);
+    }
     if (!result && vt->signal) {
         result = ghostty_terminal_set(
             vt->terminal, GHOSTTY_TERMINAL_OPT_CONTEXT_SIGNAL, (const void *)context_signal);
@@ -138,7 +240,33 @@ static int resize_pixels(Vt *vt, unsigned short cols, unsigned short rows,
     unsigned short cell_height = pixel_height / rows;
     if (!cell_width) cell_width = 1;
     if (!cell_height) cell_height = 1;
-    return ghostty_terminal_resize(vt->terminal, cols, rows, cell_width, cell_height);
+    if (vt->cols == cols && vt->rows == rows &&
+        vt->cell_width == cell_width && vt->cell_height == cell_height) {
+        return GHOSTTY_SUCCESS;
+    }
+    bool preserve_sync = false;
+    if (vt->cols == cols && vt->rows == rows) {
+        GhosttyTerminalModeConfig mode = {
+            .mode = GHOSTTY_MODE_SYNC_OUTPUT,
+            .value = false,
+        };
+        if (ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_MODE, &mode) == GHOSTTY_SUCCESS) {
+            preserve_sync = mode.value;
+        }
+    }
+    vt->cols = cols;
+    vt->rows = rows;
+    vt->cell_width = cell_width;
+    vt->cell_height = cell_height;
+    int res = ghostty_terminal_resize(vt->terminal, cols, rows, cell_width, cell_height);
+    if (res == GHOSTTY_SUCCESS && preserve_sync) {
+        GhosttyTerminalModeConfig mode = {
+            .mode = GHOSTTY_MODE_SYNC_OUTPUT,
+            .value = true,
+        };
+        ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_MODE, &mode);
+    }
+    return res;
 }
 
 void *omg_vt_new_with_pixels_scrollback(unsigned short cols, unsigned short rows,
@@ -158,6 +286,7 @@ void *omg_vt_new_with_pixels_scrollback(unsigned short cols, unsigned short rows
     vt->scrollback_max_bytes = scrollback_max_bytes;
     vt->has_scrollback_max_lines = scrollback_max_lines != NULL;
     vt->scrollback_max_lines = scrollback_max_lines ? *scrollback_max_lines : 0;
+    init_default_identity(vt);
     if (apply_vt_options(vt) != GHOSTTY_SUCCESS) {
         ghostty_terminal_free(vt->terminal); free(vt); return NULL;
     }
@@ -185,7 +314,17 @@ int omg_vt_scrollback_limits(Vt *vt, size_t *scrollback_max_bytes,
 }
 void omg_vt_free(Vt *vt) { ghostty_terminal_free(vt->terminal); free(vt); }
 void omg_vt_write(Vt *vt, const unsigned char *data, size_t len) { ghostty_terminal_vt_write(vt->terminal, data, len); }
-int omg_vt_resize(Vt *vt, unsigned short cols, unsigned short rows) { return ghostty_terminal_resize(vt->terminal, cols, rows, 8, 16); }
+int omg_vt_resize(Vt *vt, unsigned short cols, unsigned short rows) {
+    if (!cols || !rows) return -1;
+    if (vt->cols == cols && vt->rows == rows) return GHOSTTY_SUCCESS;
+    unsigned short cell_width = vt->cell_width ? vt->cell_width : 8;
+    unsigned short cell_height = vt->cell_height ? vt->cell_height : 16;
+    vt->cols = cols;
+    vt->rows = rows;
+    vt->cell_width = cell_width;
+    vt->cell_height = cell_height;
+    return ghostty_terminal_resize(vt->terminal, cols, rows, cell_width, cell_height);
+}
 int omg_vt_resize_pixels(Vt *vt, unsigned short cols, unsigned short rows,
                          unsigned short pixel_width, unsigned short pixel_height) {
     return resize_pixels(vt, cols, rows, pixel_width, pixel_height);
@@ -207,6 +346,14 @@ int omg_vt_restore(Vt *vt, const unsigned char *data, size_t len) {
     ghostty_snapshot_decoder_free(decoder);
     if (result || consumed != len) { if (terminal) ghostty_terminal_free(terminal); return result ? result : -1; }
     ghostty_terminal_free(vt->terminal); vt->terminal = terminal;
+    uint16_t cols = 0;
+    uint16_t rows = 0;
+    if (ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_COLS, &cols) == GHOSTTY_SUCCESS && cols > 0) {
+        vt->cols = cols;
+    }
+    if (ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_ROWS, &rows) == GHOSTTY_SUCCESS && rows > 0) {
+        vt->rows = rows;
+    }
     return apply_vt_options(vt);
 }
 int omg_vt_continuation(Vt *vt, unsigned char **data, size_t *len) {
@@ -226,6 +373,137 @@ int omg_vt_in_alt_screen(Vt *vt) {
         return 0;
     }
     return screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE ? 1 : 0;
+}
+int omg_vt_in_sync_and_screen(Vt *vt, bool *in_sync, bool *alt_screen) {
+    if (!vt) return GHOSTTY_INVALID_VALUE;
+    if (in_sync) {
+        GhosttyTerminalModeConfig mode = {
+            .mode = GHOSTTY_MODE_SYNC_OUTPUT,
+            .value = false,
+        };
+        int res = ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_MODE, &mode);
+        if (res != GHOSTTY_SUCCESS) return res;
+        *in_sync = mode.value;
+    }
+    if (alt_screen) {
+        GhosttyTerminalScreen screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY;
+        int res = ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &screen);
+        if (res != GHOSTTY_SUCCESS) return res;
+        *alt_screen = (screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE);
+    }
+    return GHOSTTY_SUCCESS;
+}
+int omg_vt_ui_modes(Vt *vt, bool *in_sync, bool *alt_screen, bool *cursor_visible, bool *mouse_active) {
+    int res = omg_vt_in_sync_and_screen(vt, in_sync, alt_screen);
+    if (res != GHOSTTY_SUCCESS) return res;
+    if (cursor_visible) {
+        GhosttyTerminalModeConfig mode = {
+            .mode = GHOSTTY_MODE_CURSOR_VISIBLE,
+            .value = true,
+        };
+        if (ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_MODE, &mode) == GHOSTTY_SUCCESS) {
+            *cursor_visible = mode.value;
+        } else {
+            *cursor_visible = true;
+        }
+    }
+    if (mouse_active) {
+        const GhosttyMode mouse_modes[] = {
+            GHOSTTY_MODE_X10_MOUSE,
+            GHOSTTY_MODE_NORMAL_MOUSE,
+            GHOSTTY_MODE_BUTTON_MOUSE,
+            GHOSTTY_MODE_ANY_MOUSE,
+        };
+        bool active = false;
+        for (size_t i = 0; i < sizeof(mouse_modes) / sizeof(mouse_modes[0]); i++) {
+            GhosttyTerminalModeConfig mode = {
+                .mode = mouse_modes[i],
+                .value = false,
+            };
+            if (ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_MODE, &mode) == GHOSTTY_SUCCESS && mode.value) {
+                active = true;
+                break;
+            }
+        }
+        *mouse_active = active;
+    }
+    return GHOSTTY_SUCCESS;
+}
+int omg_vt_build_version(const unsigned char **data, size_t *len) {
+    GhosttyString ver = { NULL, 0 };
+    int res = ghostty_build_info(GHOSTTY_BUILD_INFO_VERSION_STRING, &ver);
+    if (res != GHOSTTY_SUCCESS) return res;
+    if (data) *data = ver.ptr;
+    if (len) *len = ver.len;
+    return GHOSTTY_SUCCESS;
+}
+int omg_vt_set_identity(Vt *vt,
+                        const unsigned char *term_program, size_t term_program_len,
+                        const unsigned char *version, size_t version_len,
+                        const unsigned char *terminfo, size_t terminfo_len) {
+    if (!vt) return GHOSTTY_INVALID_VALUE;
+    if (term_program && term_program_len > 0 && version && version_len > 0) {
+        int n = snprintf(vt->xtversion, sizeof(vt->xtversion), "%.*s %.*s",
+                         (int)term_program_len, (const char *)term_program,
+                         (int)version_len, (const char *)version);
+        if (n > 0) {
+            vt->xtversion_len = (size_t)n >= sizeof(vt->xtversion) ? sizeof(vt->xtversion) - 1 : (size_t)n;
+        }
+    } else if (version && version_len > 0) {
+        int n = snprintf(vt->xtversion, sizeof(vt->xtversion), "ghostty %.*s",
+                         (int)version_len, (const char *)version);
+        if (n > 0) {
+            vt->xtversion_len = (size_t)n >= sizeof(vt->xtversion) ? sizeof(vt->xtversion) - 1 : (size_t)n;
+        }
+    }
+    if (terminfo && terminfo_len > 0) {
+        if (terminfo_len > sizeof(vt->terminfo_name)) return GHOSTTY_INVALID_VALUE;
+        memcpy(vt->terminfo_name, terminfo, terminfo_len);
+        vt->terminfo_name_len = terminfo_len;
+        GhosttyString tn = { (const uint8_t *)vt->terminfo_name, vt->terminfo_name_len };
+        return ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_TERMINFO_NAME, &tn);
+    }
+    return GHOSTTY_SUCCESS;
+}
+int omg_vt_set_theme(Vt *vt,
+                     bool has_scheme, int dark_scheme,
+                     bool has_fg, const unsigned char *fg_rgb,
+                     bool has_bg, const unsigned char *bg_rgb,
+                     bool has_cursor, const unsigned char *cursor_rgb) {
+    if (!vt) return GHOSTTY_INVALID_VALUE;
+    vt->has_color_scheme = has_scheme;
+    if (has_scheme) {
+        vt->color_scheme = dark_scheme ? GHOSTTY_COLOR_SCHEME_DARK : GHOSTTY_COLOR_SCHEME_LIGHT;
+    }
+    vt->has_fg = has_fg && fg_rgb != NULL;
+    if (vt->has_fg) {
+        vt->fg.r = fg_rgb[0];
+        vt->fg.g = fg_rgb[1];
+        vt->fg.b = fg_rgb[2];
+    }
+    vt->has_bg = has_bg && bg_rgb != NULL;
+    if (vt->has_bg) {
+        vt->bg.r = bg_rgb[0];
+        vt->bg.g = bg_rgb[1];
+        vt->bg.b = bg_rgb[2];
+    }
+    vt->has_cursor = has_cursor && cursor_rgb != NULL;
+    if (vt->has_cursor) {
+        vt->cursor.r = cursor_rgb[0];
+        vt->cursor.g = cursor_rgb[1];
+        vt->cursor.b = cursor_rgb[2];
+    }
+    int result = ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND,
+                                      vt->has_fg ? &vt->fg : NULL);
+    if (!result) {
+        result = ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND,
+                                      vt->has_bg ? &vt->bg : NULL);
+    }
+    if (!result) {
+        result = ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_COLOR_CURSOR,
+                                      vt->has_cursor ? &vt->cursor : NULL);
+    }
+    return result;
 }
 int omg_vt_dynamic_color(Vt *vt, unsigned int index, unsigned char *rgb) {
     const GhosttyTerminalData keys[] = {

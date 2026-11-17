@@ -237,9 +237,16 @@ final class SessionRuntimeHandoff {
                     let create: Bool
                     let cwd: String?
                     let inlineViewer = true
+                    let term: String?
+                    let colorterm: String?
+                    let termProgram: String?
+                    let termProgramVersion: String?
                     enum CodingKeys: String, CodingKey {
                         case id, policy, create, cwd
                         case inlineViewer = "inline_viewer"
+                        case term, colorterm
+                        case termProgram = "term_program"
+                        case termProgramVersion = "term_program_version"
                     }
                 }
                 struct Context: Encodable {
@@ -258,9 +265,15 @@ final class SessionRuntimeHandoff {
                 }
             }
             let helper = try SessionRuntimeConnections.shared.cachedHelper(for: descriptor)
+            let bundleVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             let approval = Approval(helper: helper.path, configuration: config.path, socket: socket.path,
                 open: .init(id: remote.pane.uuidString.lowercased(), policy: descriptor.policy, create: true,
-                            cwd: descriptor.initialWorkingDirectory),
+                            cwd: descriptor.initialWorkingDirectory,
+                            term: "xterm-ghostty",
+                            colorterm: "truecolor",
+                            termProgram: "ghostty",
+                            termProgramVersion: bundleVersion?.isEmpty == false ? bundleVersion : nil),
                 context: .init(connectionID: remote.connectionID,
                                target: connection.destination.split(separator: "@").last.map(String.init) ?? connection.destination,
                                localWorkingDirectory: request.cwd, activeRecord: active.path,

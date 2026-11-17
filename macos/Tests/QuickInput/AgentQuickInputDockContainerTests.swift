@@ -97,9 +97,9 @@ struct AgentQuickInputDockContainerTests {
             #expect(container.composerHost.layer?.masksToBounds == false)
             #expect(container.queueHost.layer?.masksToBounds == false)
             if composerHeight > 0 {
-                #expect(abs((container.composerHost.layer?.shadowOpacity ?? 0) - 0.28) < 0.001)
-                #expect(container.composerHost.layer?.shadowRadius == 16)
-                #expect(container.composerHost.layer?.shadowOffset == CGSize(width: 0, height: -4))
+                #expect(abs((container.composerHost.layer?.shadowOpacity ?? 0) - 0.40) < 0.001)
+                #expect(container.composerHost.layer?.shadowRadius == 20)
+                #expect(container.composerHost.layer?.shadowOffset == CGSize(width: 0, height: -6))
                 #expect(container.composerHost.layer?.shadowPath != nil)
             } else {
                 #expect(container.composerHost.layer?.shadowOpacity == 0)

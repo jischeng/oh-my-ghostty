@@ -914,7 +914,7 @@ private struct AgentQuickInputQueueLane: View {
     let send: (UUID) -> Void
     let edit: (UUID) -> Void
     let remove: (UUID) -> Void
-    /// Opaque elevated card background derived from the active terminal theme.
+    /// Opaque terminal-theme card background derived from the active terminal theme.
     let chromeBackground: Color
 
     private var laneColorScheme: ColorScheme {
@@ -1190,7 +1190,7 @@ private struct AgentQuickInputComposer: View {
         isPasswordLocked && !model.isEditingQueuedItem
     }
 
-    /// Always paints an opaque elevated card background over the terminal.
+    /// Always paints an opaque terminal-theme card background over the terminal.
     private var chromeBackground: Color {
         controller.quickInputAccessoryBackground(isPinned: model.isPinned)
     }
@@ -1353,7 +1353,10 @@ private struct AgentQuickInputComposer: View {
         .clipShape(cardShape)
         .overlay(
             cardShape
-                .strokeBorder(Color.primary.opacity(0.14), lineWidth: 1)
+                .strokeBorder(
+                    Color.primary.opacity(cardColorScheme == .light ? 0.12 : 0.18),
+                    lineWidth: 1
+                )
                 .allowsHitTesting(false)
         )
         .contentShape(cardShape)

@@ -779,10 +779,18 @@ struct AgentQuickInputTests {
     }
 
     @Test @MainActor
-    func floatingQuickInputAlwaysUsesOpaqueElevatedCardBackground() throws {
+    func floatingQuickInputAlwaysUsesOpaqueQuantizedThemeBackground() throws {
         let darkThemeColor = Color(.sRGB, red: 0.12, green: 0.13, blue: 0.19, opacity: 1)
+        let expectedDarkColor = try #require(
+            NSColor(TerminalController.chromeBackground(
+                color: darkThemeColor,
+                opacity: 0.62,
+                windowIsOpaque: true,
+                usesWindowGlass: false
+            )).usingColorSpace(.sRGB)
+        )
 
-        // 1. Translucent background-opacity < 1.0 still yields a 100% opaque lifted dark card.
+        // 1. Translucent background-opacity < 1.0 still yields a 100% opaque renderer-matched theme card.
         let translucentChrome = TerminalController.chromeBackground(
             color: darkThemeColor,
             opacity: 0.62,
@@ -805,9 +813,12 @@ struct AgentQuickInputTests {
         let pinnedTranslucentColor = try #require(NSColor(pinnedTranslucent).usingColorSpace(.sRGB))
         #expect(unpinnedTranslucentColor.alphaComponent == 1.0)
         #expect(pinnedTranslucentColor.alphaComponent == 1.0)
-        #expect(unpinnedTranslucentColor.redComponent > 0.12)
-        #expect(unpinnedTranslucentColor.greenComponent > 0.13)
-        #expect(unpinnedTranslucentColor.blueComponent > 0.19)
+        #expect(abs(unpinnedTranslucentColor.redComponent - expectedDarkColor.redComponent) < 0.005)
+        #expect(abs(unpinnedTranslucentColor.greenComponent - expectedDarkColor.greenComponent) < 0.005)
+        #expect(abs(unpinnedTranslucentColor.blueComponent - expectedDarkColor.blueComponent) < 0.005)
+        #expect(abs(pinnedTranslucentColor.redComponent - expectedDarkColor.redComponent) < 0.005)
+        #expect(abs(pinnedTranslucentColor.greenComponent - expectedDarkColor.greenComponent) < 0.005)
+        #expect(abs(pinnedTranslucentColor.blueComponent - expectedDarkColor.blueComponent) < 0.005)
 
         // 2. macOS glass style (usesWindowGlass = true -> terminalChromeBackground is .clear) stays opaque.
         let glassChrome = TerminalController.chromeBackground(
@@ -828,11 +839,25 @@ struct AgentQuickInputTests {
             color: darkThemeColor,
             opacity: 0.62
         )
-        #expect(NSColor(unpinnedGlass).alphaComponent == 1.0)
-        #expect(NSColor(pinnedGlass).alphaComponent == 1.0)
+        let unpinnedGlassColor = try #require(NSColor(unpinnedGlass).usingColorSpace(.sRGB))
+        let pinnedGlassColor = try #require(NSColor(pinnedGlass).usingColorSpace(.sRGB))
+        #expect(unpinnedGlassColor.alphaComponent == 1.0)
+        #expect(pinnedGlassColor.alphaComponent == 1.0)
+        #expect(abs(unpinnedGlassColor.redComponent - expectedDarkColor.redComponent) < 0.005)
+        #expect(abs(unpinnedGlassColor.greenComponent - expectedDarkColor.greenComponent) < 0.005)
+        #expect(abs(unpinnedGlassColor.blueComponent - expectedDarkColor.blueComponent) < 0.005)
 
-        // 3. Light theme is subtly tinted darker while staying 100% opaque in Display P3 too.
+        // 3. Light theme matches exact opaque renderer-quantized Display P3 theme color.
         let lightThemeColor = Color(.sRGB, red: 0.95, green: 0.95, blue: 0.97, opacity: 1)
+        let expectedLightColor = try #require(
+            NSColor(TerminalController.chromeBackground(
+                color: lightThemeColor,
+                opacity: 0.5,
+                windowIsOpaque: true,
+                colorspaceIsDisplayP3: true,
+                usesWindowGlass: false
+            )).usingColorSpace(.sRGB)
+        )
         let lightCard = TerminalController.quickInputAccessoryBackground(
             isPinned: false,
             chromeBackground: .clear,
@@ -844,7 +869,9 @@ struct AgentQuickInputTests {
         #expect(lightNSColor.alphaComponent == 1.0)
         let lightSRGB = try #require(lightNSColor.usingColorSpace(.sRGB))
         #expect(lightSRGB.alphaComponent == 1.0)
-        #expect(lightSRGB.redComponent < 0.95)
+        #expect(abs(lightSRGB.redComponent - expectedLightColor.redComponent) < 0.005)
+        #expect(abs(lightSRGB.greenComponent - expectedLightColor.greenComponent) < 0.005)
+        #expect(abs(lightSRGB.blueComponent - expectedLightColor.blueComponent) < 0.005)
     }
 
     @Test @MainActor

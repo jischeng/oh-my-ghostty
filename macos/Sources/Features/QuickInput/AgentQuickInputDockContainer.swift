@@ -174,9 +174,9 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
             guard let layer = composerHost.layer else { return }
             if composerVisible, !composerHost.bounds.isEmpty {
                 layer.shadowColor = NSColor.black.cgColor
-                layer.shadowOpacity = 0.28
-                layer.shadowRadius = 16
-                layer.shadowOffset = CGSize(width: 0, height: -4)
+                layer.shadowOpacity = 0.40
+                layer.shadowRadius = 20
+                layer.shadowOffset = CGSize(width: 0, height: -6)
                 layer.shadowPath = CGPath(
                     roundedRect: composerHost.bounds,
                     cornerWidth: AgentQuickInputMetrics.cardCornerRadius,

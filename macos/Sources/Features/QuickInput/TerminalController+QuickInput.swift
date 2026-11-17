@@ -24,23 +24,14 @@ extension TerminalController {
     ) -> Color {
         _ = isPinned
         _ = chromeBackground
-        _ = opacity
-        _ = linearBlending
-        let targetSpace: NSColorSpace = colorspaceIsDisplayP3 ? .displayP3 : .sRGB
-        let base = (NSColor(color).usingColorSpace(targetSpace)
-            ?? NSColor(color).usingColorSpace(.sRGB)
-            ?? NSColor(colorSpace: targetSpace, components: [0.12, 0.12, 0.14, 1], count: 4))
-            .withAlphaComponent(1.0)
-        let isLight = base.isLightColor
-        let tintTarget = NSColor(
-            colorSpace: targetSpace,
-            components: isLight ? [0, 0, 0, 1] : [1, 1, 1, 1],
-            count: 4
+        return Self.chromeBackground(
+            color: color,
+            opacity: opacity,
+            windowIsOpaque: true,
+            colorspaceIsDisplayP3: colorspaceIsDisplayP3,
+            linearBlending: linearBlending,
+            usesWindowGlass: false
         )
-        let fraction: CGFloat = isLight ? 0.03 : 0.06
-        let elevated = (base.blended(withFraction: fraction, of: tintTarget) ?? base)
-            .withAlphaComponent(1.0)
-        return Color(nsColor: elevated)
     }
 
     func quickInputAvailableHeight(

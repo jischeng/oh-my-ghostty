@@ -77,6 +77,19 @@ enum QuickInputHistoryLayout {
         }.max() ?? minimumCapsuleWidth
         return max(baseControl, entriesMax)
     }
+
+    static func visibleIndexRange(
+        entryCount: Int,
+        selectedIndex: Int?,
+        topScrolledRows: Int? = nil
+    ) -> Range<Int> {
+        QuickInputCapsuleStackViewport.visibleIndexRange(
+            itemCount: entryCount,
+            maxVisible: maxVisibleEntries,
+            selectedIndex: selectedIndex,
+            topScrolledRows: topScrolledRows
+        )
+    }
 }
 
 struct QuickInputHistoryView: View {
@@ -92,6 +105,9 @@ struct QuickInputHistoryView: View {
 
     @State private var visualExpanded = false
     @State private var isLiveScrolling = false
+    @State private var isFanOutSettled = false
+    @State private var topScrolledRows: Int?
+    @State private var settleTask: Task<Void, Never>?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(
@@ -147,7 +163,13 @@ struct QuickInputHistoryView: View {
         )
         let needsScroll = matches.count > QuickInputHistoryLayout.maxVisibleEntries
             || entriesMaxHeight < QuickInputHistoryLayout.naturalEntriesHeight(entryCount: matches.count)
-        let totalAnimatedCount = 1 + max(matches.count, 1) + (store.storageError != nil ? 1 : 0)
+        let selectedIndex = matches.firstIndex(where: { $0.id == presentation.selectedID })
+        let visibleRange = QuickInputHistoryLayout.visibleIndexRange(
+            entryCount: matches.count,
+            selectedIndex: selectedIndex,
+            topScrolledRows: topScrolledRows
+        )
+        let totalAnimatedCount = 1 + max(visibleRange.count, 1) + (store.storageError != nil ? 1 : 0)
 
         VStack(alignment: .leading, spacing: QuickInputHistoryLayout.capsuleSpacing) {
             if store.storageError != nil {
@@ -160,7 +182,7 @@ struct QuickInputHistoryView: View {
                 .modifier(
                     HistoryCapsuleFanOutModifier(
                         visualExpanded: visualExpanded,
-                        distanceFromSwitch: max(matches.count, 1) + 1,
+                        distanceFromSwitch: max(visibleRange.count, 1) + 1,
                         totalCount: totalAnimatedCount,
                         reduceMotion: reduceMotion
                     )
@@ -190,18 +212,35 @@ struct QuickInputHistoryView: View {
                         entriesColumn(
                             matches: matches,
                             width: stackWidth,
+                            visibleRange: visibleRange,
                             totalAnimatedCount: totalAnimatedCount,
                             isScrollingContainer: true
                         )
                         .quickInputScrollTargetLayout()
                         .background(
-                            QuickInputScrollViewConfigurator { live in
-                                isLiveScrolling = live
-                            }
+                            QuickInputScrollViewConfigurator(
+                                onLiveScrollChanged: { live in
+                                    isLiveScrolling = live
+                                    if live, !isFanOutSettled {
+                                        settleTask?.cancel()
+                                        settleTask = nil
+                                        withTransaction(Transaction(animation: nil)) {
+                                            isFanOutSettled = true
+                                        }
+                                    }
+                                },
+                                onTopScrolledRowsChanged: { rows in
+                                    if isFanOutSettled {
+                                        topScrolledRows = rows
+                                    }
+                                }
+                            )
                         )
                         .padding(.horizontal, QuickInputHistoryLayout.scrollHorizontalShadowOutset)
                     }
+                    .quickInputDefaultBottomScrollAnchor()
                     .quickInputViewAlignedScroll()
+                    .quickInputScrollClipDisabled(!isFanOutSettled)
                     .frame(
                         width: stackWidth + QuickInputHistoryLayout.scrollHorizontalShadowOutset * 2,
                         height: entriesMaxHeight
@@ -223,6 +262,7 @@ struct QuickInputHistoryView: View {
                 entriesColumn(
                     matches: matches,
                     width: stackWidth,
+                    visibleRange: visibleRange,
                     totalAnimatedCount: totalAnimatedCount,
                     isScrollingContainer: false
                 )
@@ -274,21 +314,49 @@ struct QuickInputHistoryView: View {
             presentation.reconcile(entries: matches)
             if isExpanded {
                 presentation.requestFocus()
-                Task { @MainActor in
-                    visualExpanded = true
-                }
-            } else {
-                visualExpanded = false
             }
+            startFanOutTransition(expanded: isExpanded)
         }
         .onChange(of: isExpanded) { expanded in
-            visualExpanded = expanded
             if expanded {
                 presentation.reconcile(entries: matches)
                 presentation.requestFocus()
-            } else {
-                isLiveScrolling = false
             }
+            startFanOutTransition(expanded: expanded)
+        }
+        .onDisappear {
+            settleTask?.cancel()
+            settleTask = nil
+        }
+    }
+
+    private func startFanOutTransition(expanded: Bool) {
+        settleTask?.cancel()
+        settleTask = nil
+        if expanded {
+            withTransaction(Transaction(animation: nil)) {
+                isFanOutSettled = false
+                topScrolledRows = nil
+            }
+            Task { @MainActor in
+                visualExpanded = true
+            }
+            let delay: Duration = reduceMotion
+                ? .milliseconds(30)
+                : QuickInputCapsuleStackViewport.fanOutSettleDelay
+            settleTask = Task { @MainActor in
+                try? await Task.sleep(for: delay)
+                guard !Task.isCancelled else { return }
+                withTransaction(Transaction(animation: nil)) {
+                    isFanOutSettled = true
+                }
+            }
+        } else {
+            isLiveScrolling = false
+            withTransaction(Transaction(animation: nil)) {
+                isFanOutSettled = false
+            }
+            visualExpanded = false
         }
     }
 
@@ -296,29 +364,37 @@ struct QuickInputHistoryView: View {
         proxy: ScrollViewProxy,
         matches: [QuickInputHistoryEntry]
     ) {
-        let targetID = matches.first(where: { $0.id == presentation.selectedID })?.id ?? matches.first?.id
-        guard let targetID else { return }
-        if targetID == matches.first?.id {
-            proxy.scrollTo(targetID, anchor: .bottom)
-        } else {
-            proxy.scrollTo(targetID)
-        }
+        let selectedIndex = matches.firstIndex(where: { $0.id == presentation.selectedID })
+        let range = QuickInputHistoryLayout.visibleIndexRange(
+            entryCount: matches.count,
+            selectedIndex: selectedIndex
+        )
+        topScrolledRows = nil
+        guard range.lowerBound < matches.count else { return }
+        proxy.scrollTo(matches[range.lowerBound].id, anchor: .bottom)
     }
 
     private func entriesColumn(
         matches: [QuickInputHistoryEntry],
         width: CGFloat,
+        visibleRange: Range<Int>,
         totalAnimatedCount: Int,
         isScrollingContainer: Bool
     ) -> some View {
         let bottomUpEntries = Array(matches.enumerated().reversed())
         return VStack(alignment: .leading, spacing: QuickInputHistoryLayout.capsuleSpacing) {
             ForEach(bottomUpEntries, id: \.element.id) { index, entry in
+                let isVisibleSlot = !isScrollingContainer || visibleRange.contains(index)
+                let slot = max(
+                    0,
+                    min(index - visibleRange.lowerBound, QuickInputHistoryLayout.maxVisibleEntries - 1)
+                )
+                let hiddenOffscreen = isScrollingContainer && !isFanOutSettled && !isVisibleSlot
                 QuickInputHistoryEntryCapsule(
                     entry: entry,
                     width: width,
                     isSelected: presentation.selectedID == entry.id,
-                    isExpanded: isExpanded,
+                    isExpanded: isExpanded && (isFanOutSettled || isVisibleSlot),
                     suppressHover: isLiveScrolling,
                     chromeBackground: chromeBackground,
                     strings: strings,
@@ -335,14 +411,15 @@ struct QuickInputHistoryView: View {
                 )
                 .id(entry.id)
                 .quickInputScrollCapsuleTransition(
-                    enabled: isScrollingContainer,
+                    enabled: isScrollingContainer && isFanOutSettled,
                     anchor: .leading
                 )
                 .modifier(
                     HistoryCapsuleFanOutModifier(
                         visualExpanded: visualExpanded,
-                        distanceFromSwitch: index + 1,
+                        distanceFromSwitch: slot + 1,
                         totalCount: totalAnimatedCount,
+                        hiddenOffscreen: hiddenOffscreen,
                         reduceMotion: reduceMotion
                     )
                 )
@@ -355,14 +432,17 @@ private struct HistoryCapsuleFanOutModifier: ViewModifier {
     let visualExpanded: Bool
     let distanceFromSwitch: Int
     let totalCount: Int
+    var hiddenOffscreen = false
     let reduceMotion: Bool
 
     func body(content: Content) -> some View {
-        let travel = CGFloat(min(distanceFromSwitch + 1, 6)) * 22
+        let travel: CGFloat = distanceFromSwitch == 0
+            ? 18
+            : CGFloat(18 + min(distanceFromSwitch, 6) * 20)
         content
             .scaleEffect(visualExpanded ? 1.0 : 0.80, anchor: .bottomLeading)
             .offset(y: visualExpanded ? 0 : travel)
-            .opacity(visualExpanded ? 1.0 : 0.0)
+            .opacity(hiddenOffscreen ? 0.0 : (visualExpanded ? 1.0 : 0.0))
             .animation(animation, value: visualExpanded)
     }
 
@@ -371,11 +451,13 @@ private struct HistoryCapsuleFanOutModifier: ViewModifier {
             return .linear(duration: 0.01)
         }
         if visualExpanded {
-            let delay = Double(min(distanceFromSwitch, 6)) * 0.032
+            let delay = distanceFromSwitch == 0
+                ? 0
+                : 0.016 + Double(min(distanceFromSwitch - 1, 5)) * 0.024
             return .spring(response: 0.30, dampingFraction: 0.76).delay(delay)
         }
         let reverseOrder = max(0, min(totalCount - 1 - distanceFromSwitch, 5))
-        return .spring(response: 0.22, dampingFraction: 0.88).delay(Double(reverseOrder) * 0.020)
+        return .spring(response: 0.22, dampingFraction: 0.88).delay(Double(reverseOrder) * 0.018)
     }
 }
 

@@ -1295,6 +1295,35 @@ private struct AgentQuickInputResizeHandle: View {
     }
 }
 
+enum QuickInputCapsuleStackViewport {
+    static let stepStride: CGFloat = 41
+    static let fanOutSettleDelay: Duration = .milliseconds(360)
+
+    static func visibleIndexRange(
+        itemCount: Int,
+        maxVisible: Int,
+        selectedIndex: Int? = nil,
+        topScrolledRows: Int? = nil
+    ) -> Range<Int> {
+        guard itemCount > 0, maxVisible > 0 else { return 0..<0 }
+        guard itemCount > maxVisible else { return 0..<itemCount }
+        if let topScrolledRows {
+            let topIndex = min(
+                itemCount - 1,
+                max(maxVisible - 1, itemCount - 1 - max(0, topScrolledRows))
+            )
+            let start = max(0, topIndex - (maxVisible - 1))
+            return start..<(topIndex + 1)
+        }
+        let active = min(max(selectedIndex ?? 0, 0), itemCount - 1)
+        if active < maxVisible {
+            return 0..<maxVisible
+        }
+        let start = active - (maxVisible - 1)
+        return start..<(start + maxVisible)
+    }
+}
+
 enum QuickInputQueueStackLayout {
     static let capsuleHeight: CGFloat = 34
     static let capsuleSpacing: CGFloat = 7
@@ -1380,6 +1409,9 @@ private struct AgentQuickInputQueueCapsuleStack: View {
 
     @State private var visualExpanded = false
     @State private var isLiveScrolling = false
+    @State private var isFanOutSettled = false
+    @State private var topScrolledRows: Int?
+    @State private var settleTask: Task<Void, Never>?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var stackHeight: CGFloat {
@@ -1403,21 +1435,46 @@ private struct AgentQuickInputQueueCapsuleStack: View {
     var body: some View {
         let horizontalOutset = QuickInputQueueStackLayout.scrollHorizontalShadowOutset
         let stackAlignment: Alignment = alignment == .trailing ? .bottomTrailing : .bottomLeading
+        let visibleRange = QuickInputCapsuleStackViewport.visibleIndexRange(
+            itemCount: items.count,
+            maxVisible: QuickInputQueueStackLayout.maxVisibleCapsules,
+            topScrolledRows: topScrolledRows
+        )
 
         Group {
             if needsScroll {
                 ScrollViewReader { proxy in
                     ScrollView(.vertical, showsIndicators: false) {
-                        capsuleColumn(width: unifiedWidth, isScrollingContainer: true)
-                            .quickInputScrollTargetLayout()
-                            .background(
-                                QuickInputScrollViewConfigurator { live in
+                        capsuleColumn(
+                            width: unifiedWidth,
+                            isScrollingContainer: true,
+                            visibleRange: visibleRange
+                        )
+                        .quickInputScrollTargetLayout()
+                        .background(
+                            QuickInputScrollViewConfigurator(
+                                onLiveScrollChanged: { live in
                                     isLiveScrolling = live
+                                    if live, !isFanOutSettled {
+                                        settleTask?.cancel()
+                                        settleTask = nil
+                                        withTransaction(Transaction(animation: nil)) {
+                                            isFanOutSettled = true
+                                        }
+                                    }
+                                },
+                                onTopScrolledRowsChanged: { rows in
+                                    if isFanOutSettled {
+                                        topScrolledRows = rows
+                                    }
                                 }
                             )
-                            .padding(.horizontal, horizontalOutset)
+                        )
+                        .padding(.horizontal, horizontalOutset)
                     }
+                    .quickInputDefaultBottomScrollAnchor()
                     .quickInputViewAlignedScroll()
+                    .quickInputScrollClipDisabled(!isFanOutSettled)
                     .frame(
                         width: unifiedWidth + horizontalOutset * 2,
                         height: stackHeight
@@ -1431,41 +1488,77 @@ private struct AgentQuickInputQueueCapsuleStack: View {
                 }
                 .frame(width: unifiedWidth, height: stackHeight, alignment: stackAlignment)
             } else {
-                capsuleColumn(width: unifiedWidth, isScrollingContainer: false)
+                capsuleColumn(
+                    width: unifiedWidth,
+                    isScrollingContainer: false,
+                    visibleRange: visibleRange
+                )
             }
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Queued Agent Messages")
         .onAppear {
-            guard isExpanded else {
-                visualExpanded = false
-                return
-            }
-            Task { @MainActor in
-                visualExpanded = isExpanded
-            }
+            startFanOutTransition(expanded: isExpanded)
         }
         .onChange(of: isExpanded) { expanded in
-            visualExpanded = expanded
-            if !expanded {
-                isLiveScrolling = false
-            }
+            startFanOutTransition(expanded: expanded)
+        }
+        .onDisappear {
+            settleTask?.cancel()
+            settleTask = nil
         }
     }
 
-    private func capsuleColumn(width: CGFloat, isScrollingContainer: Bool) -> some View {
+    private func startFanOutTransition(expanded: Bool) {
+        settleTask?.cancel()
+        settleTask = nil
+        if expanded {
+            withTransaction(Transaction(animation: nil)) {
+                isFanOutSettled = false
+                topScrolledRows = nil
+            }
+            Task { @MainActor in
+                visualExpanded = true
+            }
+            let delay: Duration = reduceMotion
+                ? .milliseconds(30)
+                : QuickInputCapsuleStackViewport.fanOutSettleDelay
+            settleTask = Task { @MainActor in
+                try? await Task.sleep(for: delay)
+                guard !Task.isCancelled else { return }
+                withTransaction(Transaction(animation: nil)) {
+                    isFanOutSettled = true
+                }
+            }
+        } else {
+            isLiveScrolling = false
+            withTransaction(Transaction(animation: nil)) {
+                isFanOutSettled = false
+            }
+            visualExpanded = false
+        }
+    }
+
+    private func capsuleColumn(
+        width: CGFloat,
+        isScrollingContainer: Bool,
+        visibleRange: Range<Int>
+    ) -> some View {
         let bottomUpItems = Array(items.enumerated().reversed())
+        let visibleCount = max(1, visibleRange.count)
         return VStack(alignment: alignment, spacing: QuickInputQueueStackLayout.capsuleSpacing) {
             ForEach(bottomUpItems, id: \.element.id) { index, item in
-                let distanceFromSwitch = index
-                let travel = CGFloat(min(distanceFromSwitch + 1, 5)) * 24
+                let isVisibleSlot = !isScrollingContainer || visibleRange.contains(index)
+                let slot = max(0, min(index - visibleRange.lowerBound, QuickInputQueueStackLayout.maxVisibleCapsules - 1))
+                let hiddenOffscreen = isScrollingContainer && !isFanOutSettled && !isVisibleSlot
+                let travel = CGFloat(min(slot + 1, 5)) * 24
                 AgentQuickInputQueueItemCapsule(
                     index: index + 1,
                     item: item,
                     width: width,
                     isEditing: editingItemID == item.id,
                     isSendLocked: isSendLocked,
-                    isExpanded: isExpanded,
+                    isExpanded: isExpanded && (isFanOutSettled || isVisibleSlot),
                     elevatedOverCard: elevatedOverCard,
                     suppressHover: isLiveScrolling,
                     chromeBackground: chromeBackground,
@@ -1476,17 +1569,17 @@ private struct AgentQuickInputQueueCapsuleStack: View {
                 )
                 .id(item.id)
                 .quickInputScrollCapsuleTransition(
-                    enabled: isScrollingContainer,
+                    enabled: isScrollingContainer && isFanOutSettled,
                     anchor: alignment == .trailing ? .trailing : .leading
                 )
                 .scaleEffect(visualExpanded ? 1.0 : 0.80, anchor: scaleAnchor)
                 .offset(y: visualExpanded ? 0 : travel)
-                .opacity(visualExpanded ? 1.0 : 0.0)
+                .opacity(hiddenOffscreen ? 0.0 : (visualExpanded ? 1.0 : 0.0))
                 .animation(
                     capsuleAnimation(
                         opening: visualExpanded,
-                        distanceFromSwitch: distanceFromSwitch,
-                        totalCount: items.count
+                        distanceFromSwitch: slot,
+                        totalCount: visibleCount
                     ),
                     value: visualExpanded
                 )
@@ -1976,15 +2069,18 @@ private struct QuickInputPointingHandCursorView: NSViewRepresentable {
 
 struct QuickInputScrollViewConfigurator: NSViewRepresentable {
     var onLiveScrollChanged: ((Bool) -> Void)?
+    var onTopScrolledRowsChanged: ((Int) -> Void)?
 
     func makeNSView(context: Context) -> ConfiguratorView {
         let view = ConfiguratorView()
         view.onLiveScrollChanged = onLiveScrollChanged
+        view.onTopScrolledRowsChanged = onTopScrolledRowsChanged
         return view
     }
 
     func updateNSView(_ view: ConfiguratorView, context: Context) {
         view.onLiveScrollChanged = onLiveScrollChanged
+        view.onTopScrolledRowsChanged = onTopScrolledRowsChanged
         view.configureEnclosingScrollView()
     }
 
@@ -1994,9 +2090,12 @@ struct QuickInputScrollViewConfigurator: NSViewRepresentable {
 
     final class ConfiguratorView: NSView {
         var onLiveScrollChanged: ((Bool) -> Void)?
+        var onTopScrolledRowsChanged: ((Int) -> Void)?
         private weak var observedScrollView: NSScrollView?
         private var startObserver: NSObjectProtocol?
         private var endObserver: NSObjectProtocol?
+        private var boundsObserver: NSObjectProtocol?
+        private var lastReportedTopRows = -1
 
         deinit {
             detachObservers()
@@ -2053,12 +2152,27 @@ struct QuickInputScrollViewConfigurator: NSViewRepresentable {
                     self?.onLiveScrollChanged?(false)
                 }
             }
+            scrollView.contentView.postsBoundsChangedNotifications = true
+            boundsObserver = center.addObserver(
+                forName: NSView.boundsDidChangeNotification,
+                object: scrollView.contentView,
+                queue: .main
+            ) { [weak self, weak clipView = scrollView.contentView] _ in
+                guard let clipView else { return }
+                let rows = max(0, Int(round(clipView.bounds.minY / QuickInputCapsuleStackViewport.stepStride)))
+                Task { @MainActor in
+                    guard let self, rows != self.lastReportedTopRows else { return }
+                    self.lastReportedTopRows = rows
+                    self.onTopScrolledRowsChanged?(rows)
+                }
+            }
         }
 
         func teardown() {
             detachObservers()
             observedScrollView = nil
             onLiveScrollChanged = nil
+            onTopScrolledRowsChanged = nil
         }
 
         private func detachObservers() {
@@ -2071,6 +2185,11 @@ struct QuickInputScrollViewConfigurator: NSViewRepresentable {
                 center.removeObserver(endObserver)
                 self.endObserver = nil
             }
+            if let boundsObserver {
+                center.removeObserver(boundsObserver)
+                self.boundsObserver = nil
+            }
+            lastReportedTopRows = -1
         }
     }
 }
@@ -2098,6 +2217,24 @@ extension View {
     func quickInputViewAlignedScroll() -> some View {
         if #available(macOS 14.0, *) {
             scrollTargetBehavior(.viewAligned)
+        } else {
+            self
+        }
+    }
+
+    @ViewBuilder
+    func quickInputDefaultBottomScrollAnchor() -> some View {
+        if #available(macOS 14.0, *) {
+            defaultScrollAnchor(.bottom)
+        } else {
+            self
+        }
+    }
+
+    @ViewBuilder
+    func quickInputScrollClipDisabled(_ disabled: Bool) -> some View {
+        if #available(macOS 14.0, *) {
+            scrollClipDisabled(disabled)
         } else {
             self
         }

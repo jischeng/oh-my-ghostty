@@ -263,6 +263,56 @@ struct QuickInputHistoryNativeTests {
         #expect(!container.occludesContentPoint(inWindow: NSPoint(x: queueX + stackWidth + 12, y: queueY + 130)))
     }
 
+    @Test func fanOutUnclipsVisibleViewportAndNormalizesOlderSelectionSlots() async throws {
+        #expect(QuickInputHistoryLayout.visibleIndexRange(entryCount: 15, selectedIndex: 0) == 0..<5)
+        #expect(QuickInputHistoryLayout.visibleIndexRange(entryCount: 15, selectedIndex: 9) == 5..<10)
+        #expect(QuickInputHistoryLayout.visibleIndexRange(entryCount: 15, selectedIndex: nil) == 0..<5)
+
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let settings = OhMyGhosttySettings(fileURL: home.appendingPathComponent("settings.json"))
+        let store = QuickInputHistoryStore()
+        let model = AgentQuickInputModel(dockHeight: 252, historyStore: store)
+        let pane = UUID()
+        let tab = UUID()
+        model.bindHistory(to: tab, paneIDs: [pane])
+        model.present(for: pane, requestFocus: false)
+
+        for index in 0..<12 {
+            store.record("fanout entry \(index)", paneID: pane, tabID: tab)
+        }
+        let entries = store.visibleEntries(paneID: pane, tabID: tab, scope: .tab)
+        model.historyPresentation.open(entries: entries)
+        model.historyPresentation.select(entries[9].id)
+
+        let host = NSHostingView(rootView: QuickInputHistoryView(
+            model: model,
+            store: store,
+            settings: settings,
+            availableWidth: 600,
+            onSelect: { _ in }
+        ))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 600),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { window.contentView = nil; window.close() }
+
+        host.layoutSubtreeIfNeeded()
+        host.display()
+        try await Task.sleep(for: .milliseconds(40))
+        host.layoutSubtreeIfNeeded()
+
+        let scrollView = try #require(find(NSScrollView.self, in: host))
+        #expect(scrollView.contentView.layer?.masksToBounds == false)
+
+        try await Task.sleep(for: .milliseconds(420))
+        host.layoutSubtreeIfNeeded()
+        #expect(scrollView.contentView.layer?.masksToBounds == true)
+    }
+
     private func find<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
         (view as? T) ?? view.subviews.lazy.compactMap { find(type, in: $0) }.first
     }

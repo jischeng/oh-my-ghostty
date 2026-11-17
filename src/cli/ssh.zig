@@ -781,7 +781,7 @@ fn remoteShellCommand(
         remote_working_directory,
         remote_agent,
         remote_agent_session,
-        "on",
+        null,
     );
 }
 
@@ -1356,21 +1356,21 @@ test remoteShellCommand {
     try testing.expect(std.mem.indexOf(u8, full_cwd_command, "OMG_REMOTE_CWD=") != null);
     try testing.expect(std.mem.indexOf(u8, full_cwd_command, "project") != null);
     try testing.expect(std.mem.indexOf(u8, full_cwd_command, "export OMG_REMOTE_CWD") != null);
-    try testing.expect(std.mem.indexOf(u8, full_cwd_command, "AGY_CLI_OSC7501='on'") != null);
+    try testing.expect(std.mem.indexOf(u8, full_cwd_command, "AGY_CLI_OSC7501") == null);
 
-    const disabled_osc_command = remoteShellCommandWithEnv(
+    const enabled_osc_command = remoteShellCommandWithEnv(
         testing.allocator,
         "cloud",
-        "omg-ssh-no-env",
+        "omg-ssh-on-env",
         null,
         null,
         null,
-        null,
+        "on",
     ).?;
-    defer testing.allocator.free(disabled_osc_command);
-    const decoded_no_env = try decodeBootstrapForTest(testing.allocator, disabled_osc_command);
-    defer testing.allocator.free(decoded_no_env);
-    try testing.expect(std.mem.indexOf(u8, decoded_no_env, "AGY_CLI_OSC7501") == null);
+    defer testing.allocator.free(enabled_osc_command);
+    const decoded_on_env = try decodeBootstrapForTest(testing.allocator, enabled_osc_command);
+    defer testing.allocator.free(decoded_on_env);
+    try testing.expect(std.mem.indexOf(u8, decoded_on_env, "AGY_CLI_OSC7501='on'") != null);
 
     const explicit_off_command = remoteShellCommandWithEnv(
         testing.allocator,

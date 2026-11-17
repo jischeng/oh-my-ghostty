@@ -9,6 +9,8 @@ enum QuickInputHistoryLayout {
     static let minimumCapsuleWidth: CGFloat = 248
     static let maximumCapsuleWidth: CGFloat = 430
     static let controlCapsuleWidth: CGFloat = 296
+    static let scrollHorizontalShadowOutset: CGFloat = 14
+    static let scrollVerticalShadowOutset: CGFloat = 4
 
     static func entryPreview(_ text: String) -> String {
         var collapsed = ""
@@ -69,7 +71,7 @@ enum QuickInputHistoryLayout {
         let baseControl = min(controlCapsuleWidth, maxAllowed)
         let entriesMax = entries.prefix(20).map { entry in
             capsuleWidth(
-                previewCount: entryPreview(entry.text).count,
+                previewCount: AgentQuickInputMetrics.displayColumnCount(entryPreview(entry.text)),
                 hasDeliveryBadge: entry.deliveryState != .sent,
                 availableWidth: availableWidth
             )
@@ -134,7 +136,6 @@ struct QuickInputHistoryView: View {
             storageError: store.storageError != nil,
             maxHeight: maxHeight
         )
-        let controlWidth = min(QuickInputHistoryLayout.controlCapsuleWidth, stackWidth)
         let nonEntryHeight = QuickInputHistoryLayout.capsuleSpacing
             + QuickInputHistoryLayout.controlCapsuleHeight
             + (store.storageError != nil
@@ -152,6 +153,7 @@ struct QuickInputHistoryView: View {
             if store.storageError != nil {
                 QuickInputHistoryErrorCapsule(
                     text: strings.quickInputHistoryStorageError,
+                    width: stackWidth,
                     chromeBackground: chromeBackground,
                     isExpanded: isExpanded
                 )
@@ -170,7 +172,7 @@ struct QuickInputHistoryView: View {
                     text: presentation.isSearching
                         ? strings.quickInputHistoryNoMatches
                         : strings.quickInputHistoryEmpty,
-                    width: QuickInputHistoryLayout.minimumCapsuleWidth,
+                    width: stackWidth,
                     chromeBackground: chromeBackground,
                     isExpanded: isExpanded
                 )
@@ -185,22 +187,49 @@ struct QuickInputHistoryView: View {
             } else if needsScroll {
                 ScrollViewReader { proxy in
                     ScrollView(.vertical, showsIndicators: false) {
-                        entriesColumn(matches: matches, totalAnimatedCount: totalAnimatedCount)
+                        VStack(alignment: .leading, spacing: 0) {
+                            Color.clear
+                                .frame(width: 1, height: QuickInputHistoryLayout.scrollVerticalShadowOutset)
+                                .id("history-scroll-top")
+                            entriesColumn(
+                                matches: matches,
+                                width: stackWidth,
+                                totalAnimatedCount: totalAnimatedCount
+                            )
+                            Color.clear
+                                .frame(width: 1, height: QuickInputHistoryLayout.scrollVerticalShadowOutset)
+                                .id("history-scroll-bottom")
+                        }
+                        .padding(.horizontal, QuickInputHistoryLayout.scrollHorizontalShadowOutset)
                     }
-                    .frame(height: entriesMaxHeight)
+                    .frame(
+                        width: stackWidth + QuickInputHistoryLayout.scrollHorizontalShadowOutset * 2,
+                        height: entriesMaxHeight + QuickInputHistoryLayout.scrollVerticalShadowOutset * 2
+                    )
+                    .padding(.horizontal, -QuickInputHistoryLayout.scrollHorizontalShadowOutset)
+                    .padding(.vertical, -QuickInputHistoryLayout.scrollVerticalShadowOutset)
                     .onAppear {
-                        if let firstID = matches.first?.id {
-                            proxy.scrollTo(firstID, anchor: .bottom)
+                        if !matches.isEmpty {
+                            proxy.scrollTo("history-scroll-bottom", anchor: .bottom)
                         }
                     }
                     .onChange(of: presentation.keyboardSelectionRevision) { _ in
-                        if let selectedID = presentation.selectedID {
+                        guard let selectedID = presentation.selectedID else { return }
+                        if selectedID == matches.first?.id {
+                            proxy.scrollTo("history-scroll-bottom", anchor: .bottom)
+                        } else if selectedID == matches.last?.id {
+                            proxy.scrollTo("history-scroll-top", anchor: .top)
+                        } else {
                             proxy.scrollTo(selectedID)
                         }
                     }
                 }
             } else {
-                entriesColumn(matches: matches, totalAnimatedCount: totalAnimatedCount)
+                entriesColumn(
+                    matches: matches,
+                    width: stackWidth,
+                    totalAnimatedCount: totalAnimatedCount
+                )
             }
 
             QuickInputHistoryControlCapsule(
@@ -209,7 +238,7 @@ struct QuickInputHistoryView: View {
                 strings: strings,
                 companionSurfaceID: model.targetSurfaceID,
                 entries: matches,
-                width: controlWidth,
+                width: stackWidth,
                 chromeBackground: chromeBackground,
                 isExpanded: isExpanded,
                 onMove: { delta in
@@ -267,16 +296,12 @@ struct QuickInputHistoryView: View {
 
     private func entriesColumn(
         matches: [QuickInputHistoryEntry],
+        width: CGFloat,
         totalAnimatedCount: Int
     ) -> some View {
         let bottomUpEntries = Array(matches.enumerated().reversed())
         return VStack(alignment: .leading, spacing: QuickInputHistoryLayout.capsuleSpacing) {
             ForEach(bottomUpEntries, id: \.element.id) { index, entry in
-                let width = QuickInputHistoryLayout.capsuleWidth(
-                    previewCount: QuickInputHistoryLayout.entryPreview(entry.text).count,
-                    hasDeliveryBadge: entry.deliveryState != .sent,
-                    availableWidth: availableWidth
-                )
                 QuickInputHistoryEntryCapsule(
                     entry: entry,
                     width: width,
@@ -433,13 +458,15 @@ private struct QuickInputHistoryEntryCapsule: View {
                     tintOpacity: (isSelected || isHovered) ? 0.88 : 0.80,
                     colorScheme: colorScheme,
                     borderColor: isSelected ? Color.accentColor.opacity(0.82) : nil,
-                    materialOverride: colorScheme == .light ? .popover : .hudWindow
+                    materialOverride: colorScheme == .light ? .popover : .hudWindow,
+                    shadowOpacity: 0.18,
+                    shadowRadius: 3.5,
+                    shadowOffsetY: 1.5
                 )
             )
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .shadow(color: .black.opacity(0.34), radius: 9, y: 3)
         .onHover { hovering in
             isHovered = hovering
             onHoverChanged(hovering)
@@ -553,11 +580,13 @@ private struct QuickInputHistoryControlCapsule: View {
                 tintOpacity: presentation.isSearching ? 0.88 : 0.80,
                 colorScheme: colorScheme,
                 borderColor: presentation.isSearching ? Color.accentColor.opacity(0.65) : nil,
-                materialOverride: colorScheme == .light ? .popover : .hudWindow
+                materialOverride: colorScheme == .light ? .popover : .hudWindow,
+                shadowOpacity: 0.18,
+                shadowRadius: 3.5,
+                shadowOffsetY: 1.5
             )
         )
         .contentShape(Capsule())
-        .shadow(color: .black.opacity(0.34), radius: 9, y: 3)
         .background(FloatingAccessoryAnchor(isActive: isExpanded))
         .allowsHitTesting(isExpanded)
         .environment(\.colorScheme, colorScheme)
@@ -592,6 +621,7 @@ private struct QuickInputHistoryEmptyCapsule: View {
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, 12)
         .frame(width: width, height: QuickInputHistoryLayout.entryCapsuleHeight)
@@ -601,11 +631,13 @@ private struct QuickInputHistoryEmptyCapsule: View {
                 themeColor: chromeBackground,
                 tintOpacity: 0.80,
                 colorScheme: colorScheme,
-                materialOverride: colorScheme == .light ? .popover : .hudWindow
+                materialOverride: colorScheme == .light ? .popover : .hudWindow,
+                shadowOpacity: 0.18,
+                shadowRadius: 3.5,
+                shadowOffsetY: 1.5
             )
         )
         .contentShape(Capsule())
-        .shadow(color: .black.opacity(0.34), radius: 9, y: 3)
         .background(FloatingAccessoryAnchor(isActive: isExpanded))
         .allowsHitTesting(isExpanded)
         .environment(\.colorScheme, colorScheme)
@@ -614,6 +646,7 @@ private struct QuickInputHistoryEmptyCapsule: View {
 
 private struct QuickInputHistoryErrorCapsule: View {
     let text: String
+    let width: CGFloat
     let chromeBackground: Color
     let isExpanded: Bool
 
@@ -631,9 +664,10 @@ private struct QuickInputHistoryErrorCapsule: View {
                 .foregroundStyle(.orange)
                 .lineLimit(1)
                 .truncationMode(.tail)
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, 12)
-        .frame(height: QuickInputHistoryLayout.entryCapsuleHeight)
+        .frame(width: width, height: QuickInputHistoryLayout.entryCapsuleHeight)
         .background(
             QuickInputGlassSurface(
                 cornerRadius: QuickInputHistoryLayout.entryCapsuleHeight * 0.5,
@@ -641,11 +675,13 @@ private struct QuickInputHistoryErrorCapsule: View {
                 tintOpacity: 0.80,
                 colorScheme: colorScheme,
                 borderColor: Color.orange.opacity(0.55),
-                materialOverride: colorScheme == .light ? .popover : .hudWindow
+                materialOverride: colorScheme == .light ? .popover : .hudWindow,
+                shadowOpacity: 0.18,
+                shadowRadius: 3.5,
+                shadowOffsetY: 1.5
             )
         )
         .contentShape(Capsule())
-        .shadow(color: .black.opacity(0.34), radius: 9, y: 3)
         .background(FloatingAccessoryAnchor(isActive: isExpanded))
         .allowsHitTesting(isExpanded)
         .environment(\.colorScheme, colorScheme)

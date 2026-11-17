@@ -469,6 +469,51 @@ struct AgentQuickInputTests {
         ) == QuickInputQueueStackLayout.minimumCapsuleWidth)
     }
 
+    @Test func queueStackWidthUnifiesShortLongAndCollapsedPillFloors() {
+        let shortItem = AgentQuickInputQueueItem(text: "1234")
+        let longItem = AgentQuickInputQueueItem(
+            text: "investigate quick input capsule width synchronization"
+        )
+
+        #expect(AgentQuickInputMetrics.displayColumnCount("1234") == 4)
+        #expect(AgentQuickInputMetrics.displayColumnCount("排队 1 · 1234") == 13)
+
+        #expect(QuickInputQueueStackLayout.stackWidth(
+            items: [shortItem],
+            editingItemID: nil,
+            availableWidth: 1_000
+        ) == QuickInputQueueStackLayout.minimumCapsuleWidth)
+
+        #expect(QuickInputQueueStackLayout.stackWidth(
+            items: [shortItem],
+            editingItemID: nil,
+            availableWidth: 1_000,
+            minimumWidth: 210
+        ) == 210)
+
+        let longOnlyWidth = QuickInputQueueStackLayout.stackWidth(
+            items: [longItem],
+            editingItemID: nil,
+            availableWidth: 1_000,
+            minimumWidth: 150
+        )
+        let mixedWidth = QuickInputQueueStackLayout.stackWidth(
+            items: [shortItem, longItem],
+            editingItemID: nil,
+            availableWidth: 1_000,
+            minimumWidth: 150
+        )
+        #expect(mixedWidth == longOnlyWidth)
+        #expect(mixedWidth > QuickInputQueueStackLayout.minimumCapsuleWidth)
+
+        #expect(QuickInputQueueStackLayout.stackWidth(
+            items: [longItem],
+            editingItemID: nil,
+            availableWidth: 160,
+            minimumWidth: 108
+        ) == 128)
+    }
+
     @Test func accessoryHeightNeverReservesInFlowTerminalSpace() {
         #expect(AgentQuickInputMetrics.minimumHeight == 96)
         #expect(AgentQuickInputMetrics.defaultHeight == 148)

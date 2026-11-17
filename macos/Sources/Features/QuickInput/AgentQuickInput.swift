@@ -279,6 +279,32 @@ enum AgentQuickInputMetrics {
         _ = isPinned
         return 0
     }
+
+    static func displayColumnCount(_ text: String) -> Int {
+        var columns = 0
+        for scalar in text.unicodeScalars {
+            columns += isWideScalar(scalar.value) ? 2 : 1
+        }
+        return columns
+    }
+
+    private static func isWideScalar(_ value: UInt32) -> Bool {
+        switch value {
+        case 0x1100...0x115F,
+             0x2E80...0x303E,
+             0x3040...0xA4CF,
+             0xAC00...0xD7A3,
+             0xF900...0xFAFF,
+             0xFE10...0xFE6F,
+             0xFF01...0xFF60,
+             0xFFE0...0xFFE6,
+             0x1F300...0x1FAFF,
+             0x20000...0x3FFFD:
+            true
+        default:
+            false
+        }
+    }
 }
 
 enum AgentQuickInputMotion {
@@ -1134,6 +1160,7 @@ private struct AgentQuickInputPaneQueueBadgeHost: View {
     @State private var isExpanded = false
     @State private var isStackMounted = false
     @State private var unmountTask: Task<Void, Never>?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var strings: SettingsStrings { SettingsStrings(language: settings.language) }
     private var queue: [AgentQuickInputQueueItem] {
@@ -1156,16 +1183,27 @@ private struct AgentQuickInputPaneQueueBadgeHost: View {
     var body: some View {
         if shouldShow {
             let label = collapsedPillLabel(for: queue)
-            let pillWidth = AgentQuickInputMetrics.collapsedQueueWidth(
-                labelCount: label.count,
+            let editingID = model.targetSurfaceID == surfaceID ? model.editingQueueItemID : nil
+            let collapsedWidth = AgentQuickInputMetrics.collapsedQueueWidth(
+                labelCount: AgentQuickInputMetrics.displayColumnCount(label),
                 availableWidth: availableWidth
             )
+            let expandedWidth = QuickInputQueueStackLayout.stackWidth(
+                items: queue,
+                editingItemID: editingID,
+                availableWidth: availableWidth,
+                minimumWidth: collapsedWidth
+            )
+            let activePillWidth = isExpanded ? expandedWidth : collapsedWidth
+            let pillAnimation: Animation = reduceMotion
+                ? .linear(duration: 0.01)
+                : .spring(response: 0.28, dampingFraction: 0.80)
             let chromeBackground = controller.quickInputAccessoryBackground(isPinned: model.isPinned)
             VStack(alignment: .trailing, spacing: QuickInputQueueStackLayout.capsuleSpacing) {
                 if isStackMounted {
                     AgentQuickInputQueueCapsuleStack(
                         items: queue,
-                        editingItemID: model.targetSurfaceID == surfaceID ? model.editingQueueItemID : nil,
+                        editingItemID: editingID,
                         isSendLocked: isSendLocked,
                         chromeBackground: chromeBackground,
                         strings: strings,
@@ -1174,6 +1212,7 @@ private struct AgentQuickInputPaneQueueBadgeHost: View {
                         scaleAnchor: .bottomTrailing,
                         availableWidth: availableWidth,
                         maxHeight: maxStackHeight,
+                        minimumWidth: collapsedWidth,
                         send: { controller.sendQueuedQuickInput($0, from: surfaceID) },
                         edit: { itemID in
                             collapseStack(immediate: true)
@@ -1190,7 +1229,8 @@ private struct AgentQuickInputPaneQueueBadgeHost: View {
                     isExpanded: isExpanded,
                     toggle: toggleExpanded
                 )
-                .frame(width: pillWidth, height: AgentQuickInputMetrics.collapsedQueueHeight)
+                .frame(width: activePillWidth, height: AgentQuickInputMetrics.collapsedQueueHeight)
+                .animation(pillAnimation, value: isExpanded)
                 .background(FloatingAccessoryAnchor())
             }
             .padding(.trailing, 16)
@@ -1260,6 +1300,8 @@ enum QuickInputQueueStackLayout {
     static let maxVisibleCapsules = 5
     static let minimumCapsuleWidth: CGFloat = 176
     static let maximumCapsuleWidth: CGFloat = 380
+    static let scrollHorizontalShadowOutset: CGFloat = 14
+    static let scrollVerticalShadowOutset: CGFloat = 4
 
     static func naturalStackHeight(itemCount: Int) -> CGFloat {
         guard itemCount > 0 else { return 0 }
@@ -1293,16 +1335,29 @@ enum QuickInputQueueStackLayout {
     static func stackWidth(
         items: [AgentQuickInputQueueItem],
         editingItemID: UUID?,
-        availableWidth: CGFloat
+        availableWidth: CGFloat,
+        minimumWidth: CGFloat = minimumCapsuleWidth
     ) -> CGFloat {
-        guard !items.isEmpty else { return minimumCapsuleWidth }
-        return items.map { item in
-            capsuleWidth(
-                previewCount: item.preview.count,
-                isEditing: item.id == editingItemID,
-                availableWidth: availableWidth
+        let availableAfterInset = max(1, availableWidth - AgentQuickInputMetrics.floatingHorizontalInset * 2)
+        let maxAllowed = availableAfterInset >= minimumCapsuleWidth
+            ? min(maximumCapsuleWidth, availableAfterInset)
+            : availableAfterInset
+        let floorWidth = min(
+            max(minimumWidth, AgentQuickInputMetrics.collapsedQueueMinimumWidth),
+            maxAllowed
+        )
+        guard !items.isEmpty else { return floorWidth }
+        let itemsMax = items.map { item in
+            min(
+                maxAllowed,
+                capsuleWidth(
+                    previewCount: AgentQuickInputMetrics.displayColumnCount(item.preview),
+                    isEditing: item.id == editingItemID,
+                    availableWidth: availableWidth
+                )
             )
-        }.max() ?? minimumCapsuleWidth
+        }.max() ?? floorWidth
+        return max(floorWidth, itemsMax)
     }
 }
 
@@ -1318,6 +1373,7 @@ private struct AgentQuickInputQueueCapsuleStack: View {
     let scaleAnchor: UnitPoint
     let availableWidth: CGFloat
     let maxHeight: CGFloat
+    var minimumWidth: CGFloat = QuickInputQueueStackLayout.minimumCapsuleWidth
     let send: (UUID) -> Void
     let edit: (UUID) -> Void
     let remove: (UUID) -> Void
@@ -1329,27 +1385,54 @@ private struct AgentQuickInputQueueCapsuleStack: View {
         QuickInputQueueStackLayout.stackHeight(itemCount: items.count, maxHeight: maxHeight)
     }
 
+    private var unifiedWidth: CGFloat {
+        QuickInputQueueStackLayout.stackWidth(
+            items: items,
+            editingItemID: editingItemID,
+            availableWidth: availableWidth,
+            minimumWidth: minimumWidth
+        )
+    }
+
     private var needsScroll: Bool {
         items.count > QuickInputQueueStackLayout.maxVisibleCapsules
             || maxHeight < QuickInputQueueStackLayout.naturalStackHeight(itemCount: items.count)
     }
 
     var body: some View {
+        let horizontalOutset = QuickInputQueueStackLayout.scrollHorizontalShadowOutset
+        let verticalOutset = QuickInputQueueStackLayout.scrollVerticalShadowOutset
+        let stackAlignment: Alignment = alignment == .trailing ? .bottomTrailing : .bottomLeading
+
         Group {
             if needsScroll {
                 ScrollViewReader { proxy in
                     ScrollView(.vertical, showsIndicators: false) {
-                        capsuleColumn
+                        VStack(alignment: alignment, spacing: 0) {
+                            Color.clear
+                                .frame(width: 1, height: verticalOutset)
+                            capsuleColumn(width: unifiedWidth)
+                            Color.clear
+                                .frame(width: 1, height: verticalOutset)
+                                .id("queue-scroll-bottom")
+                        }
+                        .padding(.horizontal, horizontalOutset)
                     }
+                    .frame(
+                        width: unifiedWidth + horizontalOutset * 2,
+                        height: stackHeight + verticalOutset * 2
+                    )
+                    .padding(.horizontal, -horizontalOutset)
+                    .padding(.vertical, -verticalOutset)
                     .onAppear {
-                        if let firstID = items.first?.id {
-                            proxy.scrollTo(firstID, anchor: .bottom)
+                        if !items.isEmpty {
+                            proxy.scrollTo("queue-scroll-bottom", anchor: .bottom)
                         }
                     }
                 }
-                .frame(height: stackHeight)
+                .frame(width: unifiedWidth, height: stackHeight, alignment: stackAlignment)
             } else {
-                capsuleColumn
+                capsuleColumn(width: unifiedWidth)
             }
         }
         .accessibilityElement(children: .contain)
@@ -1368,17 +1451,12 @@ private struct AgentQuickInputQueueCapsuleStack: View {
         }
     }
 
-    private var capsuleColumn: some View {
+    private func capsuleColumn(width: CGFloat) -> some View {
         let bottomUpItems = Array(items.enumerated().reversed())
         return VStack(alignment: alignment, spacing: QuickInputQueueStackLayout.capsuleSpacing) {
             ForEach(bottomUpItems, id: \.element.id) { index, item in
                 let distanceFromSwitch = index
                 let travel = CGFloat(min(distanceFromSwitch + 1, 5)) * 24
-                let width = QuickInputQueueStackLayout.capsuleWidth(
-                    previewCount: item.preview.count,
-                    isEditing: editingItemID == item.id,
-                    availableWidth: availableWidth
-                )
                 AgentQuickInputQueueItemCapsule(
                     index: index + 1,
                     item: item,
@@ -1407,6 +1485,7 @@ private struct AgentQuickInputQueueCapsuleStack: View {
                 )
             }
         }
+        .frame(width: width)
         .animation(AgentQuickInputMotion.queue, value: items.map(\.id))
     }
 
@@ -1520,19 +1599,134 @@ private struct AgentQuickInputQueueItemCapsule: View {
                 tintOpacity: tintOpacity,
                 colorScheme: colorScheme,
                 borderColor: isEditing ? Color.accentColor.opacity(0.65) : nil,
-                materialOverride: materialOverride
+                materialOverride: materialOverride,
+                shadowOpacity: elevatedOverCard ? 0.18 : 0.15,
+                shadowRadius: 3.5,
+                shadowOffsetY: 1.5
             )
         )
         .contentShape(Capsule())
-        .shadow(
-            color: .black.opacity(elevatedOverCard ? 0.34 : 0.22),
-            radius: elevatedOverCard ? 9 : 7,
-            y: elevatedOverCard ? 3 : 2
-        )
         .onHover { isHovered = $0 }
         .background(FloatingAccessoryAnchor(isActive: isExpanded))
         .allowsHitTesting(isExpanded)
         .environment(\.colorScheme, colorScheme)
+    }
+}
+
+struct QuickInputOuterShadowView: NSViewRepresentable {
+    let cornerRadius: CGFloat
+    let opacity: Float
+    var radius: CGFloat = 3.5
+    var offsetY: CGFloat = 1.5
+
+    func makeNSView(context: Context) -> HostView {
+        let view = HostView()
+        view.configure(
+            cornerRadius: cornerRadius,
+            opacity: opacity,
+            radius: radius,
+            offsetY: offsetY
+        )
+        return view
+    }
+
+    func updateNSView(_ view: HostView, context: Context) {
+        view.configure(
+            cornerRadius: cornerRadius,
+            opacity: opacity,
+            radius: radius,
+            offsetY: offsetY
+        )
+    }
+
+    final class HostView: NSView {
+        let shadowLayer = CALayer()
+        private let maskShape = CAShapeLayer()
+        private var cornerRadius: CGFloat = 0
+        private var shadowOpacityValue: Float = 0
+        private var shadowRadiusValue: CGFloat = 3.5
+        private var shadowOffsetYValue: CGFloat = 1.5
+
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            wantsLayer = true
+            layer?.masksToBounds = false
+            shadowLayer.backgroundColor = NSColor.clear.cgColor
+            shadowLayer.isOpaque = false
+            shadowLayer.masksToBounds = false
+            shadowLayer.isHidden = true
+            maskShape.fillRule = .evenOdd
+            shadowLayer.mask = maskShape
+            layer?.addSublayer(shadowLayer)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        func configure(
+            cornerRadius: CGFloat,
+            opacity: Float,
+            radius: CGFloat,
+            offsetY: CGFloat
+        ) {
+            self.cornerRadius = cornerRadius
+            self.shadowOpacityValue = opacity
+            self.shadowRadiusValue = radius
+            self.shadowOffsetYValue = offsetY
+            updateShadowLayer()
+        }
+
+        override func layout() {
+            super.layout()
+            updateShadowLayer()
+        }
+
+        override func setFrameSize(_ newSize: NSSize) {
+            super.setFrameSize(newSize)
+            updateShadowLayer()
+        }
+
+        private func updateShadowLayer() {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            defer { CATransaction.commit() }
+
+            guard !bounds.isEmpty, shadowOpacityValue > 0 else {
+                shadowLayer.shadowOpacity = 0
+                shadowLayer.shadowPath = nil
+                shadowLayer.mask = nil
+                shadowLayer.isHidden = true
+                return
+            }
+
+            let pad = ceil(shadowRadiusValue * 3 + abs(shadowOffsetYValue) + 4)
+            shadowLayer.frame = bounds.insetBy(dx: -pad, dy: -pad)
+            let cardRect = CGRect(x: pad, y: pad, width: bounds.width, height: bounds.height)
+            let clampedCorner = min(cornerRadius, min(bounds.width, bounds.height) * 0.5)
+            let cardPath = CGPath(
+                roundedRect: cardRect,
+                cornerWidth: clampedCorner,
+                cornerHeight: clampedCorner,
+                transform: nil
+            )
+            shadowLayer.shadowColor = NSColor.black.cgColor
+            shadowLayer.shadowOpacity = shadowOpacityValue
+            shadowLayer.shadowRadius = shadowRadiusValue
+            shadowLayer.shadowOffset = CGSize(width: 0, height: -shadowOffsetYValue)
+            shadowLayer.shadowPath = cardPath
+            shadowLayer.isHidden = false
+
+            let maskPath = CGMutablePath()
+            maskPath.addRect(shadowLayer.bounds)
+            maskPath.addPath(cardPath)
+            maskShape.frame = shadowLayer.bounds
+            maskShape.path = maskPath
+            shadowLayer.mask = maskShape
+        }
     }
 }
 
@@ -1571,6 +1765,9 @@ struct QuickInputGlassSurface: View {
     var borderOpacity: Double?
     var borderColor: Color?
     var materialOverride: NSVisualEffectView.Material?
+    var shadowOpacity: Float = 0
+    var shadowRadius: CGFloat = 3.5
+    var shadowOffsetY: CGFloat = 1.5
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -1587,6 +1784,15 @@ struct QuickInputGlassSurface: View {
         let reduceTransparency = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
 
         ZStack {
+            if shadowOpacity > 0 {
+                QuickInputOuterShadowView(
+                    cornerRadius: cornerRadius,
+                    opacity: shadowOpacity,
+                    radius: shadowRadius,
+                    offsetY: shadowOffsetY
+                )
+                .allowsHitTesting(false)
+            }
             if reduceTransparency {
                 shape.fill(themeColor)
             } else {
@@ -1640,14 +1846,17 @@ private struct AgentQuickInputCollapsedQueuePill: View {
                 Image(systemName: "tray.full")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(Color.accentColor.opacity(0.9))
+                    .fixedSize()
                 Text(label)
                     .font(.system(size: 11.5, weight: .medium))
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .foregroundStyle(.primary.opacity(0.88))
+                Spacer(minLength: 2)
                 Image(systemName: isExpanded ? "chevron.down" : "chevron.up")
                     .font(.system(size: 8.5, weight: .semibold))
                     .foregroundStyle(.secondary)
+                    .fixedSize()
             }
             .padding(.horizontal, 10)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1658,13 +1867,15 @@ private struct AgentQuickInputCollapsedQueuePill: View {
                     tintOpacity: (isHovered || isExpanded)
                         ? 0.40
                         : AgentQuickInputMetrics.collapsedQueueTintOpacity,
-                    colorScheme: colorScheme
+                    colorScheme: colorScheme,
+                    shadowOpacity: 0.15,
+                    shadowRadius: 3.5,
+                    shadowOffsetY: 1.5
                 )
             )
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .shadow(color: .black.opacity(0.20), radius: 8, y: 2)
         .onHover { isHovered = $0 }
         .pointingHandCursor()
         .help(strings.quickInputCollapsedQueueHelp)

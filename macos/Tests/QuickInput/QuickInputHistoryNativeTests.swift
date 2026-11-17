@@ -125,8 +125,99 @@ struct QuickInputHistoryNativeTests {
         #expect(input.string == "拼")
     }
 
+    @Test func scrollingHistoryCapsulesUnifyWidthAndIsolateOuterCutoutShadow() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let settings = OhMyGhosttySettings(fileURL: home.appendingPathComponent("settings.json"))
+        let store = QuickInputHistoryStore()
+        let model = AgentQuickInputModel(dockHeight: 252, historyStore: store)
+        let pane = UUID()
+        let tab = UUID()
+        model.bindHistory(to: tab, paneIDs: [pane])
+        model.present(for: pane, requestFocus: false)
+
+        for index in 0..<7 {
+            let text = index == 3
+                ? "1234 slightly longer command prompt for unified width check"
+                : "1234 item \(index)"
+            store.record(text, paneID: pane, tabID: tab)
+        }
+        let entries = store.visibleEntries(paneID: pane, tabID: tab, scope: .tab)
+        let expectedWidth = QuickInputHistoryLayout.stackWidth(entries: entries, availableWidth: 500)
+        #expect(expectedWidth > QuickInputHistoryLayout.controlCapsuleWidth)
+        model.historyPresentation.open(entries: entries)
+
+        let host = NSHostingView(rootView: QuickInputHistoryView(
+            model: model,
+            store: store,
+            settings: settings,
+            availableWidth: 500,
+            onSelect: { _ in }
+        ))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 600),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { window.contentView = nil; window.close() }
+
+        host.layoutSubtreeIfNeeded()
+        host.display()
+        try await Task.sleep(for: .milliseconds(60))
+        host.layoutSubtreeIfNeeded()
+
+        let anchors = findAll(FloatingAccessoryAnchor.AnchorView.self, in: host)
+        #expect(anchors.count >= 6)
+        for anchor in anchors {
+            #expect(abs(anchor.bounds.width - expectedWidth) < 0.5)
+            let originInHost = anchor.convert(NSPoint.zero, to: host)
+            #expect(abs(originInHost.x) < 0.5)
+        }
+
+        let scrollView = try #require(find(NSScrollView.self, in: host))
+        #expect(scrollView.frame.width > expectedWidth)
+        #expect(
+            scrollView.contentView.frame.width
+                >= expectedWidth + QuickInputHistoryLayout.scrollHorizontalShadowOutset * 2 - 0.5
+        )
+
+        let shadowHosts = findAll(QuickInputOuterShadowView.HostView.self, in: host)
+        #expect(shadowHosts.count == anchors.count)
+        let rootLayer = try #require(host.layer)
+        let shadowedLayers = collectShadowedLayers(in: rootLayer)
+        let dedicatedLayers = Set(shadowHosts.map { ObjectIdentifier($0.shadowLayer) })
+        #expect(!shadowedLayers.isEmpty)
+        for layer in shadowedLayers {
+            #expect(dedicatedLayers.contains(ObjectIdentifier(layer)))
+            #expect(layer.mask != nil)
+        }
+    }
+
     private func find<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
         (view as? T) ?? view.subviews.lazy.compactMap { find(type, in: $0) }.first
+    }
+
+    private func findAll<T: NSView>(_ type: T.Type, in view: NSView) -> [T] {
+        var results: [T] = []
+        if let match = view as? T {
+            results.append(match)
+        }
+        for subview in view.subviews {
+            results.append(contentsOf: findAll(type, in: subview))
+        }
+        return results
+    }
+
+    private func collectShadowedLayers(in layer: CALayer) -> [CALayer] {
+        var results: [CALayer] = []
+        if layer.shadowOpacity > 0 {
+            results.append(layer)
+        }
+        for sublayer in layer.sublayers ?? [] {
+            results.append(contentsOf: collectShadowedLayers(in: sublayer))
+        }
+        return results
     }
 
     private func keyEvent(_ keyCode: UInt16, windowNumber: Int) throws -> NSEvent {

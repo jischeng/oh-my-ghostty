@@ -181,6 +181,11 @@ extension TerminalController {
         // Manually resigning here creates an intermediate unfocused pane frame.
     }
 
+    func presentQuickInput(forSurfaceID surfaceID: UUID) {
+        guard let surface = surfaceTree.first(where: { $0.id == surfaceID }) else { return }
+        presentQuickInput(for: surface, requestFocus: true)
+    }
+
     func hideCoveringEditorWorkspace(surfaceID: UUID) {
         editorWorkspaceStore.hideIfCovering(surfaceID: surfaceID)
         if editorWorkspaceStore !== EditorWorkspaceStore.shared {

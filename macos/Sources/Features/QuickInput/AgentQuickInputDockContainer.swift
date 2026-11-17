@@ -13,6 +13,7 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
     let queue: AnyView
     let composerHeight: CGFloat
     let queueHeight: CGFloat
+    var queueWidth: CGFloat?
     var isPinned: Bool = false
 
     func makeNSView(context: Context) -> Container { Container() }
@@ -24,6 +25,7 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
             queue: AnyView(queue.environment(\.self, context.environment)),
             composerHeight: composerHeight,
             queueHeight: queueHeight,
+            queueWidth: queueWidth,
             isPinned: isPinned
         )
     }
@@ -38,6 +40,7 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
         let queueHost = NSHostingView(rootView: AnyView(EmptyView()))
         private var requestedComposerHeight: CGFloat = 0
         private var requestedQueueHeight: CGFloat = 0
+        private var requestedQueueWidth: CGFloat?
         private(set) var isPinned: Bool = false
 
         func occludesContentPoint(inWindow pointInWindow: NSPoint) -> Bool {
@@ -73,10 +76,12 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
             queue: AnyView,
             composerHeight: CGFloat,
             queueHeight: CGFloat,
+            queueWidth: CGFloat? = nil,
             isPinned: Bool = false
         ) {
             requestedComposerHeight = max(0, composerHeight)
             requestedQueueHeight = max(0, queueHeight)
+            requestedQueueWidth = queueWidth.map { max(0, $0) }
             self.isPinned = isPinned
             applyAccessoryFrames()
             // Preserve the Surface and ComposerTextView instances, including
@@ -142,12 +147,16 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
                 } else {
                     0
                 }
-                let queueFrame = NSRect(
-                    x: insetX,
-                    y: queueY,
-                    width: cardWidth,
-                    height: nextQueueHeight
-                )
+                let queueFrame: NSRect
+                if nextQueueHeight > 0,
+                   nextComposerHeight == 0,
+                   let requestedQueueWidth {
+                    let resolvedWidth = min(cardWidth, requestedQueueWidth)
+                    let queueX = max(insetX, safeWidth - insetX - resolvedWidth)
+                    queueFrame = NSRect(x: queueX, y: queueY, width: resolvedWidth, height: nextQueueHeight)
+                } else {
+                    queueFrame = NSRect(x: insetX, y: queueY, width: cardWidth, height: nextQueueHeight)
+                }
 
                 let frames: [(NSView, NSRect)] = [
                     (contentHost, contentFrame),
@@ -174,9 +183,9 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
             guard let layer = composerHost.layer else { return }
             if composerVisible, !composerHost.bounds.isEmpty {
                 layer.shadowColor = NSColor.black.cgColor
-                layer.shadowOpacity = 0.40
-                layer.shadowRadius = 20
-                layer.shadowOffset = CGSize(width: 0, height: -6)
+                layer.shadowOpacity = 0.34
+                layer.shadowRadius = 18
+                layer.shadowOffset = CGSize(width: 0, height: -5)
                 layer.shadowPath = CGPath(
                     roundedRect: composerHost.bounds,
                     cornerWidth: AgentQuickInputMetrics.cardCornerRadius,

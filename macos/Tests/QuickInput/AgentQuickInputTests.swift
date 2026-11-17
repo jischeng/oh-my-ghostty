@@ -423,6 +423,21 @@ struct AgentQuickInputTests {
             availableWidth: 160
         ) == 136)
         #expect(AgentQuickInputMetrics.queueButtonHitSize == 30)
+        #expect(AgentQuickInputMetrics.queueCardHeight == 38)
+        #expect(AgentQuickInputMetrics.queueFloatingHeight == 46)
+        #expect(AgentQuickInputMetrics.collapsedQueueHeight == 28)
+        #expect(AgentQuickInputMetrics.collapsedQueueWidth(
+            labelCount: 2,
+            availableWidth: 1_000
+        ) == AgentQuickInputMetrics.collapsedQueueMinimumWidth)
+        #expect(AgentQuickInputMetrics.collapsedQueueWidth(
+            labelCount: 100,
+            availableWidth: 1_000
+        ) == AgentQuickInputMetrics.collapsedQueueMaximumWidth)
+        #expect(AgentQuickInputMetrics.collapsedQueueWidth(
+            labelCount: 100,
+            availableWidth: 140
+        ) == 108)
         #expect(AgentQuickInputMetrics.queueHoverDelayMilliseconds == 300)
     }
 
@@ -1430,5 +1445,26 @@ struct AgentQuickInputTests {
         let docView = try #require(innerScroll.documentView)
         #expect(docView.frame.height >= 2000)
         #expect(surface.frame.size == CGSize(width: 800, height: 400))
+    }
+
+    @Test @MainActor
+    func collapsedQueuePillExpandHelperPresentsQuickInputForTargetSurface() throws {
+        let app = try #require((NSApp.delegate as? AppDelegate)?.ghostty)
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 30"
+        let controller = TerminalController(app, withBaseConfig: config)
+        let window = try #require(controller.window)
+        defer { window.delegate = nil; window.close() }
+        let surface = try #require(controller.surfaceTree.first)
+
+        controller.quickInputModel.present(for: surface.id, requestFocus: false)
+        controller.quickInputModel.draft = "queued prompt"
+        #expect(controller.quickInputModel.enqueueDraft() != nil)
+        controller.quickInputModel.dismiss()
+        #expect(!controller.quickInputModel.isPresented)
+
+        controller.presentQuickInput(forSurfaceID: surface.id)
+        #expect(controller.quickInputModel.isPresented)
+        #expect(controller.quickInputModel.targetSurfaceID == surface.id)
     }
 }

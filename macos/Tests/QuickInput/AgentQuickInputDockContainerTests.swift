@@ -97,9 +97,9 @@ struct AgentQuickInputDockContainerTests {
             #expect(container.composerHost.layer?.masksToBounds == false)
             #expect(container.queueHost.layer?.masksToBounds == false)
             if composerHeight > 0 {
-                #expect(abs((container.composerHost.layer?.shadowOpacity ?? 0) - 0.40) < 0.001)
-                #expect(container.composerHost.layer?.shadowRadius == 20)
-                #expect(container.composerHost.layer?.shadowOffset == CGSize(width: 0, height: -6))
+                #expect(abs((container.composerHost.layer?.shadowOpacity ?? 0) - 0.34) < 0.001)
+                #expect(container.composerHost.layer?.shadowRadius == 18)
+                #expect(container.composerHost.layer?.shadowOffset == CGSize(width: 0, height: -5))
                 #expect(container.composerHost.layer?.shadowPath != nil)
             } else {
                 #expect(container.composerHost.layer?.shadowOpacity == 0)
@@ -217,5 +217,48 @@ struct AgentQuickInputDockContainerTests {
                 #expect(editor.selectedRange() == NSRange(location: 3, length: 2))
             }
         }
+    }
+
+    @Test func collapsedQueuePillFramesAtBottomTrailingWithoutOccludingLeadingPrompt() {
+        let terminal = ResizeTrackingView()
+        let container = AgentQuickInputDockContainer.Container(
+            frame: NSRect(x: 0, y: 0, width: 800, height: 600)
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = container
+        defer { window.contentView = nil; window.close() }
+
+        container.update(
+            content: AnyView(MountProbe { terminal }),
+            composer: AnyView(Color.clear),
+            queue: AnyView(Color.clear),
+            composerHeight: 0,
+            queueHeight: 0
+        )
+        container.layoutSubtreeIfNeeded()
+        terminal.frameChangeCount = 0
+
+        container.update(
+            content: AnyView(MountProbe { terminal }),
+            composer: AnyView(Color.clear),
+            queue: AnyView(Color.clear),
+            composerHeight: 0,
+            queueHeight: AgentQuickInputMetrics.collapsedQueueHeight,
+            queueWidth: 172
+        )
+        container.layoutSubtreeIfNeeded()
+
+        #expect(terminal.frameChangeCount == 0)
+        #expect(container.contentHost.frame == NSRect(x: 0, y: 0, width: 800, height: 600))
+        #expect(container.composerHost.isHidden)
+        #expect(!container.queueHost.isHidden)
+        #expect(container.queueHost.frame == NSRect(x: 612, y: 12, width: 172, height: 28))
+        #expect(!container.occludesContentPoint(inWindow: NSPoint(x: 60, y: 20)))
+        #expect(!container.occludesContentPoint(inWindow: NSPoint(x: 500, y: 20)))
+        #expect(container.occludesContentPoint(inWindow: NSPoint(x: 680, y: 20)))
     }
 }

@@ -228,8 +228,14 @@ enum AgentQuickInputMetrics {
     static let floatingTopMargin: CGFloat = 16
     static let cardCornerRadius: CGFloat = 12
     static let queueLaneHeight: CGFloat = 60
-    static let queueCardHeight: CGFloat = 44
+    static let queueCardHeight: CGFloat = 38
     static let queueFloatingHeight: CGFloat = queueCardHeight + 8
+    static let collapsedQueueHeight: CGFloat = 28
+    static let collapsedQueueMinimumWidth: CGFloat = 96
+    static let collapsedQueueMaximumWidth: CGFloat = 224
+    static let composerTintOpacity: Double = 0.74
+    static let queueCardTintOpacity: Double = 0.70
+    static let collapsedQueueTintOpacity: Double = 0.58
     static let queueButtonHitSize: CGFloat = 30
     static let queueHoverDelayMilliseconds = 300
     static let queueMinimumWidth: CGFloat = 150
@@ -246,6 +252,18 @@ enum AgentQuickInputMetrics {
         return min(
             max(estimated, queueMinimumWidth),
             min(queueMaximumWidth, available)
+        )
+    }
+
+    static func collapsedQueueWidth(
+        labelCount: Int,
+        availableWidth: CGFloat
+    ) -> CGFloat {
+        let estimated = CGFloat(labelCount) * 7.2 + 56
+        let available = max(1, availableWidth - floatingHorizontalInset * 2)
+        return min(
+            max(estimated, collapsedQueueMinimumWidth),
+            min(collapsedQueueMaximumWidth, available)
         )
     }
 
@@ -820,6 +838,7 @@ final class ShortcutRecorderButton: NSButton {
 struct AgentQuickInputDock<Content: View>: View {
     @ObservedObject var controller: TerminalController
     @ObservedObject var model: AgentQuickInputModel
+    @ObservedObject private var settings = OhMyGhosttySettings.shared
     @ObservedObject private var secureInput = SecureInput.shared
     let content: Content
 
@@ -833,14 +852,30 @@ struct AgentQuickInputDock<Content: View>: View {
         self.content = content()
     }
 
+    private var strings: SettingsStrings { SettingsStrings(language: settings.language) }
+
     var body: some View {
-        AgentQuickInputDockContainer(
+        let items = presentedQueueItems
+        let queueHeight: CGFloat = if items.isEmpty {
+            0
+        } else if model.isPresented {
+            AgentQuickInputMetrics.queueFloatingHeight
+        } else {
+            AgentQuickInputMetrics.collapsedQueueHeight
+        }
+        let queueWidth: CGFloat? = if !items.isEmpty, !model.isPresented {
+            collapsedPillWidth(for: items)
+        } else {
+            nil
+        }
+
+        return AgentQuickInputDockContainer(
             content: AnyView(content),
             composer: AnyView(composer),
             queue: AnyView(queue),
             composerHeight: model.isPresented ? model.dockHeight : 0,
-            queueHeight: presentedQueueIDs.isEmpty
-                ? 0 : AgentQuickInputMetrics.queueFloatingHeight,
+            queueHeight: queueHeight,
+            queueWidth: queueWidth,
             isPinned: model.isPinned
         )
     }
@@ -859,16 +894,26 @@ struct AgentQuickInputDock<Content: View>: View {
         if let surfaceID = presentedQueueSurfaceID,
            let queue = model.state(for: surfaceID)?.queue,
            !queue.isEmpty {
-            AgentQuickInputQueueLane(
-                items: queue,
-                surfaceID: surfaceID,
-                model: model,
-                isSendLocked: isQueueSendLocked(for: surfaceID),
-                send: { controller.sendQueuedQuickInput($0, from: surfaceID) },
-                edit: { controller.editQueuedQuickInput($0, from: surfaceID) },
-                remove: { controller.removeQueuedQuickInput($0, from: surfaceID) },
-                chromeBackground: controller.quickInputAccessoryBackground(isPinned: model.isPinned)
-            )
+            if model.isPresented {
+                AgentQuickInputQueueLane(
+                    items: queue,
+                    surfaceID: surfaceID,
+                    model: model,
+                    isSendLocked: isQueueSendLocked(for: surfaceID),
+                    send: { controller.sendQueuedQuickInput($0, from: surfaceID) },
+                    edit: { controller.editQueuedQuickInput($0, from: surfaceID) },
+                    remove: { controller.removeQueuedQuickInput($0, from: surfaceID) },
+                    chromeBackground: controller.quickInputAccessoryBackground(isPinned: model.isPinned)
+                )
+            } else {
+                AgentQuickInputCollapsedQueuePill(
+                    items: queue,
+                    chromeBackground: controller.quickInputAccessoryBackground(isPinned: model.isPinned),
+                    strings: strings
+                ) {
+                    controller.presentQuickInput(forSurfaceID: surfaceID)
+                }
+            }
         }
     }
 
@@ -882,11 +927,23 @@ struct AgentQuickInputDock<Content: View>: View {
         return (controller.focusedSurface ?? controller.surfaceTree.first)?.id
     }
 
-    private var presentedQueueIDs: [UUID] {
+    private var presentedQueueItems: [AgentQuickInputQueueItem] {
         guard let surfaceID = presentedQueueSurfaceID else { return [] }
-        return model.state(for: surfaceID)?.queue.map(\.id) ?? []
+        return model.state(for: surfaceID)?.queue ?? []
     }
 
+    private func collapsedPillLabel(for items: [AgentQuickInputQueueItem]) -> String {
+        let badge = strings.quickInputCollapsedQueueBadge(items.count)
+        guard let preview = items.first?.preview, !preview.isEmpty else { return badge }
+        return "\(badge) · \(preview)"
+    }
+
+    private func collapsedPillWidth(for items: [AgentQuickInputQueueItem]) -> CGFloat {
+        AgentQuickInputMetrics.collapsedQueueWidth(
+            labelCount: collapsedPillLabel(for: items).count,
+            availableWidth: 1_000
+        )
+    }
 }
 
 private struct AgentQuickInputResizeHandle: View {
@@ -983,6 +1040,156 @@ private struct AgentQuickInputQueueLane: View {
     }
 }
 
+private struct QuickInputGlassSurface<S: InsettableShape>: View {
+    let shape: S
+    let themeColor: Color
+    let tintOpacity: Double
+    let colorScheme: ColorScheme
+    var borderOpacity: Double?
+
+    var body: some View {
+        let topRim = colorScheme == .light ? 0.52 : 0.18
+        let bottomRim = colorScheme == .light ? 0.10 : 0.08
+        let rimStroke = LinearGradient(
+            colors: [
+                Color.white.opacity(topRim),
+                Color.primary.opacity(bottomRim)
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+
+        ZStack {
+            shape.fill(.ultraThinMaterial)
+            shape.fill(themeColor.opacity(tintOpacity))
+        }
+        .clipShape(shape)
+        .overlay {
+            if let borderOpacity {
+                shape
+                    .strokeBorder(Color.primary.opacity(borderOpacity), lineWidth: 1)
+                    .allowsHitTesting(false)
+            } else {
+                shape
+                    .strokeBorder(rimStroke, lineWidth: 1)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+}
+
+private struct AgentQuickInputCollapsedQueuePill: View {
+    let items: [AgentQuickInputQueueItem]
+    let chromeBackground: Color
+    let strings: SettingsStrings
+    let expand: () -> Void
+    @State private var isHovered = false
+
+    private var colorScheme: ColorScheme {
+        NSColor(chromeBackground).isLightColor ? .light : .dark
+    }
+
+    private var label: String {
+        let badge = strings.quickInputCollapsedQueueBadge(items.count)
+        guard let preview = items.first?.preview, !preview.isEmpty else { return badge }
+        return "\(badge) · \(preview)"
+    }
+
+    var body: some View {
+        Button(action: expand) {
+            HStack(spacing: 6) {
+                Image(systemName: "tray.full")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(Color.accentColor.opacity(0.9))
+                Text(label)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .foregroundStyle(.primary.opacity(0.88))
+                Image(systemName: "chevron.up")
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(
+                QuickInputGlassSurface(
+                    shape: Capsule(),
+                    themeColor: chromeBackground,
+                    tintOpacity: isHovered ? 0.74 : AgentQuickInputMetrics.collapsedQueueTintOpacity,
+                    colorScheme: colorScheme
+                )
+            )
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .shadow(color: .black.opacity(0.20), radius: 8, y: 2)
+        .onHover { isHovered = $0 }
+        .pointingHandCursor()
+        .help(strings.quickInputCollapsedQueueHelp)
+        .accessibilityLabel(strings.quickInputCollapsedQueueBadge(items.count))
+        .environment(\.colorScheme, colorScheme)
+    }
+}
+
+private struct QuickInputQueueIconButtonStyle: ButtonStyle {
+    var isDestructive = false
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovered = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        let boxFill: Color = if !isEnabled {
+            .clear
+        } else if isDestructive {
+            Color.red.opacity(configuration.isPressed ? 0.22 : (isHovered ? 0.14 : 0))
+        } else {
+            Color.primary.opacity(configuration.isPressed ? 0.18 : (isHovered ? 0.11 : 0))
+        }
+        let iconColor: Color = if !isEnabled {
+            .secondary
+        } else if isDestructive && (isHovered || configuration.isPressed) {
+            Color.red.opacity(0.9)
+        } else if isHovered || configuration.isPressed {
+            .primary
+        } else {
+            .secondary
+        }
+
+        return configuration.label
+            .font(.system(size: 11.5, weight: .medium))
+            .foregroundStyle(iconColor)
+            .frame(
+                width: AgentQuickInputMetrics.queueButtonHitSize,
+                height: AgentQuickInputMetrics.queueButtonHitSize
+            )
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(boxFill)
+                    .frame(width: 26, height: 26)
+            )
+            .contentShape(Rectangle())
+            .opacity(isEnabled ? 1 : 0.4)
+            .onHover { isHovered = $0 }
+    }
+}
+
+private struct QuickInputQueueIconButton: View {
+    let symbol: String
+    let helpText: String
+    var isDestructive = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+        }
+        .buttonStyle(QuickInputQueueIconButtonStyle(isDestructive: isDestructive))
+        .help(helpText)
+        .accessibilityLabel(helpText)
+        .pointingHandCursor()
+    }
+}
+
 private struct AgentQuickInputQueueCard: View {
     let item: AgentQuickInputQueueItem
     let isEditing: Bool
@@ -997,24 +1204,20 @@ private struct AgentQuickInputQueueCard: View {
     @State private var hoverPreviewTask: Task<Void, Never>?
 
     private var strings: SettingsStrings { SettingsStrings(language: settings.language) }
+    private var colorScheme: ColorScheme {
+        NSColor(chromeBackground).isLightColor ? .light : .dark
+    }
 
     var body: some View {
         let cardShape = RoundedRectangle(cornerRadius: 10, style: .continuous)
 
-        return HStack(spacing: 2) {
-            Button(action: send) {
-                Image(systemName: isSendLocked ? "lock.fill" : "arrow.turn.down.right")
-                    .frame(
-                        width: AgentQuickInputMetrics.queueButtonHitSize,
-                        height: AgentQuickInputMetrics.queueButtonHitSize
-                    )
-                    .contentShape(Rectangle())
-            }
+        return HStack(spacing: 4) {
+            QuickInputQueueIconButton(
+                symbol: isSendLocked ? "lock.fill" : "arrow.turn.down.right",
+                helpText: isSendLocked ? strings.quickInputPasswordLockedMessage : "Send now",
+                action: send
+            )
             .disabled(isSendLocked)
-            .opacity(isSendLocked ? 0.45 : 1)
-            .foregroundStyle(.secondary)
-            .help(isSendLocked ? strings.quickInputPasswordLockedMessage : "Send now")
-            .pointingHandCursor()
 
             Text(item.preview)
                 .font(.system(.body, design: .monospaced))
@@ -1039,47 +1242,45 @@ private struct AgentQuickInputQueueCard: View {
                     )
                 }
 
-            Button(action: edit) {
-                Image(systemName: "pencil")
-                    .frame(
-                        width: AgentQuickInputMetrics.queueButtonHitSize,
-                        height: AgentQuickInputMetrics.queueButtonHitSize
-                    )
-                    .contentShape(Rectangle())
-            }
-            .help("Edit queued message")
-            .pointingHandCursor()
+            Rectangle()
+                .fill(Color.primary.opacity(0.10))
+                .frame(width: 1, height: 14)
 
-            Button(action: remove) {
-                Image(systemName: "trash")
-                    .frame(
-                        width: AgentQuickInputMetrics.queueButtonHitSize,
-                        height: AgentQuickInputMetrics.queueButtonHitSize
-                    )
-                    .contentShape(Rectangle())
-            }
-            .help("Remove queued message")
-            .pointingHandCursor()
-        }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 6)
-        .frame(height: AgentQuickInputMetrics.queueCardHeight)
-        .background(chromeBackground, in: cardShape)
-        .overlay(
-            cardShape
-                .fill(.primary.opacity(hovered ? 0.06 : 0))
-                .allowsHitTesting(false)
-        )
-        .clipShape(cardShape)
-        .overlay {
-            cardShape
-                .strokeBorder(
-                    isEditing ? Color.accentColor : .primary.opacity(0.18),
-                    lineWidth: isEditing ? 1.5 : 1
+            HStack(spacing: 2) {
+                QuickInputQueueIconButton(
+                    symbol: "pencil",
+                    helpText: "Edit queued message",
+                    action: edit
                 )
-                .allowsHitTesting(false)
+
+                QuickInputQueueIconButton(
+                    symbol: "trash",
+                    helpText: "Remove queued message",
+                    isDestructive: true,
+                    action: remove
+                )
+            }
         }
-        .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
+        .padding(.horizontal, 4)
+        .frame(height: AgentQuickInputMetrics.queueCardHeight)
+        .background(
+            QuickInputGlassSurface(
+                shape: cardShape,
+                themeColor: chromeBackground,
+                tintOpacity: isEditing
+                    ? 0.82
+                    : (hovered ? 0.76 : AgentQuickInputMetrics.queueCardTintOpacity),
+                colorScheme: colorScheme
+            )
+        )
+        .overlay {
+            if isEditing {
+                cardShape
+                    .strokeBorder(Color.accentColor, lineWidth: 1.5)
+                    .allowsHitTesting(false)
+            }
+        }
+        .shadow(color: .black.opacity(0.22), radius: 10, y: 3)
         .contentShape(cardShape)
         .onDisappear { hoverPreviewTask?.cancel() }
         .animation(.easeOut(duration: 0.12), value: hovered)
@@ -1205,7 +1406,7 @@ private struct AgentQuickInputComposer: View {
             style: .continuous
         )
 
-        return VStack(alignment: .leading, spacing: 8) {
+        return VStack(alignment: .leading, spacing: 6) {
             AgentQuickInputTextEditor(
                 text: $model.draft,
                 placeholder: model.isEditingQueuedItem
@@ -1238,6 +1439,10 @@ private struct AgentQuickInputComposer: View {
                 companionSurfaceID: model.targetSurfaceID
             )
             .background(.clear)
+
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 1)
 
             HStack(spacing: QuickInputFooterStyle.itemSpacing) {
                 if !settings.quickInputImportShortcut.isEmpty, !model.isEditingQueuedItem {
@@ -1340,9 +1545,17 @@ private struct AgentQuickInputComposer: View {
             .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.top, 10)
+        .padding(.bottom, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(chromeBackground, in: cardShape)
+        .background(
+            QuickInputGlassSurface(
+                shape: cardShape,
+                themeColor: chromeBackground,
+                tintOpacity: AgentQuickInputMetrics.composerTintOpacity,
+                colorScheme: cardColorScheme
+            )
+        )
         .overlay(alignment: .top) {
             AgentQuickInputResizeHandle(
                 controller: controller,
@@ -1351,14 +1564,6 @@ private struct AgentQuickInputComposer: View {
             )
         }
         .clipShape(cardShape)
-        .overlay(
-            cardShape
-                .strokeBorder(
-                    Color.primary.opacity(cardColorScheme == .light ? 0.12 : 0.18),
-                    lineWidth: 1
-                )
-                .allowsHitTesting(false)
-        )
         .contentShape(cardShape)
         .environment(\.colorScheme, cardColorScheme)
         .accessibilityElement(children: .contain)

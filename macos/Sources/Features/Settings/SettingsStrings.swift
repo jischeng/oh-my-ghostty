@@ -432,6 +432,12 @@ struct SettingsStrings: Equatable, Sendable {
     var quickInputImportDraftHelp: String {
         t("Import Agent Draft", "导入 Agent 草稿")
     }
+    func quickInputCollapsedQueueBadge(_ count: Int) -> String {
+        t("\(count) queued", "排队 \(count)")
+    }
+    var quickInputCollapsedQueueHelp: String {
+        t("Show queued messages in Quick Input", "展开输入框查看排队消息")
+    }
     var quickInputImportInvalid: String {
         t("Use up to four comma-separated shortcuts with control, option or shift and a letter or digit.",
           "使用 control、option、shift 加字母或数字；多个按键组合用逗号分隔，最多四组。")

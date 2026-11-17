@@ -324,9 +324,7 @@ fn view_loop(
     loop {
         let signal = INTERRUPTED.load(Ordering::Relaxed);
         if signal != 0 {
-            if !out_buf.is_empty() {
-                let _ = raw_stdout.write_all(&out_buf);
-            }
+            let _ = flush_out_buf(&mut *raw_stdout, &mut out_buf);
             return Ok(128 + signal);
         }
         let mut drained_frames = 0usize;
@@ -338,19 +336,14 @@ fn view_loop(
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    if !out_buf.is_empty() {
-                        let _ = raw_stdout.write_all(&out_buf);
-                    }
+                    let _ = flush_out_buf(&mut *raw_stdout, &mut out_buf);
                     return Err(io::ErrorKind::UnexpectedEof.into());
                 }
             };
             match frame.kind {
                 b'T' => {
                     let status: Value = serde_json::from_slice(&frame.data)?;
-                    if !out_buf.is_empty() {
-                        raw_stdout.write_all(&out_buf)?;
-                        out_buf.clear();
-                    }
+                    flush_out_buf(&mut *raw_stdout, &mut out_buf)?;
                     sync_hold_started = None;
                     generation = frame.seq;
                     ready = false;
@@ -529,10 +522,7 @@ fn view_loop(
                     }
                 }
                 b'X' => {
-                    if !out_buf.is_empty() {
-                        raw_stdout.write_all(&out_buf)?;
-                        out_buf.clear();
-                    }
+                    flush_out_buf(&mut *raw_stdout, &mut out_buf)?;
                     if !pending_output.is_empty() {
                         let mut ended = Screen::new(80, 24)?;
                         let mut filter = crate::terminal_output::Relay::default();
@@ -544,10 +534,7 @@ fn view_loop(
                         .ok_or_else(|| io::Error::other("invalid remote exit status"));
                 }
                 b'E' => {
-                    if !out_buf.is_empty() {
-                        let _ = raw_stdout.write_all(&out_buf);
-                        out_buf.clear();
-                    }
+                    let _ = flush_out_buf(&mut *raw_stdout, &mut out_buf);
                     return Err(io::Error::other(
                         String::from_utf8_lossy(&frame.data).into_owned(),
                     ));
@@ -587,8 +574,7 @@ fn view_loop(
             || out_buf.len() >= INLINE_OUT_BUF_LIMIT
             || sync_hold_started.is_some_and(|started| started.elapsed() >= INLINE_SYNC_HOLD_LIMIT)
         {
-            raw_stdout.write_all(&out_buf)?;
-            out_buf.clear();
+            flush_out_buf(&mut *raw_stdout, &mut out_buf)?;
             sync_hold_started = None;
         } else {
             sync_hold_started.get_or_insert_with(Instant::now);
@@ -630,6 +616,7 @@ fn view_loop(
                 let mut bytes = [0; 8192];
                 let len = io::stdin().read(&mut bytes)?;
                 if len == 0 {
+                    flush_out_buf(&mut *raw_stdout, &mut out_buf)?;
                     return Ok(0);
                 }
                 if ready {
@@ -638,14 +625,24 @@ fn view_loop(
                     }
                     Frame::new(b'I', generation, &bytes[..len]).send(socket)?;
                 } else if bytes[..len].contains(&3) {
+                    flush_out_buf(&mut *raw_stdout, &mut out_buf)?;
                     return Ok(130);
                 }
             }
             if fds[0].revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+                flush_out_buf(&mut *raw_stdout, &mut out_buf)?;
                 return Ok(0);
             }
         }
     }
+}
+
+fn flush_out_buf(out: &mut impl Write, buf: &mut Vec<u8>) -> io::Result<()> {
+    if !buf.is_empty() {
+        out.write_all(buf)?;
+        buf.clear();
+    }
+    Ok(())
 }
 
 struct Screen {
@@ -845,5 +842,17 @@ mod tests {
                 .any(|w| w == b"\x1b[999;1H"),
             "alt-screen repaint must not emit scrollback newlines"
         );
+    }
+
+    #[test]
+    fn flush_out_buf_drains_and_clears_buffered_bytes_for_eof_paths() {
+        let mut out = Vec::new();
+        let mut buf = b"\x1b[?2026h\x1b[2Jpartial".to_vec();
+        flush_out_buf(&mut out, &mut buf).unwrap();
+        assert_eq!(out, b"\x1b[?2026h\x1b[2Jpartial");
+        assert!(buf.is_empty());
+        // Calling again on empty buffer must be a clean no-op.
+        flush_out_buf(&mut out, &mut buf).unwrap();
+        assert_eq!(out, b"\x1b[?2026h\x1b[2Jpartial");
     }
 }

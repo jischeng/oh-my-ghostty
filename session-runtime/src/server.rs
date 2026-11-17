@@ -604,32 +604,44 @@ fn update_pty_backpressure(pty_backpressured: &mut bool, peers: &[Peer]) {
     }
 }
 
-fn has_xterm_ghostty_in_dir(dir: &Path) -> bool {
-    let x_path = dir.join("x/xterm-ghostty");
-    if fs::metadata(&x_path).is_ok_and(|m| m.is_file() && m.len() > 0) {
-        return true;
+fn terminfo_entry_has_sync(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() == 0 || meta.len() > 256 * 1024 {
+        return false;
     }
-    let hex_path = dir.join("78/xterm-ghostty");
-    fs::metadata(&hex_path).is_ok_and(|m| m.is_file() && m.len() > 0)
+    fs::read(path).is_ok_and(|bytes| bytes.windows(5).any(|w| w == b"Sync\0"))
 }
 
-/// Check whether `xterm-ghostty` terminfo is resolvable on this host.
-/// Returns `Some(None)` if system / `$TERMINFO` / `~/.terminfo` already finds it,
-/// `Some(Some(dir))` if found only under `<state_dir>/terminfo`, or `None` if unavailable.
-fn resolve_xterm_ghostty_terminfo_dir(state_dir: Option<&Path>) -> Option<Option<PathBuf>> {
-    if let Some(dir) = std::env::var_os("TERMINFO").filter(|v| !v.is_empty()) {
-        if has_xterm_ghostty_in_dir(Path::new(&dir)) {
+fn has_xterm_ghostty_in_dir(dir: &Path) -> bool {
+    terminfo_entry_has_sync(&dir.join("x/xterm-ghostty"))
+        || terminfo_entry_has_sync(&dir.join("78/xterm-ghostty"))
+}
+
+fn resolve_xterm_ghostty_terminfo_dir_with(
+    inherited_terminfo: Option<&std::ffi::OsStr>,
+    home: Option<&std::ffi::OsStr>,
+    system_dirs: &[&Path],
+    state_dir: Option<&Path>,
+    probe_infocmp_sync: impl FnOnce() -> bool,
+) -> Option<Option<PathBuf>> {
+    let inherited = inherited_terminfo.filter(|v| !v.is_empty());
+    if let Some(dir) = inherited {
+        if has_xterm_ghostty_in_dir(Path::new(dir)) {
             return Some(None);
         }
     }
-    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-        if has_xterm_ghostty_in_dir(&Path::new(&home).join(".terminfo")) {
-            return Some(None);
+    let needs_terminfo_override = inherited.is_some();
+    if let Some(home) = home.filter(|v| !v.is_empty()) {
+        let dir = Path::new(home).join(".terminfo");
+        if has_xterm_ghostty_in_dir(&dir) {
+            return Some(needs_terminfo_override.then_some(dir));
         }
     }
-    for system_dir in ["/etc/terminfo", "/lib/terminfo", "/usr/share/terminfo"] {
-        if has_xterm_ghostty_in_dir(Path::new(system_dir)) {
-            return Some(None);
+    for system_dir in system_dirs {
+        if has_xterm_ghostty_in_dir(system_dir) {
+            return Some(needs_terminfo_override.then(|| system_dir.to_path_buf()));
         }
     }
     if let Some(state_terminfo) = state_dir.map(|d| d.join("terminfo")) {
@@ -637,17 +649,44 @@ fn resolve_xterm_ghostty_terminfo_dir(state_dir: Option<&Path>) -> Option<Option
             return Some(Some(state_terminfo));
         }
     }
-    if std::process::Command::new("infocmp")
-        .arg("xterm-ghostty")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
-    {
+    if !needs_terminfo_override && probe_infocmp_sync() {
         return Some(None);
     }
     None
+}
+
+/// Check whether `xterm-ghostty` terminfo (with extended `Sync` capability) is
+/// resolvable on this host.
+/// Returns `Some(None)` if inherited `$TERMINFO` / `~/.terminfo` / system DB
+/// already resolves it, `Some(Some(dir))` if the child PTY needs `TERMINFO=dir`
+/// (e.g. `<state_dir>/terminfo`, or overriding an inherited `$TERMINFO` that lacks it),
+/// or `None` if unavailable.
+fn resolve_xterm_ghostty_terminfo_dir(state_dir: Option<&Path>) -> Option<Option<PathBuf>> {
+    let inherited_terminfo = std::env::var_os("TERMINFO");
+    let home = std::env::var_os("HOME");
+    let system_dirs = [
+        Path::new("/etc/terminfo"),
+        Path::new("/lib/terminfo"),
+        Path::new("/usr/share/terminfo"),
+        Path::new("/usr/local/share/terminfo"),
+    ];
+    resolve_xterm_ghostty_terminfo_dir_with(
+        inherited_terminfo.as_deref(),
+        home.as_deref(),
+        &system_dirs,
+        state_dir,
+        || {
+            std::process::Command::new("infocmp")
+                .args(["-x", "-1", "xterm-ghostty"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .output()
+                .is_ok_and(|out| {
+                    out.status.success() && out.stdout.windows(4).any(|w| w == b"Sync")
+                })
+        },
+    )
 }
 
 fn queue_snapshot(peer: &mut Peer, seq: u64, snapshot: io::Result<Vec<u8>>) -> bool {
@@ -1043,9 +1082,7 @@ pub fn serve_managed(
     } else {
         command.env("TERM", &resolved_term);
         if let Some(Some(dir)) = terminfo_dir.as_ref() {
-            if std::env::var_os("TERMINFO").is_none() {
-                command.env("TERMINFO", dir);
-            }
+            command.env("TERMINFO", dir);
         }
         let colorterm = remote_cfg
             .as_ref()
@@ -1214,20 +1251,18 @@ pub fn serve_managed(
     let vt_dark_scheme = remote_cfg
         .as_ref()
         .and_then(|r| r.color_scheme.as_deref())
-        .map(|s| !s.eq_ignore_ascii_case("light"))
-        .or(Some(true));
-    let vt_fg = remote_cfg
-        .as_ref()
-        .and_then(|r| r.foreground)
-        .or(Some([0xff, 0xff, 0xff]));
-    let vt_bg = remote_cfg
-        .as_ref()
-        .and_then(|r| r.background)
-        .or(Some([0x28, 0x2c, 0x34]));
-    let vt_cursor = remote_cfg
-        .as_ref()
-        .and_then(|r| r.cursor)
-        .or(vt_fg);
+        .and_then(|s| {
+            if s.eq_ignore_ascii_case("light") {
+                Some(false)
+            } else if s.eq_ignore_ascii_case("dark") {
+                Some(true)
+            } else {
+                None
+            }
+        });
+    let vt_fg = remote_cfg.as_ref().and_then(|r| r.foreground);
+    let vt_bg = remote_cfg.as_ref().and_then(|r| r.background);
+    let vt_cursor = remote_cfg.as_ref().and_then(|r| r.cursor).or(vt_fg);
     let vt_term_program = resolved_term_program.clone();
     let vt_term_version = resolved_term_program_version.clone();
     let vt_terminfo = resolved_term.clone();
@@ -1236,7 +1271,9 @@ pub fn serve_managed(
         vt_term_version.as_deref(),
         Some(&vt_terminfo),
     );
-    let _ = vt.set_theme(vt_dark_scheme, vt_fg, vt_bg, vt_cursor);
+    if vt_dark_scheme.is_some() || vt_fg.is_some() || vt_bg.is_some() || vt_cursor.is_some() {
+        let _ = vt.set_theme(vt_dark_scheme, vt_fg, vt_bg, vt_cursor);
+    }
     let mut seq = 0u64;
     let mut snapshot_schedule = SnapshotSchedule::new(Instant::now());
     if is_resurrect {
@@ -2762,9 +2799,9 @@ mod tests {
         fs::create_dir_all(&terminfo_hex).unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
         fs::set_permissions(&sessions, fs::Permissions::from_mode(0o700)).unwrap();
-        // Provide synthetic compiled xterm-ghostty entries in state_dir/terminfo.
-        fs::write(terminfo_x.join("xterm-ghostty"), b"synthetic-terminfo").unwrap();
-        fs::write(terminfo_hex.join("xterm-ghostty"), b"synthetic-terminfo").unwrap();
+        // Provide synthetic compiled xterm-ghostty entries with Sync capability in state_dir/terminfo.
+        fs::write(terminfo_x.join("xterm-ghostty"), b"synthetic-terminfo\0Sync\0").unwrap();
+        fs::write(terminfo_hex.join("xterm-ghostty"), b"synthetic-terminfo\0Sync\0").unwrap();
 
         let id = "44444444-4444-4444-4444-444444444444";
         let sock_path = dir.join("sess.sock");
@@ -2777,6 +2814,7 @@ mod tests {
         let dir_clone = dir.clone();
         let handle = thread::spawn(move || {
             let cmd = "python3 -c 'import fcntl,os,struct,sys,termios,time; \
+sys.stdin.readline(); \
 ws=fcntl.ioctl(1,termios.TIOCGWINSZ,b\"\\0\"*8); rows,cols,xp,yp=struct.unpack(\"HHHH\",ws); \
 sys.stdout.write(\"SIZE=%dx%d:%dx%d\\n\" % (cols,rows,xp,yp)); \
 sys.stdout.write(\"ENV=%s|%s|%s|%s\\n\" % (os.environ.get(\"TERM\"),os.environ.get(\"COLORTERM\"),os.environ.get(\"TERM_PROGRAM\"),os.environ.get(\"AGY_CLI_OSC7501\"))); \
@@ -2848,6 +2886,8 @@ time.sleep(0.05)'";
                     Frame::new(ACK, f.seq, &0u64.to_be_bytes())
                         .send(&mut client)
                         .unwrap();
+                    Frame::new(b'W', 0, &[]).send(&mut client).unwrap();
+                    Frame::new(INPUT, 0, b"GO\n").send(&mut client).unwrap();
                 }
                 OUTPUT => {
                     output_frames.push(f.data.clone());
@@ -2879,5 +2919,225 @@ time.sleep(0.05)'";
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn terminfo_resolution_overrides_inherited_terminfo_missing_ghostty_or_sync() {
+        let dir = PathBuf::from(format!(
+            "/tmp/omg-srv-ti-{}",
+            &crate::record::nonce().unwrap()[..8]
+        ));
+        let bad_terminfo = dir.join("bad_ti");
+        let stale_terminfo = dir.join("stale_ti");
+        let home = dir.join("home");
+        let state_dir = dir.join("state");
+        fs::create_dir_all(bad_terminfo.as_path()).unwrap();
+        fs::create_dir_all(stale_terminfo.join("x")).unwrap();
+        fs::create_dir_all(home.join(".terminfo/x")).unwrap();
+        fs::create_dir_all(state_dir.join("terminfo/x")).unwrap();
+        // Entry lacking Sync\0 must be treated as stale/invalid.
+        fs::write(stale_terminfo.join("x/xterm-ghostty"), b"no-sync-cap").unwrap();
+        assert!(!has_xterm_ghostty_in_dir(&stale_terminfo));
+        fs::write(state_dir.join("terminfo/x/xterm-ghostty"), b"ti\0Sync\0").unwrap();
+        assert!(has_xterm_ghostty_in_dir(&state_dir.join("terminfo")));
+
+        // Inherited TERMINFO lacks xterm-ghostty (or is stale), while state_dir has Sync entry:
+        // must return Some(Some(state_dir/terminfo)) so child overrides TERMINFO.
+        assert_eq!(
+            resolve_xterm_ghostty_terminfo_dir_with(
+                Some(bad_terminfo.as_os_str()),
+                Some(home.as_os_str()),
+                &[],
+                Some(&state_dir),
+                || false,
+            ),
+            Some(Some(state_dir.join("terminfo")))
+        );
+        assert_eq!(
+            resolve_xterm_ghostty_terminfo_dir_with(
+                Some(stale_terminfo.as_os_str()),
+                Some(home.as_os_str()),
+                &[],
+                Some(&state_dir),
+                || false,
+            ),
+            Some(Some(state_dir.join("terminfo")))
+        );
+
+        // When HOME/.terminfo has valid entry AND inherited TERMINFO was invalid/stale,
+        // must override child TERMINFO with HOME/.terminfo; when inherited TERMINFO is unset,
+        // returns Some(None).
+        fs::write(home.join(".terminfo/x/xterm-ghostty"), b"ti\0Sync\0").unwrap();
+        assert_eq!(
+            resolve_xterm_ghostty_terminfo_dir_with(
+                Some(bad_terminfo.as_os_str()),
+                Some(home.as_os_str()),
+                &[],
+                Some(&state_dir),
+                || false,
+            ),
+            Some(Some(home.join(".terminfo")))
+        );
+        assert_eq!(
+            resolve_xterm_ghostty_terminfo_dir_with(
+                None,
+                Some(home.as_os_str()),
+                &[],
+                Some(&state_dir),
+                || false,
+            ),
+            Some(None)
+        );
+        assert_eq!(
+            resolve_xterm_ghostty_terminfo_dir_with(
+                Some(home.join(".terminfo").as_os_str()),
+                Some(home.as_os_str()),
+                &[],
+                Some(&state_dir),
+                || false,
+            ),
+            Some(None)
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn serve_managed_leaves_unset_theme_open_and_respects_explicit_light_theme() {
+        fn run_theme_probe(remote_launch: Option<RemoteSessionLaunch>) -> (Vec<u8>, Vec<u8>) {
+            let dir = PathBuf::from(format!(
+                "/tmp/omg-srv-theme-{}",
+                &crate::record::nonce().unwrap()[..8]
+            ));
+            let sessions = dir.join("sessions");
+            fs::create_dir_all(&sessions).unwrap();
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(&sessions, fs::Permissions::from_mode(0o700)).unwrap();
+            let id = "55555555-5555-5555-5555-555555555555";
+            let sock_path = dir.join("sess.sock");
+            let rec_path = sessions.join(format!("{id}.json"));
+            let mut rec = Record::new(id, crate::lifecycle::Policy::default()).unwrap();
+            rec.save(&rec_path).unwrap();
+
+            let sock_clone = sock_path.clone();
+            let rec_clone = rec_path.clone();
+            let handle = thread::spawn(move || {
+                let cmd = r#"python3 -c 'import os, select, sys, termios, time, tty
+sys.stdin.readline()
+fd = 0
+old = termios.tcgetattr(fd)
+tty.setraw(fd)
+os.write(1, b"\x1b[?996n\x1b]11;?\x07")
+end = time.monotonic() + 0.15
+acc = bytearray()
+while time.monotonic() < end:
+    r, _, _ = select.select([fd], [], [], 0.02)
+    if fd in r:
+        acc.extend(os.read(fd, 4096))
+termios.tcsetattr(fd, termios.TCSADRAIN, old)
+os.write(1, b"REPLIED=" + repr(bytes(acc)).encode() + b"\n")
+time.sleep(0.05)'"#;
+                serve_managed(
+                    &sock_clone,
+                    vec!["/bin/sh".into(), "-c".into(), cmd.into()],
+                    Some(ManagedSession {
+                        path: rec_clone,
+                        record: rec,
+                        containment_root: None,
+                        initial_cwd: None,
+                        local_launch: None,
+                        remote_launch,
+                        presentation: None,
+                        resurrect: false,
+                        shutdown_wake: None,
+                    }),
+                )
+            });
+
+            let mut client = None;
+            for _ in 0..100 {
+                if sock_path.exists() {
+                    if let Ok(s) = UnixStream::connect(&sock_path) {
+                        client = Some(s);
+                        break;
+                    }
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            let mut client = match client {
+                Some(c) => c,
+                None => {
+                    let res = handle.join();
+                    panic!("session socket ready (serve_managed returned: {res:?})");
+                }
+            };
+            client
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut collected = Vec::new();
+            let mut writer_replies = Vec::new();
+            loop {
+                let f = Frame::read(&mut client).unwrap();
+                match f.kind {
+                    SNAPSHOT => {
+                        Frame::new(ACK, f.seq, &0u64.to_be_bytes())
+                            .send(&mut client)
+                            .unwrap();
+                        Frame::new(b'W', 0, &[]).send(&mut client).unwrap();
+                        Frame::new(INPUT, 0, b"GO\n").send(&mut client).unwrap();
+                    }
+                    OUTPUT => {
+                        if f.data.windows(7).any(|w| w == b"\x1b[?996n") {
+                            writer_replies.extend_from_slice(b"\x1b[?997;2n");
+                        }
+                        collected.extend_from_slice(&f.data);
+                    }
+                    EXIT => break,
+                    _ => {}
+                }
+            }
+            drop(client);
+            handle.join().unwrap().unwrap();
+            let _ = fs::remove_dir_all(&dir);
+            (collected, writer_replies)
+        }
+
+        // Unset theme (e.g. local session-holder or inline without theme fields) must NOT
+        // fabricate dark mode or #282c34; queries pass through to viewer OUTPUT cleanly.
+        let (unset_output, _) = run_theme_probe(None);
+        let unset_text = String::from_utf8_lossy(&unset_output);
+        assert!(
+            unset_output.windows(7).any(|w| w == b"\x1b[?996n"),
+            "unset theme must pass CSI ?996n through to outer viewer: {unset_text:?}"
+        );
+        assert!(
+            unset_output.windows(6).any(|w| w == b"\x1b]11;?"),
+            "unset theme must pass OSC 11;? through to outer viewer: {unset_text:?}"
+        );
+        assert!(
+            !unset_text.contains("997;1n") && !unset_text.contains("2828/2c2c/3434"),
+            "must never fabricate dark scheme or #282c34: {unset_text:?}"
+        );
+
+        // Explicit Light theme must answer ?997;2n and rgb:fafa/fafa/fafa directly and strip queries.
+        let (light_output, _) = run_theme_probe(Some(RemoteSessionLaunch {
+            cols: Some(80),
+            rows: Some(24),
+            pixel_width: None,
+            pixel_height: None,
+            term: Some("xterm-ghostty".into()),
+            colorterm: Some("truecolor".into()),
+            term_program: Some("ghostty".into()),
+            term_program_version: Some("1.3.2-test".into()),
+            color_scheme: Some("light".into()),
+            foreground: Some([0x10, 0x10, 0x10]),
+            background: Some([0xfa, 0xfa, 0xfa]),
+            cursor: Some([0x10, 0x10, 0x10]),
+            state_dir: None,
+        }));
+        let light_text = String::from_utf8_lossy(&light_output);
+        assert!(light_text.contains("?997;2n"), "{light_text:?}");
+        assert!(light_text.contains("rgb:fafa/fafa/fafa"), "{light_text:?}");
+        assert!(!light_output.windows(7).any(|w| w == b"\x1b[?996n"));
     }
 }

@@ -539,4 +539,32 @@ test "remote client context enriches create and recreate requests only" {
     defer alloc.free(attached);
     try std.testing.expect(std.mem.indexOf(u8, attached, "cols") == null);
     try std.testing.expect(std.mem.indexOf(u8, attached, "term_program") == null);
+
+    // Custom Ghostty config.term and light theme are preserved when request omits "term",
+    // while an explicit request "term" continues to take precedence.
+    const custom_ctx: ClientContext = .{
+        .term = "screen-256color",
+        .version = "1.3.2-test",
+        .dark_scheme = false,
+        .foreground = .{ 0x10, 0x10, 0x10 },
+        .background = .{ 0xfa, 0xfa, 0xfa },
+    };
+    const custom = try withRemoteClientContext(alloc, "{\"id\":\"pane\",\"policy\":{},\"create\":true}", grid, pixels, custom_ctx);
+    defer alloc.free(custom);
+    const parsed_custom = try std.json.parseFromSlice(std.json.Value, alloc, custom, .{});
+    defer parsed_custom.deinit();
+    try std.testing.expectEqualStrings("screen-256color", parsed_custom.value.object.get("term").?.string);
+    try std.testing.expectEqualStrings("light", parsed_custom.value.object.get("color_scheme").?.string);
+
+    const preset = try withRemoteClientContext(
+        alloc,
+        "{\"id\":\"pane\",\"policy\":{},\"create\":true,\"term\":\"xterm-256color\"}",
+        grid,
+        pixels,
+        custom_ctx,
+    );
+    defer alloc.free(preset);
+    const parsed_preset = try std.json.parseFromSlice(std.json.Value, alloc, preset, .{});
+    defer parsed_preset.deinit();
+    try std.testing.expectEqualStrings("xterm-256color", parsed_preset.value.object.get("term").?.string);
 }

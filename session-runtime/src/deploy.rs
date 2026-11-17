@@ -307,6 +307,9 @@ fn execute(mut command: Command, mut input: impl Read + Send + 'static) -> io::R
 }
 /// Probe has no writes. Hosts without a conventional shell/tar/sha256 tool fail
 /// explicitly; there is never a fallback pretending to be a durable session.
+const TERMINFO_PROBE_CMD: &str = "printf '\\nOMG_RUNTIME_PROBE\\n'; uname -s; uname -m; printf '%s\\n' \"$HOME\"; command -v tar >/dev/null; \
+if (command -v infocmp >/dev/null 2>&1 && infocmp -x -1 xterm-ghostty 2>/dev/null | grep -q 'Sync') || (! command -v infocmp >/dev/null 2>&1 && ([ -s \"$HOME/.terminfo/x/xterm-ghostty\" ] || [ -s \"$HOME/.terminfo/78/xterm-ghostty\" ])); then printf 'HAVE\\n'; elif command -v tic >/dev/null 2>&1; then printf 'TIC\\n'; else printf 'NONE\\n'; fi";
+
 pub fn prepare(config: &Connection, interactive: bool) -> io::Result<(String, String)> {
     if !config.auto_install {
         return Err(io::Error::new(
@@ -315,13 +318,7 @@ pub fn prepare(config: &Connection, interactive: bool) -> io::Result<(String, St
         ));
     }
     config.policy.validate()?;
-    let probe = run(
-        config,
-        "printf '\\nOMG_RUNTIME_PROBE\\n'; uname -s; uname -m; printf '%s\\n' \"$HOME\"; command -v tar >/dev/null; \
-if (command -v infocmp >/dev/null 2>&1 && infocmp xterm-ghostty >/dev/null 2>&1) || [ -r \"$HOME/.terminfo/x/xterm-ghostty\" ] || [ -r \"$HOME/.terminfo/78/xterm-ghostty\" ]; then printf 'HAVE\\n'; elif command -v tic >/dev/null 2>&1; then printf 'TIC\\n'; else printf 'NONE\\n'; fi",
-        None,
-        interactive,
-    )?;
+    let probe = run(config, TERMINFO_PROBE_CMD, None, interactive)?;
     let text = String::from_utf8(probe).map_err(io::Error::other)?;
     let mut lines = text
         .split("OMG_RUNTIME_PROBE\n")
@@ -504,17 +501,17 @@ if [ ! -d "$version" ]; then mv "$staging" "$version"; fi
         let terminfo_script = format!(
             r#"set -eu
 umask 077
-if [ -r {state}/terminfo/x/xterm-ghostty ] || [ -r {state}/terminfo/78/xterm-ghostty ]; then
+if (command -v infocmp >/dev/null 2>&1 && TERMINFO={state}/terminfo infocmp -x -1 xterm-ghostty 2>/dev/null | grep -q 'Sync') || (! command -v infocmp >/dev/null 2>&1 && ([ -s {state}/terminfo/x/xterm-ghostty ] || [ -s {state}/terminfo/78/xterm-ghostty ])); then
   cat >/dev/null
 else
   tmp_terminfo=$(mktemp "${{TMPDIR:-/tmp}}/omg-terminfo.XXXXXX")
   trap 'rm -f "$tmp_terminfo"' EXIT
   cat > "$tmp_terminfo"
-  if mkdir -p "$HOME/.terminfo" 2>/dev/null && tic -x "$tmp_terminfo" >/dev/null 2>&1; then
+  if mkdir -p "$HOME/.terminfo" 2>/dev/null && tic -x -o "$HOME/.terminfo" "$tmp_terminfo" >/dev/null 2>&1; then
     if command -v infocmp >/dev/null 2>&1; then
-      infocmp xterm-ghostty >/dev/null 2>&1 || true
+      infocmp -x -1 xterm-ghostty >/dev/null 2>&1 || true
     fi
-  elif mkdir -p {state}/terminfo 2>/dev/null && TERMINFO={state}/terminfo tic -x "$tmp_terminfo" >/dev/null 2>&1; then
+  elif mkdir -p {state}/terminfo 2>/dev/null && tic -x -o {state}/terminfo "$tmp_terminfo" >/dev/null 2>&1; then
     true
   fi
 fi
@@ -902,5 +899,63 @@ mod fast_tests {
         );
         assert!(dir.join("78/xterm-ghostty").exists() || dir.join("x/xterm-ghostty").exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn terminfo_probe_requires_sync_capability_when_infocmp_is_available() {
+        let nonce = crate::record::nonce().unwrap();
+        let root = std::env::temp_dir().join(format!("omg-ti-probe-{}", &nonce[..8]));
+        let bin = root.join("bin");
+        let home = root.join("home");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(home.join(".terminfo/x")).unwrap();
+        fs::write(home.join(".terminfo/x/xterm-ghostty"), b"stale").unwrap();
+        fs::write(bin.join("tic"), "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(bin.join("tic"), fs::Permissions::from_mode(0o700)).unwrap();
+
+        // Stale entry without Sync -> probe must report TIC rather than HAVE.
+        fs::write(
+            bin.join("infocmp"),
+            "#!/bin/sh\nprintf 'xterm-ghostty|Ghostty,\\n\\tam,\\n'\n",
+        )
+        .unwrap();
+        fs::set_permissions(bin.join("infocmp"), fs::Permissions::from_mode(0o700)).unwrap();
+        let path_env = format!("{}:/usr/bin:/bin", bin.display());
+        let stale_out = Command::new("/bin/sh")
+            .args(["-c", TERMINFO_PROBE_CMD])
+            .env("PATH", &path_env)
+            .env("HOME", &home)
+            .output()
+            .unwrap();
+        assert!(stale_out.status.success());
+        let stale_status = String::from_utf8_lossy(&stale_out.stdout)
+            .lines()
+            .last()
+            .unwrap_or("")
+            .to_owned();
+        assert_eq!(stale_status, "TIC");
+
+        // Fresh entry advertising Sync -> probe reports HAVE.
+        fs::write(
+            bin.join("infocmp"),
+            "#!/bin/sh\nprintf 'xterm-ghostty|Ghostty,\\n\\tSync=\\\\E[?2026,\\n'\n",
+        )
+        .unwrap();
+        fs::set_permissions(bin.join("infocmp"), fs::Permissions::from_mode(0o700)).unwrap();
+        let valid_out = Command::new("/bin/sh")
+            .args(["-c", TERMINFO_PROBE_CMD])
+            .env("PATH", &path_env)
+            .env("HOME", &home)
+            .output()
+            .unwrap();
+        assert!(valid_out.status.success());
+        let valid_status = String::from_utf8_lossy(&valid_out.stdout)
+            .lines()
+            .last()
+            .unwrap_or("")
+            .to_owned();
+        assert_eq!(valid_status, "HAVE");
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

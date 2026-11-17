@@ -240,7 +240,7 @@ struct SessionRuntimeDescriptor: Codable, Equatable, Sendable {
             rows: rows,
             pixelWidth: pixelWidth,
             pixelHeight: pixelHeight,
-            term: term ?? (remoteSpawns ? "xterm-ghostty" : nil),
+            term: term,
             colorterm: colorterm ?? (remoteSpawns ? "truecolor" : nil),
             termProgram: termProgram ?? (remoteSpawns ? "ghostty" : nil),
             termProgramVersion: termProgramVersion ?? (remoteSpawns ? (bundleVersion?.isEmpty == false ? bundleVersion : nil) : nil)

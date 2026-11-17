@@ -89,15 +89,20 @@ pub const StreamHandler = struct {
     post_resize: PostResizeState = .{},
 
     pub const PostResizeState = struct {
-        /// Short bounded safety window from the latest resize during which an
-        /// immediate full-screen wipe (`CSI 2 J` / `CSI 3 J`) before the app's
-        /// own `DECSET 2026` frame or cursor restore is coalesced, and a
-        /// scrolled-up primary-screen viewport is restored.
-        pub const idle_window_ms = 120;
+        /// Short bounded safety window from the latest resize (or completed
+        /// redraw cycle) during which an immediate blank-wipe (`CSI J` /
+        /// `CSI 2 J` / `CSI 3 J` leaving only 0-4 top lines) is coalesced
+        /// across a two-phase TUI resize redraw.
+        pub const idle_window_ms = 320;
 
-        /// Hard cap from the latest resize so post-resize coalescing never
-        /// freezes rendering beyond a single short redraw turn (`<= 150ms`).
-        pub const hard_limit_ms = 150;
+        /// Hard cap from the latest resize so post-resize blank-wipe hold
+        /// never freezes rendering past 420ms.
+        pub const hard_limit_ms = 420;
+
+        /// Tail window during which `scroll_save` remains armed (without
+        /// holding `synchronized_output`) so a TUI whose history reprint
+        /// arrives 250-800ms after `SIGWINCH` still restores scrollback.
+        pub const scroll_restore_ms = 900;
 
         pub const ScrollSave = struct {
             offset: usize,
@@ -109,7 +114,9 @@ pub const StreamHandler = struct {
         active: bool = false,
         deadline: ?std.Io.Timestamp = null,
         hard_deadline: ?std.Io.Timestamp = null,
+        scroll_deadline: ?std.Io.Timestamp = null,
         had_scrollback: bool = false,
+        pre_cursor_y: terminal.size.CellCountInt = 0,
         saw_erase_below: bool = false,
         saw_full_clear: bool = false,
         held_sync_output: bool = false,
@@ -168,6 +175,7 @@ pub const StreamHandler = struct {
         self: *StreamHandler,
         msg: apprt.surface.Message,
     ) void {
+        if (comptime apprt.runtime == apprt.none) return;
         // See messageWriter which has similar logic and explains why
         // we may have to do this.
         if (self.surface_mailbox.push(msg, .{ .instant = {} }) == 0) {
@@ -1575,18 +1583,26 @@ pub const StreamHandler = struct {
     }
 
     pub fn setSynchronizedOutput(self: *StreamHandler, enabled: bool) void {
-        self.terminal.modes.set(.synchronized_output, enabled);
         if (enabled) {
+            self.terminal.modes.set(.synchronized_output, true);
             self.seen_synchronized_output = true;
             self.post_resize.held_sync_output = false;
             self.messageWriter(.{ .start_synchronized_output = {} });
-        } else {
-            self.post_resize.held_sync_output = false;
-            if (self.postResizeIsActive() and
-                (self.post_resize.saw_full_clear or self.post_resize.saw_erase_below))
-            {
-                self.completePostResizeCycle();
-            }
+            return;
+        }
+
+        if (self.shouldHoldPostResizeBlankWipe()) {
+            const now = std.Io.Timestamp.now(global.io(), .awake);
+            self.holdPostResizeSyncOutput(now);
+            return;
+        }
+
+        self.terminal.modes.set(.synchronized_output, false);
+        self.post_resize.held_sync_output = false;
+        if (self.postResizeIsActive() and
+            (self.post_resize.saw_full_clear or self.post_resize.saw_erase_below))
+        {
+            self.completePostResizeCycle();
         }
     }
 
@@ -1595,8 +1611,15 @@ pub const StreamHandler = struct {
         if (!self.postResizeIsActive()) return;
         if (!self.post_resize.saw_full_clear and !self.post_resize.saw_erase_below) return;
 
+        if (self.shouldHoldPostResizeBlankWipe()) {
+            const now = std.Io.Timestamp.now(global.io(), .awake);
+            self.holdPostResizeSyncOutput(now);
+            return;
+        }
+
         if (self.post_resize.held_sync_output) {
             self.terminal.modes.set(.synchronized_output, false);
+            self.post_resize.held_sync_output = false;
         }
         if (!self.terminal.modes.get(.synchronized_output)) {
             self.completePostResizeCycle();
@@ -1609,17 +1632,23 @@ pub const StreamHandler = struct {
         pre_sb: terminal.PageList.Scrollbar,
         pre_cursor_y: terminal.size.CellCountInt,
     ) void {
-        _ = pre_cursor_y;
         if (self.terminal.screens.active_key != .primary) {
             self.cancelPostResize();
             return;
         }
 
+        _ = self.postResizeIsActive();
+
         const now = std.Io.Timestamp.now(global.io(), .awake);
         const deadline = now.addDuration(.fromMilliseconds(PostResizeState.idle_window_ms));
         const hard_deadline = now.addDuration(.fromMilliseconds(PostResizeState.hard_limit_ms));
+        const scroll_deadline = now.addDuration(.fromMilliseconds(PostResizeState.scroll_restore_ms));
         const existing_save = if (self.post_resize.active) self.post_resize.scroll_save else null;
         const existing_had_sb = if (self.post_resize.active) self.post_resize.had_scrollback else false;
+        const existing_pre_cursor_y: terminal.size.CellCountInt = if (self.post_resize.active)
+            self.post_resize.pre_cursor_y
+        else
+            0;
         const existing_saw_erase = if (self.post_resize.active) self.post_resize.saw_erase_below else false;
         const existing_saw_clear = if (self.post_resize.active) self.post_resize.saw_full_clear else false;
         const existing_held_sync = if (self.post_resize.active) self.post_resize.held_sync_output else false;
@@ -1638,7 +1667,9 @@ pub const StreamHandler = struct {
             .active = true,
             .deadline = deadline,
             .hard_deadline = hard_deadline,
+            .scroll_deadline = scroll_deadline,
             .had_scrollback = existing_had_sb or (pre_sb.total > pre_sb.len),
+            .pre_cursor_y = @max(existing_pre_cursor_y, pre_cursor_y),
             .saw_erase_below = existing_saw_erase,
             .saw_full_clear = existing_saw_clear,
             .held_sync_output = existing_held_sync,
@@ -1650,7 +1681,7 @@ pub const StreamHandler = struct {
         }
     }
 
-    /// Refresh the bounded post-resize window at the exact moment `SIGWINCH` is
+    /// Refresh the bounded post-resize windows at the exact moment `SIGWINCH` is
     /// sent to the child PTY after live-resize coalescing completes.
     pub fn noteChildResizeCommitted(self: *StreamHandler) void {
         if (!self.post_resize.active) return;
@@ -1662,6 +1693,7 @@ pub const StreamHandler = struct {
         const now = std.Io.Timestamp.now(global.io(), .awake);
         self.post_resize.deadline = now.addDuration(.fromMilliseconds(PostResizeState.idle_window_ms));
         self.post_resize.hard_deadline = now.addDuration(.fromMilliseconds(PostResizeState.hard_limit_ms));
+        self.post_resize.scroll_deadline = now.addDuration(.fromMilliseconds(PostResizeState.scroll_restore_ms));
         if (self.post_resize.held_sync_output and self.terminal.modes.get(.synchronized_output)) {
             self.messageWriter(.{ .start_synchronized_output = {} });
         }
@@ -1674,8 +1706,58 @@ pub const StreamHandler = struct {
         if (self.terminal.screens.active_key != .primary) return;
         if (self.terminal.modes.get(.synchronized_output)) return;
         self.post_resize.scroll_save = PostResizeState.captureScrollSave(self.terminal.screens.active);
+        if (self.post_resize.scroll_save == null and !self.postResizeHoldIsActive()) {
+            self.post_resize = .{};
+        }
     }
 
+    fn postResizeHoldExpired(self: *const StreamHandler, now: std.Io.Timestamp) bool {
+        if (self.post_resize.hard_deadline) |hd| {
+            if (now.durationTo(hd).toNanoseconds() <= 0) return true;
+        } else {
+            return true;
+        }
+        if (self.post_resize.deadline) |dl| {
+            if (now.durationTo(dl).toNanoseconds() <= 0) return true;
+        } else {
+            return true;
+        }
+        return false;
+    }
+
+    fn postResizeScrollExpired(self: *const StreamHandler, now: std.Io.Timestamp) bool {
+        if (self.post_resize.scroll_deadline) |sd| {
+            return now.durationTo(sd).toNanoseconds() <= 0;
+        }
+        return true;
+    }
+
+    /// Returns true while the bounded blank-wipe hold window (`<= 420ms`) is active.
+    pub fn postResizeHoldIsActive(self: *StreamHandler) bool {
+        if (!self.post_resize.active) return false;
+        if (self.terminal.screens.active_key != .primary) {
+            self.cancelPostResize();
+            return false;
+        }
+        const now = std.Io.Timestamp.now(global.io(), .awake);
+        if (self.post_resize.hard_deadline == null and
+            self.post_resize.deadline == null and
+            !self.post_resize.held_sync_output)
+        {
+            if (self.postResizeScrollExpired(now)) {
+                self.finishPostResize();
+            }
+            return false;
+        }
+        if (self.postResizeHoldExpired(now)) {
+            self.finishPostResizeHold();
+            return false;
+        }
+        return true;
+    }
+
+    /// Returns true while either the blank-wipe hold window or the scroll-restore
+    /// tail window (`<= 900ms`) is active on the primary screen.
     pub fn postResizeIsActive(self: *StreamHandler) bool {
         if (!self.post_resize.active) return false;
         if (self.terminal.screens.active_key != .primary) {
@@ -1683,19 +1765,31 @@ pub const StreamHandler = struct {
             return false;
         }
         const now = std.Io.Timestamp.now(global.io(), .awake);
-        if (self.post_resize.hard_deadline) |hd| {
-            if (now.durationTo(hd).toNanoseconds() <= 0) {
-                self.finishPostResize();
-                return false;
-            }
+        if (self.postResizeScrollExpired(now)) {
+            self.finishPostResize();
+            return false;
         }
-        if (self.post_resize.deadline) |dl| {
-            if (now.durationTo(dl).toNanoseconds() <= 0) {
-                self.finishPostResize();
-                return false;
-            }
+        if ((self.post_resize.hard_deadline != null or
+            self.post_resize.deadline != null or
+            self.post_resize.held_sync_output) and
+            self.postResizeHoldExpired(now))
+        {
+            self.finishPostResizeHold();
         }
-        return true;
+        return self.post_resize.active;
+    }
+
+    pub fn shouldHoldPostResizeBlankWipe(self: *StreamHandler) bool {
+        if (!self.postResizeHoldIsActive()) return false;
+        if (!self.post_resize.saw_full_clear and !self.post_resize.saw_erase_below) return false;
+
+        const had_substantial_content = self.post_resize.had_scrollback or
+            self.post_resize.pre_cursor_y >= 4;
+        if (!had_substantial_content) return false;
+
+        const screen = self.terminal.screens.active;
+        const pages = &screen.pages;
+        return pages.total_rows <= pages.rows and screen.cursor.y <= 3;
     }
 
     fn isLikelyPostResizeTuiWipe(self: *const StreamHandler) bool {
@@ -1704,6 +1798,7 @@ pub const StreamHandler = struct {
             !self.terminal.modes.get(.cursor_visible) or
             self.post_resize.held_sync_output or
             self.post_resize.saw_erase_below or
+            self.post_resize.saw_full_clear or
             self.terminal.flags.mouse_event != .none or
             self.terminal.modes.get(.focus_event) or
             self.terminal.screens.active.kitty_keyboard.current().int() != 0;
@@ -1722,20 +1817,24 @@ pub const StreamHandler = struct {
 
     fn noteEraseDisplay(self: *StreamHandler, mode: terminal.EraseDisplay) void {
         if (!self.postResizeIsActive()) return;
+        if (!self.isLikelyPostResizeTuiWipe()) return;
+        const hold_active = self.postResizeHoldIsActive();
         const now = std.Io.Timestamp.now(global.io(), .awake);
         switch (mode) {
             .below => {
-                // Rely on genuine app `DECSET 2026` rather than synthetically
-                // freezing partial `CSI J` wipes; only note `saw_erase_below`
-                // when already inside an active synchronized frame.
-                if (self.terminal.modes.get(.synchronized_output)) {
+                const sync_active = self.terminal.modes.get(.synchronized_output);
+                const full_screen_wipe = (self.post_resize.had_scrollback or self.post_resize.pre_cursor_y >= 4) and
+                    self.terminal.screens.active.cursor.y <= 3;
+                if (sync_active or full_screen_wipe) {
                     self.post_resize.saw_erase_below = true;
+                    if (hold_active and !sync_active) {
+                        self.holdPostResizeSyncOutput(now);
+                    }
                 }
             },
             .complete, .scrollback, .scroll_complete => {
-                if (!self.isLikelyPostResizeTuiWipe()) return;
                 self.post_resize.saw_full_clear = true;
-                if (!self.terminal.modes.get(.synchronized_output)) {
+                if (hold_active and !self.terminal.modes.get(.synchronized_output)) {
                     self.holdPostResizeSyncOutput(now);
                 }
             },
@@ -1750,63 +1849,91 @@ pub const StreamHandler = struct {
         const fresh = self.terminal.screens.active.pages.scrollbar();
         const max_fresh = fresh.total -| fresh.len;
         if (self.post_resize.scroll_save) |saved| {
-            if (max_fresh > 0) {
-                var target: usize = if (fresh.total == saved.total)
-                    @min(saved.offset, max_fresh)
-                else
-                    @min(
-                        (saved.offset * fresh.total + (saved.total / 2)) / @max(@as(usize, 1), saved.total),
-                        max_fresh,
-                    );
-                if (target >= max_fresh and saved.distance_from_bottom > 0) {
-                    const scaled_dist = if (fresh.total == saved.total)
-                        saved.distance_from_bottom
-                    else
-                        @max(
-                            @as(usize, 1),
-                            (saved.distance_from_bottom * fresh.total + (saved.total / 2)) / @max(@as(usize, 1), saved.total),
-                        );
-                    target = max_fresh -| @min(scaled_dist, max_fresh);
-                }
-                self.terminal.scrollViewport(.{ .row = target });
-                self.renderer_state.scroll.snapTo(
-                    @floatFromInt(target),
-                    @floatFromInt(max_fresh),
+            if (max_fresh == 0) return;
+            var target: usize = if (fresh.total == saved.total)
+                @min(saved.offset, max_fresh)
+            else
+                @min(
+                    (saved.offset * fresh.total + (saved.total / 2)) / @max(@as(usize, 1), saved.total),
+                    max_fresh,
                 );
+            if (target >= max_fresh and saved.distance_from_bottom > 0) {
+                const scaled_dist = if (fresh.total == saved.total)
+                    saved.distance_from_bottom
+                else
+                    @max(
+                        @as(usize, 1),
+                        (saved.distance_from_bottom * fresh.total + (saved.total / 2)) / @max(@as(usize, 1), saved.total),
+                    );
+                target = max_fresh -| @min(scaled_dist, max_fresh);
             }
+            self.terminal.scrollViewport(.{ .row = target });
+            self.renderer_state.scroll.snapTo(
+                @floatFromInt(target),
+                @floatFromInt(max_fresh),
+            );
+            self.renderer_state.terminal_generation +%= 1;
         } else if (self.post_resize.saw_full_clear) {
             self.terminal.scrollViewport(.{ .bottom = {} });
             self.renderer_state.scroll.pinBottom(@floatFromInt(max_fresh));
+            self.renderer_state.terminal_generation +%= 1;
         }
-        self.renderer_state.terminal_generation +%= 1;
     }
 
     fn completePostResizeCycle(self: *StreamHandler) void {
+        const fresh_before = self.terminal.screens.active.pages.scrollbar();
+        const max_fresh = fresh_before.total -| fresh_before.len;
         self.restorePostResizeScroll();
-        self.post_resize.saw_erase_below = false;
-        self.post_resize.saw_full_clear = false;
+        if (self.post_resize.scroll_save == null or max_fresh > 0) {
+            self.post_resize.saw_erase_below = false;
+            self.post_resize.saw_full_clear = false;
+        }
         self.post_resize.held_sync_output = false;
 
         const now = std.Io.Timestamp.now(global.io(), .awake);
-        if (self.post_resize.hard_deadline) |hd| {
-            if (now.durationTo(hd).toNanoseconds() <= 0) {
-                self.post_resize = .{};
-                return;
-            }
+        if (!self.postResizeHoldExpired(now)) {
+            const hd = self.post_resize.hard_deadline.?;
             const candidate = now.addDuration(.fromMilliseconds(PostResizeState.idle_window_ms));
             self.post_resize.deadline = if (candidate.durationTo(hd).toNanoseconds() < 0)
                 hd
             else
                 candidate;
-        } else {
-            self.post_resize.deadline = now.addDuration(.fromMilliseconds(PostResizeState.idle_window_ms));
+            return;
         }
+
+        self.post_resize.deadline = null;
+        self.post_resize.hard_deadline = null;
+        if (self.post_resize.scroll_save != null and !self.postResizeScrollExpired(now)) {
+            return;
+        }
+        self.post_resize = .{};
     }
 
     pub fn cancelPostResize(self: *StreamHandler) void {
         if (!self.post_resize.active) return;
         if (self.post_resize.held_sync_output) {
             self.terminal.modes.set(.synchronized_output, false);
+        }
+        self.post_resize = .{};
+    }
+
+    /// Release the blank-wipe sync hold while retaining `scroll_save` for the
+    /// bounded scrollback restoration tail window (`scroll_restore_ms`).
+    pub fn finishPostResizeHold(self: *StreamHandler) void {
+        if (!self.post_resize.active) return;
+        if (self.post_resize.saw_full_clear or self.post_resize.saw_erase_below) {
+            self.restorePostResizeScroll();
+        }
+        if (self.post_resize.held_sync_output) {
+            self.terminal.modes.set(.synchronized_output, false);
+        }
+        self.post_resize.held_sync_output = false;
+        self.post_resize.deadline = null;
+        self.post_resize.hard_deadline = null;
+
+        const now = std.Io.Timestamp.now(global.io(), .awake);
+        if (self.post_resize.scroll_save != null and !self.postResizeScrollExpired(now)) {
+            return;
         }
         self.post_resize = .{};
     }
@@ -1828,8 +1955,9 @@ test "StreamHandler: post-resize relies on genuine DEC 2026 without cursor_y <= 
     const alloc = testing.allocator;
 
     comptime {
-        std.debug.assert(StreamHandler.PostResizeState.idle_window_ms <= 150);
-        std.debug.assert(StreamHandler.PostResizeState.hard_limit_ms <= 150);
+        std.debug.assert(StreamHandler.PostResizeState.idle_window_ms <= 350);
+        std.debug.assert(StreamHandler.PostResizeState.hard_limit_ms <= 450);
+        std.debug.assert(StreamHandler.PostResizeState.scroll_restore_ms <= 1000);
     }
 
     var t = try terminal.Terminal.init(testing.io, alloc, .{
@@ -1994,16 +2122,18 @@ test "StreamHandler: partial CSI J does not freeze outside mode 2026 and full wi
     try t.resize(alloc, .{ .cols = 25, .rows = 10 });
     handler.noteTerminalResize(true, pre_sb, pre_cursor_y);
 
-    // Partial `\x1b[J` outside mode 2026 must NOT synthetically freeze `synchronized_output`.
+    // Partial bottom-area `\x1b[J` (`cursor.y >= 4`) outside mode 2026 must NOT
+    // synthetically freeze `synchronized_output`.
     t.modes.set(.cursor_visible, false);
-    s.nextSlice("\r\x1b[7A");
+    s.nextSlice("\r\x1b[2A");
+    try testing.expect(t.screens.active.cursor.y >= 4);
     handler.noteEraseDisplay(.below);
     s.nextSlice("\x1b[J? for shortcuts\r\x1b[m");
     try testing.expect(!t.modes.get(.synchronized_output));
     try testing.expect(!handler.post_resize.held_sync_output);
 
-    // Full `\x1b[2J\x1b[3J` wipe coalesces within the bounded `<= 150ms` window and
-    // releases immediately on `\x1b[?25h` — even when `cursor.y <= 3`!
+    // Full `\x1b[2J\x1b[3J` wipe coalesces within the bounded `<= 420ms` window and
+    // releases immediately on `\x1b[?25h` once scrollback is repopulated — even when `cursor.y <= 3`!
     handler.noteEraseDisplay(.complete);
     t.scrollViewport(.{ .bottom = {} });
     s.nextSlice("\x1b[2J");
@@ -2027,7 +2157,7 @@ test "StreamHandler: partial CSI J does not freeze outside mode 2026 and full wi
     try testing.expectEqual(@as(usize, 8), t.screens.active.pages.scrollbar().offset);
 }
 
-test "StreamHandler: post-resize safety window is strictly bounded to <= 150ms and preserves scroll_save across back-to-back resizes" {
+test "StreamHandler: post-resize hold is bounded to <= 420ms, scroll_restore_ms <= 900ms, and preserves scroll_save across back-to-back resizes" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
@@ -2090,7 +2220,7 @@ test "StreamHandler: post-resize safety window is strictly bounded to <= 150ms a
     handler.noteTerminalResize(true, pre_sb1, pre_cy1);
     handler.noteChildResizeCommitted();
 
-    // Full wipe arrives within `<= 150ms`, then Resize #2 arrives before completion.
+    // Full wipe arrives within `<= 420ms`, then Resize #2 arrives before completion.
     t.modes.set(.cursor_visible, false);
     handler.noteEraseDisplay(.complete);
     t.scrollViewport(.{ .bottom = {} });
@@ -2117,13 +2247,20 @@ test "StreamHandler: post-resize safety window is strictly bounded to <= 150ms a
     try testing.expect(!t.modes.get(.synchronized_output));
     try testing.expectEqual(@as(usize, 5), t.screens.active.pages.scrollbar().offset);
 
-    // Simulating >150ms elapsed immediately expires `postResizeIsActive` and releases held sync output!
+    // Simulating >420ms elapsed releases held sync output immediately while keeping
+    // `scroll_save` alive inside the 900ms scroll-restore tail window; >900ms clears all state.
     t.modes.set(.cursor_visible, false);
     handler.noteEraseDisplay(.complete);
     try testing.expect(t.modes.get(.synchronized_output));
     handler.post_resize.hard_deadline = std.Io.Timestamp.now(testing.io, .awake).addDuration(.fromMilliseconds(-1));
-    try testing.expect(!handler.postResizeIsActive());
+    try testing.expect(!handler.postResizeHoldIsActive());
     try testing.expect(!t.modes.get(.synchronized_output));
+    try testing.expect(!handler.post_resize.held_sync_output);
+    try testing.expect(handler.postResizeIsActive());
+    try testing.expectEqual(@as(usize, 5), handler.post_resize.scroll_save.?.offset);
+
+    handler.post_resize.scroll_deadline = std.Io.Timestamp.now(testing.io, .awake).addDuration(.fromMilliseconds(-1));
+    try testing.expect(!handler.postResizeIsActive());
     try testing.expect(!handler.post_resize.active);
 
     // Bare shell `/usr/bin/clear` (cursor visible, no mode 2026 / TUI modes) must NOT freeze:
@@ -2133,6 +2270,326 @@ test "StreamHandler: post-resize safety window is strictly bounded to <= 150ms a
     handler.noteTerminalResize(false, bare_sb, t.screens.active.cursor.y);
     handler.noteEraseDisplay(.complete);
     try testing.expect(!t.modes.get(.synchronized_output));
+}
+
+const PostResizeTestHarness = struct {
+    terminal: terminal.Terminal,
+    mutex: std.Io.Mutex,
+    renderer_state: renderer.State,
+    size: renderer.Size,
+    termio_mailbox: termio.Mailbox,
+    renderer_mailbox: renderer.Thread.Mailbox,
+    wakeup: xev.Async,
+    stream: StreamHandler.Stream,
+
+    fn init(
+        self: *PostResizeTestHarness,
+        alloc: Allocator,
+        cols: terminal.size.CellCountInt,
+        rows: terminal.size.CellCountInt,
+    ) !void {
+        self.terminal = try terminal.Terminal.init(std.testing.io, alloc, .{
+            .cols = cols,
+            .rows = rows,
+        });
+        errdefer self.terminal.deinit(alloc);
+
+        self.mutex = .init;
+        self.renderer_state = .{
+            .mutex = &self.mutex,
+            .terminal = &self.terminal,
+        };
+        self.size = .{
+            .screen = .{ .width = @as(u32, cols) * 10, .height = @as(u32, rows) * 20 },
+            .cell = .{ .width = 10, .height = 20 },
+            .padding = .{},
+        };
+        self.termio_mailbox = try termio.Mailbox.initSPSC(alloc);
+        errdefer self.termio_mailbox.deinit(alloc);
+        self.renderer_mailbox = .{};
+        self.wakeup = try xev.Async.init();
+        errdefer self.wakeup.deinit();
+
+        self.stream = .init(.{
+            .allocator = alloc,
+            .handler = .{
+                .alloc = alloc,
+                .remote_session = true,
+                .size = &self.size,
+                .terminal = &self.terminal,
+                .termio_mailbox = &self.termio_mailbox,
+                .surface_mailbox = undefined,
+                .renderer_state = &self.renderer_state,
+                .renderer_mailbox = &self.renderer_mailbox,
+                .renderer_wakeup = self.wakeup,
+                .enquiry_response = "",
+                .osc_color_report_format = .none,
+                .clipboard_write = .deny,
+            },
+        });
+    }
+
+    fn deinit(self: *PostResizeTestHarness, alloc: Allocator) void {
+        self.stream.deinit();
+        self.wakeup.deinit();
+        self.termio_mailbox.deinit(alloc);
+        self.terminal.deinit(alloc);
+    }
+
+    fn handler(self: *PostResizeTestHarness) *StreamHandler {
+        return &self.stream.handler;
+    }
+
+    fn resize(
+        self: *PostResizeTestHarness,
+        alloc: Allocator,
+        cols: terminal.size.CellCountInt,
+        rows: terminal.size.CellCountInt,
+        pull_scrollback: bool,
+    ) !void {
+        const was_scrolled_up = !self.terminal.screens.active.viewportIsBottom();
+        const pre_sb = self.terminal.screens.active.pages.scrollbar();
+        const pre_cursor_y = self.terminal.screens.active.cursor.y;
+        try self.terminal.resize(alloc, .{
+            .cols = cols,
+            .rows = rows,
+            .pull_scrollback = pull_scrollback,
+        });
+        self.stream.handler.noteTerminalResize(was_scrolled_up, pre_sb, pre_cursor_y);
+        self.stream.handler.noteChildResizeCommitted();
+    }
+
+    fn rewindDeadlinesMs(self: *PostResizeTestHarness, delta_ms: i64) void {
+        const post_resize = &self.stream.handler.post_resize;
+        const offset = std.Io.Duration.fromMilliseconds(-delta_ms);
+        if (post_resize.deadline) |dl| post_resize.deadline = dl.addDuration(offset);
+        if (post_resize.hard_deadline) |hd| post_resize.hard_deadline = hd.addDuration(offset);
+        if (post_resize.scroll_deadline) |sd| post_resize.scroll_deadline = sd.addDuration(offset);
+    }
+
+    fn writeLines(self: *PostResizeTestHarness, count: usize) !void {
+        for (0..count) |i| {
+            var buf: [32]u8 = undefined;
+            const line = try std.fmt.bufPrint(&buf, "history-{d:0>2}\r\n", .{i});
+            self.stream.nextSlice(line);
+        }
+    }
+};
+
+test "StreamHandler: octo two-phase SIGWINCH redraw holds Phase 1 blank wipe and restores scrollback on Phase 2" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var env: PostResizeTestHarness = undefined;
+    try env.init(alloc, 40, 10);
+    defer env.deinit(alloc);
+
+    // Populate 80 lines wrapped in DEC 2026 and scroll up to offset = 20.
+    env.stream.nextSlice("\x1b[?2026h");
+    try env.writeLines(80);
+    env.stream.nextSlice("prompt-line\r\n? for shortcuts\x1b[?2026l");
+    try testing.expect(env.handler().seen_synchronized_output);
+
+    env.terminal.scrollViewport(.{ .row = 20 });
+    try testing.expect(!env.terminal.screens.active.viewportIsBottom());
+    try testing.expectEqual(@as(usize, 20), env.terminal.screens.active.pages.scrollbar().offset);
+
+    // SIGWINCH resize (40x10 -> 40x8).
+    try env.resize(alloc, 40, 8, true);
+
+    // Phase 1 (+10ms): clear scrollback + 1 header line inside DEC 2026.
+    // Must keep holding `synchronized_output` across Phase 1's DECRST 2026
+    // and MUST NOT drop `scroll_save` on the empty intermediate screen.
+    env.stream.nextSlice("\x1b[?2026h\x1b[2J\x1b[3J\x1b[H? for shortcuts   octo\x1b[?2026l");
+    try testing.expect(env.terminal.modes.get(.synchronized_output));
+    try testing.expect(env.handler().post_resize.held_sync_output);
+    try testing.expect(env.handler().post_resize.scroll_save != null);
+    try testing.expectEqual(@as(usize, 20), env.handler().post_resize.scroll_save.?.offset);
+
+    // Phase 2 (+250ms, still inside 320/420ms hold window): reprints 80 lines + DECRST 2026.
+    env.rewindDeadlinesMs(250);
+    try testing.expect(env.handler().postResizeHoldIsActive());
+    env.stream.nextSlice("\x1b[?2026h\x1b[2J\x1b[3J\x1b[H");
+    try env.writeLines(80);
+    env.stream.nextSlice("prompt-line\r\n? for shortcuts\x1b[?2026l");
+
+    // Releases `synchronized_output` immediately (0ms extra wait) and restores offset = 20.
+    try testing.expect(!env.terminal.modes.get(.synchronized_output));
+    try testing.expect(!env.handler().post_resize.held_sync_output);
+    try testing.expect(!env.terminal.screens.active.viewportIsBottom());
+    try testing.expectEqual(@as(usize, 20), env.terminal.screens.active.pages.scrollbar().offset);
+    try testing.expect(!env.renderer_state.scroll.pinned_to_bottom);
+
+    // Also verify `pre_cursor_y` preservation holds a single-screen (no scrollback) wipe
+    // when `pre_cursor_y >= 4` and releases once Phase 2 populates past row 3.
+    env.handler().cancelPostResize();
+    env.stream.nextSlice("\x1b[?2026h\x1b[2J\x1b[3J\x1b[H");
+    try env.writeLines(6);
+    env.stream.nextSlice("prompt\x1b[?2026l");
+    try testing.expect(env.terminal.screens.active.cursor.y >= 4);
+    try env.resize(alloc, 40, 10, true);
+    env.stream.nextSlice("\x1b[?2026h\x1b[H\x1b[J? for shortcuts   octo\x1b[?2026l");
+    try testing.expect(env.terminal.modes.get(.synchronized_output));
+    try testing.expect(env.handler().post_resize.held_sync_output);
+
+    // Second back-to-back resize while wiped at row 0 must retain `@max(pre_cursor_y, 0) >= 4`.
+    try env.resize(alloc, 42, 10, true);
+    try testing.expect(env.handler().post_resize.pre_cursor_y >= 4);
+    env.stream.nextSlice("\x1b[?2026h\x1b[H\x1b[J");
+    try env.writeLines(6);
+    env.stream.nextSlice("prompt\x1b[?2026l");
+    try testing.expect(!env.terminal.modes.get(.synchronized_output));
+    try testing.expect(!env.handler().post_resize.held_sync_output);
+}
+
+test "StreamHandler: standalone CSI H CSI J wipe without DEC 2026 holds until full reprint and cursor show" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var env: PostResizeTestHarness = undefined;
+    try env.init(alloc, 40, 10);
+    defer env.deinit(alloc);
+
+    env.stream.nextSlice("\x1b[?25l");
+    try env.writeLines(40);
+    env.stream.nextSlice("prompt-top\r\n? for shortcuts\x1b[?25h");
+
+    env.terminal.scrollViewport(.{ .row = 10 });
+    try testing.expectEqual(@as(usize, 10), env.terminal.screens.active.pages.scrollbar().offset);
+
+    try env.resize(alloc, 30, 10, false);
+
+    // Standalone `\x1b[H\x1b[J? for shortcuts\r` without DEC 2026 holds sync output.
+    env.stream.nextSlice("\x1b[?25l\x1b[H\x1b[J? for shortcuts\r");
+    try testing.expect(env.terminal.modes.get(.synchronized_output));
+    try testing.expect(env.handler().post_resize.held_sync_output);
+    try testing.expect(env.handler().post_resize.saw_erase_below);
+
+    // Even if `\x1b[3J` cleared scrollback and `\x1b[?25h` toggled on the 1-line wipe,
+    // `shouldHoldPostResizeBlankWipe` keeps holding until full content arrives.
+    env.stream.nextSlice("\x1b[3J\x1b[H\x1b[J? for shortcuts\r\x1b[?25h");
+    try testing.expect(env.terminal.modes.get(.synchronized_output));
+    try testing.expect(env.handler().post_resize.held_sync_output);
+
+    // Full reprint + `\x1b[?25h` immediately releases sync output and restores scroll offset.
+    env.stream.nextSlice("\x1b[?25l\x1b[H");
+    try env.writeLines(40);
+    env.stream.nextSlice("prompt-top\r\n? for shortcuts\x1b[?25h");
+    try testing.expect(!env.terminal.modes.get(.synchronized_output));
+    try testing.expect(!env.handler().post_resize.held_sync_output);
+    try testing.expectEqual(@as(usize, 10), env.terminal.screens.active.pages.scrollbar().offset);
+}
+
+test "StreamHandler: late history reprint at +600ms restores scroll_save without holding sync output past 420ms" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var env: PostResizeTestHarness = undefined;
+    try env.init(alloc, 40, 10);
+    defer env.deinit(alloc);
+
+    env.stream.nextSlice("\x1b[?2026h");
+    try env.writeLines(80);
+    env.stream.nextSlice("prompt\r\n? for shortcuts\x1b[?2026l");
+    env.terminal.scrollViewport(.{ .row = 20 });
+
+    try env.resize(alloc, 40, 8, true);
+
+    // Phase 1 holds sync output and saves scroll offset = 20.
+    env.stream.nextSlice("\x1b[?2026h\x1b[2J\x1b[3J\x1b[H? for shortcuts   octo\x1b[?2026l");
+    try testing.expect(env.terminal.modes.get(.synchronized_output));
+    try testing.expect(env.handler().post_resize.held_sync_output);
+
+    // Simulate +421ms elapsed (past 420ms hold cap, still inside 900ms scroll_restore_ms):
+    // `held_sync_output` and `synchronized_output` release (no freeze) while `scroll_save` remains armed.
+    env.rewindDeadlinesMs(421);
+    try testing.expect(!env.handler().postResizeHoldIsActive());
+    try testing.expect(!env.terminal.modes.get(.synchronized_output));
+    try testing.expect(!env.handler().post_resize.held_sync_output);
+    try testing.expect(env.handler().postResizeIsActive());
+    try testing.expect(env.handler().post_resize.scroll_save != null);
+
+    // Simulate +600ms total elapsed (~300ms remaining on `scroll_deadline`).
+    env.rewindDeadlinesMs(180);
+    try testing.expect(env.handler().postResizeIsActive());
+
+    // Phase 2 arrives at +600ms: must NOT re-hold sync output past 420ms, AND must restore offset = 20.
+    env.stream.nextSlice("\x1b[?25l\x1b[2J\x1b[3J\x1b[H");
+    try testing.expect(!env.terminal.modes.get(.synchronized_output));
+    try testing.expect(!env.handler().post_resize.held_sync_output);
+    try env.writeLines(80);
+    env.stream.nextSlice("prompt\r\n? for shortcuts\x1b[?25h");
+
+    try testing.expect(!env.terminal.modes.get(.synchronized_output));
+    try testing.expect(!env.terminal.screens.active.viewportIsBottom());
+    try testing.expectEqual(@as(usize, 20), env.terminal.screens.active.pages.scrollbar().offset);
+
+    // Also verify `finishPostResizeHold` (timer path at 420ms) releases hold while preserving `scroll_save`.
+    try env.resize(alloc, 40, 10, true);
+    env.stream.nextSlice("\x1b[?2026h\x1b[2J\x1b[3J\x1b[H? for shortcuts\x1b[?2026l");
+    try testing.expect(env.terminal.modes.get(.synchronized_output));
+    env.handler().finishPostResizeHold();
+    try testing.expect(!env.terminal.modes.get(.synchronized_output));
+    try testing.expect(!env.handler().post_resize.held_sync_output);
+    try testing.expect(env.handler().postResizeIsActive());
+    try testing.expect(env.handler().post_resize.scroll_save != null);
+
+    // Past 900ms `scroll_deadline`, `postResizeIsActive` expires and clears all state.
+    env.rewindDeadlinesMs(950);
+    try testing.expect(!env.handler().postResizeIsActive());
+    try testing.expect(!env.handler().post_resize.active);
+}
+
+test "StreamHandler: immediate unfreeze on OSC 133 semanticPrompt, alt-screen switch, or hard_deadline expiry" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var env: PostResizeTestHarness = undefined;
+    try env.init(alloc, 40, 10);
+    defer env.deinit(alloc);
+
+    env.stream.nextSlice("\x1b[?2026h");
+    try env.writeLines(40);
+    env.stream.nextSlice("prompt\x1b[?2026l");
+
+    // 1) OSC 133 semanticPrompt (`prompt_start`) immediately unfreezes held sync output.
+    try env.resize(alloc, 40, 8, true);
+    env.stream.nextSlice("\x1b[?2026h\x1b[2J\x1b[3J\x1b[H? for shortcuts\x1b[?2026l");
+    try testing.expect(env.terminal.modes.get(.synchronized_output));
+    try testing.expect(env.handler().post_resize.held_sync_output);
+
+    env.stream.nextSlice("\x1b]133;A\x07");
+    try testing.expect(!env.terminal.modes.get(.synchronized_output));
+    try testing.expect(!env.handler().post_resize.held_sync_output);
+    try testing.expect(!env.handler().post_resize.active);
+
+    // 2) Alt-screen switch (`CSI ? 1049 h`) immediately unfreezes held sync output.
+    env.stream.nextSlice("\x1b[?2026h");
+    try env.writeLines(40);
+    env.stream.nextSlice("prompt\x1b[?2026l");
+    try env.resize(alloc, 40, 10, true);
+    env.stream.nextSlice("\x1b[?2026h\x1b[2J\x1b[3J\x1b[H? for shortcuts\x1b[?2026l");
+    try testing.expect(env.terminal.modes.get(.synchronized_output));
+
+    env.stream.nextSlice("\x1b[?1049h");
+    try testing.expectEqual(.alternate, env.terminal.screens.active_key);
+    try testing.expect(!env.terminal.modes.get(.synchronized_output));
+    try testing.expect(!env.handler().post_resize.held_sync_output);
+    try testing.expect(!env.handler().post_resize.active);
+
+    // 3) `hard_deadline` expiry immediately unfreezes held sync output.
+    env.stream.nextSlice("\x1b[?1049l\x1b[?2026h");
+    try env.writeLines(40);
+    env.stream.nextSlice("prompt\x1b[?2026l");
+    try env.resize(alloc, 40, 8, true);
+    env.stream.nextSlice("\x1b[?2026h\x1b[2J\x1b[3J\x1b[H? for shortcuts\x1b[?2026l");
+    try testing.expect(env.terminal.modes.get(.synchronized_output));
+
+    env.handler().post_resize.hard_deadline = std.Io.Timestamp.now(testing.io, .awake).addDuration(.fromMilliseconds(-1));
+    try testing.expect(!env.handler().postResizeHoldIsActive());
+    try testing.expect(!env.terminal.modes.get(.synchronized_output));
+    try testing.expect(!env.handler().post_resize.held_sync_output);
+    try testing.expect(!env.handler().post_resize.active);
 }
 
 test "StreamHandler: omg-program-status-query emits protocol_reply even in remote_session" {

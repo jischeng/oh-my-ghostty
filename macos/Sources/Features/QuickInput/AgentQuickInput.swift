@@ -222,8 +222,14 @@ enum AgentQuickInputMetrics {
     static let defaultHeight: CGFloat = 148
     static let maximumHeight: CGFloat = 480
     static let minimumTerminalHeight: CGFloat = 160
+    static let floatingHorizontalInset: CGFloat = 16
+    static let floatingBottomInset: CGFloat = 12
+    static let floatingStackSpacing: CGFloat = 8
+    static let floatingTopMargin: CGFloat = 16
+    static let cardCornerRadius: CGFloat = 12
     static let queueLaneHeight: CGFloat = 60
     static let queueCardHeight: CGFloat = 44
+    static let queueFloatingHeight: CGFloat = queueCardHeight + 8
     static let queueButtonHitSize: CGFloat = 30
     static let queueHoverDelayMilliseconds = 300
     static let queueMinimumWidth: CGFloat = 150
@@ -249,16 +255,12 @@ enum AgentQuickInputMetrics {
         hasQueue: Bool,
         isPinned: Bool = false
     ) -> CGFloat {
+        _ = dockHeight
+        _ = isDockPresented
+        _ = hasQueue
         _ = isPinned
-        let dock = isDockPresented
-            ? dockHeight + TerminalShellStyle.dividerWidth
-            : 0
-        let queue = hasQueue
-            ? queueLaneHeight + TerminalShellStyle.dividerWidth
-            : 0
-        return dock + queue
+        return 0
     }
-
 }
 
 enum AgentQuickInputMotion {
@@ -836,30 +838,19 @@ struct AgentQuickInputDock<Content: View>: View {
             content: AnyView(content),
             composer: AnyView(composer),
             queue: AnyView(queue),
-            composerHeight: model.isPresented
-                ? model.dockHeight + TerminalShellStyle.dividerWidth : 0,
+            composerHeight: model.isPresented ? model.dockHeight : 0,
             queueHeight: presentedQueueIDs.isEmpty
-                ? 0 : AgentQuickInputMetrics.queueLaneHeight + TerminalShellStyle.dividerWidth,
+                ? 0 : AgentQuickInputMetrics.queueFloatingHeight,
             isPinned: model.isPinned
         )
     }
 
     private var composer: some View {
-        VStack(spacing: 0) {
-            AgentQuickInputResizeHandle(
-                controller: controller,
-                model: model,
-                color: controller.sidebarDividerColor
-            )
-            // The hit area overlaps the native editor below.
-            .zIndex(1)
-            AgentQuickInputComposer(
-                controller: controller,
-                model: model
-            )
-            .frame(height: model.dockHeight)
-        }
-        .frame(height: model.dockHeight + TerminalShellStyle.dividerWidth, alignment: .top)
+        AgentQuickInputComposer(
+            controller: controller,
+            model: model
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .transaction { $0.animation = nil }
     }
 
@@ -876,7 +867,6 @@ struct AgentQuickInputDock<Content: View>: View {
                 send: { controller.sendQueuedQuickInput($0, from: surfaceID) },
                 edit: { controller.editQueuedQuickInput($0, from: surfaceID) },
                 remove: { controller.removeQueuedQuickInput($0, from: surfaceID) },
-                dividerColor: controller.sidebarDividerColor,
                 chromeBackground: controller.quickInputAccessoryBackground(isPinned: model.isPinned)
             )
         }
@@ -911,7 +901,7 @@ private struct AgentQuickInputResizeHandle: View {
             currentExtent: { model.dockHeight },
             resize: controller.updateQuickInputHeight,
             accessibilityLabel: "Resize Agent Quick Input",
-            defersTerminalResize: true
+            defersTerminalResize: false
         )
     }
 }
@@ -924,64 +914,61 @@ private struct AgentQuickInputQueueLane: View {
     let send: (UUID) -> Void
     let edit: (UUID) -> Void
     let remove: (UUID) -> Void
-    let dividerColor: Color
-    /// Effective chrome background (see `TerminalController.terminalChromeBackground`).
+    /// Opaque elevated card background derived from the active terminal theme.
     let chromeBackground: Color
 
-    var body: some View {
-        VStack(spacing: 0) {
-            Rectangle()
-                .fill(dividerColor)
-                .frame(height: TerminalShellStyle.dividerWidth)
-                .frame(maxWidth: .infinity)
+    private var laneColorScheme: ColorScheme {
+        NSColor(chromeBackground).isLightColor ? .light : .dark
+    }
 
-            GeometryReader { geometry in
-                ScrollViewReader { proxy in
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 10) {
-                            ForEach(items) { item in
-                                AgentQuickInputQueueCard(
-                                    item: item,
-                                    isEditing: model.editingQueueItemID == item.id,
-                                    isSendLocked: isSendLocked,
-                                    send: { send(item.id) },
-                                    edit: { edit(item.id) },
-                                    remove: { remove(item.id) }
-                                )
-                                .frame(width: AgentQuickInputMetrics.queueCardWidth(
-                                    previewCount: item.preview.count,
-                                    availableWidth: geometry.size.width
-                                ))
-                                .id(item.id)
-                                .transition(.asymmetric(
-                                    insertion: .move(edge: .trailing)
-                                        .combined(with: .scale(
-                                            scale: 0.9,
-                                            anchor: .trailing
-                                        ))
-                                        .combined(with: .opacity),
-                                    removal: .offset(y: 18)
-                                        .combined(with: .scale(scale: 0.86))
-                                        .combined(with: .opacity)
-                                ))
-                            }
+    var body: some View {
+        GeometryReader { geometry in
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(items) { item in
+                            AgentQuickInputQueueCard(
+                                item: item,
+                                isEditing: model.editingQueueItemID == item.id,
+                                isSendLocked: isSendLocked,
+                                chromeBackground: chromeBackground,
+                                send: { send(item.id) },
+                                edit: { edit(item.id) },
+                                remove: { remove(item.id) }
+                            )
+                            .frame(width: AgentQuickInputMetrics.queueCardWidth(
+                                previewCount: item.preview.count,
+                                availableWidth: geometry.size.width
+                            ))
+                            .id(item.id)
+                            .transition(.asymmetric(
+                                insertion: .move(edge: .trailing)
+                                    .combined(with: .scale(
+                                        scale: 0.9,
+                                        anchor: .trailing
+                                    ))
+                                    .combined(with: .opacity),
+                                removal: .offset(y: 18)
+                                    .combined(with: .scale(scale: 0.86))
+                                    .combined(with: .opacity)
+                            ))
                         }
-                        .padding(.horizontal, AgentQuickInputMetrics.queueHorizontalInset)
-                        .frame(minHeight: geometry.size.height)
-                        .animation(
-                            AgentQuickInputMotion.queue,
-                            value: items.map(\.id)
-                        )
                     }
-                    .onAppear { scrollToNewest(using: proxy) }
-                    .onChange(of: items.map(\.id)) { _ in
-                        scrollToNewest(using: proxy)
-                    }
+                    .padding(.horizontal, 2)
+                    .frame(minHeight: geometry.size.height)
+                    .animation(
+                        AgentQuickInputMotion.queue,
+                        value: items.map(\.id)
+                    )
+                }
+                .onAppear { scrollToNewest(using: proxy) }
+                .onChange(of: items.map(\.id)) { _ in
+                    scrollToNewest(using: proxy)
                 }
             }
-            .frame(height: AgentQuickInputMetrics.queueLaneHeight)
         }
-        .background(chromeBackground)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .environment(\.colorScheme, laneColorScheme)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Queued Agent Messages")
     }
@@ -1000,6 +987,7 @@ private struct AgentQuickInputQueueCard: View {
     let item: AgentQuickInputQueueItem
     let isEditing: Bool
     let isSendLocked: Bool
+    let chromeBackground: Color
     let send: () -> Void
     let edit: () -> Void
     let remove: () -> Void
@@ -1011,7 +999,9 @@ private struct AgentQuickInputQueueCard: View {
     private var strings: SettingsStrings { SettingsStrings(language: settings.language) }
 
     var body: some View {
-        HStack(spacing: 2) {
+        let cardShape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+
+        return HStack(spacing: 2) {
             Button(action: send) {
                 Image(systemName: isSendLocked ? "lock.fill" : "arrow.turn.down.right")
                     .frame(
@@ -1074,17 +1064,23 @@ private struct AgentQuickInputQueueCard: View {
         .buttonStyle(.plain)
         .padding(.horizontal, 6)
         .frame(height: AgentQuickInputMetrics.queueCardHeight)
-        .background(.primary.opacity(hovered ? 0.12 : 0.08))
+        .background(chromeBackground, in: cardShape)
+        .overlay(
+            cardShape
+                .fill(.primary.opacity(hovered ? 0.06 : 0))
+                .allowsHitTesting(false)
+        )
+        .clipShape(cardShape)
         .overlay {
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(
-                    isEditing ? Color.accentColor : .primary.opacity(0.24),
+            cardShape
+                .strokeBorder(
+                    isEditing ? Color.accentColor : .primary.opacity(0.18),
                     lineWidth: isEditing ? 1.5 : 1
                 )
+                .allowsHitTesting(false)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .shadow(color: .black.opacity(0.14), radius: 8, y: 3)
-        .contentShape(RoundedRectangle(cornerRadius: 10))
+        .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
+        .contentShape(cardShape)
         .onDisappear { hoverPreviewTask?.cancel() }
         .animation(.easeOut(duration: 0.12), value: hovered)
     }
@@ -1140,6 +1136,45 @@ private struct AgentQuickInputQueueDepthIndicator: View {
     }
 }
 
+private struct QuickInputPillButtonStyle: ButtonStyle {
+    var isPrimary = false
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovered = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        let fill: Color = if isPrimary {
+            Color.accentColor.opacity(
+                isEnabled && (isHovered || configuration.isPressed)
+                    ? (configuration.isPressed ? 0.30 : 0.24)
+                    : 0.16
+            )
+        } else {
+            Color.primary.opacity(
+                isEnabled && (isHovered || configuration.isPressed)
+                    ? (configuration.isPressed ? 0.16 : 0.10)
+                    : 0.055
+            )
+        }
+        let stroke: Color = isPrimary
+            ? Color.accentColor.opacity(isEnabled ? 0.36 : 0.16)
+            : Color.primary.opacity(0.11)
+
+        return configuration.label
+            .padding(.horizontal, 10)
+            .frame(minHeight: 24)
+            .foregroundStyle(isPrimary ? Color.primary : Color.secondary)
+            .background(fill, in: Capsule())
+            .overlay(
+                Capsule()
+                    .strokeBorder(stroke, lineWidth: 1)
+                    .allowsHitTesting(false)
+            )
+            .contentShape(Capsule())
+            .opacity(isEnabled ? 1 : 0.4)
+            .onHover { isHovered = $0 }
+    }
+}
+
 private struct AgentQuickInputComposer: View {
     @ObservedObject var controller: TerminalController
     @ObservedObject var model: AgentQuickInputModel
@@ -1155,18 +1190,27 @@ private struct AgentQuickInputComposer: View {
         isPasswordLocked && !model.isEditingQueuedItem
     }
 
-    /// Always matches the in-flow window/glass chrome below the terminal viewport.
+    /// Always paints an opaque elevated card background over the terminal.
     private var chromeBackground: Color {
         controller.quickInputAccessoryBackground(isPinned: model.isPinned)
     }
 
+    private var cardColorScheme: ColorScheme {
+        NSColor(chromeBackground).isLightColor ? .light : .dark
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let cardShape = RoundedRectangle(
+            cornerRadius: AgentQuickInputMetrics.cardCornerRadius,
+            style: .continuous
+        )
+
+        return VStack(alignment: .leading, spacing: 8) {
             AgentQuickInputTextEditor(
                 text: $model.draft,
                 placeholder: model.isEditingQueuedItem
-                    ? "Edit queued message…"
-                    : "Type here…",
+                    ? strings.quickInputEditQueuedPlaceholder
+                    : strings.quickInputPlaceholder,
                 isPresented: model.isPresented,
                 focusRequestID: model.focusRequestID,
                 font: editorFont,
@@ -1196,44 +1240,6 @@ private struct AgentQuickInputComposer: View {
             .background(.clear)
 
             HStack(spacing: QuickInputFooterStyle.itemSpacing) {
-                QuickInputFooterActionButton(
-                    symbols: ["command", "return"],
-                    title: model.isEditingQueuedItem ? strings.quickInputSaveTitle : strings.quickInputSendTitle,
-                    action: controller.sendQuickInputDraft
-                )
-                .disabled(isSendDisabled)
-                .help(
-                    isSendDisabled
-                        ? strings.quickInputPasswordLockedMessage
-                        : (model.isEditingQueuedItem
-                            ? "⌘↩ " + strings.quickInputSaveTitle
-                            : "⌘↩ " + strings.quickInputSendTitle)
-                )
-                QuickInputFooterActionButton(
-                    symbols: ["option", "command", "return"],
-                    title: model.isEditingQueuedItem ? strings.quickInputMoveTitle : strings.quickInputQueueTitle,
-                    action: controller.queueQuickInputDraft
-                )
-                .help("⌥⌘↩ " + strings.quickInputQueueTitle)
-                QuickInputFooterActionButton(symbols: ["escape"], title: strings.quickInputCancelTitle,
-                                            action: controller.dismissQuickInput)
-                    .help("Esc " + strings.quickInputCancelTitle)
-                if isPasswordLocked {
-                    Text("·")
-                    HStack(spacing: 4) {
-                        Image(systemName: "lock.fill")
-                            .font(QuickInputFooterStyle.iconFont)
-                        Text(strings.quickInputPasswordLockedMessage)
-                            .lineLimit(1)
-                    }
-                    .foregroundStyle(.secondary)
-                } else if let statusMessage = model.statusMessage {
-                    Text("·")
-                    Text(statusMessage)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Spacer()
                 if !settings.quickInputImportShortcut.isEmpty, !model.isEditingQueuedItem {
                     QuickInputFooterIconButton(
                         title: strings.quickInputImportDraftHelp,
@@ -1267,13 +1273,91 @@ private struct AgentQuickInputComposer: View {
                     )
                     .help("Queued messages")
                 }
+                if isPasswordLocked {
+                    Text("·")
+                    HStack(spacing: 4) {
+                        Image(systemName: "lock.fill")
+                            .font(QuickInputFooterStyle.iconFont)
+                        Text(strings.quickInputPasswordLockedMessage)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    .foregroundStyle(.secondary)
+                } else if let statusMessage = model.statusMessage {
+                    Text("·")
+                    Text(statusMessage)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                Spacer(minLength: 8)
+                HStack(spacing: 6) {
+                    Button(action: controller.dismissQuickInput) {
+                        QuickInputShortcutHint(
+                            symbols: ["escape"],
+                            title: strings.quickInputCancelTitle
+                        )
+                    }
+                    .buttonStyle(QuickInputPillButtonStyle())
+                    .help("Esc " + strings.quickInputCancelTitle)
+
+                    Button(action: controller.queueQuickInputDraft) {
+                        QuickInputShortcutHint(
+                            symbols: ["option", "command", "return"],
+                            title: model.isEditingQueuedItem
+                                ? strings.quickInputMoveTitle
+                                : strings.quickInputQueueTitle
+                        )
+                    }
+                    .buttonStyle(QuickInputPillButtonStyle())
+                    .help(
+                        model.isEditingQueuedItem
+                            ? "⌥⌘↩ " + strings.quickInputMoveTitle
+                            : "⌥⌘↩ " + strings.quickInputQueueTitle
+                    )
+
+                    Button(action: controller.sendQuickInputDraft) {
+                        QuickInputShortcutHint(
+                            symbols: ["command", "return"],
+                            title: model.isEditingQueuedItem
+                                ? strings.quickInputSaveTitle
+                                : strings.quickInputSendTitle
+                        )
+                    }
+                    .buttonStyle(QuickInputPillButtonStyle(isPrimary: true))
+                    .disabled(isSendDisabled)
+                    .help(
+                        isSendDisabled
+                            ? strings.quickInputPasswordLockedMessage
+                            : (model.isEditingQueuedItem
+                                ? "⌘↩ " + strings.quickInputSaveTitle
+                                : "⌘↩ " + strings.quickInputSendTitle)
+                    )
+                }
+                .fixedSize(horizontal: true, vertical: false)
             }
             .font(QuickInputFooterStyle.font)
             .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(chromeBackground)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(chromeBackground, in: cardShape)
+        .overlay(alignment: .top) {
+            AgentQuickInputResizeHandle(
+                controller: controller,
+                model: model,
+                color: .clear
+            )
+        }
+        .clipShape(cardShape)
+        .overlay(
+            cardShape
+                .strokeBorder(Color.primary.opacity(0.14), lineWidth: 1)
+                .allowsHitTesting(false)
+        )
+        .contentShape(cardShape)
+        .environment(\.colorScheme, cardColorScheme)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Agent Quick Input")
     }

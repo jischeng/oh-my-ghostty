@@ -708,7 +708,16 @@ fn sizeReportLocked(self: *Termio, td: *ThreadData, style: termio.Message.SizeRe
 pub fn resetSynchronizedOutput(self: *Termio) void {
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());
-    self.terminal_stream.handler.finishPostResize();
+    if (!self.terminal.modes.get(.synchronized_output) and
+        !self.terminal_stream.handler.post_resize.held_sync_output)
+    {
+        return;
+    }
+    if (self.terminal_stream.handler.post_resize.held_sync_output) {
+        self.terminal_stream.handler.finishPostResizeHold();
+    } else {
+        _ = self.terminal_stream.handler.postResizeIsActive();
+    }
     self.terminal.modes.set(.synchronized_output, false);
     self.renderer_wakeup.notify() catch {};
 }
@@ -959,4 +968,106 @@ pub const ThreadData = struct {
 /// not available on a particular platform.
 pub fn getProcessInfo(self: *Termio, comptime info: ProcessInfo) ?ProcessInfo.Type(info) {
     return self.backend.getProcessInfo(info);
+}
+
+test "Termio: resetSynchronizedOutput releases held sync output without dropping scroll_save" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var term = try terminalpkg.Terminal.init(testing.io, alloc, .{
+        .cols = 40,
+        .rows = 10,
+    });
+    errdefer term.deinit(alloc);
+
+    var mutex: std.Io.Mutex = .init;
+    var renderer_state: renderer.State = .{
+        .mutex = &mutex,
+        .terminal = &term,
+    };
+    var renderer_mailbox: renderer.Thread.Mailbox = .{};
+    var wakeup = try xev.Async.init();
+    errdefer wakeup.deinit();
+    var mailbox = try termio.Mailbox.initSPSC(alloc);
+    errdefer mailbox.deinit(alloc);
+
+    var io: Termio = .{
+        .alloc = alloc,
+        .backend = undefined,
+        .config = undefined,
+        .terminal = term,
+        .renderer_state = &renderer_state,
+        .renderer_wakeup = wakeup,
+        .renderer_mailbox = &renderer_mailbox,
+        .surface_mailbox = undefined,
+        .size = .{
+            .screen = .{ .width = 400, .height = 200 },
+            .cell = .{ .width = 10, .height = 20 },
+            .padding = .{},
+        },
+        .mailbox = mailbox,
+        .terminal_stream = undefined,
+    };
+    io.renderer_state.terminal = &io.terminal;
+    io.terminal_stream = .init(.{
+        .allocator = alloc,
+        .handler = .{
+            .alloc = alloc,
+            .remote_session = true,
+            .size = &io.size,
+            .terminal = &io.terminal,
+            .termio_mailbox = &io.mailbox,
+            .surface_mailbox = undefined,
+            .renderer_state = io.renderer_state,
+            .renderer_mailbox = io.renderer_mailbox,
+            .renderer_wakeup = io.renderer_wakeup,
+            .enquiry_response = "",
+            .osc_color_report_format = .none,
+            .clipboard_write = .deny,
+        },
+    });
+    defer {
+        io.terminal_stream.deinit();
+        io.renderer_wakeup.deinit();
+        io.terminal.deinit(alloc);
+        io.mailbox.deinit(alloc);
+    }
+
+    for (0..40) |i| {
+        var buf: [32]u8 = undefined;
+        const line = try std.fmt.bufPrint(&buf, "history-{d:0>2}\r\n", .{i});
+        io.terminal_stream.nextSlice(line);
+    }
+    io.terminal.scrollViewport(.{ .row = 12 });
+    const pre_sb = io.terminal.screens.active.pages.scrollbar();
+    const pre_cy = io.terminal.screens.active.cursor.y;
+    try io.terminal.resize(alloc, .{ .cols = 40, .rows = 8, .pull_scrollback = true });
+    io.terminal_stream.handler.noteTerminalResize(true, pre_sb, pre_cy);
+    io.terminal_stream.handler.noteChildResizeCommitted();
+
+    // Hold sync output across Phase 1 wipe.
+    io.terminal_stream.nextSlice("\x1b[?2026h\x1b[2J\x1b[3J\x1b[H? for shortcuts\x1b[?2026l");
+    try testing.expect(io.terminal.modes.get(.synchronized_output));
+    try testing.expect(io.terminal_stream.handler.post_resize.held_sync_output);
+
+    // Timer firing `resetSynchronizedOutput` releases freeze while keeping `scroll_save` alive!
+    io.resetSynchronizedOutput();
+    try testing.expect(!io.terminal.modes.get(.synchronized_output));
+    try testing.expect(!io.terminal_stream.handler.post_resize.held_sync_output);
+    try testing.expect(io.terminal_stream.handler.postResizeIsActive());
+    try testing.expectEqual(@as(usize, 12), io.terminal_stream.handler.post_resize.scroll_save.?.offset);
+
+    // A stale timer (`synchronized_output == false`, `held_sync_output == false`) is a no-op
+    // and must not disturb a newly armed hold window.
+    io.terminal_stream.nextSlice("\x1b[?2026h");
+    for (0..40) |i| {
+        var buf: [32]u8 = undefined;
+        const line = try std.fmt.bufPrint(&buf, "history-{d:0>2}\r\n", .{i});
+        io.terminal_stream.nextSlice(line);
+    }
+    io.terminal_stream.nextSlice("\x1b[?2026l");
+    try testing.expect(!io.terminal.modes.get(.synchronized_output));
+    io.resetSynchronizedOutput();
+    try testing.expect(io.terminal_stream.handler.postResizeIsActive());
+    try testing.expectEqual(@as(usize, 12), io.terminal_stream.handler.post_resize.scroll_save.?.offset);
 }

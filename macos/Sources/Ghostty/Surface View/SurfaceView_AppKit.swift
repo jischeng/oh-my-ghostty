@@ -400,7 +400,12 @@ extension Ghostty {
         // We need to support being a first responder so that we can get input events
         override var acceptsFirstResponder: Bool { return true }
 
-        init(_ app: ghostty_app_t, baseConfig: SurfaceConfiguration? = nil, uuid: UUID? = nil) {
+        init(
+            _ app: ghostty_app_t,
+            baseConfig: SurfaceConfiguration? = nil,
+            uuid: UUID? = nil,
+            initialSize: CGSize? = nil
+        ) {
             self.markedText = NSMutableAttributedString()
 
             // Our initial config always is our application wide config.
@@ -416,10 +421,20 @@ extension Ghostty {
             self.cachedScreenContents = .init(duration: .milliseconds(500)) { "" }
             self.cachedVisibleContents = self.cachedScreenContents
 
-            // Initialize with some default frame size. The important thing is that this
-            // is non-zero so that our layer bounds are non-zero so that our renderer
-            // can do SOMETHING.
-            super.init(id: uuid, frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+            let resolvedSize: CGSize
+            if let initialSize,
+               initialSize.width.isFinite,
+               initialSize.height.isFinite,
+               initialSize.width > 0,
+               initialSize.height > 0 {
+                resolvedSize = initialSize
+            } else {
+                resolvedSize = CGSize(width: 800, height: 600)
+            }
+
+            // Initialize with the target slot size when available, or a non-zero
+            // default frame so layer bounds are non-zero for initial rendering.
+            super.init(id: uuid, frame: NSRect(origin: .zero, size: resolvedSize))
 
             // Our cache of screen data
             cachedScreenContents = .init(duration: .milliseconds(500)) { [weak self] in

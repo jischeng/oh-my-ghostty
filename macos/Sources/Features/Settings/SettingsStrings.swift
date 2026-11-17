@@ -314,8 +314,8 @@ struct SettingsStrings: Equatable, Sendable {
     }
     var terminalResizeRenderingCaption: String {
         t(
-            "Applies to Sidebars, split dividers, and Quick Input. During Drag feels continuous; On Release keeps terminal content fixed until resizing ends.",
-            "适用于侧边栏、分屏分隔线和快速输入框。“拖动时”会连续重排；“松开时”会在尺寸调整结束前保持终端内容不变。"
+            "Applies to Sidebars and split dividers. During Drag feels continuous; On Release keeps terminal content fixed until resizing ends.",
+            "适用于侧边栏和分屏分隔线。“拖动时”会连续重排；“松开时”会在尺寸调整结束前保持终端内容不变。"
         )
     }
     func terminalResizeRenderingTitle(_ mode: TerminalResizeRenderingMode) -> String {
@@ -449,13 +449,25 @@ struct SettingsStrings: Equatable, Sendable {
     var focusedSplitBorderLabel: String { t("Mark focused pane", "标记聚焦窗格") }
     var quickInputHeightCaption: String {
         t(
-            "Drag the divider above the composer to resize it. The last committed height is remembered.",
-            "拖动输入框上方的分隔线可调整高度，并会记住最后确认的高度。"
+            "Drag the top edge of the composer to resize it. The last committed height is remembered.",
+            "拖动输入框上边缘可调整高度，并会记住最后确认的高度。"
+        )
+    }
+    var quickInputPlaceholder: String {
+        t(
+            "Type multiline input — ⌘↩ send, ⇧↩ newline, ⌥⌘↩ queue…",
+            "输入多行内容，⌘↩ 发送，⇧↩ 换行，⌥⌘↩ 排队…"
+        )
+    }
+    var quickInputEditQueuedPlaceholder: String {
+        t(
+            "Edit queued message — ⌘↩ save, ⎋ cancel…",
+            "编辑排队消息，⌘↩ 保存，⎋ 取消…"
         )
     }
     var quickInputSendTitle: String { t("Send", "发送") }
     var quickInputQueueTitle: String { t("Queue", "排队") }
-    var quickInputCancelTitle: String { t("Cancel", "取消") }
+    var quickInputCancelTitle: String { t("Cancel", "关闭") }
     var quickInputSaveTitle: String { t("Save Edit", "保存修改") }
     var quickInputMoveTitle: String { t("Move to Queue End", "移到队尾") }
     var quickInputHistoryTitle: String { t("Sent History", "发送历史") }

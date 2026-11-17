@@ -334,10 +334,10 @@
     },
     "keyboard.quickInputHeight": {
       "category": "keyboard",
-      "default": 252,
-      "description": "Last committed Agent Quick Input dock height in points.",
+      "default": 148,
+      "description": "Last committed Agent Quick Input floating card height in points.",
       "maximum": 480,
-      "minimum": 140,
+      "minimum": 96,
       "type": "number"
     },
     "keyboard.quickInputHistoryInsertionMode": {

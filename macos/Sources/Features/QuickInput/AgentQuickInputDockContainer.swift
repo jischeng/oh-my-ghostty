@@ -41,7 +41,14 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
         private(set) var isPinned: Bool = false
 
         func occludesContentPoint(inWindow pointInWindow: NSPoint) -> Bool {
-            false
+            let local = convert(pointInWindow, from: nil)
+            if !composerHost.isHidden, composerHost.frame.contains(local) {
+                return true
+            }
+            if !queueHost.isHidden, queueHost.frame.contains(local) {
+                return true
+            }
+            return false
         }
 
         override init(frame frameRect: NSRect) {
@@ -52,6 +59,7 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
                 host.sizingOptions = []
                 addSubview(host)
             }
+            configureOverlayLayers(composerVisible: false)
             composerHost.isHidden = true
             queueHost.isHidden = true
         }
@@ -70,16 +78,12 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
             requestedComposerHeight = max(0, composerHeight)
             requestedQueueHeight = max(0, queueHeight)
             self.isPinned = isPinned
-            // Publish the final viewport before SwiftUI updates the terminal
-            // leaf. Updating its root at the old size produces an extra TUI
-            // layout/redraw between the old and new composer reservations.
             applyAccessoryFrames()
             // Preserve the Surface and ComposerTextView instances, including
             // first responder, selection, marked text and scrollback state.
             contentHost.rootView = content
             composerHost.rootView = composer
             queueHost.rootView = queue
-
         }
 
         override func layout() {
@@ -96,27 +100,59 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0
                 context.allowsImplicitAnimation = false
+                let safeWidth = bounds.width
                 let safeHeight = max(0, bounds.height)
-                let minContentHeight = min(
-                    AgentQuickInputMetrics.minimumTerminalHeight,
-                    safeHeight * 0.5
+                let contentFrame = NSRect(x: 0, y: 0, width: safeWidth, height: safeHeight)
+
+                let insetX = min(
+                    AgentQuickInputMetrics.floatingHorizontalInset,
+                    max(0, (safeWidth - 120) * 0.5)
                 )
-                let availableAccessory = max(0, safeHeight - minContentHeight)
-                let nextQueueHeight = min(requestedQueueHeight, availableAccessory)
-                let nextComposerHeight = min(
-                    requestedComposerHeight,
-                    max(0, availableAccessory - nextQueueHeight)
+                let cardWidth = max(0, safeWidth - insetX * 2)
+                let topMargin = min(AgentQuickInputMetrics.floatingTopMargin, safeHeight * 0.1)
+                let availableOverlay = max(
+                    0,
+                    safeHeight - AgentQuickInputMetrics.floatingBottomInset - topMargin
                 )
-                let contentFrame = NSRect(
-                    x: 0,
-                    y: nextQueueHeight + nextComposerHeight,
-                    width: bounds.width,
-                    height: max(0, safeHeight - nextQueueHeight - nextComposerHeight)
+
+                let nextComposerHeight = cardWidth > 0
+                    ? min(requestedComposerHeight, availableOverlay)
+                    : 0
+                let stackGap = nextComposerHeight > 0
+                    ? AgentQuickInputMetrics.floatingStackSpacing
+                    : 0
+                let remainingForQueue = max(0, availableOverlay - nextComposerHeight - stackGap)
+                let nextQueueHeight = cardWidth > 0
+                    ? min(requestedQueueHeight, remainingForQueue)
+                    : 0
+
+                let composerY = nextComposerHeight > 0
+                    ? min(AgentQuickInputMetrics.floatingBottomInset, max(0, safeHeight - nextComposerHeight))
+                    : 0
+                let composerFrame = NSRect(
+                    x: insetX,
+                    y: composerY,
+                    width: cardWidth,
+                    height: nextComposerHeight
                 )
+                let queueY: CGFloat = if nextQueueHeight > 0 {
+                    nextComposerHeight > 0
+                        ? composerY + nextComposerHeight + AgentQuickInputMetrics.floatingStackSpacing
+                        : min(AgentQuickInputMetrics.floatingBottomInset, max(0, safeHeight - nextQueueHeight))
+                } else {
+                    0
+                }
+                let queueFrame = NSRect(
+                    x: insetX,
+                    y: queueY,
+                    width: cardWidth,
+                    height: nextQueueHeight
+                )
+
                 let frames: [(NSView, NSRect)] = [
-                    (queueHost, .init(x: 0, y: 0, width: bounds.width, height: nextQueueHeight)),
-                    (composerHost, .init(x: 0, y: nextQueueHeight, width: bounds.width, height: nextComposerHeight)),
-                    (contentHost, contentFrame)
+                    (contentHost, contentFrame),
+                    (composerHost, composerFrame),
+                    (queueHost, queueFrame)
                 ]
                 for (host, frame) in frames where host.frame != frame { host.frame = frame }
                 if composerHost.isHidden != (nextComposerHeight == 0) {
@@ -125,6 +161,31 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
                 if queueHost.isHidden != (nextQueueHeight == 0) {
                     queueHost.isHidden = nextQueueHeight == 0
                 }
+                configureOverlayLayers(composerVisible: nextComposerHeight > 0)
+            }
+        }
+
+        private func configureOverlayLayers(composerVisible: Bool) {
+            for host in [composerHost, queueHost] {
+                host.wantsLayer = true
+                host.layer?.masksToBounds = false
+                host.layer?.backgroundColor = NSColor.clear.cgColor
+            }
+            guard let layer = composerHost.layer else { return }
+            if composerVisible, !composerHost.bounds.isEmpty {
+                layer.shadowColor = NSColor.black.cgColor
+                layer.shadowOpacity = 0.28
+                layer.shadowRadius = 16
+                layer.shadowOffset = CGSize(width: 0, height: -4)
+                layer.shadowPath = CGPath(
+                    roundedRect: composerHost.bounds,
+                    cornerWidth: AgentQuickInputMetrics.cardCornerRadius,
+                    cornerHeight: AgentQuickInputMetrics.cardCornerRadius,
+                    transform: nil
+                )
+            } else {
+                layer.shadowOpacity = 0
+                layer.shadowPath = nil
             }
         }
     }

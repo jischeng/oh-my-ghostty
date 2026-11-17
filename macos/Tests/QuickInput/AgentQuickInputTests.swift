@@ -426,41 +426,41 @@ struct AgentQuickInputTests {
         #expect(AgentQuickInputMetrics.queueHoverDelayMilliseconds == 300)
     }
 
-    @Test func accessoryHeightReservesFinalLayoutWithoutAnimationSteps() {
+    @Test func accessoryHeightNeverReservesInFlowTerminalSpace() {
         #expect(AgentQuickInputMetrics.minimumHeight == 96)
         #expect(AgentQuickInputMetrics.defaultHeight == 148)
-        let divider = TerminalShellStyle.dividerWidth
+        #expect(AgentQuickInputMetrics.maximumHeight == 480)
+        #expect(AgentQuickInputMetrics.floatingHorizontalInset == 16)
+        #expect(AgentQuickInputMetrics.floatingBottomInset == 12)
+        #expect(AgentQuickInputMetrics.floatingStackSpacing == 8)
+        #expect(AgentQuickInputMetrics.floatingTopMargin == 16)
+        #expect(AgentQuickInputMetrics.cardCornerRadius == 12)
         for pinned in [false, true] {
-            #expect(AgentQuickInputMetrics.reservedAccessoryHeight(
-                dockHeight: 148,
-                isDockPresented: false,
-                hasQueue: false,
-                isPinned: pinned
-            ) == 0)
-            #expect(AgentQuickInputMetrics.reservedAccessoryHeight(
-                dockHeight: 148,
-                isDockPresented: true,
-                hasQueue: false,
-                isPinned: pinned
-            ) == 148 + divider)
-            #expect(AgentQuickInputMetrics.reservedAccessoryHeight(
-                dockHeight: 148,
-                isDockPresented: false,
-                hasQueue: true,
-                isPinned: pinned
-            ) == AgentQuickInputMetrics.queueLaneHeight + divider)
-            #expect(AgentQuickInputMetrics.reservedAccessoryHeight(
-                dockHeight: 148,
-                isDockPresented: true,
-                hasQueue: true,
-                isPinned: pinned
-            ) == 148 + AgentQuickInputMetrics.queueLaneHeight + divider * 2)
+            for presented in [false, true] {
+                for hasQueue in [false, true] {
+                    #expect(AgentQuickInputMetrics.reservedAccessoryHeight(
+                        dockHeight: 148,
+                        isDockPresented: presented,
+                        hasQueue: hasQueue,
+                        isPinned: pinned
+                    ) == 0)
+                }
+            }
         }
         #expect(AgentQuickInputMetrics.reservedAccessoryHeight(
             dockHeight: 148,
             isDockPresented: true,
             hasQueue: false
-        ) == 148 + divider)
+        ) == 0)
+
+        let english = SettingsStrings(language: .english)
+        let chinese = SettingsStrings(language: .simplifiedChinese)
+        #expect(english.quickInputPlaceholder == "Type multiline input — ⌘↩ send, ⇧↩ newline, ⌥⌘↩ queue…")
+        #expect(chinese.quickInputPlaceholder == "输入多行内容，⌘↩ 发送，⇧↩ 换行，⌥⌘↩ 排队…")
+        #expect(english.quickInputEditQueuedPlaceholder == "Edit queued message — ⌘↩ save, ⎋ cancel…")
+        #expect(chinese.quickInputEditQueuedPlaceholder == "编辑排队消息，⌘↩ 保存，⎋ 取消…")
+        #expect(english.quickInputCancelTitle == "Cancel")
+        #expect(chinese.quickInputCancelTitle == "关闭")
     }
 
     @Test @MainActor func placeholderUsesRealWindowCaretGeometry() throws {
@@ -628,7 +628,7 @@ struct AgentQuickInputTests {
     }
 
     @Test @MainActor
-    func unpinnedQuickInputDocksInFlowWithZeroCtrlGAndZeroDEC1004FocusChatter() async throws {
+    func floatingQuickInputOverlaysTerminalWithZeroResizeZeroCtrlGAndZeroDEC1004FocusChatter() async throws {
         let app = try #require(NSApp.delegate as? AppDelegate).ghostty
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -679,15 +679,16 @@ struct AgentQuickInputTests {
         #expect(!controller.quickInputModel.isPinned)
         #expect(surface.focused)
 
-        // 1. Open unpinned Quick Input (⌘⇧E); it docks in-flow above the bottom edge and transfers focus cleanly.
+        // 1. Open Quick Input (⌘⇧E); it floats over the full terminal viewport and transfers focus cleanly.
         controller.toggleQuickInput()
         #expect(controller.quickInputModel.isPresented)
-        try await waitForAppKit {
-            window.contentView?.layoutSubtreeIfNeeded()
-            return surface.frame.height < initialSurfaceFrame.height
-        }
         func findEditor(_ view: NSView) -> ComposerTextView? {
             (view as? ComposerTextView) ?? view.subviews.lazy.compactMap(findEditor).first
+        }
+        try await waitForAppKit {
+            window.contentView?.layoutSubtreeIfNeeded()
+            guard let editor = window.contentView.flatMap(findEditor) else { return false }
+            return !editor.isHiddenOrHasHiddenAncestor
         }
         let editor = try #require(window.contentView.flatMap(findEditor))
         controller.focusQuickInputEditor(editor, for: surface.id)
@@ -695,9 +696,18 @@ struct AgentQuickInputTests {
         #expect(surface.hasCompanionQuickInputFocus)
         #expect(surface.focused)
         #expect(surface.layer?.opacity == 1)
-        #expect(surface.frame.height < initialSurfaceFrame.height)
+        #expect(surface.frame == initialSurfaceFrame)
+        #expect(surface.isPointOccludedByFloatingAccessory(
+            inWindow: surface.convert(NSPoint(x: 100, y: 40), to: nil)
+        ))
         #expect(!surface.isPointOccludedByFloatingAccessory(
-            inWindow: surface.convert(NSPoint(x: 40, y: 12), to: nil)
+            inWindow: surface.convert(NSPoint(x: 6, y: 40), to: nil)
+        ))
+        #expect(!surface.isPointOccludedByFloatingAccessory(
+            inWindow: surface.convert(NSPoint(x: 100, y: 6), to: nil)
+        ))
+        #expect(!surface.isPointOccludedByFloatingAccessory(
+            inWindow: surface.convert(NSPoint(x: 100, y: surface.bounds.height - 20), to: nil)
         ))
 
         // 2. Round-trip focus between ComposerTextView and SurfaceView (⌘⌥↑ / ⌘⌥↓).
@@ -709,41 +719,42 @@ struct AgentQuickInputTests {
         #expect(window.firstResponder === editor)
         #expect(surface.hasCompanionQuickInputFocus)
         #expect(surface.focused)
+        #expect(surface.frame == initialSurfaceFrame)
 
-        // 3. Queue a message while unpinned; queue bar stays in-flow below the terminal viewport.
+        // 3. Queue a message while unpinned; queue lane floats without resizing the terminal.
         controller.quickInputModel.draft = "queued while unpinned"
         controller.queueQuickInputDraft()
         window.contentView?.layoutSubtreeIfNeeded()
         try await Task.sleep(for: .milliseconds(50))
         window.contentView?.layoutSubtreeIfNeeded()
         #expect(controller.quickInputModel.state(for: surface.id)?.queue.count == 1)
-        #expect(surface.frame.height < initialSurfaceFrame.height)
+        #expect(surface.frame == initialSurfaceFrame)
         #expect(surface.focused)
 
-        // 4. Open again, send a draft, and dismiss on completion.
+        // 4. Open again, send a draft, and dismiss on completion with zero terminal resize.
         controller.toggleQuickInput()
         window.contentView?.layoutSubtreeIfNeeded()
         controller.focusQuickInputEditor(editor, for: surface.id)
-        controller.quickInputModel.draft = "direct in-flow send"
+        controller.quickInputModel.draft = "direct floating send"
         controller.sendQuickInputDraft()
 
         for _ in 0..<80 {
             let allData = (try? Data(contentsOf: captured)) ?? Data()
             let delta = allData.dropFirst(min(baselineBytes, allData.count))
-            if let text = String(data: delta, encoding: .utf8), text.contains("direct in-flow send"), text.hasSuffix("\r") {
+            if let text = String(data: delta, encoding: .utf8), text.contains("direct floating send"), text.hasSuffix("\r") {
                 break
             }
             try await Task.sleep(for: .milliseconds(50))
         }
         window.contentView?.layoutSubtreeIfNeeded()
-        #expect(surface.frame.height < initialSurfaceFrame.height)
+        #expect(surface.frame == initialSurfaceFrame)
         #expect(surface.layer?.opacity == 1)
         #expect(surface.focused)
 
         let allData = try Data(contentsOf: captured)
         let roundTripSlice = Data(allData.dropFirst(min(baselineBytes, allData.count)))
         let roundTripText = try #require(String(data: roundTripSlice, encoding: .utf8))
-        #expect(roundTripText.contains("direct in-flow send"))
+        #expect(roundTripText.contains("direct floating send"))
         #expect(!roundTripSlice.contains(0x07), "Default Quick Input open/send must not inject Ctrl+G (0x07)")
         #expect(!roundTripText.contains("\u{1B}[103;5u"), "Default Quick Input open/send must not inject Kitty Ctrl+G")
         #expect(!roundTripText.contains("\u{1B}[O"), "Companion focus transfer must suppress DEC 1004 focus-out")
@@ -768,12 +779,12 @@ struct AgentQuickInputTests {
     }
 
     @Test @MainActor
-    func inFlowQuickInputAlwaysUsesChromeBackgroundForBothPinnedAndUnpinned() throws {
-        let themeColor = Color(.sRGB, red: 0.12, green: 0.13, blue: 0.19, opacity: 1)
+    func floatingQuickInputAlwaysUsesOpaqueElevatedCardBackground() throws {
+        let darkThemeColor = Color(.sRGB, red: 0.12, green: 0.13, blue: 0.19, opacity: 1)
 
-        // 1. Translucent background-opacity < 1.0
+        // 1. Translucent background-opacity < 1.0 still yields a 100% opaque lifted dark card.
         let translucentChrome = TerminalController.chromeBackground(
-            color: themeColor,
+            color: darkThemeColor,
             opacity: 0.62,
             windowIsOpaque: false,
             usesWindowGlass: false
@@ -781,23 +792,26 @@ struct AgentQuickInputTests {
         let unpinnedTranslucent = TerminalController.quickInputAccessoryBackground(
             isPinned: false,
             chromeBackground: translucentChrome,
-            color: themeColor,
+            color: darkThemeColor,
             opacity: 0.62
         )
         let pinnedTranslucent = TerminalController.quickInputAccessoryBackground(
             isPinned: true,
             chromeBackground: translucentChrome,
-            color: themeColor,
+            color: darkThemeColor,
             opacity: 0.62
         )
         let unpinnedTranslucentColor = try #require(NSColor(unpinnedTranslucent).usingColorSpace(.sRGB))
         let pinnedTranslucentColor = try #require(NSColor(pinnedTranslucent).usingColorSpace(.sRGB))
-        #expect(abs(unpinnedTranslucentColor.alphaComponent - 0.62) < 0.02)
-        #expect(abs(pinnedTranslucentColor.alphaComponent - 0.62) < 0.02)
+        #expect(unpinnedTranslucentColor.alphaComponent == 1.0)
+        #expect(pinnedTranslucentColor.alphaComponent == 1.0)
+        #expect(unpinnedTranslucentColor.redComponent > 0.12)
+        #expect(unpinnedTranslucentColor.greenComponent > 0.13)
+        #expect(unpinnedTranslucentColor.blueComponent > 0.19)
 
-        // 2. macOS glass style (usesWindowGlass = true -> terminalChromeBackground is .clear)
+        // 2. macOS glass style (usesWindowGlass = true -> terminalChromeBackground is .clear) stays opaque.
         let glassChrome = TerminalController.chromeBackground(
-            color: themeColor,
+            color: darkThemeColor,
             opacity: 0.62,
             windowIsOpaque: false,
             usesWindowGlass: true
@@ -805,17 +819,32 @@ struct AgentQuickInputTests {
         let unpinnedGlass = TerminalController.quickInputAccessoryBackground(
             isPinned: false,
             chromeBackground: glassChrome,
-            color: themeColor,
+            color: darkThemeColor,
             opacity: 0.62
         )
         let pinnedGlass = TerminalController.quickInputAccessoryBackground(
             isPinned: true,
             chromeBackground: glassChrome,
-            color: themeColor,
+            color: darkThemeColor,
             opacity: 0.62
         )
-        #expect(NSColor(unpinnedGlass).alphaComponent == 0)
-        #expect(NSColor(pinnedGlass).alphaComponent == 0)
+        #expect(NSColor(unpinnedGlass).alphaComponent == 1.0)
+        #expect(NSColor(pinnedGlass).alphaComponent == 1.0)
+
+        // 3. Light theme is subtly tinted darker while staying 100% opaque in Display P3 too.
+        let lightThemeColor = Color(.sRGB, red: 0.95, green: 0.95, blue: 0.97, opacity: 1)
+        let lightCard = TerminalController.quickInputAccessoryBackground(
+            isPinned: false,
+            chromeBackground: .clear,
+            color: lightThemeColor,
+            opacity: 0.5,
+            colorspaceIsDisplayP3: true
+        )
+        let lightNSColor = NSColor(lightCard)
+        #expect(lightNSColor.alphaComponent == 1.0)
+        let lightSRGB = try #require(lightNSColor.usingColorSpace(.sRGB))
+        #expect(lightSRGB.alphaComponent == 1.0)
+        #expect(lightSRGB.redComponent < 0.95)
     }
 
     @Test @MainActor
@@ -923,7 +952,7 @@ struct AgentQuickInputTests {
     }
 
     @Test @MainActor
-    func inFlowQuickInputDoesNotOccludeTerminalAndPreservesMouseHover() async throws {
+    func floatingQuickInputOccludesCardRectAndPreservesMarginMouseHover() async throws {
         let app = try #require(NSApp.delegate as? AppDelegate).ghostty
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -966,18 +995,19 @@ struct AgentQuickInputTests {
         }
         try #require(FileManager.default.fileExists(atPath: ready.path))
         window.contentView?.layoutSubtreeIfNeeded()
-        let initialSurfaceHeight = surface.frame.height
+        let initialSurfaceFrame = surface.frame
+        let cardPoint = surface.convert(NSPoint(x: 120, y: 40), to: nil)
 
         controller.keyWindowOverrideForTesting = true
         controller.focusFollowsMouseOverrideForTesting = true
         controller.presentQuickInput(for: surface, requestFocus: false)
         try await waitForAppKit {
             window.contentView?.layoutSubtreeIfNeeded()
-            return surface.frame.height < initialSurfaceHeight
+            return surface.isPointOccludedByFloatingAccessory(inWindow: cardPoint)
         }
 
-        #expect(surface.frame.height < initialSurfaceHeight)
-        let dockHit = try #require(window.contentView?.hitTest(NSPoint(x: 120, y: 40)))
+        #expect(surface.frame == initialSurfaceFrame)
+        let dockHit = try #require(window.contentView?.hitTest(cardPoint))
         #expect(dockHit !== surface && !dockHit.isDescendant(of: surface))
 
         let externalField = NSTextField(frame: NSRect(x: 0, y: 560, width: 80, height: 24))
@@ -987,8 +1017,13 @@ struct AgentQuickInputTests {
         #expect(!surface.focused)
         #expect(window.firstResponder !== surface)
 
-        let surfaceBottomPoint = surface.convert(NSPoint(x: 120, y: 20), to: nil)
-        #expect(!surface.isPointOccludedByFloatingAccessory(inWindow: surfaceBottomPoint))
+        let leftMarginPoint = surface.convert(NSPoint(x: 6, y: 40), to: nil)
+        let bottomMarginPoint = surface.convert(NSPoint(x: 120, y: 6), to: nil)
+        let aboveCardPoint = surface.convert(NSPoint(x: 120, y: 260), to: nil)
+        #expect(surface.isPointOccludedByFloatingAccessory(inWindow: cardPoint))
+        #expect(!surface.isPointOccludedByFloatingAccessory(inWindow: leftMarginPoint))
+        #expect(!surface.isPointOccludedByFloatingAccessory(inWindow: bottomMarginPoint))
+        #expect(!surface.isPointOccludedByFloatingAccessory(inWindow: aboveCardPoint))
         let baselineCount = (try? Data(contentsOf: captured))?.count ?? 0
 
         let makeMouseMoveEvent = { (location: NSPoint) throws -> NSEvent in
@@ -1004,7 +1039,10 @@ struct AgentQuickInputTests {
                 pressure: 0
             ))
         }
-        surface.mouseMoved(with: try makeMouseMoveEvent(surfaceBottomPoint))
+        surface.mouseMoved(with: try makeMouseMoveEvent(cardPoint))
+        #expect(!surface.mouseOverSurface)
+
+        surface.mouseMoved(with: try makeMouseMoveEvent(aboveCardPoint))
         #expect(surface.mouseOverSurface)
         for _ in 0..<40 {
             let data = (try? Data(contentsOf: captured)) ?? Data()
@@ -1097,18 +1135,25 @@ struct AgentQuickInputTests {
         #expect(controller.quickInputModel.dockHeight == 188)
         #expect(settings.quickInputHeight == 188)
 
-        // 3. Visible queue reservation is subtracted from available height during divider resize.
+        // 3. Visible queue reservation and floating vertical insets are subtracted from available height.
         let surface = try #require(controller.focusedSurface)
         controller.quickInputModel.present(for: surface.id, requestFocus: false)
         controller.quickInputModel.draft = "queued"
         _ = controller.quickInputModel.enqueueDraft()
         window.setContentSize(NSSize(width: 800, height: 420))
         let contentHeight = window.contentLayoutRect.height
+        let expectedAvailable = max(
+            0,
+            contentHeight
+                - AgentQuickInputMetrics.floatingBottomInset
+                - AgentQuickInputMetrics.floatingTopMargin
+                - (AgentQuickInputMetrics.queueFloatingHeight + AgentQuickInputMetrics.floatingStackSpacing)
+        )
+        #expect(abs(controller.quickInputAvailableHeight() - expectedAvailable) < 0.01)
         controller.updateQuickInputHeight(400, persist: true)
-        let queueReserve = AgentQuickInputMetrics.queueLaneHeight + TerminalShellStyle.dividerWidth
         let expectedMax = max(
             AgentQuickInputMetrics.minimumHeight,
-            contentHeight - queueReserve - AgentQuickInputMetrics.minimumTerminalHeight
+            expectedAvailable - AgentQuickInputMetrics.minimumTerminalHeight
         )
         #expect(abs(controller.quickInputModel.dockHeight - expectedMax) < 0.01)
     }

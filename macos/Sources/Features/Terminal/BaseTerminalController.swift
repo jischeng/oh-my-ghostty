@@ -385,7 +385,31 @@ class BaseTerminalController: NSWindowController,
 
         // Create a new surface view
         guard let ghostty_app = ghostty.app else { return nil }
-        let newView = Ghostty.SurfaceView(ghostty_app, baseConfig: config)
+        let targetSize: CGSize?
+        if oldView.frame.width.isFinite,
+           oldView.frame.height.isFinite,
+           oldView.frame.width > 20,
+           oldView.frame.height > 20 {
+            switch direction {
+            case .left, .right:
+                targetSize = CGSize(
+                    width: (oldView.frame.width - 1) * 0.5,
+                    height: oldView.frame.height
+                )
+            case .up, .down:
+                targetSize = CGSize(
+                    width: oldView.frame.width,
+                    height: (oldView.frame.height - 1) * 0.5
+                )
+            }
+        } else {
+            targetSize = nil
+        }
+        let newView = Ghostty.SurfaceView(
+            ghostty_app,
+            baseConfig: config,
+            initialSize: targetSize
+        )
 
         // Do the split
         let newTree: SplitTree<Ghostty.SurfaceView>

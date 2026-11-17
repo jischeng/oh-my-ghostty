@@ -414,27 +414,33 @@ fn drainMailbox(
     }
 }
 
+fn syncResetTimeoutMs(post_resize: *const termio.StreamHandler.PostResizeState) u64 {
+    if (!post_resize.active or !post_resize.held_sync_output) {
+        return sync_reset_ms;
+    }
+    if (post_resize.deadline == null and post_resize.hard_deadline == null) {
+        return 1;
+    }
+    const now = std.Io.Timestamp.now(global.io(), .awake);
+    var cap_ms: u64 = termio.StreamHandler.PostResizeState.hard_limit_ms;
+    if (post_resize.deadline) |dl| {
+        const rem_ms = now.durationTo(dl).toMilliseconds();
+        if (rem_ms <= 0) return 1;
+        cap_ms = @min(cap_ms, @as(u64, @intCast(rem_ms)));
+    }
+    if (post_resize.hard_deadline) |hd| {
+        const rem_ms = now.durationTo(hd).toMilliseconds();
+        if (rem_ms <= 0) return 1;
+        cap_ms = @min(cap_ms, @as(u64, @intCast(rem_ms)));
+    }
+    return @max(@as(u64, 1), cap_ms);
+}
+
 fn startSynchronizedOutput(self: *Thread, cb: *CallbackData) void {
     const timeout_ms: u64 = timeout: {
         cb.io.renderer_state.mutex.lockUncancelable(global.io());
         defer cb.io.renderer_state.mutex.unlock(global.io());
-        const post_resize = &cb.io.terminal_stream.handler.post_resize;
-        if (!post_resize.active or !post_resize.held_sync_output) {
-            break :timeout sync_reset_ms;
-        }
-        const now = std.Io.Timestamp.now(global.io(), .awake);
-        var cap_ms: u64 = termio.StreamHandler.PostResizeState.hard_limit_ms;
-        if (post_resize.deadline) |dl| {
-            const rem_ms = now.durationTo(dl).toMilliseconds();
-            if (rem_ms <= 0) break :timeout 1;
-            cap_ms = @min(cap_ms, @as(u64, @intCast(rem_ms)));
-        }
-        if (post_resize.hard_deadline) |hd| {
-            const rem_ms = now.durationTo(hd).toMilliseconds();
-            if (rem_ms <= 0) break :timeout 1;
-            cap_ms = @min(cap_ms, @as(u64, @intCast(rem_ms)));
-        }
-        break :timeout @max(@as(u64, 1), cap_ms);
+        break :timeout syncResetTimeoutMs(&cb.io.terminal_stream.handler.post_resize);
     };
     self.sync_reset.reset(
         &self.loop,
@@ -620,4 +626,41 @@ fn selectionScrollCallback(
     );
 
     return .disarm;
+}
+
+test "Thread: syncResetTimeoutMs uses bounded hold deadlines only when held_sync_output is active" {
+    const testing = std.testing;
+    const now = std.Io.Timestamp.now(testing.io, .awake);
+
+    var inactive: termio.StreamHandler.PostResizeState = .{};
+    try testing.expectEqual(sync_reset_ms, syncResetTimeoutMs(&inactive));
+
+    // In scroll-restore tail window (`held_sync_output == false`), normal sync reset applies.
+    var tail: termio.StreamHandler.PostResizeState = .{
+        .active = true,
+        .held_sync_output = false,
+        .scroll_deadline = now.addDuration(.fromMilliseconds(900)),
+    };
+    try testing.expectEqual(sync_reset_ms, syncResetTimeoutMs(&tail));
+
+    // When held, timeout is capped by `deadline`, `hard_deadline`, and `hard_limit_ms`.
+    var held: termio.StreamHandler.PostResizeState = .{
+        .active = true,
+        .held_sync_output = true,
+        .deadline = now.addDuration(.fromMilliseconds(320)),
+        .hard_deadline = now.addDuration(.fromMilliseconds(420)),
+        .scroll_deadline = now.addDuration(.fromMilliseconds(900)),
+    };
+    const held_timeout = syncResetTimeoutMs(&held);
+    try testing.expect(held_timeout >= 1 and held_timeout <= 320);
+
+    // Expired or missing deadlines resolve to 1ms immediate unfreeze.
+    held.hard_deadline = now.addDuration(.fromMilliseconds(-5));
+    try testing.expectEqual(@as(u64, 1), syncResetTimeoutMs(&held));
+
+    var missing_deadlines: termio.StreamHandler.PostResizeState = .{
+        .active = true,
+        .held_sync_output = true,
+    };
+    try testing.expectEqual(@as(u64, 1), syncResetTimeoutMs(&missing_deadlines));
 }

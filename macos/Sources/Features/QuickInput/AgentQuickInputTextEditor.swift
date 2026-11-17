@@ -382,11 +382,12 @@ final class ComposerTextView: NSTextView, TerminalCompanionResponder {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard string.isEmpty, !hasMarkedText(), !placeholder.isEmpty else { return }
+        let placeholderColor = textColor?.withAlphaComponent(0.42) ?? NSColor.placeholderTextColor
         placeholder.draw(
             at: placeholderDrawingOrigin(),
             withAttributes: [
                 .font: font ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
-                .foregroundColor: NSColor.placeholderTextColor,
+                .foregroundColor: placeholderColor,
             ]
         )
     }

@@ -23,11 +23,24 @@ extension TerminalController {
         linearBlending: Bool = false
     ) -> Color {
         _ = isPinned
-        _ = color
+        _ = chromeBackground
         _ = opacity
-        _ = colorspaceIsDisplayP3
         _ = linearBlending
-        return chromeBackground
+        let targetSpace: NSColorSpace = colorspaceIsDisplayP3 ? .displayP3 : .sRGB
+        let base = (NSColor(color).usingColorSpace(targetSpace)
+            ?? NSColor(color).usingColorSpace(.sRGB)
+            ?? NSColor(colorSpace: targetSpace, components: [0.12, 0.12, 0.14, 1], count: 4))
+            .withAlphaComponent(1.0)
+        let isLight = base.isLightColor
+        let tintTarget = NSColor(
+            colorSpace: targetSpace,
+            components: isLight ? [0, 0, 0, 1] : [1, 1, 1, 1],
+            count: 4
+        )
+        let fraction: CGFloat = isLight ? 0.03 : 0.06
+        let elevated = (base.blended(withFraction: fraction, of: tintTarget) ?? base)
+            .withAlphaComponent(1.0)
+        return Color(nsColor: elevated)
     }
 
     func quickInputAvailableHeight(
@@ -38,10 +51,13 @@ extension TerminalController {
             ? quickInputModel.targetSurfaceID
             : (focusedSurface ?? surfaceTree.first)?.id
         let hasQueue = queueSurfaceID.flatMap { quickInputModel.state(for: $0)?.queue.isEmpty } == false
-        let queueHeight = hasQueue
-            ? AgentQuickInputMetrics.queueLaneHeight + TerminalShellStyle.dividerWidth
+        let queueAllowance = hasQueue
+            ? AgentQuickInputMetrics.queueFloatingHeight + AgentQuickInputMetrics.floatingStackSpacing
             : 0
-        return max(0, baseHeight - queueHeight)
+        let insets = AgentQuickInputMetrics.floatingBottomInset
+            + AgentQuickInputMetrics.floatingTopMargin
+            + queueAllowance
+        return max(0, baseHeight - insets)
     }
 
     func toggleQuickInput() {

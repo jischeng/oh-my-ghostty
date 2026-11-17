@@ -53,9 +53,14 @@ class SurfaceScrollView: NSView {
 
     init(contentSize: CGSize, surfaceView: Ghostty.SurfaceView, lease: SurfacePresentationLease?) {
         self.surfaceView = surfaceView
+        let initialSize = CGSize(
+            width: contentSize.width.isFinite ? max(0, contentSize.width) : 0,
+            height: contentSize.height.isFinite ? max(0, contentSize.height) : 0
+        )
+        let initialRect = NSRect(origin: .zero, size: initialSize)
         // The scroll view is our outermost view that controls all our scrollbar
         // rendering and behavior.
-        scrollView = NSScrollView()
+        scrollView = NSScrollView(frame: initialRect)
         scrollView.hasVerticalScroller = false
         scrollView.hasHorizontalScroller = false
         // An overlay scroller must disappear when the document fits the viewport,
@@ -76,13 +81,13 @@ class SurfaceScrollView: NSView {
         // The document view is what the scrollview is actually going
         // to be directly scrolling. We set it up to a "blank" NSView
         // with the desired content size.
-        documentView = NSView(frame: NSRect(origin: .zero, size: contentSize))
+        documentView = NSView(frame: initialRect)
         scrollView.documentView = documentView
 
         // The document view contains our actual surface as a child.
         // We synchronize the scrolling of the document with this surface
         // so that our primary Ghostty renderer only needs to render the viewport.
-        super.init(frame: .zero)
+        super.init(frame: initialRect)
         mount(lease: lease)
 
         // Our scroll view is our only view
@@ -90,6 +95,13 @@ class SurfaceScrollView: NSView {
 
         // Apply initial scrollbar settings
         synchronizeAppearance()
+
+        if initialSize.width > 0, initialSize.height > 0, ownsSurface {
+            surfaceView.frame.size = scrollView.bounds.size
+            documentView.frame.size.width = scrollView.bounds.width
+            synchronizeScrollView()
+            synchronizeSurfaceView()
+        }
 
         // We listen for scroll events through bounds notifications on our NSClipView.
         // This is based on: https://christiantietze.de/posts/2018/07/synchronize-nsscrollview/
@@ -190,6 +202,7 @@ class SurfaceScrollView: NSView {
 
         // Listen for derived config changes to update scrollbar settings live
         surfaceView.$derivedConfig
+            .dropFirst()
             .sink { [weak self] _ in
                 DispatchQueue.main.async { [weak self] in
                     self?.handleConfigChange()

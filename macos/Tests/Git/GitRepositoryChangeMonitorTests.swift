@@ -57,4 +57,27 @@ struct GitRepositoryChangeMonitorTests {
             #expect(observed)
         }
     }
+
+    @Test func acknowledgeRefreshFlushesBurstWritesOnMainActorWithoutDeadlocking() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var wakes = 0
+        let monitor = try #require(GitRepositoryChangeMonitor(paths: [root.path], onChange: { wakes += 1 }))
+        let writer = Task.detached {
+            for index in 0..<400 {
+                try? Data("v\(index)".utf8).write(to: root.appendingPathComponent("burst-\(index).txt"))
+            }
+        }
+        for _ in 0..<25 {
+            monitor.acknowledgeRefresh()
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        await writer.value
+        monitor.acknowledgeRefresh()
+        wakes = 0
+        try await Task.sleep(for: .milliseconds(350))
+        #expect(wakes == 0)
+        #expect(!monitor.needsRefresh())
+    }
 }

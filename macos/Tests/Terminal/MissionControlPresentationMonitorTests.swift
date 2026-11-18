@@ -6,8 +6,16 @@ import Testing
 @MainActor
 struct MissionControlPresentationMonitorTests {
     @Test
-    func classifierMatchesLocalizedDockExposeAndSpacesStripWhileIgnoringControlCenter() {
-        let screens = [CGSize(width: 1920, height: 1080), CGSize(width: 1512, height: 982)]
+    func classifierMatchesLocalizedDockExposeAndStackedDualMonitorSpacesStripWhileIgnoringControlCenter() {
+        // Primary 1920x1080 at AppKit (0, 0) -> Quartz (0, 0, 1920, 1080);
+        // Upper stacked 1920x1080 at AppKit (0, 1080) -> Quartz (0, -1080, 1920, 1080);
+        // Right side 1512x982 at AppKit (1920, 0) -> Quartz (1920, 98, 1512, 982).
+        let screens = MissionControlPresentationMonitor.quartzScreenBounds(fromAppKitFrames: [
+            CGRect(x: 0, y: 0, width: 1920, height: 1080),
+            CGRect(x: 0, y: 1080, width: 1920, height: 1080),
+            CGRect(x: 1920, y: 0, width: 1512, height: 982),
+        ])
+        #expect(screens[1] == CGRect(x: 0, y: -1080, width: 1920, height: 1080))
         let dockLevel = Int(CGWindowLevelForKey(.dockWindow))
 
         let bundleMap: [pid_t: String] = [
@@ -21,13 +29,14 @@ struct MissionControlPresentationMonitorTests {
         //    layer == dockLevel Dock container per display + Stage Manager side strip) -> false
         let normalDesktop: [MissionControlPresentationMonitor.WindowSnapshot] = [
             .init(ownerPID: 401, ownerName: "程序坞", layer: dockLevel, bounds: CGRect(x: 0, y: 0, width: 1920, height: 1080)),
-            .init(ownerPID: 401, ownerName: "Dock", layer: dockLevel, bounds: CGRect(x: 1920, y: 0, width: 1512, height: 982)),
+            .init(ownerPID: 401, ownerName: "程序坞", layer: dockLevel, bounds: CGRect(x: 0, y: -1080, width: 1920, height: 1080)),
+            .init(ownerPID: 401, ownerName: "Dock", layer: dockLevel, bounds: CGRect(x: 1920, y: 98, width: 1512, height: 982)),
             .init(ownerPID: 523, ownerName: "WindowManager", layer: 14, bounds: CGRect(x: 0, y: 30, width: 190, height: 900)),
             .init(ownerPID: 999, ownerName: "OMG", layer: 0, bounds: CGRect(x: 100, y: 100, width: 1200, height: 800)),
         ]
         #expect(!MissionControlPresentationMonitor.isMissionControlPresented(
             windows: normalDesktop,
-            screenSizes: screens,
+            screenBounds: screens,
             bundleIdentifierForPID: { bundleMap[$0] }
         ))
 
@@ -38,7 +47,7 @@ struct MissionControlPresentationMonitorTests {
         ]
         #expect(!MissionControlPresentationMonitor.isMissionControlPresented(
             windows: controlCenterOpen,
-            screenSizes: screens,
+            screenBounds: screens,
             bundleIdentifierForPID: { bundleMap[$0] }
         ))
 
@@ -48,7 +57,7 @@ struct MissionControlPresentationMonitorTests {
         ]
         #expect(MissionControlPresentationMonitor.isMissionControlPresented(
             windows: chineseDockExposeBackdrop,
-            screenSizes: screens,
+            screenBounds: screens,
             bundleIdentifierForPID: { bundleMap[$0] }
         ))
 
@@ -58,19 +67,92 @@ struct MissionControlPresentationMonitorTests {
         ]
         #expect(MissionControlPresentationMonitor.isMissionControlPresented(
             windows: stackedDockOverlay,
-            screenSizes: screens,
+            screenBounds: screens,
             bundleIdentifierForPID: { bundleMap[$0] }
         ))
 
-        // 4. macOS 26/27 WindowManager top Spaces strip -> true
-        let windowManagerSpacesStrip: [MissionControlPresentationMonitor.WindowSnapshot] = [
+        // 4a. macOS 26/27 WindowManager top Spaces strip on primary display (y: 0) -> true
+        let primarySpacesStrip: [MissionControlPresentationMonitor.WindowSnapshot] = [
             .init(ownerPID: 523, ownerName: "WindowManager", layer: 14, bounds: CGRect(x: 0, y: 0, width: 1920, height: 202)),
         ]
         #expect(MissionControlPresentationMonitor.isMissionControlPresented(
-            windows: windowManagerSpacesStrip,
-            screenSizes: screens,
+            windows: primarySpacesStrip,
+            screenBounds: screens,
             bundleIdentifierForPID: { bundleMap[$0] }
         ))
+
+        // 4b. WindowManager top Spaces strip on stacked upper secondary display (Quartz y: -1080) -> true
+        let upperDisplaySpacesStrip: [MissionControlPresentationMonitor.WindowSnapshot] = [
+            .init(ownerPID: 523, ownerName: "WindowManager", layer: 14, bounds: CGRect(x: 0, y: -1080, width: 1920, height: 202)),
+        ]
+        #expect(MissionControlPresentationMonitor.isMissionControlPresented(
+            windows: upperDisplaySpacesStrip,
+            screenBounds: screens,
+            bundleIdentifierForPID: { bundleMap[$0] }
+        ))
+    }
+
+    @Test
+    func eventFilterIgnoresMouseMovesScrollsAndControlReadlineKeysWhileMatchingMissionControlShortcuts() throws {
+        func keyDown(keyCode: UInt16, flags: NSEvent.ModifierFlags) throws -> NSEvent {
+            try #require(
+                NSEvent.keyEvent(
+                    with: .keyDown,
+                    location: .zero,
+                    modifierFlags: flags,
+                    timestamp: 0,
+                    windowNumber: 0,
+                    context: nil,
+                    characters: "",
+                    charactersIgnoringModifiers: "",
+                    isARepeat: false,
+                    keyCode: keyCode
+                )
+            )
+        }
+
+        // Terminal readline / shell Control keys must NEVER trigger probes.
+        #expect(!MissionControlPresentationMonitor.shouldTriggerImmediateProbe(for: try keyDown(keyCode: 8, flags: .control)))  // Ctrl+C
+        #expect(!MissionControlPresentationMonitor.shouldTriggerImmediateProbe(for: try keyDown(keyCode: 0, flags: .control)))  // Ctrl+A
+        #expect(!MissionControlPresentationMonitor.shouldTriggerImmediateProbe(for: try keyDown(keyCode: 14, flags: .control))) // Ctrl+E
+        #expect(!MissionControlPresentationMonitor.shouldTriggerImmediateProbe(for: try keyDown(keyCode: 126, flags: [])))      // Plain Up arrow
+
+        // Pointer movement and systemDefined / gesture / scroll events must NEVER trigger probes.
+        let mouseMoved = try #require(
+            NSEvent.mouseEvent(
+                with: .mouseMoved,
+                location: .zero,
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: 0,
+                context: nil,
+                eventNumber: 0,
+                clickCount: 0,
+                pressure: 0
+            )
+        )
+        #expect(!MissionControlPresentationMonitor.shouldTriggerImmediateProbe(for: mouseMoved))
+
+        let systemDefined = try #require(
+            NSEvent.otherEvent(
+                with: .systemDefined,
+                location: .zero,
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: 0,
+                context: nil,
+                subtype: 0,
+                data1: 0,
+                data2: 0
+            )
+        )
+        #expect(!MissionControlPresentationMonitor.shouldTriggerImmediateProbe(for: systemDefined))
+
+        // Mission Control dedicated keys (160, 131) and Control+Arrow (123...126) DO trigger probes.
+        #expect(MissionControlPresentationMonitor.shouldTriggerImmediateProbe(for: try keyDown(keyCode: 160, flags: [])))
+        #expect(MissionControlPresentationMonitor.shouldTriggerImmediateProbe(for: try keyDown(keyCode: 131, flags: [])))
+        #expect(MissionControlPresentationMonitor.shouldTriggerImmediateProbe(for: try keyDown(keyCode: 126, flags: .control))) // Ctrl+Up
+        #expect(MissionControlPresentationMonitor.shouldTriggerImmediateProbe(for: try keyDown(keyCode: 123, flags: .control))) // Ctrl+Left
     }
 
     @Test
@@ -80,7 +162,7 @@ struct MissionControlPresentationMonitorTests {
         let workspaceCenter = NotificationCenter()
         let monitor = MissionControlPresentationMonitor(
             snapshotProvider: { snapshots },
-            screenSizesProvider: { [CGSize(width: 1512, height: 982)] },
+            screenBoundsProvider: { [CGRect(x: 0, y: 0, width: 1512, height: 982)] },
             bundleIdentifierProvider: { $0 == 401 ? "com.apple.dock" : nil },
             notificationCenter: center,
             workspaceNotificationCenter: workspaceCenter,
@@ -273,6 +355,107 @@ struct MissionControlPresentationMonitorTests {
         }
         if couldAnimateBefore {
             #expect(iconView.isBreathingAnimationRunning)
+        }
+    }
+
+    @Test
+    func auxiliaryNativeSurfaceSoleWindowNeverOscillatesDuringMissionControlAndSupportsGlassAtUnitOpacity() throws {
+        var snapshots: [MissionControlPresentationMonitor.WindowSnapshot] = []
+        let center = NotificationCenter()
+        let workspaceCenter = NotificationCenter()
+        let monitor = MissionControlPresentationMonitor(
+            snapshotProvider: { snapshots },
+            screenBoundsProvider: { [CGRect(x: 0, y: 0, width: 1512, height: 982)] },
+            bundleIdentifierProvider: { $0 == 401 ? "com.apple.dock" : nil },
+            notificationCenter: center,
+            workspaceNotificationCenter: workspaceCenter,
+            enableEventMonitors: false
+        )
+
+        var transitionCount = 0
+        let token = center.addObserver(
+            forName: MissionControlPresentationMonitor.didChangeNotification,
+            object: monitor,
+            queue: nil
+        ) { _ in
+            transitionCount += 1
+        }
+        defer { center.removeObserver(token) }
+
+        let blurFile = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let glassFile = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.removeItem(at: blurFile)
+            try? FileManager.default.removeItem(at: glassFile)
+        }
+        try "background = 1e2030\nforeground = c8d3f5\nbackground-opacity = 0.70\nbackground-blur = 20\n"
+            .write(to: blurFile, atomically: true, encoding: .utf8)
+        try "background = 1e2030\nforeground = c8d3f5\nbackground-opacity = 1.0\nbackground-blur = macos-glass-regular\n"
+            .write(to: glassFile, atomically: true, encoding: .utf8)
+
+        let blurConfig = Ghostty.Config(at: blurFile.path)
+        let glassConfig = Ghostty.Config(at: glassFile.path)
+
+        let glassTheme = OMGNativeTheme.resolve(for: nil, config: glassConfig, missionControlMonitor: monitor)
+        #expect(glassTheme.wantsBehindWindowBlur)
+
+        let surface = OMGNativeSurfaceView(
+            frame: NSRect(x: 0, y: 0, width: 340, height: 200),
+            missionControlMonitor: monitor,
+            notificationCenter: center
+        )
+        let controller = NSViewController()
+        controller.view = surface
+        let auxWindow = NSWindow(
+            contentRect: NSRect(x: 120, y: 120, width: 340, height: 200),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        auxWindow.isReleasedWhenClosed = false
+        auxWindow.contentViewController = controller
+        auxWindow.orderFront(nil)
+        surface.bindTheme(to: nil, config: blurConfig)
+        defer {
+            center.post(name: NSWindow.willCloseNotification, object: auxWindow)
+            auxWindow.contentViewController = nil
+            auxWindow.close()
+        }
+
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency else { return }
+        #expect(!auxWindow.isOpaque)
+        #expect(surface.theme.wantsBehindWindowBlur)
+
+        // Enter Mission Control with `auxWindow` as the SOLE registered window in `monitor`.
+        let dockLevel = Int(CGWindowLevelForKey(.dockWindow))
+        snapshots = [
+            .init(ownerPID: 401, ownerName: "Dock", layer: dockLevel, bounds: CGRect(x: 0, y: 0, width: 1512, height: 982)),
+            .init(ownerPID: 401, ownerName: "Dock", layer: dockLevel - 2, bounds: CGRect(x: 0, y: 0, width: 1512, height: 982)),
+        ]
+        monitor.probeNow(reason: "mc-tick-1")
+        #expect(monitor.isMissionControlActive)
+        #expect(auxWindow.isOpaque)
+        #expect(surface.theme.wantsBehindWindowBlur)
+        #expect(transitionCount == 1)
+
+        // Subsequent watchdog ticks while Mission Control stays open must NOT oscillate.
+        monitor.probeNow(reason: "mc-tick-2")
+        monitor.probeNow(reason: "mc-tick-3")
+        #expect(monitor.isMissionControlActive)
+        #expect(auxWindow.isOpaque)
+        #expect(transitionCount == 1)
+
+        // Exiting Mission Control restores non-opaque blur cleanly.
+        snapshots = []
+        monitor.probeNow(reason: "mc-exit")
+        #expect(!monitor.isMissionControlActive)
+        #expect(!auxWindow.isOpaque)
+        #expect(transitionCount == 2)
+
+        // Verify `macos-glass-regular` at `opacity == 1.0` also configures non-opaque aux window on macOS 26+.
+        if #available(macOS 26.0, *) {
+            surface.bindTheme(to: nil, config: glassConfig)
+            #expect(!auxWindow.isOpaque)
         }
     }
 }

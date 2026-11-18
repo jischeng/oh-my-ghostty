@@ -11,13 +11,25 @@ struct OMGNativeTheme: Equatable {
     let background: NSColor
     let foreground: NSColor
     let accent: NSColor
-    var opacity: Double = 1
-    var blur: Ghostty.Config.BackgroundBlur = .disabled
+    var opacity: Double = 1 {
+        didSet { configuredWantsBehindWindowBlur = nil }
+    }
+    var blur: Ghostty.Config.BackgroundBlur = .disabled {
+        didSet { configuredWantsBehindWindowBlur = nil }
+    }
+    private var configuredWantsBehindWindowBlur: Bool?
 
     init(background: NSColor, foreground: NSColor, accent: NSColor = .controlAccentColor) {
         self.background = background.withAlphaComponent(1)
         self.foreground = foreground
         self.accent = accent
+    }
+
+    /// Configuration-level desire for behind-window blur/glass prior to any
+    /// temporary `isMissionControlActive` opaque override, so auxiliary windows
+    /// stay registered with `MissionControlPresentationMonitor` across Exposé.
+    var wantsBehindWindowBlur: Bool {
+        configuredWantsBehindWindowBlur ?? (blur.isGlassStyle || (opacity < 1 && blur.isEnabled))
     }
 
     var secondary: NSColor { foreground.withAlphaComponent(0.62) }
@@ -29,7 +41,11 @@ struct OMGNativeTheme: Equatable {
     var appearance: NSAppearance? { NSAppearance(named: background.isLightColor ? .aqua : .darkAqua) }
 
     @MainActor
-    static func resolve(for window: NSWindow?, config: Ghostty.Config? = nil) -> OMGNativeTheme {
+    static func resolve(
+        for window: NSWindow?,
+        config: Ghostty.Config? = nil,
+        missionControlMonitor: MissionControlPresentationMonitor = .shared
+    ) -> OMGNativeTheme {
         let origin = window?.sheetParent ?? window
         let config = config ?? (origin?.windowController as? TerminalController)?.ghostty.config
             ?? (NSApp.delegate as? AppDelegate)?.ghostty.config
@@ -45,13 +61,18 @@ struct OMGNativeTheme: Equatable {
         let palette = OMGThemeBackground.palette(for: origin, config: config)
         var theme = OMGNativeTheme(background: palette.background, foreground: palette.foreground,
                                    accent: config.nativeControlAccent(background: palette.background))
-        let forceOpaque = origin?.styleMask.contains(.fullScreen) == true ||
-            (origin?.windowController as? TerminalController)?.isBackgroundOpaque == true ||
-            MissionControlPresentationMonitor.shared.isMissionControlActive
+        let configForceOpaque = origin?.styleMask.contains(.fullScreen) == true ||
+            (origin?.windowController as? TerminalController)?.isBackgroundOpaque == true
+        let configOpacity = config.backgroundOpacity.clamped(to: 0...1)
+        let configBlur = config.backgroundBlur
+        let wantsBehindWindowBlur = !configForceOpaque &&
+            (configBlur.isGlassStyle || (configOpacity < 1 && configBlur.isEnabled))
+        let forceOpaque = configForceOpaque || missionControlMonitor.isMissionControlActive
         if !forceOpaque {
-            theme.opacity = config.backgroundOpacity.clamped(to: 0...1)
-            theme.blur = config.backgroundBlur
+            theme.opacity = configOpacity
+            theme.blur = configBlur
         }
+        theme.configuredWantsBehindWindowBlur = wantsBehindWindowBlur
         return theme
     }
 
@@ -70,19 +91,36 @@ struct OMGNativeTheme: Equatable {
 @MainActor
 final class OMGNativeThemeObserver: NSObject {
     weak var sourceWindow: NSWindow?
+    var explicitConfig: Ghostty.Config?
+    let missionControlMonitor: MissionControlPresentationMonitor
+    private let notificationCenter: NotificationCenter
     var onChange: ((OMGNativeTheme) -> Void)?
 
-    override init() {
+    init(
+        missionControlMonitor: MissionControlPresentationMonitor = .shared,
+        notificationCenter: NotificationCenter = .default
+    ) {
+        self.missionControlMonitor = missionControlMonitor
+        self.notificationCenter = notificationCenter
         super.init()
-        NotificationCenter.default.addObserver(self, selector: #selector(configChanged(_:)),
-                                               name: .ghosttyConfigDidChange, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(missionControlChanged),
-                                               name: MissionControlPresentationMonitor.didChangeNotification, object: nil)
+        notificationCenter.addObserver(self, selector: #selector(configChanged(_:)),
+                                       name: .ghosttyConfigDidChange, object: nil)
+        notificationCenter.addObserver(self, selector: #selector(missionControlChanged),
+                                       name: MissionControlPresentationMonitor.didChangeNotification,
+                                       object: missionControlMonitor)
     }
 
-    deinit { NotificationCenter.default.removeObserver(self) }
+    deinit { notificationCenter.removeObserver(self) }
 
-    func refresh() { onChange?(OMGNativeTheme.resolve(for: sourceWindow)) }
+    func refresh() {
+        onChange?(
+            OMGNativeTheme.resolve(
+                for: sourceWindow,
+                config: explicitConfig,
+                missionControlMonitor: missionControlMonitor
+            )
+        )
+    }
 
     @objc private func missionControlChanged() { refresh() }
 
@@ -90,22 +128,41 @@ final class OMGNativeThemeObserver: NSObject {
         if let object = notification.object as AnyObject? {
             guard object === sourceWindow || object === sourceWindow?.windowController else { return }
         }
-        let config = notification.userInfo?[Notification.Name.GhosttyConfigChangeKey] as? Ghostty.Config
-        onChange?(OMGNativeTheme.resolve(for: sourceWindow, config: config))
+        let config = (notification.userInfo?[Notification.Name.GhosttyConfigChangeKey] as? Ghostty.Config)
+            ?? explicitConfig
+        onChange?(
+            OMGNativeTheme.resolve(
+                for: sourceWindow,
+                config: config,
+                missionControlMonitor: missionControlMonitor
+            )
+        )
     }
 }
 
 class OMGNativeSurfaceView: NSView {
     /// Embedded chrome inherits the terminal backdrop; only popup roots paint one.
     var paintsBackground = true { didSet { updateBackdrop(); needsDisplay = true } }
-    private let themeObserver = OMGNativeThemeObserver()
+    private let themeObserver: OMGNativeThemeObserver
     private(set) var theme = OMGNativeTheme(background: .windowBackgroundColor, foreground: .labelColor)
     var onThemeChange: ((OMGNativeTheme) -> Void)?
     private var hasExplicitSource = false
     private var backdrop: NSView?
     private var backdropBlur: Ghostty.Config.BackgroundBlur?
 
-    override init(frame frameRect: NSRect) {
+    override convenience init(frame frameRect: NSRect) {
+        self.init(frame: frameRect, missionControlMonitor: .shared, notificationCenter: .default)
+    }
+
+    init(
+        frame frameRect: NSRect,
+        missionControlMonitor: MissionControlPresentationMonitor,
+        notificationCenter: NotificationCenter = .default
+    ) {
+        self.themeObserver = OMGNativeThemeObserver(
+            missionControlMonitor: missionControlMonitor,
+            notificationCenter: notificationCenter
+        )
         super.init(frame: frameRect)
         wantsLayer = true
         themeObserver.onChange = { [weak self] in self?.applyTheme($0) }
@@ -116,9 +173,10 @@ class OMGNativeSurfaceView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override var wantsUpdateLayer: Bool { true }
 
-    func bindTheme(to window: NSWindow?) {
+    func bindTheme(to window: NSWindow?, config: Ghostty.Config? = nil) {
         hasExplicitSource = true
         themeObserver.sourceWindow = window
+        themeObserver.explicitConfig = config
         themeObserver.refresh()
     }
 
@@ -207,12 +265,16 @@ class OMGNativeSurfaceView: NSView {
         // Only configure an auxiliary window owned by this surface, never its terminal origin.
         if paintsBackground, let window, window.contentViewController?.view === self ||
             (hasExplicitSource && window !== themeObserver.sourceWindow) {
-            let wantsBlur = effectiveOpacity < 1 && blur != .disabled
-            MissionControlPresentationMonitor.shared.updateWindowEligibility(
+            let reduceTransparency = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+            let wantsBlur = !reduceTransparency && theme.wantsBehindWindowBlur
+            let monitor = themeObserver.missionControlMonitor
+            monitor.updateWindowEligibility(
                 window,
                 wantsBehindWindowBlur: wantsBlur
             )
-            let isAuxOpaque = effectiveOpacity >= 1 || MissionControlPresentationMonitor.shared.isMissionControlActive
+            let isAuxOpaque = reduceTransparency ||
+                (effectiveOpacity >= 1 && !blur.isGlassStyle) ||
+                monitor.isMissionControlActive
             window.isOpaque = isAuxOpaque
             window.setAutoFlattenLayerTreeEnabled(!wantsBlur || isAuxOpaque)
             window.backgroundColor = isAuxOpaque ? theme.background : theme.background.withAlphaComponent(0.001)

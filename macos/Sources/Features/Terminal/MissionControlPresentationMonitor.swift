@@ -20,10 +20,11 @@ import os
 ///   or closed (or displays are asleep), NO timers and NO event monitors are active
 ///   (`isMonitoring == false`, zero wakeups).
 /// - While at least one visible window uses behind-window blur/glass, monitoring
-///   combines immediate event-driven probes (space/occlusion notifications, swipe/key
-///   gestures, hot-corner proximity) with a low-duty coalesced watchdog timer
-///   (`250ms` + `60ms` leeway, `< 0.05%` CPU) so programmatic triggers such as
-///   `Mission Control.app` are caught as reliably as trackpad gestures.
+///   combines immediate event-driven probes (space/occlusion notifications and
+///   in-app swipe / Mission Control / Control+Arrow shortcuts) with a low-duty
+///   coalesced watchdog timer (`250ms` + `60ms` leeway, `< 0.05%` CPU) so Hot
+///   Corners, Dock gestures, and `Mission Control.app` are caught with zero
+///   global pointer or scroll event-tap IPC.
 @MainActor
 final class MissionControlPresentationMonitor: ObservableObject {
     static let shared = MissionControlPresentationMonitor()
@@ -62,7 +63,6 @@ final class MissionControlPresentationMonitor: ObservableObject {
     private let eligibleWindows = NSHashTable<NSWindow>.weakObjects()
     private var observedWindowTokens: [ObjectIdentifier: [NSObjectProtocol]] = [:]
     private var workspaceTokens: [NSObjectProtocol] = []
-    private var globalEventMonitor: Any?
     private var localEventMonitor: Any?
     private var timer: DispatchSourceTimer?
     private var timerIntervalMilliseconds: Int = 0
@@ -71,7 +71,7 @@ final class MissionControlPresentationMonitor: ObservableObject {
     private var bundleIDCache: [pid_t: String] = [:]
 
     private let snapshotProvider: () -> [WindowSnapshot]
-    private let screenSizesProvider: () -> [CGSize]
+    private let screenBoundsProvider: () -> [CGRect]
     private let bundleIdentifierProvider: (pid_t) -> String?
     private let notificationCenter: NotificationCenter
     private let workspaceNotificationCenter: NotificationCenter
@@ -79,7 +79,7 @@ final class MissionControlPresentationMonitor: ObservableObject {
 
     init(
         snapshotProvider: @escaping () -> [WindowSnapshot] = MissionControlPresentationMonitor.liveOnScreenSnapshots,
-        screenSizesProvider: @escaping () -> [CGSize] = MissionControlPresentationMonitor.liveScreenSizes,
+        screenBoundsProvider: @escaping () -> [CGRect] = MissionControlPresentationMonitor.liveQuartzScreenBounds,
         bundleIdentifierProvider: @escaping (pid_t) -> String? = { pid in
             NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
         },
@@ -88,7 +88,7 @@ final class MissionControlPresentationMonitor: ObservableObject {
         enableEventMonitors: Bool = true
     ) {
         self.snapshotProvider = snapshotProvider
-        self.screenSizesProvider = screenSizesProvider
+        self.screenBoundsProvider = screenBoundsProvider
         self.bundleIdentifierProvider = bundleIdentifierProvider
         self.notificationCenter = notificationCenter
         self.workspaceNotificationCenter = workspaceNotificationCenter
@@ -104,9 +104,6 @@ final class MissionControlPresentationMonitor: ObservableObject {
             for token in tokens {
                 notificationCenter.removeObserver(token)
             }
-        }
-        if let globalEventMonitor {
-            NSEvent.removeMonitor(globalEventMonitor)
         }
         if let localEventMonitor {
             NSEvent.removeMonitor(localEventMonitor)
@@ -311,7 +308,7 @@ final class MissionControlPresentationMonitor: ObservableObject {
     }
 
     private func stopMonitoring() {
-        guard isMonitoring || timer != nil || globalEventMonitor != nil || localEventMonitor != nil else {
+        guard isMonitoring || timer != nil || localEventMonitor != nil else {
             return
         }
         isMonitoring = false
@@ -319,10 +316,6 @@ final class MissionControlPresentationMonitor: ObservableObject {
         timer?.cancel()
         timer = nil
         timerIntervalMilliseconds = 0
-        if let globalEventMonitor {
-            NSEvent.removeMonitor(globalEventMonitor)
-            self.globalEventMonitor = nil
-        }
         if let localEventMonitor {
             NSEvent.removeMonitor(localEventMonitor)
             self.localEventMonitor = nil
@@ -356,45 +349,25 @@ final class MissionControlPresentationMonitor: ObservableObject {
     }
 
     private func installEventMonitorsIfNeeded() {
-        let mask: NSEvent.EventTypeMask = [.keyDown, .systemDefined, .gesture, .swipe, .mouseMoved]
-        if globalEventMonitor == nil {
-            globalEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
-                let shouldProbe = Self.shouldTriggerImmediateProbe(for: event)
-                guard shouldProbe else { return }
-                Task { @MainActor [weak self] in
-                    self?.scheduleBurstProbes(reason: "global-input")
-                }
+        guard localEventMonitor == nil else { return }
+        let mask: NSEvent.EventTypeMask = [.swipe, .keyDown]
+        localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+            if Self.shouldTriggerImmediateProbe(for: event) {
+                self?.scheduleBurstProbes(reason: "local-input")
             }
-        }
-        if localEventMonitor == nil {
-            localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
-                if Self.shouldTriggerImmediateProbe(for: event) {
-                    self?.scheduleBurstProbes(reason: "local-input")
-                }
-                return event
-            }
+            return event
         }
     }
 
-    nonisolated private static func shouldTriggerImmediateProbe(for event: NSEvent) -> Bool {
+    nonisolated static func shouldTriggerImmediateProbe(for event: NSEvent) -> Bool {
         switch event.type {
-        case .gesture, .swipe, .systemDefined:
+        case .swipe:
             return true
         case .keyDown:
-            // F3 / Mission Control keycodes (160, 131) or Control+Arrow shortcuts.
+            // Mission Control / Exposé keys (160, 131) or Control+Arrow shortcuts (123...126).
             let code = event.keyCode
-            if code == 160 || code == 131 || code == 99 { return true }
-            return event.modifierFlags.contains(.control)
-        case .mouseMoved:
-            // Only probe mouse movement near screen corners (Hot Corners).
-            let loc = NSEvent.mouseLocation
-            for screen in NSScreen.screens {
-                let f = screen.frame
-                let nearX = abs(loc.x - f.minX) <= 6 || abs(loc.x - f.maxX) <= 6
-                let nearY = abs(loc.y - f.minY) <= 6 || abs(loc.y - f.maxY) <= 6
-                if nearX && nearY { return true }
-            }
-            return false
+            if code == 160 || code == 131 { return true }
+            return event.modifierFlags.contains(.control) && (123...126).contains(code)
         default:
             return false
         }
@@ -431,10 +404,10 @@ final class MissionControlPresentationMonitor: ObservableObject {
         }
         probeCount += 1
         let snapshots = snapshotProvider()
-        let screens = screenSizesProvider()
+        let screens = screenBoundsProvider()
         let active = Self.isMissionControlPresented(
             windows: snapshots,
-            screenSizes: screens,
+            screenBounds: screens,
             bundleIdentifierForPID: { [weak self] pid in
                 self?.resolvedBundleIdentifier(for: pid)
             }
@@ -467,7 +440,8 @@ final class MissionControlPresentationMonitor: ObservableObject {
         reevaluateMonitoring()
     }
 
-    /// Pure locale-independent Mission Control / Exposé detector.
+    /// Pure locale-independent Mission Control / Exposé detector using Quartz
+    /// global display coordinates (`origin` at top-left of primary screen).
     ///
     /// Matches:
     /// 1. `com.apple.dock` (`Dock` / `程序坞` / etc.) onscreen full-screen Exposé
@@ -477,7 +451,8 @@ final class MissionControlPresentationMonitor: ObservableObject {
     ///    `layer == dockLevel` Dock root container per display on normal desktop and
     ///    spawns an additional full-screen Exposé layer on top during Mission Control).
     /// 2. `com.apple.WindowManager` onscreen Mission Control top Spaces strip at
-    ///    `layer` `14...16` spanning `>= 85%` of a screen's width along `y ~= 0`.
+    ///    `layer` `14...16` spanning `>= 85%` of any screen's width along that
+    ///    display's Quartz top edge (`win.bounds.minY ~= screen.minY`).
     ///
     /// Rejects:
     /// - Menu-bar Control Center (`com.apple.controlcenter`), Notification Center,
@@ -485,10 +460,10 @@ final class MissionControlPresentationMonitor: ObservableObject {
     ///   Stage Manager side strip, and desktop wallpaper.
     static func isMissionControlPresented(
         windows: [WindowSnapshot],
-        screenSizes: [CGSize],
+        screenBounds: [CGRect],
         bundleIdentifierForPID: (pid_t) -> String?
     ) -> Bool {
-        let validScreens = screenSizes.filter { $0.width > 100 && $0.height > 100 }
+        let validScreens = screenBounds.filter { $0.width > 100 && $0.height > 100 }
         guard !validScreens.isEmpty else { return false }
 
         let dockLevel = Int(CGWindowLevelForKey(.dockWindow))
@@ -505,8 +480,10 @@ final class MissionControlPresentationMonitor: ObservableObject {
             // 1. Dock Exposé full-screen backdrop/overlay (locale-independent via bundleIdentifier).
             if bundleID == "com.apple.dock" {
                 let coversScreen = validScreens.contains { screen in
-                    win.bounds.width >= screen.width * 0.85 &&
-                        win.bounds.height >= screen.height * 0.85
+                    let overlap = screen.intersection(win.bounds)
+                    guard !overlap.isNull else { return false }
+                    return overlap.width >= screen.width * 0.85 &&
+                        overlap.height >= screen.height * 0.85
                 }
                 if coversScreen {
                     if exposeBackdropRange.contains(win.layer) {
@@ -527,15 +504,17 @@ final class MissionControlPresentationMonitor: ObservableObject {
                 }
             }
 
-            // 2. macOS 26/27 WindowManager top Spaces bar (`layer` 14..16, full width, top edge).
+            // 2. macOS 26/27 WindowManager top Spaces bar (`layer` 14..16, full width, display top edge).
             let isWindowManager = bundleID == "com.apple.WindowManager" ||
                 (bundleID == nil && win.ownerName == "WindowManager")
             if isWindowManager && (14...16).contains(win.layer) {
-                let spansTopStrip = abs(win.bounds.minY) <= 8 &&
-                    win.bounds.height >= 70 &&
+                let spansTopStrip = win.bounds.height >= 70 &&
                     win.bounds.height <= 380 &&
                     validScreens.contains { screen in
-                        win.bounds.width >= screen.width * 0.85 &&
+                        abs(win.bounds.minY - screen.minY) <= 8 &&
+                            win.bounds.maxX - screen.minX >= screen.width * 0.85 &&
+                            screen.maxX - win.bounds.minX >= screen.width * 0.85 &&
+                            win.bounds.width >= screen.width * 0.85 &&
                             win.bounds.height < screen.height * 0.6
                     }
                 if spansTopStrip {
@@ -580,9 +559,25 @@ final class MissionControlPresentationMonitor: ObservableObject {
         return result
     }
 
-    private static func liveScreenSizes() -> [CGSize] {
-        let sizes = NSScreen.screens.map(\.frame.size)
-        return sizes.isEmpty ? [CGSize(width: 1512, height: 982)] : sizes
+    /// Converts AppKit `NSScreen.screens` frames (bottom-left origin on primary screen)
+    /// into Quartz global coordinates (top-left origin on primary screen, matching
+    /// `kCGWindowBounds`), supporting stacked vertical and side-by-side multi-monitor setups.
+    static func quartzScreenBounds(fromAppKitFrames frames: [CGRect]) -> [CGRect] {
+        guard let primaryHeight = frames.first?.height, primaryHeight > 0 else {
+            return [CGRect(x: 0, y: 0, width: 1512, height: 982)]
+        }
+        return frames.map { frame in
+            CGRect(
+                x: frame.minX,
+                y: primaryHeight - frame.maxY,
+                width: frame.width,
+                height: frame.height
+            )
+        }
+    }
+
+    private static func liveQuartzScreenBounds() -> [CGRect] {
+        quartzScreenBounds(fromAppKitFrames: NSScreen.screens.map(\.frame))
     }
 }
 

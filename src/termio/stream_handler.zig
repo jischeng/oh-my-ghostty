@@ -24,6 +24,12 @@ pub const StreamHandler = struct {
     alloc: Allocator,
     /// The daemon owns terminal query replies for native session surfaces.
     remote_session: bool = false,
+
+    /// True when backed by a remote `SessionBackend` SSH session.
+    remote_ssh_session: bool = false,
+
+    /// True while inside an OSC 3008 `type=remote` SSH context on a local PTY.
+    in_remote_ssh_context: bool = false,
     size: *renderer.Size,
     terminal: *terminal.Terminal,
 
@@ -83,10 +89,24 @@ pub const StreamHandler = struct {
     /// on the current screen, and cleared on full reset or shell semantic prompt.
     seen_synchronized_output: bool = false,
 
+    /// Timestamps tracking active DEC 2026 renewal across multi-second SSH writes.
+    sync_output_started_at: ?std.Io.Timestamp = null,
+    sync_output_last_renewed_at: ?std.Io.Timestamp = null,
+
     /// Coalesces intermediate post-resize screen wipes (`CSI J`, `CSI 2 J`,
     /// `CSI 3 J`) and restores a scrolled-up primary-screen viewport after a
     /// TUI reprints its history on `SIGWINCH`.
     post_resize: PostResizeState = .{},
+
+    /// Coalesces non-resize TUI two-phase blank wipes (`Ctrl+O`) inside DEC 2026.
+    tui_wipe_hold: TuiWipeHoldState = .{},
+
+    /// Maximum duration an unbroken active DEC 2026 frame can remain frozen
+    /// while PTY output continues arriving.
+    pub const sync_active_max_ms: u64 = 15_000;
+
+    /// Minimum interval between active DEC 2026 timer renewals on streaming output.
+    pub const sync_renew_interval_ms: u64 = 250;
 
     pub const PostResizeState = struct {
         /// Short bounded safety window from the latest resize (or completed
@@ -103,6 +123,12 @@ pub const StreamHandler = struct {
         /// holding `synchronized_output`) so a TUI whose history reprint
         /// arrives 250-800ms after `SIGWINCH` still restores scrollback.
         pub const scroll_restore_ms = 900;
+
+        /// Extended coalescing windows for remote SSH sessions where Phase 2
+        /// redraws arrive over slow/high-RTT links.
+        pub const remote_idle_window_ms = 1800;
+        pub const remote_hard_limit_ms = 2400;
+        pub const remote_scroll_restore_ms = 3200;
 
         pub const ScrollSave = struct {
             offset: usize,
@@ -134,6 +160,19 @@ pub const StreamHandler = struct {
                 .distance_from_bottom = max_offset -| sb.offset,
             };
         }
+    };
+
+    pub const TuiWipeHoldState = struct {
+        /// Bounded safety cap for holding across a non-resize Phase 1 TUI
+        /// full-screen wipe inside DEC 2026 before Phase 2 reprints history.
+        pub const hold_limit_ms: u64 = 2500;
+
+        active: bool = false,
+        deadline: ?std.Io.Timestamp = null,
+        had_substantial_content: bool = false,
+        saw_full_clear: bool = false,
+        saw_erase_below: bool = false,
+        held_sync_output: bool = false,
     };
 
     pub const Stream = terminal.Stream(StreamHandler);
@@ -308,6 +347,11 @@ pub const StreamHandler = struct {
             .erase_display_complete => {
                 self.noteEraseDisplay(.complete);
                 self.terminal.scrollViewport(.{ .bottom = {} });
+                if (self.terminal.screens.active_key == .primary and
+                    !(self.post_resize.active and self.post_resize.scroll_save != null))
+                {
+                    self.renderer_state.scroll.pinBottom(0);
+                }
                 self.terminal.eraseDisplay(.complete, value);
             },
             .erase_display_scrollback => {
@@ -700,8 +744,12 @@ pub const StreamHandler = struct {
             return;
         }
 
-        // We first always set the raw mode on our mode state.
-        self.terminal.modes.set(mode, enabled);
+        // We first always set the raw mode on our mode state (except
+        // synchronized_output, which manages transitions and hold state in
+        // setSynchronizedOutput).
+        if (mode != .synchronized_output) {
+            self.terminal.modes.set(mode, enabled);
+        }
 
         // And then some modes require additional processing.
         switch (mode) {
@@ -727,17 +775,26 @@ pub const StreamHandler = struct {
             },
 
             .alt_screen_legacy => {
-                if (enabled) self.cancelPostResize();
+                if (enabled) {
+                    self.cancelPostResize();
+                    self.cancelTuiWipeHold();
+                }
                 try self.terminal.switchScreenMode(.@"47", enabled);
             },
 
             .alt_screen => {
-                if (enabled) self.cancelPostResize();
+                if (enabled) {
+                    self.cancelPostResize();
+                    self.cancelTuiWipeHold();
+                }
                 try self.terminal.switchScreenMode(.@"1047", enabled);
             },
 
             .alt_screen_save_cursor_clear_enter => {
-                if (enabled) self.cancelPostResize();
+                if (enabled) {
+                    self.cancelPostResize();
+                    self.cancelTuiWipeHold();
+                }
                 try self.terminal.switchScreenMode(.@"1049", enabled);
             },
 
@@ -949,7 +1006,11 @@ pub const StreamHandler = struct {
         self: *StreamHandler,
     ) !void {
         self.seen_synchronized_output = false;
+        self.sync_output_started_at = null;
+        self.sync_output_last_renewed_at = null;
+        self.in_remote_ssh_context = false;
         self.cancelPostResize();
+        self.cancelTuiWipeHold();
         self.terminal.fullReset();
         try self.setMouseShape(.text);
 
@@ -1089,6 +1150,7 @@ pub const StreamHandler = struct {
             .end_command => {
                 self.seen_synchronized_output = false;
                 self.cancelPostResize();
+                self.cancelTuiWipeHold();
                 // The specification seems to not specify the type but
                 // other terminals accept 32-bits, but exit codes are really
                 // bytes, so we just do our best here.
@@ -1105,6 +1167,7 @@ pub const StreamHandler = struct {
             => {
                 self.seen_synchronized_output = false;
                 self.cancelPostResize();
+                self.cancelTuiWipeHold();
             },
 
             // Handled by Terminal, no special handling by us
@@ -1138,6 +1201,21 @@ pub const StreamHandler = struct {
         signal: terminal.osc.context_signal.Command,
     ) !void {
         if (self.queueProgramStatusQueryReply(signal)) return;
+        switch (signal.action) {
+            .start => {
+                if (std.mem.indexOf(u8, signal.metadata, "type=remote") != null) {
+                    self.in_remote_ssh_context = true;
+                }
+            },
+            .end => {
+                if (!std.mem.startsWith(u8, signal.id, "omg-inline-") and
+                    !std.mem.startsWith(u8, signal.id, "omg-agent-") and
+                    !std.mem.eql(u8, signal.id, "omg-runtime-state"))
+                {
+                    self.in_remote_ssh_context = false;
+                }
+            },
+        }
         const message = apprt.surface.Message.ContextSignal.init(
             self.alloc,
             signal,
@@ -1582,18 +1660,95 @@ pub const StreamHandler = struct {
         self.surfaceMessageWriter(.{ .progress_report = report });
     }
 
+    fn isRemoteSshSession(self: *const StreamHandler) bool {
+        return self.remote_ssh_session or self.in_remote_ssh_context;
+    }
+
+    fn postResizeIdleWindowMs(self: *const StreamHandler) i64 {
+        return if (self.isRemoteSshSession())
+            PostResizeState.remote_idle_window_ms
+        else
+            PostResizeState.idle_window_ms;
+    }
+
+    fn postResizeHardLimitMs(self: *const StreamHandler) i64 {
+        return if (self.isRemoteSshSession())
+            PostResizeState.remote_hard_limit_ms
+        else
+            PostResizeState.hard_limit_ms;
+    }
+
+    fn postResizeScrollRestoreMs(self: *const StreamHandler) i64 {
+        return if (self.isRemoteSshSession())
+            PostResizeState.remote_scroll_restore_ms
+        else
+            PostResizeState.scroll_restore_ms;
+    }
+
+    fn screenHasSubstantialContent(screen: *const terminal.Screen) bool {
+        if (screen.pages.total_rows > screen.pages.rows or screen.cursor.y >= 4) return true;
+        var populated_rows: usize = 0;
+        var y: terminal.size.CellCountInt = 0;
+        while (y < screen.pages.rows) : (y += 1) {
+            const pin = screen.pages.pin(.{ .active = .{ .y = y } }) orelse continue;
+            const page = pin.node.page();
+            const rac = pin.rowAndCell();
+            for (rac.row.cells.ptr(page.memory)[0..page.size.cols]) |cell| {
+                if (!cell.isEmpty()) {
+                    populated_rows += 1;
+                    if (populated_rows >= 4) return true;
+                    break;
+                }
+            }
+        }
+        return false;
+    }
+
+    fn screenIsNearlyBlankWipe(screen: *const terminal.Screen) bool {
+        if (screen.pages.total_rows > screen.pages.rows or screen.cursor.y > 3) return false;
+        var y: terminal.size.CellCountInt = 4;
+        while (y < screen.pages.rows) : (y += 1) {
+            const pin = screen.pages.pin(.{ .active = .{ .y = y } }) orelse continue;
+            const page = pin.node.page();
+            const rac = pin.rowAndCell();
+            for (rac.row.cells.ptr(page.memory)[0..page.size.cols]) |cell| {
+                if (!cell.isEmpty()) return false;
+            }
+        }
+        return true;
+    }
+
     pub fn setSynchronizedOutput(self: *StreamHandler, enabled: bool) void {
         if (enabled) {
+            const now = std.Io.Timestamp.now(global.io(), .awake);
+            const already_genuine_sync = self.terminal.modes.get(.synchronized_output) and
+                !self.post_resize.held_sync_output and
+                !self.tui_wipe_hold.held_sync_output;
             self.terminal.modes.set(.synchronized_output, true);
             self.seen_synchronized_output = true;
             self.post_resize.held_sync_output = false;
+            self.tui_wipe_hold.held_sync_output = false;
+            self.tui_wipe_hold.deadline = null;
+            if (!already_genuine_sync) {
+                self.sync_output_started_at = now;
+                self.sync_output_last_renewed_at = now;
+            }
             self.messageWriter(.{ .start_synchronized_output = {} });
             return;
         }
 
+        self.sync_output_started_at = null;
+        self.sync_output_last_renewed_at = null;
+
         if (self.shouldHoldPostResizeBlankWipe()) {
             const now = std.Io.Timestamp.now(global.io(), .awake);
             self.holdPostResizeSyncOutput(now);
+            return;
+        }
+
+        if (!self.postResizeIsActive() and self.shouldHoldTuiBlankWipe()) {
+            const now = std.Io.Timestamp.now(global.io(), .awake);
+            self.holdTuiWipeSyncOutput(now);
             return;
         }
 
@@ -1603,12 +1758,50 @@ pub const StreamHandler = struct {
             (self.post_resize.saw_full_clear or self.post_resize.saw_erase_below))
         {
             self.completePostResizeCycle();
+        } else if (self.tui_wipe_hold.active) {
+            self.completeTuiWipeCycle();
         }
+    }
+
+    /// Renew the writer-thread synchronized-output safety timer during long
+    /// multi-chunk DEC 2026 frames (such as `agy` history reprints over SSH)
+    /// while bounding total uninterrupted freeze duration to `sync_active_max_ms`.
+    pub fn noteActiveSynchronizedOutput(self: *StreamHandler, now: std.Io.Timestamp) void {
+        if (!self.terminal.modes.get(.synchronized_output) or
+            self.post_resize.held_sync_output or
+            self.tui_wipe_hold.held_sync_output)
+        {
+            return;
+        }
+        const started = self.sync_output_started_at orelse {
+            self.sync_output_started_at = now;
+            self.sync_output_last_renewed_at = now;
+            return;
+        };
+        if (started.durationTo(now).toMilliseconds() >= @as(i64, @intCast(sync_active_max_ms))) {
+            return;
+        }
+        if (self.sync_output_last_renewed_at) |last| {
+            if (last.durationTo(now).toMilliseconds() < @as(i64, @intCast(sync_renew_interval_ms))) {
+                return;
+            }
+        }
+        self.sync_output_last_renewed_at = now;
+        self.messageWriter(.{ .start_synchronized_output = {} });
     }
 
     pub fn notePostResizeCursorVisible(self: *StreamHandler) void {
         self.terminal.modes.set(.cursor_visible, true);
-        if (!self.postResizeIsActive()) return;
+        if (!self.postResizeIsActive()) {
+            if (self.tui_wipe_hold.active and
+                self.tui_wipe_hold.held_sync_output and
+                !self.shouldHoldTuiBlankWipe())
+            {
+                self.terminal.modes.set(.synchronized_output, false);
+                self.completeTuiWipeCycle();
+            }
+            return;
+        }
         if (!self.post_resize.saw_full_clear and !self.post_resize.saw_erase_below) return;
 
         if (self.shouldHoldPostResizeBlankWipe()) {
@@ -1634,24 +1827,35 @@ pub const StreamHandler = struct {
     ) void {
         if (self.terminal.screens.active_key != .primary) {
             self.cancelPostResize();
+            self.cancelTuiWipeHold();
             return;
         }
 
         _ = self.postResizeIsActive();
+        _ = self.tuiWipeHoldIsActive();
 
         const now = std.Io.Timestamp.now(global.io(), .awake);
-        const deadline = now.addDuration(.fromMilliseconds(PostResizeState.idle_window_ms));
-        const hard_deadline = now.addDuration(.fromMilliseconds(PostResizeState.hard_limit_ms));
-        const scroll_deadline = now.addDuration(.fromMilliseconds(PostResizeState.scroll_restore_ms));
+        const deadline = now.addDuration(.fromMilliseconds(self.postResizeIdleWindowMs()));
+        const hard_deadline = now.addDuration(.fromMilliseconds(self.postResizeHardLimitMs()));
+        const scroll_deadline = now.addDuration(.fromMilliseconds(self.postResizeScrollRestoreMs()));
         const existing_save = if (self.post_resize.active) self.post_resize.scroll_save else null;
         const existing_had_sb = if (self.post_resize.active) self.post_resize.had_scrollback else false;
         const existing_pre_cursor_y: terminal.size.CellCountInt = if (self.post_resize.active)
             self.post_resize.pre_cursor_y
         else
             0;
-        const existing_saw_erase = if (self.post_resize.active) self.post_resize.saw_erase_below else false;
-        const existing_saw_clear = if (self.post_resize.active) self.post_resize.saw_full_clear else false;
-        const existing_held_sync = if (self.post_resize.active) self.post_resize.held_sync_output else false;
+        const tui_active = self.tui_wipe_hold.active;
+        const tui_had_content = tui_active and self.tui_wipe_hold.had_substantial_content;
+        const tui_held_sync = tui_active and self.tui_wipe_hold.held_sync_output;
+        const existing_saw_erase = (if (self.post_resize.active) self.post_resize.saw_erase_below else false) or
+            (tui_active and self.tui_wipe_hold.saw_erase_below);
+        const existing_saw_clear = (if (self.post_resize.active) self.post_resize.saw_full_clear else false) or
+            (tui_active and self.tui_wipe_hold.saw_full_clear);
+        const existing_held_sync = (if (self.post_resize.active) self.post_resize.held_sync_output else false) or
+            tui_held_sync;
+        if (tui_active) {
+            self.tui_wipe_hold = .{};
+        }
 
         const max_pre = pre_sb.total -| pre_sb.len;
         const new_save: ?PostResizeState.ScrollSave = if (existing_save) |s|
@@ -1668,7 +1872,7 @@ pub const StreamHandler = struct {
             .deadline = deadline,
             .hard_deadline = hard_deadline,
             .scroll_deadline = scroll_deadline,
-            .had_scrollback = existing_had_sb or (pre_sb.total > pre_sb.len),
+            .had_scrollback = existing_had_sb or (pre_sb.total > pre_sb.len) or tui_had_content,
             .pre_cursor_y = @max(existing_pre_cursor_y, pre_cursor_y),
             .saw_erase_below = existing_saw_erase,
             .saw_full_clear = existing_saw_clear,
@@ -1691,9 +1895,9 @@ pub const StreamHandler = struct {
         }
 
         const now = std.Io.Timestamp.now(global.io(), .awake);
-        self.post_resize.deadline = now.addDuration(.fromMilliseconds(PostResizeState.idle_window_ms));
-        self.post_resize.hard_deadline = now.addDuration(.fromMilliseconds(PostResizeState.hard_limit_ms));
-        self.post_resize.scroll_deadline = now.addDuration(.fromMilliseconds(PostResizeState.scroll_restore_ms));
+        self.post_resize.deadline = now.addDuration(.fromMilliseconds(self.postResizeIdleWindowMs()));
+        self.post_resize.hard_deadline = now.addDuration(.fromMilliseconds(self.postResizeHardLimitMs()));
+        self.post_resize.scroll_deadline = now.addDuration(.fromMilliseconds(self.postResizeScrollRestoreMs()));
         if (self.post_resize.held_sync_output and self.terminal.modes.get(.synchronized_output)) {
             self.messageWriter(.{ .start_synchronized_output = {} });
         }
@@ -1787,9 +1991,7 @@ pub const StreamHandler = struct {
             self.post_resize.pre_cursor_y >= 4;
         if (!had_substantial_content) return false;
 
-        const screen = self.terminal.screens.active;
-        const pages = &screen.pages;
-        return pages.total_rows <= pages.rows and screen.cursor.y <= 3;
+        return screenIsNearlyBlankWipe(self.terminal.screens.active);
     }
 
     fn isLikelyPostResizeTuiWipe(self: *const StreamHandler) bool {
@@ -1807,7 +2009,7 @@ pub const StreamHandler = struct {
     fn holdPostResizeSyncOutput(self: *StreamHandler, now: std.Io.Timestamp) void {
         self.terminal.modes.set(.synchronized_output, true);
         self.post_resize.held_sync_output = true;
-        const candidate = now.addDuration(.fromMilliseconds(PostResizeState.idle_window_ms));
+        const candidate = now.addDuration(.fromMilliseconds(self.postResizeIdleWindowMs()));
         self.post_resize.deadline = if (self.post_resize.hard_deadline) |hd|
             if (candidate.durationTo(hd).toNanoseconds() < 0) hd else candidate
         else
@@ -1815,27 +2017,125 @@ pub const StreamHandler = struct {
         self.messageWriter(.{ .start_synchronized_output = {} });
     }
 
-    fn noteEraseDisplay(self: *StreamHandler, mode: terminal.EraseDisplay) void {
-        if (!self.postResizeIsActive()) return;
-        if (!self.isLikelyPostResizeTuiWipe()) return;
-        const hold_active = self.postResizeHoldIsActive();
+    fn tuiWipeHoldExpired(self: *const StreamHandler, now: std.Io.Timestamp) bool {
+        const dl = self.tui_wipe_hold.deadline orelse return false;
+        return now.durationTo(dl).toNanoseconds() <= 0;
+    }
+
+    pub fn tuiWipeHoldIsActive(self: *StreamHandler) bool {
+        if (!self.tui_wipe_hold.active) return false;
+        if (self.terminal.screens.active_key != .primary) {
+            self.cancelTuiWipeHold();
+            return false;
+        }
         const now = std.Io.Timestamp.now(global.io(), .awake);
-        switch (mode) {
-            .below => {
-                const sync_active = self.terminal.modes.get(.synchronized_output);
-                const full_screen_wipe = (self.post_resize.had_scrollback or self.post_resize.pre_cursor_y >= 4) and
-                    self.terminal.screens.active.cursor.y <= 3;
-                if (sync_active or full_screen_wipe) {
-                    self.post_resize.saw_erase_below = true;
-                    if (hold_active and !sync_active) {
+        if (self.tuiWipeHoldExpired(now)) {
+            self.finishTuiWipeHold();
+            return false;
+        }
+        return true;
+    }
+
+    pub fn shouldHoldTuiBlankWipe(self: *StreamHandler) bool {
+        if (!self.tuiWipeHoldIsActive()) return false;
+        if (!self.tui_wipe_hold.saw_full_clear and !self.tui_wipe_hold.saw_erase_below) return false;
+        if (!self.tui_wipe_hold.had_substantial_content) return false;
+        return screenIsNearlyBlankWipe(self.terminal.screens.active);
+    }
+
+    fn holdTuiWipeSyncOutput(self: *StreamHandler, now: std.Io.Timestamp) void {
+        self.terminal.modes.set(.synchronized_output, true);
+        self.tui_wipe_hold.held_sync_output = true;
+        if (self.tui_wipe_hold.deadline == null) {
+            self.tui_wipe_hold.deadline = now.addDuration(
+                .fromMilliseconds(@intCast(TuiWipeHoldState.hold_limit_ms)),
+            );
+        }
+        self.messageWriter(.{ .start_synchronized_output = {} });
+    }
+
+    fn pinBottomOnTuiFullClear(self: *StreamHandler) void {
+        if (!self.tui_wipe_hold.saw_full_clear or self.terminal.screens.active_key != .primary) return;
+        const fresh = self.terminal.screens.active.pages.scrollbar();
+        const max_fresh = fresh.total -| fresh.len;
+        self.terminal.scrollViewport(.{ .bottom = {} });
+        self.renderer_state.scroll.pinBottom(@floatFromInt(max_fresh));
+        self.renderer_state.terminal_generation +%= 1;
+    }
+
+    fn completeTuiWipeCycle(self: *StreamHandler) void {
+        if (!self.tui_wipe_hold.active) return;
+        self.pinBottomOnTuiFullClear();
+        self.tui_wipe_hold = .{};
+    }
+
+    pub fn cancelTuiWipeHold(self: *StreamHandler) void {
+        if (!self.tui_wipe_hold.active) return;
+        if (self.tui_wipe_hold.held_sync_output) {
+            self.terminal.modes.set(.synchronized_output, false);
+        }
+        self.tui_wipe_hold = .{};
+    }
+
+    pub fn finishTuiWipeHold(self: *StreamHandler) void {
+        if (!self.tui_wipe_hold.active) return;
+        self.pinBottomOnTuiFullClear();
+        if (self.tui_wipe_hold.held_sync_output) {
+            self.terminal.modes.set(.synchronized_output, false);
+        }
+        self.tui_wipe_hold = .{};
+    }
+
+    fn noteEraseDisplay(self: *StreamHandler, mode: terminal.EraseDisplay) void {
+        if (self.postResizeIsActive()) {
+            if (!self.isLikelyPostResizeTuiWipe()) return;
+            const hold_active = self.postResizeHoldIsActive();
+            const now = std.Io.Timestamp.now(global.io(), .awake);
+            switch (mode) {
+                .below => {
+                    const sync_active = self.terminal.modes.get(.synchronized_output);
+                    const full_screen_wipe = (self.post_resize.had_scrollback or
+                        self.post_resize.pre_cursor_y >= 4 or
+                        screenHasSubstantialContent(self.terminal.screens.active)) and
+                        self.terminal.screens.active.cursor.y <= 3;
+                    if (sync_active or full_screen_wipe) {
+                        self.post_resize.saw_erase_below = true;
+                        if (hold_active and !sync_active) {
+                            self.holdPostResizeSyncOutput(now);
+                        }
+                    }
+                },
+                .complete, .scrollback, .scroll_complete => {
+                    self.post_resize.saw_full_clear = true;
+                    if (hold_active and !self.terminal.modes.get(.synchronized_output)) {
                         self.holdPostResizeSyncOutput(now);
                     }
-                }
-            },
+                },
+                .above => {},
+            }
+            return;
+        }
+
+        if (self.terminal.screens.active_key != .primary) return;
+        _ = self.tuiWipeHoldIsActive();
+        // Never hold bare `clear` / `Ctrl+L` outside DEC 2026.
+        if (!self.terminal.modes.get(.synchronized_output)) return;
+
+        const substantial = self.tui_wipe_hold.had_substantial_content or
+            screenHasSubstantialContent(self.terminal.screens.active);
+        if (!substantial) return;
+
+        switch (mode) {
             .complete, .scrollback, .scroll_complete => {
-                self.post_resize.saw_full_clear = true;
-                if (hold_active and !self.terminal.modes.get(.synchronized_output)) {
-                    self.holdPostResizeSyncOutput(now);
+                self.tui_wipe_hold.active = true;
+                self.tui_wipe_hold.had_substantial_content = true;
+                self.tui_wipe_hold.saw_full_clear = true;
+            },
+            .below => {
+                if (self.terminal.screens.active.cursor.y <= 3) {
+                    self.tui_wipe_hold.active = true;
+                    self.tui_wipe_hold.had_substantial_content = true;
+                    self.tui_wipe_hold.saw_erase_below = true;
                 }
             },
             .above => {},
@@ -1893,7 +2193,7 @@ pub const StreamHandler = struct {
         const now = std.Io.Timestamp.now(global.io(), .awake);
         if (!self.postResizeHoldExpired(now)) {
             const hd = self.post_resize.hard_deadline.?;
-            const candidate = now.addDuration(.fromMilliseconds(PostResizeState.idle_window_ms));
+            const candidate = now.addDuration(.fromMilliseconds(self.postResizeIdleWindowMs()));
             self.post_resize.deadline = if (candidate.durationTo(hd).toNanoseconds() < 0)
                 hd
             else
@@ -2660,4 +2960,288 @@ test "StreamHandler: omg-program-status-query emits protocol_reply even in remot
         second.protocol_reply,
     );
     try testing.expect(termio_mailbox.spsc.queue.pop(global.io()) == null);
+}
+
+test "StreamHandler: non-resize Ctrl+O wipe holds Phase 1 across 1500ms, releases Phase 2, and pins bottom" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var env: PostResizeTestHarness = undefined;
+    try env.init(alloc, 40, 10);
+    defer env.deinit(alloc);
+
+    // Populate 80 lines inside DEC 2026 so screen has substantial scrollback.
+    env.stream.nextSlice("\x1b[?2026h");
+    try env.writeLines(80);
+    env.stream.nextSlice("prompt-line\r\n? for shortcuts\x1b[?2026l");
+    try testing.expect(env.terminal.screens.active.pages.total_rows > env.terminal.screens.active.pages.rows);
+
+    // Simulate user scrolled up in scrollback (`pinned_to_bottom == false`).
+    env.terminal.scrollViewport(.{ .row = 15 });
+    env.renderer_state.scroll.snapTo(15, @floatFromInt(env.terminal.screens.active.pages.scrollbar().total -| 10));
+    try testing.expect(!env.terminal.screens.active.viewportIsBottom());
+    try testing.expect(!env.renderer_state.scroll.pinned_to_bottom);
+
+    // Phase 1 Ctrl+O wipe inside DEC 2026 clears screen+scrollback and leaves 1 banner line.
+    env.stream.nextSlice("\x1b[?2026h\x1b[2J\x1b[3J\x1b[H? for shortcuts   agy\x1b[?2026l");
+    try testing.expect(env.renderer_state.scroll.pinned_to_bottom);
+    try testing.expect(env.terminal.modes.get(.synchronized_output));
+    try testing.expect(env.handler().tui_wipe_hold.active);
+    try testing.expect(env.handler().tui_wipe_hold.held_sync_output);
+    try testing.expect(env.handler().tui_wipe_hold.saw_full_clear);
+    try testing.expect(env.handler().tui_wipe_hold.deadline != null);
+
+    // Simulate +1500ms elapsed (still inside 2500ms hold_limit_ms): stays frozen without blank flash.
+    env.handler().tui_wipe_hold.deadline = env.handler().tui_wipe_hold.deadline.?.addDuration(.fromMilliseconds(-1500));
+    try testing.expect(env.handler().tuiWipeHoldIsActive());
+    try testing.expect(env.terminal.modes.get(.synchronized_output));
+    try testing.expect(env.handler().shouldHoldTuiBlankWipe());
+
+    // Phase 2 arrives (+1500ms) with expanded 80-line history and DECRST 2026:
+    // immediately unfreezes, pins bottom to `max_fresh`, and clears `tui_wipe_hold`.
+    env.stream.nextSlice("\x1b[?2026h\x1b[2J\x1b[3J\x1b[H");
+    try testing.expect(!env.handler().tui_wipe_hold.held_sync_output);
+    try testing.expect(env.handler().tui_wipe_hold.deadline == null);
+    try env.writeLines(80);
+    env.stream.nextSlice("prompt-line\r\n? for shortcuts\x1b[?2026l");
+
+    const sb = env.terminal.screens.active.pages.scrollbar();
+    const max_fresh: f64 = @floatFromInt(sb.total -| sb.len);
+    try testing.expect(!env.terminal.modes.get(.synchronized_output));
+    try testing.expect(!env.handler().tui_wipe_hold.active);
+    try testing.expect(env.terminal.screens.active.viewportIsBottom());
+    try testing.expect(env.renderer_state.scroll.pinned_to_bottom);
+    try testing.expectEqual(max_fresh, env.renderer_state.scroll.position);
+
+    // Also verify Phase 2 completing via `\x1b[?25h` (cursor_visible) releases held `tui_wipe_hold`.
+    env.stream.nextSlice("\x1b[?2026h\x1b[2J\x1b[3J\x1b[H? for shortcuts\x1b[?2026l");
+    try testing.expect(env.handler().tui_wipe_hold.held_sync_output);
+    env.stream.nextSlice("\x1b[?25l\x1b[H");
+    try env.writeLines(40);
+    env.stream.nextSlice("prompt\x1b[?25h");
+    try testing.expect(!env.terminal.modes.get(.synchronized_output));
+    try testing.expect(!env.handler().tui_wipe_hold.active);
+    try testing.expect(env.renderer_state.scroll.pinned_to_bottom);
+}
+
+test "StreamHandler: tui_wipe_hold false-positive guards, immediate unfreeze, and resize fold" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var env: PostResizeTestHarness = undefined;
+    try env.init(alloc, 40, 10);
+    defer env.deinit(alloc);
+
+    // Guard 1: Initial nearly empty screen (< 4 rows, no scrollback) MUST NOT hold inside DEC 2026.
+    env.stream.nextSlice("line0\r\nline1\x1b[?2026h\x1b[2J\x1b[3J\x1b[Hheader\x1b[?2026l");
+    try testing.expect(!env.terminal.modes.get(.synchronized_output));
+    try testing.expect(!env.handler().tui_wipe_hold.active);
+
+    // Populate substantial content with DEC 2026 so `seen_synchronized_output` is true.
+    env.stream.nextSlice("\x1b[?2026h");
+    try env.writeLines(40);
+    env.stream.nextSlice("prompt\x1b[?2026l");
+    try testing.expect(env.handler().seen_synchronized_output);
+
+    // Guard 2: Bare `clear` / `Ctrl+L` OUTSIDE DEC 2026 MUST NEVER freeze.
+    env.stream.nextSlice("\x1b[3J\x1b[H\x1b[2J");
+    try testing.expect(!env.terminal.modes.get(.synchronized_output));
+    try testing.expect(!env.handler().tui_wipe_hold.active);
+
+    // Guard 3: Incremental `CSI J` below cursor row 3 (`cursor.y >= 4`) inside DEC 2026 MUST NOT arm.
+    try env.writeLines(6);
+    try testing.expect(env.terminal.screens.active.cursor.y >= 4);
+    env.stream.nextSlice("\x1b[?2026h\x1b[Jstatus\x1b[?2026l");
+    try testing.expect(!env.terminal.modes.get(.synchronized_output));
+    try testing.expect(!env.handler().tui_wipe_hold.active);
+
+    // Guard 4: Same-frame wipe + reprint >= 4 populated rows (no scrollback, cursor.y <= 3) releases immediately.
+    env.stream.nextSlice("\x1b[?2026h\x1b[2J\x1b[3J\x1b[H");
+    try env.writeLines(6);
+    env.stream.nextSlice("\x1b[1;1H\x1b[?2026l");
+    try testing.expect(!env.terminal.modes.get(.synchronized_output));
+    try testing.expect(!env.handler().tui_wipe_hold.active);
+
+    // Unfreeze 1: OSC 133;A (`prompt_start`) immediately unfreezes held `tui_wipe_hold`.
+    env.stream.nextSlice("\x1b[?2026h\x1b[2J\x1b[3J\x1b[H? for shortcuts\x1b[?2026l");
+    try testing.expect(env.terminal.modes.get(.synchronized_output));
+    try testing.expect(env.handler().tui_wipe_hold.held_sync_output);
+    env.stream.nextSlice("\x1b]133;A\x07");
+    try testing.expect(!env.terminal.modes.get(.synchronized_output));
+    try testing.expect(!env.handler().tui_wipe_hold.active);
+
+    // Unfreeze 2: Alt-screen switch (`CSI ? 1049 h`) immediately unfreezes held `tui_wipe_hold`.
+    env.stream.nextSlice("\x1b[?2026h");
+    try env.writeLines(20);
+    env.stream.nextSlice("\x1b[?2026l\x1b[?2026h\x1b[2J\x1b[3J\x1b[H? for shortcuts\x1b[?2026l");
+    try testing.expect(env.terminal.modes.get(.synchronized_output));
+    env.stream.nextSlice("\x1b[?1049h");
+    try testing.expectEqual(.alternate, env.terminal.screens.active_key);
+    try testing.expect(!env.terminal.modes.get(.synchronized_output));
+    try testing.expect(!env.handler().tui_wipe_hold.active);
+
+    // Unfreeze 3: `tui_wipe_hold.deadline` expiry (> 2500ms) releases cleanly.
+    env.stream.nextSlice("\x1b[?1049l\x1b[?2026h");
+    try env.writeLines(20);
+    env.stream.nextSlice("\x1b[?2026l\x1b[?2026h\x1b[2J\x1b[3J\x1b[H? for shortcuts\x1b[?2026l");
+    try testing.expect(env.terminal.modes.get(.synchronized_output));
+    env.handler().tui_wipe_hold.deadline = std.Io.Timestamp.now(testing.io, .awake).addDuration(.fromMilliseconds(-1));
+    try testing.expect(!env.handler().tuiWipeHoldIsActive());
+    try testing.expect(!env.terminal.modes.get(.synchronized_output));
+    try testing.expect(!env.handler().tui_wipe_hold.active);
+
+    // Resize arriving during held `tui_wipe_hold` folds substantial content & held sync into `post_resize`.
+    env.stream.nextSlice("\x1b[?2026h");
+    try env.writeLines(20);
+    env.stream.nextSlice("\x1b[?2026l\x1b[?2026h\x1b[2J\x1b[3J\x1b[H? for shortcuts\x1b[?2026l");
+    try testing.expect(env.handler().tui_wipe_hold.held_sync_output);
+    try env.resize(alloc, 42, 10, true);
+    try testing.expect(!env.handler().tui_wipe_hold.active);
+    try testing.expect(env.handler().post_resize.active);
+    try testing.expect(env.handler().post_resize.had_scrollback);
+    try testing.expect(env.handler().post_resize.held_sync_output);
+    try testing.expect(env.handler().post_resize.saw_full_clear);
+    try testing.expect(env.terminal.modes.get(.synchronized_output));
+
+    // Phase 2 after folded resize releases and pins bottom; also verify `erase_display_complete`
+    // preserves `!pinned_to_bottom` when `post_resize.scroll_save != null`.
+    env.stream.nextSlice("\x1b[?2026h\x1b[2J\x1b[3J\x1b[H");
+    try env.writeLines(30);
+    env.stream.nextSlice("\x1b[?2026l");
+    try testing.expect(!env.terminal.modes.get(.synchronized_output));
+
+    env.terminal.scrollViewport(.{ .row = 5 });
+    env.renderer_state.scroll.snapTo(5, 20);
+    try env.resize(alloc, 40, 10, true);
+    try testing.expect(env.handler().post_resize.scroll_save != null);
+    env.stream.nextSlice("\x1b[2J");
+    try testing.expect(!env.renderer_state.scroll.pinned_to_bottom);
+}
+
+test "StreamHandler: OSC 3008 type=remote and remote_ssh_session extend post-resize windows" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var env: PostResizeTestHarness = undefined;
+    try env.init(alloc, 40, 10);
+    defer env.deinit(alloc);
+
+    try testing.expect(!env.handler().isRemoteSshSession());
+
+    // Entering OSC 3008 `type=remote` activates extended remote SSH resize windows.
+    env.stream.nextSlice("\x1b]3008;start=omg-ssh-1;type=remote;targethost=cloud\x07");
+    try testing.expect(env.handler().in_remote_ssh_context);
+    try testing.expect(env.handler().isRemoteSshSession());
+
+    // Nested omg-agent / omg-inline / omg-runtime-state end signals must NOT clear remote SSH context.
+    env.stream.nextSlice("\x1b]3008;start=omg-agent-antigravity-7;type=app\x07");
+    env.stream.nextSlice("\x1b]3008;end=omg-agent-antigravity-7\x07");
+    env.stream.nextSlice("\x1b]3008;end=omg-inline-1\x07");
+    env.stream.nextSlice("\x1b]3008;end=omg-runtime-state\x07");
+    try testing.expect(env.handler().in_remote_ssh_context);
+
+    // Populate 60 lines, scroll up to offset = 18, resize, and hold Phase 1 wipe.
+    env.stream.nextSlice("\x1b[?2026h");
+    try env.writeLines(60);
+    env.stream.nextSlice("prompt\x1b[?2026l");
+    env.terminal.scrollViewport(.{ .row = 18 });
+    try env.resize(alloc, 40, 8, true);
+    env.stream.nextSlice("\x1b[?2026h\x1b[2J\x1b[3J\x1b[H? for shortcuts\x1b[?2026l");
+    try testing.expect(env.handler().post_resize.held_sync_output);
+
+    // At +1500ms (past local 320/420ms, inside remote 1800/2400ms), hold MUST remain active.
+    env.rewindDeadlinesMs(1500);
+    try testing.expect(env.handler().postResizeHoldIsActive());
+    try testing.expect(env.terminal.modes.get(.synchronized_output));
+
+    // At +2500ms total (past 2400ms remote_hard_limit_ms, inside 3200ms remote_scroll_restore_ms):
+    // hold releases while `scroll_save` remains armed and restores offset = 18 on Phase 2.
+    env.rewindDeadlinesMs(1000);
+    try testing.expect(!env.handler().postResizeHoldIsActive());
+    try testing.expect(!env.terminal.modes.get(.synchronized_output));
+    try testing.expect(env.handler().postResizeIsActive());
+    env.stream.nextSlice("\x1b[?2026h\x1b[2J\x1b[3J\x1b[H");
+    try env.writeLines(60);
+    env.stream.nextSlice("prompt\x1b[?2026l");
+    try testing.expectEqual(@as(usize, 18), env.terminal.screens.active.pages.scrollbar().offset);
+
+    // At +3500ms total, `postResizeIsActive()` expires.
+    env.rewindDeadlinesMs(3500);
+    try testing.expect(!env.handler().postResizeIsActive());
+
+    // Closing the outer SSH context signal clears `in_remote_ssh_context`.
+    env.stream.nextSlice("\x1b]3008;end=omg-ssh-1;exit=success;status=0\x07");
+    try testing.expect(!env.handler().in_remote_ssh_context);
+    try testing.expect(!env.handler().isRemoteSshSession());
+
+    // `fullReset` also clears `in_remote_ssh_context`, while `remote_ssh_session` keeps remote windows.
+    env.stream.nextSlice("\x1b]3008;start=omg-ssh-2;type=remote;targethost=cloud\x07");
+    try testing.expect(env.handler().in_remote_ssh_context);
+    try env.handler().fullReset();
+    try testing.expect(!env.handler().in_remote_ssh_context);
+
+    env.handler().remote_ssh_session = true;
+    try testing.expect(env.handler().isRemoteSshSession());
+    try env.resize(alloc, 40, 10, true);
+    env.stream.nextSlice("\x1b[?2026h\x1b[2J\x1b[3J\x1b[H? for shortcuts\x1b[?2026l");
+    env.rewindDeadlinesMs(1500);
+    try testing.expect(env.handler().postResizeHoldIsActive());
+}
+
+test "StreamHandler: noteActiveSynchronizedOutput renews every 250ms and caps at 15s" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var env: PostResizeTestHarness = undefined;
+    try env.init(alloc, 40, 10);
+    defer env.deinit(alloc);
+
+    // Opening DEC 2026 sets both timestamps and emits one `.start_synchronized_output`.
+    env.stream.nextSlice("\x1b[?2026h");
+    try testing.expect(env.handler().sync_output_started_at != null);
+    try testing.expect(env.handler().sync_output_last_renewed_at != null);
+    try testing.expectEqual(@as(?termio.Message, .{ .start_synchronized_output = {} }), env.termio_mailbox.spsc.queue.pop(global.io()));
+    try testing.expect(env.termio_mailbox.spsc.queue.pop(global.io()) == null);
+
+    const t0 = env.handler().sync_output_started_at.?;
+
+    // < 250ms elapsed does not renew.
+    env.handler().noteActiveSynchronizedOutput(t0.addDuration(.fromMilliseconds(200)));
+    try testing.expect(env.termio_mailbox.spsc.queue.pop(global.io()) == null);
+
+    // >= 250ms elapsed emits renewal and advances `sync_output_last_renewed_at`.
+    const t1 = t0.addDuration(.fromMilliseconds(260));
+    env.handler().noteActiveSynchronizedOutput(t1);
+    try testing.expectEqual(@as(?termio.Message, .{ .start_synchronized_output = {} }), env.termio_mailbox.spsc.queue.pop(global.io()));
+    try testing.expect(env.termio_mailbox.spsc.queue.pop(global.io()) == null);
+    try testing.expectEqual(t1.nanoseconds, env.handler().sync_output_last_renewed_at.?.nanoseconds);
+
+    // Redundant DECSET 2026 while already genuinely active MUST NOT reset `sync_output_started_at`.
+    env.stream.nextSlice("\x1b[?2026h");
+    try testing.expectEqual(t0.nanoseconds, env.handler().sync_output_started_at.?.nanoseconds);
+    _ = env.termio_mailbox.spsc.queue.pop(global.io());
+
+    // >= `sync_active_max_ms` (15_000ms) stops renewing.
+    env.handler().noteActiveSynchronizedOutput(t0.addDuration(.fromMilliseconds(StreamHandler.sync_active_max_ms)));
+    try testing.expect(env.termio_mailbox.spsc.queue.pop(global.io()) == null);
+
+    // Closing DEC 2026 clears timestamps.
+    env.stream.nextSlice("\x1b[?2026l");
+    try testing.expect(env.handler().sync_output_started_at == null);
+    try testing.expect(env.handler().sync_output_last_renewed_at == null);
+
+    // While `tui_wipe_hold.held_sync_output` is active, `noteActiveSynchronizedOutput` must not renew.
+    env.stream.nextSlice("\x1b[?2026h");
+    try env.writeLines(30);
+    env.stream.nextSlice("\x1b[?2026l\x1b[?2026h\x1b[2J\x1b[3J\x1b[H? for shortcuts\x1b[?2026l");
+    while (env.termio_mailbox.spsc.queue.pop(global.io())) |msg| msg.deinit();
+    try testing.expect(env.handler().tui_wipe_hold.held_sync_output);
+    env.handler().noteActiveSynchronizedOutput(std.Io.Timestamp.now(testing.io, .awake).addDuration(.fromMilliseconds(500)));
+    try testing.expect(env.termio_mailbox.spsc.queue.pop(global.io()) == null);
+
+    // `fullReset` clears timestamps as well.
+    env.stream.nextSlice("\x1b[?2026h");
+    try env.handler().fullReset();
+    try testing.expect(env.handler().sync_output_started_at == null);
+    try testing.expect(env.handler().sync_output_last_renewed_at == null);
 }

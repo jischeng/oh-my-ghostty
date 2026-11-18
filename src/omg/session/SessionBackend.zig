@@ -124,6 +124,9 @@ pub fn initTerminal(self: *Self, term: *terminal.Terminal) void {
 pub fn acceptsInitialInput(self: *const Self) bool {
     return self.is_local and self.creating;
 }
+pub fn isLocal(self: *const Self) bool {
+    return self.is_local;
+}
 pub fn appendInitialInput(self: *Self, bytes: []const u8) !void {
     if (!self.acceptsInitialInput()) return;
     if (bytes.len > LocalLaunch.max_initial_input -| self.initial_input.items.len) return error.InitialInputTooLarge;

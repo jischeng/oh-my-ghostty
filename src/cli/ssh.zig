@@ -466,6 +466,16 @@ fn runInner(
             "SetEnv=AGY_CLI_OSC7501={s}",
             .{forward_osc7501 orelse "on"},
         );
+        if (lifecycle != null and !sshHasExplicitCompressionOption(opts._ssh_args.items)) {
+            break :env_opts &.{
+                "-o", set_term,
+                "-o", set_osc7501,
+                "-o", "SendEnv=COLORTERM",
+                "-o", "SendEnv=TERM_PROGRAM",
+                "-o", "SendEnv=TERM_PROGRAM_VERSION",
+                "-o", "Compression=yes",
+            };
+        }
         break :env_opts &.{
             "-o", set_term,
             "-o", set_osc7501,
@@ -732,6 +742,53 @@ fn interactiveSSHDestination(args: []const []const u8) ?[]const u8 {
     if (index >= args.len) return null;
     const destination = args[index];
     return if (index + 1 == args.len) destination else null;
+}
+
+fn sshOptionSetsCompression(value: []const u8) bool {
+    const trimmed = std.mem.trimStart(u8, value, " \t");
+    const keyword = "compression";
+    if (trimmed.len <= keyword.len) return false;
+    if (!std.ascii.eqlIgnoreCase(trimmed[0..keyword.len], keyword)) return false;
+    return switch (trimmed[keyword.len]) {
+        '=', ' ', '\t' => true,
+        else => false,
+    };
+}
+
+fn sshHasExplicitCompressionOption(args: []const []const u8) bool {
+    const options_with_value = "BbcDEeFIiJLlmOoPpQRSWw";
+    var index: usize = 0;
+    while (index < args.len) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--")) break;
+        if (arg.len == 0 or arg[0] != '-' or std.mem.eql(u8, arg, "-")) break;
+
+        var i: usize = 1;
+        while (i < arg.len) : (i += 1) {
+            const option = arg[i];
+            if (option == 'C') return true;
+            if (option == 'o') {
+                const opt_val = if (i + 1 < arg.len)
+                    arg[i + 1 ..]
+                else blk: {
+                    index += 1;
+                    if (index >= args.len) return false;
+                    break :blk args[index];
+                };
+                if (sshOptionSetsCompression(opt_val)) return true;
+                break;
+            }
+            if (std.mem.indexOfScalar(u8, options_with_value, option) != null) {
+                if (i + 1 == arg.len) {
+                    index += 1;
+                    if (index >= args.len) return false;
+                }
+                break;
+            }
+        }
+        index += 1;
+    }
+    return false;
 }
 
 fn sshDestinationLabel(destination: []const u8) ?[]const u8 {
@@ -1233,6 +1290,36 @@ test interactiveSSHDestination {
     try testing.expect(interactiveSSHDestination(&.{ "-W", "host:22", "cloud" }) == null);
     try testing.expect(interactiveSSHDestination(&.{ "-O", "check", "cloud" }) == null);
     try testing.expect(interactiveSSHDestination(&.{ "-T", "cloud" }) == null);
+}
+
+test sshHasExplicitCompressionOption {
+    const testing = std.testing;
+    try testing.expect(sshHasExplicitCompressionOption(&.{ "-C", "cloud" }));
+    try testing.expect(sshHasExplicitCompressionOption(&.{ "-vC", "cloud" }));
+    try testing.expect(sshHasExplicitCompressionOption(&.{ "-4C", "cloud" }));
+    try testing.expect(sshHasExplicitCompressionOption(&.{ "-o", "Compression=yes", "cloud" }));
+    try testing.expect(sshHasExplicitCompressionOption(&.{ "-o", "Compression=no", "cloud" }));
+    try testing.expect(sshHasExplicitCompressionOption(&.{ "-o", "compression=NO", "cloud" }));
+    try testing.expect(sshHasExplicitCompressionOption(&.{ "-o", "Compression no", "cloud" }));
+    try testing.expect(sshHasExplicitCompressionOption(&.{ "-o", "  compression\tyes", "cloud" }));
+    try testing.expect(sshHasExplicitCompressionOption(&.{ "-oCompression=no", "cloud" }));
+    try testing.expect(sshHasExplicitCompressionOption(&.{ "-oCompression=yes", "cloud" }));
+    try testing.expect(sshHasExplicitCompressionOption(&.{ "-voCompression=no", "cloud" }));
+    try testing.expect(sshHasExplicitCompressionOption(&.{ "-p", "2222", "-o", "Compression=no", "cloud" }));
+
+    try testing.expect(!sshHasExplicitCompressionOption(&.{"cloud"}));
+    try testing.expect(!sshHasExplicitCompressionOption(&.{ "-p2222", "cloud" }));
+    try testing.expect(!sshHasExplicitCompressionOption(&.{ "-p", "2222", "cloud" }));
+    try testing.expect(!sshHasExplicitCompressionOption(&.{ "-i", "/path/with/-C", "cloud" }));
+    try testing.expect(!sshHasExplicitCompressionOption(&.{ "-i/path/with/-C", "cloud" }));
+    try testing.expect(!sshHasExplicitCompressionOption(&.{ "-l", "Cuser", "cloud" }));
+    try testing.expect(!sshHasExplicitCompressionOption(&.{ "-lCuser", "cloud" }));
+    try testing.expect(!sshHasExplicitCompressionOption(&.{ "-F", "/tmp/-oCompression=no", "cloud" }));
+    try testing.expect(!sshHasExplicitCompressionOption(&.{ "-o", "CompressionLevel=6", "cloud" }));
+    try testing.expect(!sshHasExplicitCompressionOption(&.{ "-o", "ProxyCommand=ssh -C jump", "cloud" }));
+    try testing.expect(!sshHasExplicitCompressionOption(&.{ "--", "-C", "cloud" }));
+    try testing.expect(!sshHasExplicitCompressionOption(&.{ "cloud", "-C" }));
+    try testing.expect(!sshHasExplicitCompressionOption(&.{ "-p", "2222", "-o" }));
 }
 
 test "remoteAgentWrappers" {

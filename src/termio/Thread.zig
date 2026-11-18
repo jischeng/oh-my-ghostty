@@ -422,7 +422,7 @@ fn syncResetTimeoutMs(post_resize: *const termio.StreamHandler.PostResizeState) 
         return 1;
     }
     const now = std.Io.Timestamp.now(global.io(), .awake);
-    var cap_ms: u64 = termio.StreamHandler.PostResizeState.hard_limit_ms;
+    var cap_ms: u64 = std.math.maxInt(u64);
     if (post_resize.deadline) |dl| {
         const rem_ms = now.durationTo(dl).toMilliseconds();
         if (rem_ms <= 0) return 1;
@@ -436,11 +436,39 @@ fn syncResetTimeoutMs(post_resize: *const termio.StreamHandler.PostResizeState) 
     return @max(@as(u64, 1), cap_ms);
 }
 
+fn syncResetTimeoutForHandler(handler: *const termio.StreamHandler) u64 {
+    if (handler.post_resize.active and handler.post_resize.held_sync_output) {
+        return syncResetTimeoutMs(&handler.post_resize);
+    }
+    if (handler.tui_wipe_hold.active and handler.tui_wipe_hold.held_sync_output) {
+        const dl = handler.tui_wipe_hold.deadline orelse return 1;
+        const now = std.Io.Timestamp.now(global.io(), .awake);
+        const rem_ms = now.durationTo(dl).toMilliseconds();
+        if (rem_ms <= 0) return 1;
+        return @max(
+            @as(u64, 1),
+            @min(@as(u64, @intCast(rem_ms)), termio.StreamHandler.TuiWipeHoldState.hold_limit_ms),
+        );
+    }
+    if (handler.sync_output_started_at) |started| {
+        const now = std.Io.Timestamp.now(global.io(), .awake);
+        const elapsed_ms = started.durationTo(now).toMilliseconds();
+        const max_ms: i64 = @intCast(termio.StreamHandler.sync_active_max_ms);
+        if (elapsed_ms >= max_ms) return 1;
+        const rem_ms: u64 = if (elapsed_ms <= 0)
+            termio.StreamHandler.sync_active_max_ms
+        else
+            @intCast(max_ms - elapsed_ms);
+        return @max(@as(u64, 1), @min(sync_reset_ms, rem_ms));
+    }
+    return sync_reset_ms;
+}
+
 fn startSynchronizedOutput(self: *Thread, cb: *CallbackData) void {
     const timeout_ms: u64 = timeout: {
         cb.io.renderer_state.mutex.lockUncancelable(global.io());
         defer cb.io.renderer_state.mutex.unlock(global.io());
-        break :timeout syncResetTimeoutMs(&cb.io.terminal_stream.handler.post_resize);
+        break :timeout syncResetTimeoutForHandler(&cb.io.terminal_stream.handler);
     };
     self.sync_reset.reset(
         &self.loop,
@@ -663,4 +691,88 @@ test "Thread: syncResetTimeoutMs uses bounded hold deadlines only when held_sync
         .held_sync_output = true,
     };
     try testing.expectEqual(@as(u64, 1), syncResetTimeoutMs(&missing_deadlines));
+}
+
+test "Thread: syncResetTimeoutForHandler handles remote post_resize, tui_wipe_hold, and active sync cap" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const now = std.Io.Timestamp.now(testing.io, .awake);
+
+    var term = try @import("../terminal/main.zig").Terminal.init(testing.io, alloc, .{
+        .cols = 40,
+        .rows = 10,
+    });
+    defer term.deinit(alloc);
+    var mutex: std.Io.Mutex = .init;
+    var renderer_state: renderer.State = .{
+        .mutex = &mutex,
+        .terminal = &term,
+    };
+    var size: renderer.Size = .{
+        .screen = .{ .width = 400, .height = 200 },
+        .cell = .{ .width = 10, .height = 20 },
+        .padding = .{},
+    };
+    var termio_mailbox = try termio.Mailbox.initSPSC(alloc);
+    defer termio_mailbox.deinit(alloc);
+    var renderer_mailbox: renderer.Thread.Mailbox = .{};
+    var wakeup = try xev.Async.init();
+    defer wakeup.deinit();
+
+    var handler: termio.StreamHandler = .{
+        .alloc = alloc,
+        .remote_session = true,
+        .remote_ssh_session = true,
+        .size = &size,
+        .terminal = &term,
+        .termio_mailbox = &termio_mailbox,
+        .surface_mailbox = undefined,
+        .renderer_state = &renderer_state,
+        .renderer_mailbox = &renderer_mailbox,
+        .renderer_wakeup = wakeup,
+        .enquiry_response = "",
+        .osc_color_report_format = .none,
+        .clipboard_write = .deny,
+    };
+    defer handler.deinit();
+
+    // 1. Remote `post_resize` hold allows deadlines > 420ms (up to 1800ms / 2400ms).
+    handler.post_resize = .{
+        .active = true,
+        .held_sync_output = true,
+        .deadline = now.addDuration(.fromMilliseconds(1800)),
+        .hard_deadline = now.addDuration(.fromMilliseconds(2400)),
+        .scroll_deadline = now.addDuration(.fromMilliseconds(3200)),
+    };
+    const remote_timeout = syncResetTimeoutForHandler(&handler);
+    try testing.expect(remote_timeout > 420 and remote_timeout <= 1800);
+    handler.post_resize = .{};
+
+    // 2. Non-resize `tui_wipe_hold` uses `hold_limit_ms` (<= 2500ms) and resolves expired/missing to 1ms.
+    handler.tui_wipe_hold = .{
+        .active = true,
+        .held_sync_output = true,
+        .deadline = now.addDuration(.fromMilliseconds(2500)),
+    };
+    const wipe_timeout = syncResetTimeoutForHandler(&handler);
+    try testing.expect(wipe_timeout >= 1 and wipe_timeout <= termio.StreamHandler.TuiWipeHoldState.hold_limit_ms);
+    try testing.expect(wipe_timeout > sync_reset_ms);
+
+    handler.tui_wipe_hold.deadline = now.addDuration(.fromMilliseconds(-5));
+    try testing.expectEqual(@as(u64, 1), syncResetTimeoutForHandler(&handler));
+
+    handler.tui_wipe_hold.deadline = null;
+    try testing.expectEqual(@as(u64, 1), syncResetTimeoutForHandler(&handler));
+    handler.tui_wipe_hold = .{};
+
+    // 3. Active genuine DEC 2026 uses `sync_reset_ms` initially, then caps at `sync_active_max_ms` (15s).
+    handler.sync_output_started_at = now.addDuration(.fromMilliseconds(-100));
+    try testing.expectEqual(sync_reset_ms, syncResetTimeoutForHandler(&handler));
+
+    handler.sync_output_started_at = now.addDuration(.fromMilliseconds(-14_750));
+    const tail_cap = syncResetTimeoutForHandler(&handler);
+    try testing.expect(tail_cap >= 1 and tail_cap <= 250);
+
+    handler.sync_output_started_at = now.addDuration(.fromMilliseconds(-15_010));
+    try testing.expectEqual(@as(u64, 1), syncResetTimeoutForHandler(&handler));
 }

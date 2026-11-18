@@ -223,6 +223,10 @@ pub const DerivedConfig = struct {
     }
 };
 
+fn isRemoteSshBackend(backend: *const termio.Backend) bool {
+    return backend.* == .omg_session and !backend.omg_session.isLocal();
+}
+
 /// Initialize the termio state.
 ///
 /// This will also start the child process if the termio is configured
@@ -285,6 +289,7 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
     const handler: StreamHandler = .{
         .alloc = alloc,
         .remote_session = backend == .omg_session,
+        .remote_ssh_session = isRemoteSshBackend(&backend),
         .termio_mailbox = &self.mailbox,
         .surface_mailbox = opts.surface_mailbox,
         .renderer_state = opts.renderer_state,
@@ -709,14 +714,22 @@ pub fn resetSynchronizedOutput(self: *Termio) void {
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());
     if (!self.terminal.modes.get(.synchronized_output) and
-        !self.terminal_stream.handler.post_resize.held_sync_output)
+        !self.terminal_stream.handler.post_resize.held_sync_output and
+        !self.terminal_stream.handler.tui_wipe_hold.held_sync_output)
     {
         return;
     }
+    self.terminal_stream.handler.sync_output_started_at = null;
+    self.terminal_stream.handler.sync_output_last_renewed_at = null;
     if (self.terminal_stream.handler.post_resize.held_sync_output) {
         self.terminal_stream.handler.finishPostResizeHold();
+    } else if (self.terminal_stream.handler.tui_wipe_hold.held_sync_output or
+        self.terminal_stream.handler.tui_wipe_hold.active)
+    {
+        self.terminal_stream.handler.finishTuiWipeHold();
     } else {
         _ = self.terminal_stream.handler.postResizeIsActive();
+        _ = self.terminal_stream.handler.tuiWipeHoldIsActive();
     }
     self.terminal.modes.set(.synchronized_output, false);
     self.renderer_wakeup.notify() catch {};
@@ -735,6 +748,7 @@ pub fn clearScreen(self: *Termio, td: *ThreadData, history: bool) !void {
         if (self.terminal.screens.active_key == .alternate) return;
 
         self.terminal_stream.handler.cancelPostResize();
+        self.terminal_stream.handler.cancelTuiWipeHold();
 
         // Clear our selection
         self.terminal.screens.active.clearSelection();
@@ -876,6 +890,10 @@ fn processOutputLocked(self: *Termio, buf: []const u8) void {
         }
     } else {
         self.terminal_stream.nextSlice(buf);
+    }
+
+    if (buf.len > 0) {
+        self.terminal_stream.handler.noteActiveSynchronizedOutput(now);
     }
 
     // If our stream handling caused messages to be sent to the mailbox
@@ -1070,4 +1088,136 @@ test "Termio: resetSynchronizedOutput releases held sync output without dropping
     io.resetSynchronizedOutput();
     try testing.expect(io.terminal_stream.handler.postResizeIsActive());
     try testing.expectEqual(@as(usize, 12), io.terminal_stream.handler.post_resize.scroll_save.?.offset);
+}
+
+test "Termio: isRemoteSshBackend detects remote omg_session only" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var remote_backend: termio.Backend = .{ .omg_session = try termio.OmgSession.init(alloc, "/unused", null, .{ .is_local = false }) };
+    defer remote_backend.deinit();
+    try testing.expect(isRemoteSshBackend(&remote_backend));
+
+    var local_backend: termio.Backend = .{ .omg_session = try termio.OmgSession.init(alloc, "/unused", null, .{ .is_local = true }) };
+    defer local_backend.deinit();
+    try testing.expect(!isRemoteSshBackend(&local_backend));
+
+    const exec_backend: termio.Backend = .{ .exec = undefined };
+    try testing.expect(!isRemoteSshBackend(&exec_backend));
+}
+
+test "Termio: resetSynchronizedOutput releases tui_wipe_hold, processOutput renews active sync, and clearScreen cancels hold" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var term = try terminalpkg.Terminal.init(testing.io, alloc, .{
+        .cols = 40,
+        .rows = 10,
+    });
+    errdefer term.deinit(alloc);
+
+    var mutex: std.Io.Mutex = .init;
+    var renderer_state: renderer.State = .{
+        .mutex = &mutex,
+        .terminal = &term,
+    };
+    var renderer_mailbox: renderer.Thread.Mailbox = .{};
+    var wakeup = try xev.Async.init();
+    errdefer wakeup.deinit();
+    var mailbox = try termio.Mailbox.initSPSC(alloc);
+    errdefer mailbox.deinit(alloc);
+
+    var io: Termio = .{
+        .alloc = alloc,
+        .backend = undefined,
+        .config = undefined,
+        .terminal = term,
+        .renderer_state = &renderer_state,
+        .renderer_wakeup = wakeup,
+        .renderer_mailbox = &renderer_mailbox,
+        .surface_mailbox = undefined,
+        .size = .{
+            .screen = .{ .width = 400, .height = 200 },
+            .cell = .{ .width = 10, .height = 20 },
+            .padding = .{},
+        },
+        .mailbox = mailbox,
+        .terminal_stream = undefined,
+    };
+    io.renderer_state.terminal = &io.terminal;
+    io.terminal_stream = .init(.{
+        .allocator = alloc,
+        .handler = .{
+            .alloc = alloc,
+            .remote_session = true,
+            .remote_ssh_session = true,
+            .size = &io.size,
+            .terminal = &io.terminal,
+            .termio_mailbox = &io.mailbox,
+            .surface_mailbox = undefined,
+            .renderer_state = io.renderer_state,
+            .renderer_mailbox = io.renderer_mailbox,
+            .renderer_wakeup = io.renderer_wakeup,
+            .enquiry_response = "",
+            .osc_color_report_format = .none,
+            .clipboard_write = .deny,
+        },
+    });
+    defer {
+        io.terminal_stream.deinit();
+        io.renderer_wakeup.deinit();
+        io.terminal.deinit(alloc);
+        io.mailbox.deinit(alloc);
+    }
+
+    // 1. Arm `tui_wipe_hold` via Phase 1 wipe while scrolled up, then verify `resetSynchronizedOutput`
+    // clears `synchronized_output`, resets `tui_wipe_hold`, pins bottom, and clears sync timestamps.
+    for (0..30) |i| {
+        var buf: [32]u8 = undefined;
+        const line = try std.fmt.bufPrint(&buf, "history-{d:0>2}\r\n", .{i});
+        io.processOutput(line);
+    }
+    io.terminal.scrollViewport(.{ .row = 5 });
+    io.renderer_state.scroll.snapTo(5, 15);
+    io.processOutput("\x1b[?2026h\x1b[2J\x1b[3J\x1b[H? for shortcuts\x1b[?2026l");
+    while (io.mailbox.spsc.queue.pop(global.io())) |msg| msg.deinit();
+    try testing.expect(io.terminal.modes.get(.synchronized_output));
+    try testing.expect(io.terminal_stream.handler.tui_wipe_hold.held_sync_output);
+
+    io.resetSynchronizedOutput();
+    try testing.expect(!io.terminal.modes.get(.synchronized_output));
+    try testing.expect(!io.terminal_stream.handler.tui_wipe_hold.active);
+    try testing.expect(!io.terminal_stream.handler.tui_wipe_hold.held_sync_output);
+    try testing.expect(io.terminal_stream.handler.sync_output_started_at == null);
+    try testing.expect(io.terminal_stream.handler.sync_output_last_renewed_at == null);
+    try testing.expect(io.renderer_state.scroll.pinned_to_bottom);
+
+    // 2. `processOutput` with active DEC 2026 renews `.start_synchronized_output` once >= 250ms elapse,
+    // and `resetSynchronizedOutput` clears active sync timestamps.
+    io.processOutput("\x1b[?2026hchunk-0");
+    try testing.expectEqual(@as(?termio.Message, .{ .start_synchronized_output = {} }), io.mailbox.spsc.queue.pop(global.io()));
+    try testing.expect(io.mailbox.spsc.queue.pop(global.io()) == null);
+    io.terminal_stream.handler.sync_output_last_renewed_at =
+        io.terminal_stream.handler.sync_output_last_renewed_at.?.addDuration(.fromMilliseconds(-300));
+    io.processOutput("chunk-1");
+    try testing.expectEqual(@as(?termio.Message, .{ .start_synchronized_output = {} }), io.mailbox.spsc.queue.pop(global.io()));
+    try testing.expect(io.mailbox.spsc.queue.pop(global.io()) == null);
+    io.resetSynchronizedOutput();
+    try testing.expect(!io.terminal.modes.get(.synchronized_output));
+    try testing.expect(io.terminal_stream.handler.sync_output_started_at == null);
+
+    // 3. `clearScreen` cancels held `tui_wipe_hold`.
+    for (0..30) |i| {
+        var buf: [32]u8 = undefined;
+        const line = try std.fmt.bufPrint(&buf, "line-{d:0>2}\r\n", .{i});
+        io.processOutput(line);
+    }
+    io.processOutput("\x1b[?2026h\x1b[2J\x1b[3J\x1b[H? for shortcuts\x1b[?2026l");
+    while (io.mailbox.spsc.queue.pop(global.io())) |msg| msg.deinit();
+    try testing.expect(io.terminal_stream.handler.tui_wipe_hold.held_sync_output);
+
+    var td: ThreadData = undefined;
+    try io.clearScreen(&td, true);
+    try testing.expect(!io.terminal.modes.get(.synchronized_output));
+    try testing.expect(!io.terminal_stream.handler.tui_wipe_hold.active);
 }

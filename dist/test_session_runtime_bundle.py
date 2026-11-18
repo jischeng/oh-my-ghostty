@@ -86,7 +86,10 @@ class RuntimeBundleTests(unittest.TestCase):
         )
         self.assertEqual(
             build_mod.snapshot_revision(build_mod.compute_snapshot_source_digest(repo_root), compatibility),
-            "59c5cc7b4d1fe408faf5",
+            "7abe5365444c63ee8df6",
+        )
+        self.assertTrue(
+            all(epoch == "59c5cc7b4d1fe408faf5" for epoch in compatibility.values()),
         )
 
     def test_snapshot_source_digest_ignores_non_wire_files(self):

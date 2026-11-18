@@ -192,8 +192,12 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
         }
         // Written as the embedded surface writes it: the text, with no prompt.
         // The reply must come before this returns.
-        let clipboard: GhosttyTerminalClipboardWriteFn = { _, _, _ in
-            GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED
+        let clipboard: GhosttyTerminalClipboardWriteFn = { _, _, write in
+            guard let write, let replyFn = write.pointee.reply else { return }
+            var reply = GhosttyClipboardWriteReply()
+            reply.size = MemoryLayout<GhosttyClipboardWriteReply>.size
+            reply.result = GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED
+            replyFn(write, &reply)
         }
         try Self.check(ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, unsafeBitCast(title, to: UnsafeRawPointer.self)), "ghostty_terminal_set(title)")
         try Self.check(ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_PWD_CHANGED, unsafeBitCast(directory, to: UnsafeRawPointer.self)), "ghostty_terminal_set(pwd)")
@@ -557,7 +561,7 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
     }
 
     public struct Theme: Equatable {
-        public init(foreground: GhosttyColorRgb, background: GhosttyColorRgb, cursor: GhosttyColorRgb?, palette: [GhosttyColorRgb], cursorStyle: GhosttyTerminalCursorStyle, cursorBlink: Bool, cursorText: GhosttyColorRgb? = nil, minimumContrast: Double = 1, selectionBackground: GhosttyColorRgb? = nil, selectionForeground: GhosttyColorRgb? = nil, dark: Bool = false) {
+        public init(foreground: GhosttyColorRgb, background: GhosttyColorRgb, cursor: GhosttyColorRgb?, palette: [GhosttyColorRgb], cursorStyle: GhosttyCursorStyle, cursorBlink: Bool, cursorText: GhosttyColorRgb? = nil, minimumContrast: Double = 1, selectionBackground: GhosttyColorRgb? = nil, selectionForeground: GhosttyColorRgb? = nil, dark: Bool = false) {
             self.dark = dark
             self.foreground = foreground
             self.background = background
@@ -592,7 +596,7 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
         /// Exactly 256 entries.
         public var palette: [GhosttyColorRgb]
         /// The cursor settings, as the defaults a program's DECSCUSR can override.
-        public var cursorStyle: GhosttyTerminalCursorStyle
+        public var cursorStyle: GhosttyCursorStyle
         public var cursorBlink: Bool
         /// The color of a character under a block cursor; nil is the background.
         public var cursorText: GhosttyColorRgb? = nil
@@ -643,17 +647,15 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
             var width: UInt32 = 0
             var height: UInt32 = 0
             var format = GHOSTTY_KITTY_IMAGE_FORMAT_RGBA
-            var pointer: UnsafePointer<UInt8>?
-            var length = 0
+            var pixels = GhosttyString()
             var generation: UInt64 = 0
-            guard ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_IMAGE_DATA_WIDTH, &width) == GHOSTTY_SUCCESS,
-                  ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_IMAGE_DATA_HEIGHT, &height) == GHOSTTY_SUCCESS,
-                  ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_IMAGE_DATA_FORMAT, &format) == GHOSTTY_SUCCESS,
-                  ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_IMAGE_DATA_DATA_PTR, &pointer) == GHOSTTY_SUCCESS,
-                  ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_IMAGE_DATA_DATA_LEN, &length) == GHOSTTY_SUCCESS,
-                  ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_IMAGE_DATA_GENERATION, &generation)
+            guard ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_WIDTH, &width) == GHOSTTY_SUCCESS,
+                  ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_HEIGHT, &height) == GHOSTTY_SUCCESS,
+                  ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_FORMAT, &format) == GHOSTTY_SUCCESS,
+                  ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_PIXELS, &pixels) == GHOSTTY_SUCCESS,
+                  ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_GENERATION, &generation)
                     == GHOSTTY_SUCCESS,
-                  let pointer, width > 0, height > 0
+                  let pointer = pixels.ptr, width > 0, height > 0
             else { return nil }
             let channels: Int
             switch format {
@@ -664,7 +666,7 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
             default: return nil
             }
             let count = Int(width) * Int(height) * channels
-            guard length >= count else { return nil }
+            guard pixels.len >= count else { return nil }
             // Only the copy happens under the lock; `rgba()` converts later.
             return ImagePixels(
                 width: Int(width), height: Int(height), channels: channels, generation: generation,
@@ -766,32 +768,33 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
                 defer { ghostty_key_encoder_free(encoder) }
                 try Self.check(ghostty_key_event_new(nil, &event), "key event")
                 defer { ghostty_key_event_free(event) }
-                ghostty_key_encoder_setopt_from_terminal(encoder, terminal)
-                ghostty_key_event_set_action(event, key.action == .release ? GHOSTTY_KEY_ACTION_RELEASE
+                _ = ghostty_key_encoder_set_from_terminal(encoder, terminal)
+                _ = ghostty_key_event_set_action(event, key.action == .release ? GHOSTTY_KEY_ACTION_RELEASE
                     : key.action == .repeat ? GHOSTTY_KEY_ACTION_REPEAT : GHOSTTY_KEY_ACTION_PRESS)
-                ghostty_key_event_set_key(event, GhosttyKeyNames.values[key.key] ?? GHOSTTY_KEY_UNIDENTIFIED)
-                ghostty_key_event_set_mods(event, key.mods)
-                ghostty_key_event_set_consumed_mods(event, key.consumedMods)
-                ghostty_key_event_set_composing(event, key.composing)
-                ghostty_key_event_set_unshifted_codepoint(event, key.unshifted)
-                try (key.text ?? "").withCString { text in
-                    ghostty_key_event_set_utf8(event, text, key.text?.utf8.count ?? 0)
+                _ = ghostty_key_event_set_key(event, GhosttyKeyNames.values[key.key] ?? GHOSTTY_KEY_UNIDENTIFIED)
+                _ = ghostty_key_event_set_mods(event, key.mods)
+                _ = ghostty_key_event_set_consumed_mods(event, key.consumedMods)
+                _ = ghostty_key_event_set_composing(event, key.composing)
+                _ = ghostty_key_event_set_unshifted_codepoint(event, key.unshifted)
+                let utf8Bytes = Array((key.text ?? "").utf8)
+                try utf8Bytes.withUnsafeBufferPointer { utf8 in
+                    _ = ghostty_key_event_set_utf8(event, GhosttyString(ptr: utf8.baseAddress, len: utf8.count))
                     try Self.check(ghostty_key_encoder_encode(encoder, event, &bytes, bytes.count, &written), "key encode")
                 }
             case .paste(let text, _):
                 var source = Array(text.utf8CString.dropLast())
-                var output = [CChar](repeating: 0, count: source.count + 32)
+                var output = [UInt8](repeating: 0, count: source.count + 32)
                 let result = source.withUnsafeMutableBufferPointer { data in
                     ghostty_paste_encode(data.baseAddress, data.count, mode(2004), &output, output.count, &written)
                 }
                 try Self.check(result, "paste encode")
-                return Data(output.prefix(written).map { UInt8(bitPattern: $0) })
+                return Data(output.prefix(written))
             case .focus(let focused):
                 guard mode(1004) else { return Data() }
-                var output = [CChar](repeating: 0, count: 16)
+                var output = [UInt8](repeating: 0, count: 16)
                 try Self.check(ghostty_focus_encode(focused ? GHOSTTY_FOCUS_GAINED : GHOSTTY_FOCUS_LOST,
                     &output, output.count, &written), "focus encode")
-                return Data(output.prefix(written).map { UInt8(bitPattern: $0) })
+                return Data(output.prefix(written))
             case .wheel(let wheel):
                 guard wheel.rows != 0 else { return Data() }
                 var tracking = false
@@ -803,21 +806,21 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
                     defer { ghostty_mouse_encoder_free(encoder) }
                     try Self.check(ghostty_mouse_event_new(nil, &event), "wheel mouse event")
                     defer { ghostty_mouse_event_free(event) }
-                    ghostty_mouse_encoder_setopt_from_terminal(encoder, terminal)
+                    _ = ghostty_mouse_encoder_set_from_terminal(encoder, terminal)
                     var size = GhosttyMouseEncoderSize()
                     size.size = MemoryLayout<GhosttyMouseEncoderSize>.size
                     size.cell_width = max(1, wheel.at.cellWidth)
                     size.cell_height = max(1, wheel.at.cellHeight)
                     size.screen_width = UInt32(gridLocked().cols) * size.cell_width
                     size.screen_height = UInt32(gridLocked().rows) * size.cell_height
-                    ghostty_mouse_encoder_setopt(encoder, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &size)
-                    ghostty_mouse_event_set_action(event, GHOSTTY_MOUSE_ACTION_PRESS)
-                    ghostty_mouse_event_set_button(
+                    _ = ghostty_mouse_encoder_set(encoder, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &size)
+                    _ = ghostty_mouse_event_set_action(event, GHOSTTY_MOUSE_ACTION_PRESS)
+                    _ = ghostty_mouse_event_set_button(
                         event,
                         wheel.rows < 0 ? GHOSTTY_MOUSE_BUTTON_FOUR : GHOSTTY_MOUSE_BUTTON_FIVE
                     )
-                    ghostty_mouse_event_set_mods(event, wheel.mods)
-                    ghostty_mouse_event_set_position(event, GhosttyMousePosition(x: wheel.at.x, y: wheel.at.y))
+                    _ = ghostty_mouse_event_set_mods(event, wheel.mods)
+                    _ = ghostty_mouse_event_set_position(event, GhosttyMousePosition(x: wheel.at.x, y: wheel.at.y))
                     try Self.check(
                         ghostty_mouse_encoder_encode(encoder, event, &bytes, bytes.count, &written),
                         "wheel mouse encode"
@@ -835,9 +838,9 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
                 defer { ghostty_key_encoder_free(encoder) }
                 try Self.check(ghostty_key_event_new(nil, &event), "wheel event")
                 defer { ghostty_key_event_free(event) }
-                ghostty_key_encoder_setopt_from_terminal(encoder, terminal)
-                ghostty_key_event_set_action(event, GHOSTTY_KEY_ACTION_PRESS)
-                ghostty_key_event_set_key(event, wheel.rows < 0 ? GHOSTTY_KEY_PAGE_UP : GHOSTTY_KEY_PAGE_DOWN)
+                _ = ghostty_key_encoder_set_from_terminal(encoder, terminal)
+                _ = ghostty_key_event_set_action(event, GHOSTTY_KEY_ACTION_PRESS)
+                _ = ghostty_key_event_set_key(event, wheel.rows < 0 ? GHOSTTY_KEY_PAGE_UP : GHOSTTY_KEY_PAGE_DOWN)
                 try Self.check(ghostty_key_encoder_encode(encoder, event, &bytes, bytes.count, &written), "wheel encode")
                 return Data(bytes.prefix(written))
             case .mouse(let mouse):
@@ -847,21 +850,21 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
                 defer { ghostty_mouse_encoder_free(encoder) }
                 try Self.check(ghostty_mouse_event_new(nil, &event), "mouse event")
                 defer { ghostty_mouse_event_free(event) }
-                ghostty_mouse_encoder_setopt_from_terminal(encoder, terminal)
+                _ = ghostty_mouse_encoder_set_from_terminal(encoder, terminal)
                 var size = GhosttyMouseEncoderSize()
                 size.size = MemoryLayout<GhosttyMouseEncoderSize>.size
                 size.cell_width = mouse.at.cellWidth
                 size.cell_height = mouse.at.cellHeight
                 size.screen_width = UInt32(gridLocked().cols) * size.cell_width
                 size.screen_height = UInt32(gridLocked().rows) * size.cell_height
-                ghostty_mouse_encoder_setopt(encoder, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &size)
-                ghostty_mouse_event_set_action(event, mouse.action == .release ? GHOSTTY_MOUSE_ACTION_RELEASE
+                _ = ghostty_mouse_encoder_set(encoder, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &size)
+                _ = ghostty_mouse_event_set_action(event, mouse.action == .release ? GHOSTTY_MOUSE_ACTION_RELEASE
                     : mouse.action == .motion ? GHOSTTY_MOUSE_ACTION_MOTION : GHOSTTY_MOUSE_ACTION_PRESS)
                 if let button = mouse.button {
-                    ghostty_mouse_event_set_button(event, GhosttyMouseButton(rawValue: Int32(button)))
+                    _ = ghostty_mouse_event_set_button(event, GhosttyMouseButton(rawValue: .init(button)))
                 }
-                ghostty_mouse_event_set_mods(event, mouse.mods)
-                ghostty_mouse_event_set_position(event, GhosttyMousePosition(x: mouse.at.x, y: mouse.at.y))
+                _ = ghostty_mouse_event_set_mods(event, mouse.mods)
+                _ = ghostty_mouse_event_set_position(event, GhosttyMousePosition(x: mouse.at.x, y: mouse.at.y))
                 try Self.check(ghostty_mouse_encoder_encode(encoder, event, &bytes, bytes.count, &written), "mouse encode")
             }
             return Data(bytes.prefix(written))
@@ -932,9 +935,9 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
     public func scrollViewport(rows: Int) {
         locked {
             var behavior = GhosttyTerminalScrollViewport()
-            behavior.tag = GHOSTTY_SCROLL_VIEWPORT_DELTA
+            behavior.tag = GHOSTTY_TERMINAL_SCROLL_VIEWPORT_DELTA
             behavior.value.delta = rows
-            ghostty_terminal_scroll_viewport(terminal, behavior)
+            _ = ghostty_terminal_scroll_viewport(terminal, behavior)
             changesLocked &+= 1
         }
     }
@@ -951,9 +954,9 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
     public func scrollViewport(toRow row: UInt64) {
         locked {
             var behavior = GhosttyTerminalScrollViewport()
-            behavior.tag = GHOSTTY_SCROLL_VIEWPORT_ROW
+            behavior.tag = GHOSTTY_TERMINAL_SCROLL_VIEWPORT_ROW
             behavior.value.row = Int(clamping: row)
-            ghostty_terminal_scroll_viewport(terminal, behavior)
+            _ = ghostty_terminal_scroll_viewport(terminal, behavior)
             changesLocked &+= 1
         }
     }
@@ -972,25 +975,19 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
                 point.tag = GHOSTTY_POINT_TAG_ACTIVE
                 point.value.coordinate = GhosttyPointCoordinate(x: x, y: UInt32(y))
                 var reference = GhosttyGridRef()
-                reference.size = MemoryLayout<GhosttyGridRef>.size
                 try Self.check(ghostty_terminal_grid_ref(terminal, point, &reference), "ghostty_terminal_grid_ref")
                 return reference
             }
             var selection = GhosttySelection()
-            selection.size = MemoryLayout<GhosttySelection>.size
             selection.start = try reference(0, 0)
             selection.end = try reference(cols - 1, rows - 1)
-            return try withUnsafePointer(to: &selection) { selection in
-                var options = GhosttyFormatterTerminalOptions()
-                options.size = MemoryLayout<GhosttyFormatterTerminalOptions>.size
-                options.extra.size = MemoryLayout<GhosttyFormatterTerminalExtra>.size
-                options.extra.screen.size = MemoryLayout<GhosttyFormatterScreenExtra>.size
-                options.emit = GHOSTTY_FORMATTER_FORMAT_PLAIN
-                options.unwrap = false
-                options.trim = true
-                options.selection = selection
-                return String(decoding: try format(options), as: UTF8.self)
-            }
+            let bytes = try format(
+                emit: GHOSTTY_FORMATTER_FORMAT_PLAIN,
+                unwrap: false,
+                trim: true,
+                selection: selection
+            )
+            return String(decoding: bytes, as: UTF8.self)
         }
     }
 
@@ -1078,7 +1075,6 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
     /// clears it when the event produced none.
     private func applyGesture(_ event: GhosttySelectionGestureEvent) {
         var selection = GhosttySelection()
-        selection.size = MemoryLayout<GhosttySelection>.size
         if ghostty_selection_gesture_event(gesture, terminal, event, &selection) == GHOSTTY_SUCCESS {
             _ = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_SELECTION, &selection)
         } else {
@@ -1089,7 +1085,6 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
     public func selectAll() {
         locked {
             var selection = GhosttySelection()
-            selection.size = MemoryLayout<GhosttySelection>.size
             if ghostty_terminal_select_all(terminal, &selection) == GHOSTTY_SUCCESS {
                 _ = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_SELECTION, &selection)
             }
@@ -1106,7 +1101,6 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
     public var hasSelection: Bool {
         locked {
             var selection = GhosttySelection()
-            selection.size = MemoryLayout<GhosttySelection>.size
             return ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_SELECTION, &selection) == GHOSTTY_SUCCESS
         }
     }
@@ -1116,22 +1110,16 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
     /// is selected.
     public var selectedText: String? {
         locked {
-            var options = GhosttyTerminalSelectionFormatOptions()
-            options.size = MemoryLayout<GhosttyTerminalSelectionFormatOptions>.size
-            options.emit = GHOSTTY_FORMATTER_FORMAT_PLAIN
-            options.unwrap = true
-            options.trim = true
-            var length = 0
-            let sizing = ghostty_terminal_selection_format_buf(terminal, options, nil, 0, &length)
-            guard sizing == GHOSTTY_OUT_OF_SPACE || sizing == GHOSTTY_SUCCESS else { return nil }
-            guard length > 0 else { return sizing == GHOSTTY_SUCCESS ? "" : nil }
-            var bytes = [UInt8](repeating: 0, count: length)
-            var written = 0
-            let result = bytes.withUnsafeMutableBufferPointer {
-                ghostty_terminal_selection_format_buf(terminal, options, $0.baseAddress, length, &written)
-            }
-            guard result == GHOSTTY_SUCCESS else { return nil }
-            return String(decoding: bytes.prefix(written), as: UTF8.self)
+            var selection = GhosttySelection()
+            guard ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_SELECTION, &selection) == GHOSTTY_SUCCESS,
+                  let bytes = try? format(
+                      emit: GHOSTTY_FORMATTER_FORMAT_PLAIN,
+                      unwrap: true,
+                      trim: true,
+                      selection: selection
+                  )
+            else { return nil }
+            return String(decoding: bytes, as: UTF8.self)
         }
     }
 
@@ -1148,7 +1136,6 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
             x: min(point.column, cols - 1), y: UInt32(min(point.row, rows - 1))
         )
         var reference = GhosttyGridRef()
-        reference.size = MemoryLayout<GhosttyGridRef>.size
         guard ghostty_terminal_grid_ref(terminal, target, &reference) == GHOSTTY_SUCCESS else { return nil }
         return reference
     }
@@ -1164,13 +1151,13 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
             _ = ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_ROWS, &rows)
             var behavior = GhosttyTerminalScrollViewport()
             switch move {
-            case .top: behavior.tag = GHOSTTY_SCROLL_VIEWPORT_TOP
-            case .bottom: behavior.tag = GHOSTTY_SCROLL_VIEWPORT_BOTTOM
+            case .top: behavior.tag = GHOSTTY_TERMINAL_SCROLL_VIEWPORT_TOP
+            case .bottom: behavior.tag = GHOSTTY_TERMINAL_SCROLL_VIEWPORT_BOTTOM
             case .pageUp, .pageDown:
-                behavior.tag = GHOSTTY_SCROLL_VIEWPORT_DELTA
+                behavior.tag = GHOSTTY_TERMINAL_SCROLL_VIEWPORT_DELTA
                 behavior.value.delta = (move == .pageUp ? -1 : 1) * Int(max(1, rows))
             }
-            ghostty_terminal_scroll_viewport(terminal, behavior)
+            _ = ghostty_terminal_scroll_viewport(terminal, behavior)
             changesLocked &+= 1
         }
     }
@@ -1519,7 +1506,6 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
         target.tag = GHOSTTY_POINT_TAG_VIEWPORT
         target.value.coordinate = GhosttyPointCoordinate(x: column, y: UInt32(row))
         var reference = GhosttyGridRef()
-        reference.size = MemoryLayout<GhosttyGridRef>.size
         guard ghostty_terminal_grid_ref(terminal, target, &reference) == GHOSTTY_SUCCESS else { return nil }
         return reference
     }
@@ -1550,7 +1536,6 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
         target.tag = GHOSTTY_POINT_TAG_SCREEN
         target.value.coordinate = GhosttyPointCoordinate(x: column, y: row)
         var reference = GhosttyGridRef()
-        reference.size = MemoryLayout<GhosttyGridRef>.size
         guard ghostty_terminal_grid_ref(terminal, target, &reference) == GHOSTTY_SUCCESS else { return nil }
         return reference
     }
@@ -1622,8 +1607,8 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
 
     private func scrollToBottomLocked() {
         var behavior = GhosttyTerminalScrollViewport()
-        behavior.tag = GHOSTTY_SCROLL_VIEWPORT_BOTTOM
-        ghostty_terminal_scroll_viewport(terminal, behavior)
+        behavior.tag = GHOSTTY_TERMINAL_SCROLL_VIEWPORT_BOTTOM
+        _ = ghostty_terminal_scroll_viewport(terminal, behavior)
         changesLocked &+= 1
     }
 
@@ -1711,35 +1696,56 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
     /// The options `VtTerminal::format_vt` formats with, so the two engines'
     /// output can be compared byte for byte.
     private func formattedVT() throws -> Data {
-        var options = GhosttyFormatterTerminalOptions()
-        options.size = MemoryLayout<GhosttyFormatterTerminalOptions>.size
-        options.extra.size = MemoryLayout<GhosttyFormatterTerminalExtra>.size
-        options.extra.screen.size = MemoryLayout<GhosttyFormatterScreenExtra>.size
-        options.emit = GHOSTTY_FORMATTER_FORMAT_VT
-        options.unwrap = false
-        options.trim = false
-        options.extra.palette = false
-        options.extra.modes = true
-        options.extra.scrolling_region = true
-        options.extra.tabstops = false
-        options.extra.pwd = true
-        options.extra.keyboard = true
-        options.extra.screen.cursor = true
-        options.extra.screen.style = true
-        options.extra.screen.hyperlink = true
-        options.extra.screen.protection = true
-        options.extra.screen.kitty_keyboard = true
-        options.extra.screen.charsets = true
-        return try format(options)
+        let extras: GhosttyFormatterExtras =
+            UInt32(GHOSTTY_FORMATTER_EXTRA_MODES)
+            | UInt32(GHOSTTY_FORMATTER_EXTRA_SCROLLING_REGION)
+            | UInt32(GHOSTTY_FORMATTER_EXTRA_PWD)
+            | UInt32(GHOSTTY_FORMATTER_EXTRA_KEYBOARD)
+            | UInt32(GHOSTTY_FORMATTER_EXTRA_CURSOR)
+            | UInt32(GHOSTTY_FORMATTER_EXTRA_STYLE)
+            | UInt32(GHOSTTY_FORMATTER_EXTRA_HYPERLINK)
+            | UInt32(GHOSTTY_FORMATTER_EXTRA_PROTECTION)
+            | UInt32(GHOSTTY_FORMATTER_EXTRA_KITTY_KEYBOARD)
+            | UInt32(GHOSTTY_FORMATTER_EXTRA_CHARSETS)
+        return try format(
+            emit: GHOSTTY_FORMATTER_FORMAT_VT,
+            unwrap: false,
+            trim: false,
+            extras: extras
+        )
     }
 
-    private func format(_ options: GhosttyFormatterTerminalOptions) throws -> Data {
+    private func format(
+        emit: GhosttyFormatterFormat,
+        unwrap: Bool,
+        trim: Bool,
+        selection: GhosttySelection? = nil,
+        extras: GhosttyFormatterExtras? = nil
+    ) throws -> Data {
         var formatter: GhosttyFormatter?
-        try Self.check(ghostty_formatter_terminal_new(nil, &formatter, terminal, options), "ghostty_formatter_terminal_new")
+        try Self.check(ghostty_formatter_terminal_new(nil, &formatter, terminal), "ghostty_formatter_terminal_new")
         guard let formatter else {
             throw Failure.engine("ghostty_formatter_terminal_new", GHOSTTY_INVALID_VALUE)
         }
         defer { ghostty_formatter_free(formatter) }
+        var emit = emit
+        var unwrap = unwrap
+        var trim = trim
+        try Self.check(ghostty_formatter_set(formatter, GHOSTTY_FORMATTER_OPT_EMIT, &emit), "ghostty_formatter_set(emit)")
+        try Self.check(ghostty_formatter_set(formatter, GHOSTTY_FORMATTER_OPT_UNWRAP, &unwrap), "ghostty_formatter_set(unwrap)")
+        try Self.check(ghostty_formatter_set(formatter, GHOSTTY_FORMATTER_OPT_TRIM, &trim), "ghostty_formatter_set(trim)")
+        if var selection {
+            try Self.check(
+                ghostty_formatter_set(formatter, GHOSTTY_FORMATTER_OPT_SELECTION, &selection),
+                "ghostty_formatter_set(selection)"
+            )
+        }
+        if var extras {
+            try Self.check(
+                ghostty_formatter_set(formatter, GHOSTTY_FORMATTER_OPT_EXTRAS, &extras),
+                "ghostty_formatter_set(extras)"
+            )
+        }
         // A blank screen formats to nothing, which the allocating call reports
         // as an error, so this sizes first and writes into a buffer.
         var length = 0
@@ -1836,7 +1842,6 @@ public final class TermiodStreamTerminal: @unchecked Sendable {
         point.tag = GHOSTTY_POINT_TAG_ACTIVE
         point.value.coordinate = GhosttyPointCoordinate(x: 0, y: UInt32(row))
         var reference = GhosttyGridRef()
-        reference.size = MemoryLayout<GhosttyGridRef>.size
         try Self.check(ghostty_terminal_grid_ref(terminal, point, &reference), "ghostty_terminal_grid_ref")
         var gridRow: GhosttyRow = 0
         try Self.check(ghostty_grid_ref_row(&reference, &gridRow), "ghostty_grid_ref_row")
@@ -1881,7 +1886,7 @@ extension TermiodStreamTerminal.Theme {
     public init?(
         hexForeground foreground: String, background: String, palette: [Int: String], cursor: String?,
         cursorText: String?, selectionBackground: String?, selectionForeground: String?,
-        cursorStyle: GhosttyTerminalCursorStyle, cursorBlink: Bool, minimumContrast: Double, dark: Bool
+        cursorStyle: GhosttyCursorStyle, cursorBlink: Bool, minimumContrast: Double, dark: Bool
     ) {
         guard let foreground = Self.rgb(foreground), let ground = Self.rgb(background) else { return nil }
         var colors = Self.xtermPalette

@@ -19,6 +19,21 @@ class SnapshotRevisionTests(unittest.TestCase):
             with self.subTest(mapping=mapping), self.assertRaises(ValueError):
                 builder.snapshot_revision("a" * 64, mapping)
 
+    def test_linux_vt_library_and_soname_follows_major_version(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            lib_dir = Path(tmp)
+            real = lib_dir / "libghostty-vt.so.1.0.2"
+            real.write_bytes(b"\x7fELF")
+            (lib_dir / "libghostty-vt.so.1").symlink_to("libghostty-vt.so.1.0.2")
+            (lib_dir / "libghostty-vt.so").symlink_to("libghostty-vt.so.1.0.2")
+            library, soname = builder.linux_vt_library_and_soname(lib_dir)
+            self.assertEqual(library, real)
+            self.assertEqual(soname, "libghostty-vt.so.1")
+
+    def test_ghostty_base_version_reads_repo_info_plist(self):
+        self.assertEqual(builder.ghostty_base_version(), "1.4.1-dev")
+
 
 if __name__ == "__main__":
     unittest.main()

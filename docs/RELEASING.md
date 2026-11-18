@@ -154,7 +154,7 @@ git rev-parse upstream/main
 ## Required tools
 
 - macOS and Xcode command-line tools;
-- Zig 0.17.0 (the repository uses `mise` in examples);
+- Zig 0.17.1 (the repository uses `mise` in examples);
 - SwiftLint;
 - Nushell for `macos/build.nu`;
 - GitHub CLI (`gh`) for publishing;
@@ -295,7 +295,7 @@ Sparkle update signing uses its **separate** EdDSA key as described in
 ### Preconditions
 
 - dependencies are available;
-- `mise` can resolve Zig 0.17.0;
+- `mise` can resolve Zig 0.17.1;
 - Xcode and SwiftLint are installed.
 
 When Zig/core/build files changed, rebuild GhosttyKit first. Routine OMG
@@ -309,7 +309,7 @@ packaging.
 ```bash
 env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
   -u ALL_PROXY -u all_proxy \
-  mise exec zig@0.17.0 -- zig build \
+  mise exec zig@0.17.1 -- zig build \
     -Doptimize=ReleaseFast \
     -Demit-xcframework=true \
     -Dxcframework-target=native \
@@ -416,7 +416,7 @@ static archive:
 ```bash
 env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
   -u ALL_PROXY -u all_proxy \
-  mise exec zig@0.17.0 -- zig build \
+  mise exec zig@0.17.1 -- zig build \
     -Doptimize=ReleaseFast \
     -Demit-xcframework=true \
     -Dxcframework-target=universal \
@@ -495,7 +495,7 @@ Formatting and resources:
 
 ```bash
 mise exec swiftlint -- swiftlint lint --strict --config macos/.swiftlint.yml macos
-git ls-files -z '*.zig' | xargs -0 mise exec zig@0.17.0 -- zig fmt --check
+git ls-files -z '*.zig' | xargs -0 mise exec zig@0.17.1 -- zig fmt --check
 python3 -m json.tool docs/settings/schema.json >/dev/null
 python3 dist/check_omg_docs.py
 plutil -lint macos/Ghostty-Info.plist

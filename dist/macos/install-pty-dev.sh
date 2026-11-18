@@ -29,7 +29,7 @@ base_version=$(bash "$dev_tool" python3 -c \
 version="${base_version}-pty.${short}"
 ghostty_version=$(plutil -extract GhosttyBaseVersion raw macos/Ghostty-Info.plist)
 env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy \
-  mise exec zig@0.17.0 -- zig build -Doptimize=ReleaseFast -Demit-xcframework=true \
+  mise exec zig@0.17.1 -- zig build -Doptimize=ReleaseFast -Demit-xcframework=true \
   -Dxcframework-target=native -Demit-macos-app=false "-Dversion-string=$ghostty_version"
 macos/build.nu --configuration Debug --action build --pty-app --marketing-version "$version"
 [[ "$(git rev-parse HEAD)" == "$commit" && -z "$(git status --porcelain=v1 --untracked-files=all)" ]] || { echo 'Source changed while building.' >&2; exit 1; }

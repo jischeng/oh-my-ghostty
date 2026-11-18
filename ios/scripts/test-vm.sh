@@ -65,8 +65,8 @@ if ! $skip_build; then
   (
     cd "$root"
     unset SDKROOT
-    ghostty_version=$(/usr/bin/plutil -extract GhosttyBaseVersion raw macos/Ghostty-Info.plist 2>/dev/null || echo "1.4.0")
-    mise exec zig@0.17.0 -- zig build -Doptimize=ReleaseFast \
+    ghostty_version=$(/usr/bin/plutil -extract GhosttyBaseVersion raw macos/Ghostty-Info.plist 2>/dev/null || echo "1.4.1-dev")
+    mise exec zig@0.17.1 -- zig build -Doptimize=ReleaseFast \
       -Demit-xcframework=true -Dxcframework-target=native \
       -Demit-macos-app=false "-Dversion-string=$ghostty_version"
     macos/build.nu --configuration Debug --action build

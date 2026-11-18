@@ -11,14 +11,14 @@ struct SettingsThemeSample {
     init(config: ghostty_config_t?) {
         func color(_ key: String, fallback: NSColor) -> NSColor {
             var value = ghostty_config_color_s()
-            guard config != nil, ghostty_config_get(config, &value, key, UInt(key.utf8.count)) else { return fallback }
+            guard let config, ghostty_config_get(config, &value, key, UInt(key.utf8.count)) else { return fallback }
             return NSColor(ghostty: value)
         }
         background = color("background", fallback: .textBackgroundColor)
         foreground = color("foreground", fallback: .textColor)
         cursor = color("cursor-color", fallback: foreground)
         var palette = ghostty_config_palette_s()
-        if config != nil, ghostty_config_get(config, &palette, "palette", 7) {
+        if let config, ghostty_config_get(config, &palette, "palette", 7) {
             colors = withUnsafeBytes(of: &palette.colors) {
                 Array($0.bindMemory(to: ghostty_config_color_s.self).prefix(16)).map { NSColor(ghostty: $0) }
             }

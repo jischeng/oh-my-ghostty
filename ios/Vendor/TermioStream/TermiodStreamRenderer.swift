@@ -1186,7 +1186,7 @@ public final class TermiodStreamFrameBuilder {
             builtAtlas = atlas
             builtGeneration = atlas.generation
             var clean = GHOSTTY_RENDER_STATE_DIRTY_FALSE
-            _ = ghostty_render_state_set(state, GHOSTTY_RENDER_STATE_OPTION_DIRTY, &clean)
+            _ = ghostty_render_state_set(state, GHOSTTY_RENDER_STATE_OPT_DIRTY, &clean)
         }
         // The cursor moves without dirtying any cell, so it is compared on
         // its own every frame.
@@ -1249,7 +1249,7 @@ public final class TermiodStreamFrameBuilder {
             guard full || rowDirty || extra.contains(y) else { continue }
             rebuildRow(y, colors: colors, atlas: atlas)
             var clean = false
-            _ = ghostty_render_state_row_set(rowIterator, GHOSTTY_RENDER_STATE_ROW_OPTION_DIRTY, &clean)
+            _ = ghostty_render_state_row_set(rowIterator, GHOSTTY_RENDER_STATE_ROW_OPT_DIRTY, &clean)
         }
     }
 
@@ -1281,13 +1281,13 @@ public final class TermiodStreamFrameBuilder {
             // The terminal's own style: the program's DECSCUSR, or the setting
             // where it chose none (`TermiodStreamTerminal.Theme.cursorStyle`).
             // An unfocused pane always shows the outline.
-            var visual = GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK
+            var visual = GHOSTTY_CURSOR_STYLE_BLOCK
             _ = ghostty_render_state_get(state, GHOSTTY_RENDER_STATE_DATA_CURSOR_VISUAL_STYLE, &visual)
             switch (focused, visual) {
             case (false, _): shape = .hollow
-            case (_, GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BAR): shape = .bar
-            case (_, GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_UNDERLINE): shape = .underline
-            case (_, GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK_HOLLOW): shape = .hollow
+            case (_, GHOSTTY_CURSOR_STYLE_BAR): shape = .bar
+            case (_, GHOSTTY_CURSOR_STYLE_UNDERLINE): shape = .underline
+            case (_, GHOSTTY_CURSOR_STYLE_BLOCK_HOLLOW): shape = .hollow
             default: shape = .block
             }
             // On the right half of a wide character the cursor covers all of it.
@@ -1420,12 +1420,16 @@ public final class TermiodStreamFrameBuilder {
             if span == 2 { wideStarts.insert(x) }
 
             var style = GhosttyStyle()
-            style.size = MemoryLayout<GhosttyStyle>.size
             var hasStyling = false
             _ = ghostty_render_state_row_cells_get(cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_HAS_STYLING, &hasStyling)
             if hasStyling {
                 _ = ghostty_render_state_row_cells_get(cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE, &style)
             }
+            let isBold = (style.flags & UInt16(1 << 0)) != 0
+            let isItalic = (style.flags & UInt16(1 << 1)) != 0
+            let isFaint = (style.flags & UInt16(1 << 2)) != 0
+            let isInverse = (style.flags & UInt16(1 << 4)) != 0
+            let isInvisible = (style.flags & UInt16(1 << 5)) != 0
             var foreground = colors.foreground
             var background = colors.background
             var paintsBackground = false
@@ -1437,7 +1441,7 @@ public final class TermiodStreamFrameBuilder {
                 background = resolved
                 paintsBackground = true
             }
-            if style.inverse {
+            if isInverse {
                 swap(&foreground, &background)
                 paintsBackground = true
             }
@@ -1464,29 +1468,40 @@ public final class TermiodStreamFrameBuilder {
                 ))
             }
             if spacer { continue }
-            let alpha: UInt8 = style.faint ? 128 : 255
-            if !style.invisible {
+            let alpha: UInt8 = isFaint ? 128 : 255
+            if !isInvisible {
                 appendDecorations(style, x: x, y: y, span: span, foreground: foreground, alpha: alpha,
                                   palette: colors, metrics: metrics, into: &rectangles)
             }
 
             var length: UInt32 = 0
             _ = ghostty_render_state_row_cells_get(cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &length)
-            guard length > 0, !style.invisible else { continue }
+            guard length > 0, !isInvisible else { continue }
             if Int(length) > codepoints.count {
                 codepoints = [UInt32](repeating: 0, count: Int(length))
             }
+            var graphemeCount = Int(length)
             codepoints.withUnsafeMutableBufferPointer { buffer in
-                _ = ghostty_render_state_row_cells_get(cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, buffer.baseAddress)
+                var codepointBuffer = GhosttyCodepointBuffer(
+                    ptr: buffer.baseAddress,
+                    cap: buffer.count,
+                    len: 0
+                )
+                _ = ghostty_render_state_row_cells_get(
+                    cells,
+                    GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF,
+                    &codepointBuffer
+                )
+                graphemeCount = min(codepointBuffer.len, buffer.count)
             }
-            let grapheme = Array(codepoints.prefix(Int(length)))
+            let grapheme = Array(codepoints.prefix(graphemeCount))
             if grapheme == [0x20] { continue }
             // Ghostty's `neverExtendBg`: a Powerline segment drawn to the cell
             // edge would smear its color across the padding.
             if ownsBackground, grapheme.contains(where: { (0xE0B0 ... 0xE0D7).contains($0) }) {
                 extendsEdges = false
             }
-            guard let slot = atlas.slot(graphemes: grapheme, bold: style.bold, italic: style.italic, cells: Int(span)) else {
+            guard let slot = atlas.slot(graphemes: grapheme, bold: isBold, italic: isItalic, cells: Int(span)) else {
                 continue
             }
             // Before contrast, which follows each cell's own background: Ghostty
@@ -1497,11 +1512,11 @@ public final class TermiodStreamFrameBuilder {
             }
             if grapheme.count == 1, let unit = Self.ligaturePunctuation(grapheme[0]) {
                 let look = LigatureCell.Look(
-                    red: styled.r, green: styled.g, blue: styled.b, alpha: alpha, inverse: style.inverse,
+                    red: styled.r, green: styled.g, blue: styled.b, alpha: alpha, inverse: isInverse,
                     selected: selection?.contains(x) == true,
                     cursor: shapingCursor.map { $0.y == y && $0.x == x } ?? false)
                 ligatureCells.append(LigatureCell(
-                    glyph: glyphs.count, x: x, unit: unit, bold: style.bold, italic: style.italic, look: look))
+                    glyph: glyphs.count, x: x, unit: unit, bold: isBold, italic: isItalic, look: look))
             }
             glyphs.append(TermiodStreamGlyph(
                 cellX: x, cellY: UInt16(y),
@@ -1610,9 +1625,10 @@ public final class TermiodStreamFrameBuilder {
             ))
         }
         var underlineColor = foreground
-        if style.underline_color.tag == GHOSTTY_STYLE_COLOR_RGB {
+        let underlineColorTag = GhosttyStyleColorTag(rawValue: .init(style.underline_color.tag))
+        if underlineColorTag == GHOSTTY_STYLE_COLOR_RGB {
             underlineColor = style.underline_color.value.rgb
-        } else if style.underline_color.tag == GHOSTTY_STYLE_COLOR_PALETTE {
+        } else if underlineColorTag == GHOSTTY_STYLE_COLOR_PALETTE {
             // The palette in effect now, OSC 4 changes included.
             let index = Int(style.underline_color.value.palette)
             underlineColor = withUnsafeBytes(of: colors.palette) { buffer in
@@ -1620,13 +1636,14 @@ public final class TermiodStreamFrameBuilder {
             }
         }
         let position = metrics.underlinePosition
-        switch Int32(style.underline) {
-        case GHOSTTY_SGR_UNDERLINE_SINGLE.rawValue:
+        let underline = GhosttySgrUnderline(rawValue: .init((style.flags >> UInt16(GHOSTTY_STYLE_UNDERLINE_SHIFT)) & 0x7))
+        switch underline {
+        case GHOSTTY_SGR_UNDERLINE_SINGLE:
             line(position, color: underlineColor)
-        case GHOSTTY_SGR_UNDERLINE_DOUBLE.rawValue:
+        case GHOSTTY_SGR_UNDERLINE_DOUBLE:
             line(position, color: underlineColor)
             line(position - 2 * thickness, color: underlineColor)
-        case GHOSTTY_SGR_UNDERLINE_CURLY.rawValue:
+        case GHOSTTY_SGR_UNDERLINE_CURLY:
             // A square wave of half-cell steps, close enough at text size to
             // read as the squiggle an editor's diagnostics use.
             let step = max(1, metrics.width / 2)
@@ -1637,13 +1654,13 @@ public final class TermiodStreamFrameBuilder {
                 start += step
                 up.toggle()
             }
-        case GHOSTTY_SGR_UNDERLINE_DOTTED.rawValue:
+        case GHOSTTY_SGR_UNDERLINE_DOTTED:
             var start = 0
             while start < width {
                 line(position, start, thickness, color: underlineColor)
                 start += 2 * thickness
             }
-        case GHOSTTY_SGR_UNDERLINE_DASHED.rawValue:
+        case GHOSTTY_SGR_UNDERLINE_DASHED:
             let dash = max(2, metrics.width / 3)
             var start = 0
             while start < width {
@@ -1653,8 +1670,8 @@ public final class TermiodStreamFrameBuilder {
         default:
             break
         }
-        if style.strikethrough { line(metrics.strikethroughPosition) }
-        if style.overline { line(0) }
+        if (style.flags & UInt16(1 << 6)) != 0 { line(metrics.strikethroughPosition) }
+        if (style.flags & UInt16(1 << 7)) != 0 { line(0) }
     }
 
     private func buildCursor(_ state: CursorState, colors: GhosttyRenderStateColors, atlas: TermiodGlyphAtlas) {

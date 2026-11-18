@@ -119,10 +119,10 @@ enum OMGThemeBackground {
             background, colorspaceIsDisplayP3: config?.windowColorspaceIsDisplayP3 ?? false
         ).withAlphaComponent(1)
         var foreground = rendered.isLightColor ? NSColor.black : NSColor.white
-        if let config {
+        if let config, let rawConfig = config.config {
             var value = ghostty_config_color_s()
             let key = "foreground"
-            if ghostty_config_get(config.config, &value, key, UInt(key.utf8.count)) {
+            if ghostty_config_get(rawConfig, &value, key, UInt(key.utf8.count)) {
                 foreground = TerminalRenderColorQuantizer.matchingRenderedNSColor(
                     NSColor(srgbRed: Double(value.r) / 255, green: Double(value.g) / 255,
                             blue: Double(value.b) / 255, alpha: 1),

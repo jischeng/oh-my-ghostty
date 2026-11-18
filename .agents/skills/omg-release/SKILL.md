@@ -2,7 +2,7 @@
 name: omg-release
 description: Builds, validates, installs, and publishes Oh My Ghostty macOS development and patch releases. Use when asked to install or replace OMG Dev, prepare a release, bump OMG versions, build arm64/x86_64/universal DMGs, generate the Sparkle appcast, tag, push, or publish a GitHub Release.
 metadata:
-  compatibility: macOS, Xcode, Zig 0.17.0 via mise, Nushell, SwiftLint, GitHub CLI, and Sparkle tools.
+  compatibility: macOS, Xcode, Zig 0.17.1 via mise, Nushell, SwiftLint, GitHub CLI, and Sparkle tools.
 ---
 
 # OMG Build and Release
@@ -142,7 +142,7 @@ resume packaging existing apps after recovery, do not rebuild just for an ACL er
 ```bash
 # 1. Lint, schema & docs
 swiftlint lint --strict --config macos/.swiftlint.yml macos
-git ls-files -z '*.zig' | xargs -0 mise exec zig@0.17.0 -- zig fmt --check
+git ls-files -z '*.zig' | xargs -0 mise exec zig@0.17.1 -- zig fmt --check
 python3 -m json.tool docs/settings/schema.json >/dev/null
 python3 dist/check_omg_docs.py
 plutil -lint macos/Ghostty-Info.plist

@@ -247,7 +247,7 @@ static int resize_pixels(Vt *vt, unsigned short cols, unsigned short rows,
     bool preserve_sync = false;
     if (vt->cols == cols && vt->rows == rows) {
         GhosttyTerminalModeConfig mode = {
-            .mode = GHOSTTY_MODE_SYNC_OUTPUT,
+            .mode = GHOSTTY_MODE_SYNCHRONIZED_OUTPUT,
             .value = false,
         };
         if (ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_MODE, &mode) == GHOSTTY_SUCCESS) {
@@ -261,7 +261,7 @@ static int resize_pixels(Vt *vt, unsigned short cols, unsigned short rows,
     int res = ghostty_terminal_resize(vt->terminal, cols, rows, cell_width, cell_height);
     if (res == GHOSTTY_SUCCESS && preserve_sync) {
         GhosttyTerminalModeConfig mode = {
-            .mode = GHOSTTY_MODE_SYNC_OUTPUT,
+            .mode = GHOSTTY_MODE_SYNCHRONIZED_OUTPUT,
             .value = true,
         };
         ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_MODE, &mode);
@@ -378,7 +378,7 @@ int omg_vt_in_sync_and_screen(Vt *vt, bool *in_sync, bool *alt_screen) {
     if (!vt) return GHOSTTY_INVALID_VALUE;
     if (in_sync) {
         GhosttyTerminalModeConfig mode = {
-            .mode = GHOSTTY_MODE_SYNC_OUTPUT,
+            .mode = GHOSTTY_MODE_SYNCHRONIZED_OUTPUT,
             .value = false,
         };
         int res = ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_MODE, &mode);
@@ -409,10 +409,10 @@ int omg_vt_ui_modes(Vt *vt, bool *in_sync, bool *alt_screen, bool *cursor_visibl
     }
     if (mouse_active) {
         const GhosttyMode mouse_modes[] = {
-            GHOSTTY_MODE_X10_MOUSE,
-            GHOSTTY_MODE_NORMAL_MOUSE,
-            GHOSTTY_MODE_BUTTON_MOUSE,
-            GHOSTTY_MODE_ANY_MOUSE,
+            GHOSTTY_MODE_MOUSE_EVENT_X10,
+            GHOSTTY_MODE_MOUSE_EVENT_NORMAL,
+            GHOSTTY_MODE_MOUSE_EVENT_BUTTON,
+            GHOSTTY_MODE_MOUSE_EVENT_ANY,
         };
         bool active = false;
         for (size_t i = 0; i < sizeof(mouse_modes) / sizeof(mouse_modes[0]); i++) {
@@ -526,38 +526,33 @@ int omg_vt_paint(Vt *vt, unsigned char **data, size_t *len, bool *alternate) {
     if (result || !cols || !rows) return result ? result : -1;
     *alternate = screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE;
     GhosttySelection selection = {0};
-    selection.size = sizeof(selection);
     GhosttyPoint start = {.tag = GHOSTTY_POINT_TAG_ACTIVE, .value.coordinate = {.x = 0, .y = 0}};
     GhosttyPoint end = {.tag = GHOSTTY_POINT_TAG_ACTIVE, .value.coordinate = {.x = cols - 1, .y = rows - 1}};
     result = ghostty_terminal_grid_ref(vt->terminal, start, &selection.start);
     if (!result) result = ghostty_terminal_grid_ref(vt->terminal, end, &selection.end);
     if (result) return result;
-    GhosttyFormatterTerminalOptions opts = {0};
-    opts.size = sizeof(opts);
-    opts.emit = GHOSTTY_FORMATTER_FORMAT_VT;
-    opts.selection = &selection;
-    opts.extra.size = sizeof(opts.extra);
-    // Theme defaults belong to the outer viewer, not the headless runtime.
-    opts.extra.palette = false;
-    opts.extra.modes = opts.extra.scrolling_region = opts.extra.tabstops = true;
-    opts.extra.pwd = opts.extra.keyboard = true;
-    opts.extra.screen.size = sizeof(opts.extra.screen);
-    opts.extra.screen.cursor = opts.extra.screen.style = opts.extra.screen.hyperlink = true;
-    opts.extra.screen.protection = opts.extra.screen.kitty_keyboard = opts.extra.screen.charsets = true;
     GhosttyFormatter formatter = NULL;
-    result = ghostty_formatter_terminal_new(NULL, &formatter, vt->terminal, opts);
+    result = ghostty_formatter_terminal_new(NULL, &formatter, vt->terminal);
     if (result) return result;
-    result = ghostty_formatter_format_alloc(formatter, NULL, data, len);
+    GhosttyFormatterFormat emit = GHOSTTY_FORMATTER_FORMAT_VT;
+    bool trim = false;
+    // Theme defaults belong to the outer viewer, not the headless runtime.
+    GhosttyFormatterExtras extras = GHOSTTY_FORMATTER_EXTRAS_ALL & ~GHOSTTY_FORMATTER_EXTRA_PALETTE;
+    result = ghostty_formatter_set(formatter, GHOSTTY_FORMATTER_OPT_EMIT, &emit);
+    if (!result) result = ghostty_formatter_set(formatter, GHOSTTY_FORMATTER_OPT_TRIM, &trim);
+    if (!result) result = ghostty_formatter_set(formatter, GHOSTTY_FORMATTER_OPT_SELECTION, &selection);
+    if (!result) result = ghostty_formatter_set(formatter, GHOSTTY_FORMATTER_OPT_EXTRAS, &extras);
+    if (!result) result = ghostty_formatter_format_alloc(formatter, NULL, data, len);
     ghostty_formatter_free(formatter);
     return result;
 }
 int omg_vt_text(Vt *vt, unsigned char **data, size_t *len) {
     GhosttyFormatter formatter = NULL;
-    GhosttyFormatterTerminalOptions opts = {0};
-    opts.size = sizeof(opts); opts.trim = true;
-    int result = ghostty_formatter_terminal_new(NULL, &formatter, vt->terminal, opts);
+    int result = ghostty_formatter_terminal_new(NULL, &formatter, vt->terminal);
     if (result) return result;
-    result = ghostty_formatter_format_alloc(formatter, NULL, data, len);
+    bool trim = true;
+    result = ghostty_formatter_set(formatter, GHOSTTY_FORMATTER_OPT_TRIM, &trim);
+    if (!result) result = ghostty_formatter_format_alloc(formatter, NULL, data, len);
     ghostty_formatter_free(formatter);
     return result;
 }

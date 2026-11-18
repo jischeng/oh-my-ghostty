@@ -223,7 +223,7 @@ Continue running the checks relevant to those changed layers, strictly serially:
 python3 -m unittest discover -s dist -p 'test_omg_test_plan.py'
 
 # Changed Zig area (choose the affected test filter)
-mise exec zig@0.17.0 -- zig build test \
+mise exec zig@0.17.1 -- zig build test \
   -Dversion-string=1.3.2-dev -Dtest-filter="OMG command history"
 
 # Changed SSH transport/integration/wrappers: validate the actual rebuilt artifact

@@ -286,6 +286,7 @@ struct TerminalLinkHoverTests {
         ))
         let forwarded = surface.localEventLeftMouseDown(cmdClick, isAppActive: true, isKeyWindow: true)
         #expect(forwarded === cmdClick)
+        #expect(!surface.suppressLeftMouseUntilRelease)
         #expect(window.firstResponder === surface)
 
         // Contrast: a plain click without Command from another control still transfers focus only.
@@ -301,7 +302,8 @@ struct TerminalLinkHoverTests {
             clickCount: 1,
             pressure: 1
         ))
-        #expect(surface.localEventLeftMouseDown(plainClick, isAppActive: true, isKeyWindow: true) == nil)
+        #expect(surface.localEventLeftMouseDown(plainClick, isAppActive: true, isKeyWindow: true) === plainClick)
+        #expect(surface.suppressLeftMouseUntilRelease)
         #expect(window.firstResponder === surface)
     }
 

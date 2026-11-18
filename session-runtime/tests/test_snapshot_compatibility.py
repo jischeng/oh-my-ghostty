@@ -7,6 +7,7 @@ import unittest
 class VT:
     def __init__(self, path):
         self.lib = c.CDLL(path)
+        self.v1_abi = hasattr(self.lib, "ghostty_version")
         signatures = {
             "ghostty_terminal_new": ([c.c_void_p, c.POINTER(c.c_void_p), c.c_uint16, c.c_uint16], c.c_int),
             "ghostty_terminal_free": ([c.c_void_p], None),
@@ -32,10 +33,12 @@ class VT:
 
     def snapshot(self, data, *, restore=None):
         terminal = c.c_void_p()
+        continuation_opt = 32 if self.v1_abi else 31
+        retain_opt = 2 if self.v1_abi else 1
         if restore is None:
             self.check(self.lib.ghostty_terminal_new(None, c.byref(terminal), 80, 24))
             limit = c.c_size_t(1024 * 1024)
-            self.check(self.lib.ghostty_terminal_set(terminal, 31, c.byref(limit)))
+            self.check(self.lib.ghostty_terminal_set(terminal, continuation_opt, c.byref(limit)))
         else:
             decoder = c.c_void_p()
             buffer = c.create_string_buffer(restore)
@@ -43,7 +46,7 @@ class VT:
                 None, c.byref(decoder), buffer, len(restore)))
             try:
                 retain = c.c_bool(True)
-                self.check(self.lib.ghostty_snapshot_decoder_set(decoder, 1, c.byref(retain)))
+                self.check(self.lib.ghostty_snapshot_decoder_set(decoder, retain_opt, c.byref(retain)))
                 self.check(self.lib.ghostty_snapshot_decoder_decode(decoder, c.byref(terminal)))
             finally:
                 self.lib.ghostty_snapshot_decoder_free(decoder)

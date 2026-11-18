@@ -868,7 +868,7 @@ mod fast_tests {
 
     #[test]
     fn embedded_ghostty_terminfo_compiles_cleanly_with_tic() {
-        assert!(GHOSTTY_TERMINFO.starts_with("xterm-ghostty|ghostty|Ghostty,\n"));
+        assert!(GHOSTTY_TERMINFO.starts_with("xterm-ghostty|ghostty|Ghostty terminal emulator,\n"));
         assert!(GHOSTTY_TERMINFO.contains("\tSync="));
         if !Path::new("/usr/bin/tic").exists() {
             return;

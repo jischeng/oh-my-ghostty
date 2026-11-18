@@ -103,6 +103,34 @@ def snapshot_revision(source_digest, compatibility):
     return compatibility.get(source_digest, source_digest[:20])
 
 
+def ghostty_base_version(root: Path = ROOT) -> str:
+    plist = root / "macos/Ghostty-Info.plist"
+    if plist.is_file():
+        try:
+            ver = subprocess.check_output(
+                ["/usr/bin/plutil", "-extract", "GhosttyBaseVersion", "raw", str(plist)],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+            if ver:
+                return ver
+        except subprocess.CalledProcessError:
+            pass
+    return "1.4.1-dev"
+
+
+def linux_vt_library_and_soname(lib_dir: Path) -> tuple[Path, str]:
+    library = next(p for p in lib_dir.glob("libghostty-vt.so.*") if not p.is_symlink())
+    major = library.name.split(".so.", 1)[1].split(".", 1)[0]
+    if not major.isdigit():
+        raise ValueError(f"unexpected Linux VT library name: {library.name}")
+    soname = f"libghostty-vt.so.{major}"
+    soname_link = lib_dir / soname
+    if soname_link.exists() and soname_link.resolve() != library.resolve():
+        raise ValueError(f"Linux SONAME {soname} does not resolve to {library.name}")
+    return library, soname
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', required=True, type=Path)
@@ -131,7 +159,7 @@ def main():
         digest.update(str(path.relative_to(ROOT)).encode())
         digest.update(path.read_bytes())
     revision = digest.hexdigest()[:20]
-    zig = Path(subprocess.check_output(['mise', 'exec', 'zig@0.17.0', '--', 'which', 'zig'], text=True).strip())
+    zig = Path(subprocess.check_output(['mise', 'exec', 'zig@0.17.1', '--', 'which', 'zig'], text=True).strip())
     zig_ver = subprocess.check_output([str(zig), 'version'], text=True).strip()
     rustc = subprocess.check_output(['rustup', 'which', 'rustc'], text=True).strip()
     rustc_ver = subprocess.check_output([rustc, '--version'], text=True).strip()
@@ -168,7 +196,7 @@ def main():
             tmp = Path(tmp)
             prefix = tmp/'vt'
             command = [str(zig), 'build', '-Demit-lib-vt', '-Demit-macos-app=false',
-                       '-Doptimize=ReleaseFast', '-Dversion-string=1.3.2-dev', '--prefix', str(prefix)]
+                       '-Doptimize=ReleaseFast', f'-Dversion-string={ghostty_base_version(ROOT)}', '--prefix', str(prefix)]
             if zig_target: command.append('-Dtarget=' + zig_target)
             run(command)
             env = os.environ.copy()
@@ -203,8 +231,8 @@ def main():
             binary /= 'release/omgd'
             shutil.copy2(binary, destination/'omgd')
             if name.startswith('linux-'):
-                library = next(p for p in (prefix/'lib').glob('libghostty-vt.so.*') if not p.is_symlink())
-                shutil.copy2(library, destination/'libghostty-vt.so.0')
+                library, soname = linux_vt_library_and_soname(prefix/'lib')
+                shutil.copy2(library, destination/soname)
             else:
                 library = next(p for p in (prefix/'lib').glob('libghostty-vt.*.dylib') if not p.is_symlink())
                 shutil.copy2(library, destination/library.name)

@@ -402,7 +402,7 @@ extension Ghostty.Config {
     /// colors and syntax attributes for every row draw and hover update.
     func nativeControlAccent(background: NSColor) -> NSColor {
         var palette = ghostty_config_palette_s()
-        if ghostty_config_get(config, &palette, "palette", 7) {
+        if let config, ghostty_config_get(config, &palette, "palette", 7) {
             return withUnsafeBytes(of: &palette.colors) {
                 NSColor(ghostty: $0.bindMemory(to: ghostty_config_color_s.self)[4])
             }
@@ -413,13 +413,13 @@ extension Ghostty.Config {
     func editorTheme(background: NSColor) -> EditorTheme {
         func color(_ key: String, fallback: NSColor) -> NSColor {
             var value = ghostty_config_color_s()
-            guard ghostty_config_get(config, &value, key, UInt(key.utf8.count)) else { return fallback }
+            guard let config, ghostty_config_get(config, &value, key, UInt(key.utf8.count)) else { return fallback }
             return NSColor(ghostty: value)
         }
         let foreground = color("foreground", fallback: .textColor)
         var theme = EditorTheme.adaptive(background: background, foreground: foreground)
         var palette = ghostty_config_palette_s()
-        if ghostty_config_get(config, &palette, "palette", 7) {
+        if let config, ghostty_config_get(config, &palette, "palette", 7) {
             let colors = withUnsafeBytes(of: &palette.colors) {
                 Array($0.bindMemory(to: ghostty_config_color_s.self)).map { NSColor(ghostty: $0) }
             }

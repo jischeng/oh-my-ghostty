@@ -40,13 +40,13 @@ and [macos/AGENTS.md](../macos/AGENTS.md).
 ## Build from source
 
 Use Xcode's command-line tools; opening the Xcode GUI is not required. You need
-Xcode, Zig 0.17.0 (the examples use `mise`), Nushell and SwiftLint. The app targets
+Xcode, Zig 0.17.1 (the examples use `mise`), Nushell and SwiftLint. The app targets
 macOS 13+, while the current app-hosted Swift test target requires macOS 15.5+.
 
 On a clean checkout, or after affected Zig/core/build changes, build GhosttyKit:
 
 ```bash
-mise exec zig@0.17.0 -- zig build \
+mise exec zig@0.17.1 -- zig build \
   -Doptimize=ReleaseFast \
   -Demit-xcframework=true \
   -Dxcframework-target=native \
@@ -86,7 +86,7 @@ Swift suites. Swift tests do not replace affected Zig, Python, shell, JavaScript
 or artifact checks. For example:
 
 ```bash
-mise exec zig@0.17.0 -- zig build test -Dversion-string=1.3.2-dev -Dtest-filter='<affected test>'
+mise exec zig@0.17.1 -- zig build test -Dversion-string=1.3.2-dev -Dtest-filter='<affected test>'
 python3 -m unittest discover -s dist -p 'test_omg_test_plan.py'
 # When changing the Markdown preview renderer:
 npm test --prefix dist/markdown-editor

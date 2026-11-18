@@ -188,7 +188,7 @@ final class TerminalHistoryService {
     ) -> [InspectorHistoryItem] {
         let snapshot = CommandSnapshot(surfaceID: surfaceID, epoch: epoch, sourceLabel: sourceLabel)
         ghostty_surface_omg_commands(surface, Unmanaged.passUnretained(snapshot).toOpaque()) { context, id, text, timestamp, replayKey in
-            guard let context, let text else { return }
+            guard let context else { return }
             let snapshot = Unmanaged<CommandSnapshot>.fromOpaque(context).takeUnretainedValue()
             snapshot.items.append(.init(
                 id: "command:\(snapshot.surfaceID):\(snapshot.epoch):\(id)",

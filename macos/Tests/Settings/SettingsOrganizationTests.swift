@@ -62,11 +62,13 @@ struct SettingsOrganizationTests {
         #expect(loaded.errors.isEmpty)
         var enabled = false
         let key = "focus-follows-mouse"
-        #expect(ghostty_config_get(loaded.config, &enabled, key, UInt(key.utf8.count)))
+        let loadedRawConfig = try #require(loaded.config)
+        #expect(ghostty_config_get(loadedRawConfig, &enabled, key, UInt(key.utf8.count)))
         #expect(enabled)
         #expect(restored.setCoreOverride(key, value: nil))
         let inherited = Ghostty.Config(at: baseline.path, overrideAt: overlay.path)
-        #expect(ghostty_config_get(inherited.config, &enabled, key, UInt(key.utf8.count)))
+        let inheritedRawConfig = try #require(inherited.config)
+        #expect(ghostty_config_get(inheritedRawConfig, &enabled, key, UInt(key.utf8.count)))
         #expect(!enabled)
         #expect(try String(contentsOf: baseline, encoding: .utf8) == source)
         let json = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])

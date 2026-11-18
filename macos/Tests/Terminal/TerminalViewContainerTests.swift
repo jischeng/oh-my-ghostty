@@ -82,9 +82,13 @@ struct TerminalViewContainerTests {
         #expect(blurView.effectView.material == .hudWindow)
         #expect(abs(blurView.effectView.alphaValue - 1.0) < 0.001)
         #expect(blurView.effectView.appearance?.name == .darkAqua)
+        #expect(blurView.clipView.layer?.masksToBounds == true)
+        #expect(blurView.clipView.layer?.backgroundColor == nil)
         #expect(blurView.hitTest(.zero) == nil)
 
-        // Light background + partial radius + window corner radius update in place.
+        // Light background + partial radius + window corner radius update in place
+        // on the wrapper clipView without mutating NSVisualEffectView.layer, and
+        // populate a non-clear fallback fill when radius < 20.
         view._windowCornerRadius = 12
         let lightHalfBlur = MockConfig(backgroundBlur: .radius(10), backgroundColor: .white, backgroundOpacity: 0.85)
         view.ghosttyConfigDidChange(lightHalfBlur, preferredBackgroundColor: .white)
@@ -93,7 +97,9 @@ struct TerminalViewContainerTests {
         #expect(view.backdropBlurView === blurView)
         #expect(blurView.effectView.appearance?.name == .aqua)
         #expect(abs(blurView.effectView.alphaValue - 0.5) < 0.001)
-        #expect(blurView.effectView.layer?.cornerRadius == 12)
+        #expect(blurView.clipView.layer?.cornerRadius == 12)
+        #expect(blurView.clipView.layer?.backgroundColor != nil)
+        #expect((blurView.effectView.layer?.cornerRadius ?? 0) == 0)
 
         // Window opaque override (e.g. native fullscreen or toggle_background_opacity) removes the blur view.
         view.ghosttyConfigDidChange(lightHalfBlur, preferredBackgroundColor: .white, isWindowOpaque: true)

@@ -4362,15 +4362,34 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         syncAppearance(focusedSurface.derivedConfig, immediately: true)
     }
 
+    override func syncMissionControlPresentation() {
+        guard let window, window.isVisible else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if let surface = focusedSurface ?? surfaceTree.first {
+            syncAppearance(surface.derivedConfig, immediately: true)
+        } else {
+            syncAppearance(.init(ghostty.config), immediately: true)
+        }
+        CATransaction.commit()
+        MissionControlPresentationMonitor.logWindowSync(
+            isOpaque: window.isOpaque,
+            hasBackdropBlur: terminalViewContainer?.backdropBlurView != nil,
+            hasGlass: terminalViewContainer?.glassEffectView != nil
+        )
+    }
+
     private func syncAppearance(_ surfaceConfig: Ghostty.SurfaceView.DerivedConfig, immediately: Bool = false) {
         // Let our window handle its own appearance
         guard let window = window as? TerminalWindow else { return }
         let backgroundColor = focusedSurface?.backgroundColor ?? surfaceConfig.backgroundColor
         let backgroundOpacity = surfaceConfig.backgroundOpacity
         // Mirrors the opaque-window condition in `TerminalWindow.syncAppearance`:
-        // native fullscreen forces an opaque window, as does the user's
-        // opaque-background toggle (`toggle_background_opacity`).
-        let windowIsOpaque = window.styleMask.contains(.fullScreen) || isBackgroundOpaque
+        // native fullscreen, the user's opaque-background toggle, and Mission
+        // Control Exposé each force an opaque window.
+        let windowIsOpaque = window.styleMask.contains(.fullScreen) ||
+            isBackgroundOpaque ||
+            MissionControlPresentationMonitor.shared.isMissionControlActive
         let chromeBackground = Self.chromeBackground(
             color: backgroundColor,
             opacity: backgroundOpacity,
@@ -4425,7 +4444,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         terminalViewContainer?.ghosttyConfigDidChange(
             ghostty.config,
             preferredBackgroundColor: window.preferredBackgroundColor,
-            isWindowOpaque: windowIsOpaque
+            isWindowOpaque: windowIsOpaque,
+            immediately: immediately
         )
     }
 

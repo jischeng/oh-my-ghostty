@@ -22,6 +22,7 @@ extension Ghostty {
 
         // Observe SecureInput to detect when its enabled
         @ObservedObject private var secureInput = SecureInput.shared
+        @ObservedObject private var missionControl = MissionControlPresentationMonitor.shared
 
         @EnvironmentObject private var ghostty: Ghostty.App
         @Environment(\.ghosttyLastFocusedSurface) private var lastFocusedSurface
@@ -34,7 +35,9 @@ extension Ghostty {
         private var windowIsOpaque: Bool {
             let window = surfaceView.window
             if let terminalController {
-                return window?.styleMask.contains(.fullScreen) == true || terminalController.isBackgroundOpaque
+                return window?.styleMask.contains(.fullScreen) == true ||
+                    terminalController.isBackgroundOpaque ||
+                    missionControl.isMissionControlActive
             }
             return window?.isOpaque ?? false
         }

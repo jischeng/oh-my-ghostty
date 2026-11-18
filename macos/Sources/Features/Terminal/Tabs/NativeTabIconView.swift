@@ -64,6 +64,7 @@ final class NativeTabIconView: NSView {
         }
         let visible = window.map { $0.isVisible && !$0.isMiniaturized && $0.occlusionState.contains(.visible) } ?? false
         let animates = visible && !isHiddenOrHasHiddenAncestor &&
+            !MissionControlPresentationMonitor.shared.isMissionControlActive &&
             !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         for (mark, part) in zip(marks, parts) {
             mark.image = Self.image(part.icon)
@@ -74,6 +75,10 @@ final class NativeTabIconView: NSView {
         toolTip = nil
         setAccessibilityLabel(presentation.paneCount > 1 ? "\(presentation.paneCount) Panes" : "Terminal")
         needsLayout = true
+    }
+
+    var isBreathingAnimationRunning: Bool {
+        marks.contains { $0.layer?.animation(forKey: AgentLogoLayerBreath.key) != nil }
     }
 
     override func layout() {
@@ -170,6 +175,13 @@ final class NativeTabIconView: NSView {
                     MainActor.assumeIsolated { self?.refreshPresentation() }
                 })
             }
+            windowObservers.append(NotificationCenter.default.addObserver(
+                forName: MissionControlPresentationMonitor.didChangeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshPresentation() }
+            })
             refreshPresentation()
         }
     }

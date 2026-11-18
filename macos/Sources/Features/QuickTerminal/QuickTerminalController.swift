@@ -587,23 +587,43 @@ class QuickTerminalController: BaseTerminalController {
         guard window.isVisible else { return }
 
         // If we have window transparency then set it transparent. Otherwise set it opaque.
-        // Also check if the user has overridden transparency to be fully opaque.
-        if !isBackgroundOpaque && (self.derivedConfig.backgroundOpacity < 1 || derivedConfig.backgroundBlur.isGlassStyle) {
+        // Also check if the user has overridden transparency to be fully opaque or if
+        // Mission Control Exposé is active.
+        let reduceTransparency = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+        let wantsBehindWindowBlur = !isBackgroundOpaque &&
+            !reduceTransparency &&
+            (derivedConfig.backgroundBlur.isGlassStyle ||
+                (derivedConfig.backgroundOpacity < 1 && derivedConfig.backgroundBlur.isEnabled))
+        MissionControlPresentationMonitor.shared.updateWindowEligibility(
+            window,
+            wantsBehindWindowBlur: wantsBehindWindowBlur
+        )
+
+        let forceOpaque = isBackgroundOpaque || MissionControlPresentationMonitor.shared.isMissionControlActive
+        if !forceOpaque && (self.derivedConfig.backgroundOpacity < 1 || derivedConfig.backgroundBlur.isGlassStyle) {
             window.isOpaque = false
             if derivedConfig.backgroundBlur.isEnabled {
-                window.backgroundColor = .clear
+                window.backgroundColor = NSColor(ghostty.config.backgroundColor).withAlphaComponent(0.001)
+                window.setAutoFlattenLayerTreeEnabled(false)
             } else {
                 window.backgroundColor = .white.withAlphaComponent(0.001)
+                window.setAutoFlattenLayerTreeEnabled(true)
             }
         } else {
             window.isOpaque = true
-            window.backgroundColor = .windowBackgroundColor
+            window.setAutoFlattenLayerTreeEnabled(true)
+            let baseColor = focusedSurface?.backgroundColor ?? ghostty.config.backgroundColor
+            window.backgroundColor = TerminalRenderColorQuantizer.matchingRenderedNSColor(
+                NSColor(baseColor),
+                colorspaceIsDisplayP3: ghostty.config.windowColorspaceIsDisplayP3
+            ).withAlphaComponent(1)
         }
 
         terminalViewContainer?.ghosttyConfigDidChange(
             ghostty.config,
             preferredBackgroundColor: nil,
-            isWindowOpaque: isBackgroundOpaque
+            isWindowOpaque: forceOpaque,
+            immediately: true
         )
     }
 

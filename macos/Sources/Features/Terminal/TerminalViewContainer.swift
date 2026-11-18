@@ -83,7 +83,8 @@ class TerminalViewContainer: NSView {
     func ghosttyConfigDidChange(
         _ config: Ghostty.Config,
         preferredBackgroundColor: NSColor?,
-        isWindowOpaque: Bool = false
+        isWindowOpaque: Bool = false,
+        immediately: Bool = false
     ) {
         let newValue = DerivedConfig(
             config: config,
@@ -95,10 +96,15 @@ class TerminalViewContainer: NSView {
         guard newValue != derivedConfig else { return }
         derivedConfig = newValue
 
-        // Attach the glass or blur effect synchronously if missing to prevent flicker when a new tab appears.
-        // Existing updates remain deferred, as they can occur during SwiftUI rendering.
-        if glassEffectView == nil && backdropBlurView == nil {
+        // Attach or detach synchronously when missing, when forcing opaque
+        // (e.g. fullscreen / Mission Control), or when explicitly requested
+        // outside SwiftUI's render pass so window.isOpaque and the backdrop
+        // view never diverge for a frame.
+        if immediately || newValue == nil || (glassEffectView == nil && backdropBlurView == nil) {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
             updateGlassEffectIfNeeded()
+            CATransaction.commit()
         } else {
             DispatchQueue.main.async(execute: updateGlassEffectIfNeeded)
         }
@@ -120,31 +126,45 @@ extension BaseTerminalController {
 /// legacy private `CGSSetWindowBackgroundBlurRadius`, which washes out to gray and
 /// flickers inside macOS Tahoe Mission Control when fullscreen spaces exist (`ghostty#9542`).
 final class TerminalBackdropBlurView: NSView {
+    private(set) var clipView: NSView
     private(set) var effectView: NSVisualEffectView
     private var topConstraint: NSLayoutConstraint!
 
     init(topOffset: CGFloat) {
+        self.clipView = NSView()
         self.effectView = NSVisualEffectView()
         super.init(frame: .zero)
 
         translatesAutoresizingMaskIntoConstraints = false
+
+        // Clip and round on the wrapper view rather than mutating
+        // `NSVisualEffectView.layer` directly, keeping AppKit's internal
+        // CUI `CABackdropLayer` hierarchy untouched.
+        clipView.translatesAutoresizingMaskIntoConstraints = false
+        clipView.wantsLayer = true
+        clipView.clipsToBounds = true
+        clipView.layer?.cornerCurve = .continuous
+        clipView.layer?.masksToBounds = true
+        addSubview(clipView)
+
         effectView.translatesAutoresizingMaskIntoConstraints = false
         effectView.blendingMode = .behindWindow
         effectView.state = .active
-        effectView.wantsLayer = true
-        effectView.layer?.cornerCurve = .continuous
-        effectView.layer?.masksToBounds = true
-        addSubview(effectView)
+        clipView.addSubview(effectView)
 
-        topConstraint = effectView.topAnchor.constraint(
+        topConstraint = clipView.topAnchor.constraint(
             equalTo: topAnchor,
             constant: topOffset
         )
         NSLayoutConstraint.activate([
             topConstraint,
-            effectView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            effectView.bottomAnchor.constraint(equalTo: bottomAnchor),
-            effectView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            clipView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            clipView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            clipView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            effectView.topAnchor.constraint(equalTo: clipView.topAnchor),
+            effectView.leadingAnchor.constraint(equalTo: clipView.leadingAnchor),
+            effectView.bottomAnchor.constraint(equalTo: clipView.bottomAnchor),
+            effectView.trailingAnchor.constraint(equalTo: clipView.trailingAnchor),
         ])
     }
 
@@ -158,13 +178,22 @@ final class TerminalBackdropBlurView: NSView {
     func configure(
         radius: Int,
         backgroundColor: NSColor,
+        backgroundOpacity: Double = 0.85,
         cornerRadius: CGFloat?
     ) {
         let isLight = backgroundColor.isLightColor
+        let blurStrength = min(1.0, max(0.0, CGFloat(radius) / 20.0))
+        let clampedOpacity = min(1.0, max(0.0, CGFloat(backgroundOpacity)))
         effectView.material = .hudWindow
         effectView.appearance = NSAppearance(named: isLight ? .aqua : .darkAqua)
-        effectView.alphaValue = min(1.0, max(0.0, CGFloat(radius) / 20.0))
-        effectView.layer?.cornerRadius = cornerRadius ?? 0
+        effectView.alphaValue = blurStrength
+        clipView.layer?.cornerRadius = cornerRadius ?? 0
+        // Prevent raw `.clear` punch-through when `radius < 20` reduces
+        // `effectView.alphaValue` below 1.0.
+        let fallbackAlpha = (1.0 - blurStrength) * clampedOpacity * 0.35
+        clipView.layer?.backgroundColor = fallbackAlpha > 0.001
+            ? backgroundColor.withAlphaComponent(fallbackAlpha).cgColor
+            : nil
     }
 
     func updateTopInset(_ offset: CGFloat) {
@@ -353,6 +382,7 @@ extension TerminalViewContainer {
             effectView.configure(
                 radius: radius,
                 backgroundColor: derivedConfig.backgroundColor,
+                backgroundOpacity: derivedConfig.backgroundOpacity,
                 cornerRadius: derivedConfig.cornerRadius
             )
         }

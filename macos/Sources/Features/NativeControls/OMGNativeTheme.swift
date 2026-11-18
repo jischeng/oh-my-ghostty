@@ -46,7 +46,8 @@ struct OMGNativeTheme: Equatable {
         var theme = OMGNativeTheme(background: palette.background, foreground: palette.foreground,
                                    accent: config.nativeControlAccent(background: palette.background))
         let forceOpaque = origin?.styleMask.contains(.fullScreen) == true ||
-            (origin?.windowController as? TerminalController)?.isBackgroundOpaque == true
+            (origin?.windowController as? TerminalController)?.isBackgroundOpaque == true ||
+            MissionControlPresentationMonitor.shared.isMissionControlActive
         if !forceOpaque {
             theme.opacity = config.backgroundOpacity.clamped(to: 0...1)
             theme.blur = config.backgroundBlur
@@ -75,11 +76,15 @@ final class OMGNativeThemeObserver: NSObject {
         super.init()
         NotificationCenter.default.addObserver(self, selector: #selector(configChanged(_:)),
                                                name: .ghosttyConfigDidChange, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(missionControlChanged),
+                                               name: MissionControlPresentationMonitor.didChangeNotification, object: nil)
     }
 
     deinit { NotificationCenter.default.removeObserver(self) }
 
     func refresh() { onChange?(OMGNativeTheme.resolve(for: sourceWindow)) }
+
+    @objc private func missionControlChanged() { refresh() }
 
     @objc private func configChanged(_ notification: Notification) {
         if let object = notification.object as AnyObject? {
@@ -192,13 +197,25 @@ class OMGNativeSurfaceView: NSView {
         }
 #endif
         if let blurView = backdrop as? TerminalBackdropBlurView, case .radius(let radius) = blur {
-            blurView.configure(radius: radius, backgroundColor: theme.background, cornerRadius: 0)
+            blurView.configure(
+                radius: radius,
+                backgroundColor: theme.background,
+                backgroundOpacity: effectiveOpacity,
+                cornerRadius: 0
+            )
         }
         // Only configure an auxiliary window owned by this surface, never its terminal origin.
         if paintsBackground, let window, window.contentViewController?.view === self ||
             (hasExplicitSource && window !== themeObserver.sourceWindow) {
-            window.isOpaque = effectiveOpacity >= 1
-            window.backgroundColor = effectiveOpacity >= 1 ? theme.background : .clear
+            let wantsBlur = effectiveOpacity < 1 && blur != .disabled
+            MissionControlPresentationMonitor.shared.updateWindowEligibility(
+                window,
+                wantsBehindWindowBlur: wantsBlur
+            )
+            let isAuxOpaque = effectiveOpacity >= 1 || MissionControlPresentationMonitor.shared.isMissionControlActive
+            window.isOpaque = isAuxOpaque
+            window.setAutoFlattenLayerTreeEnabled(!wantsBlur || isAuxOpaque)
+            window.backgroundColor = isAuxOpaque ? theme.background : theme.background.withAlphaComponent(0.001)
         }
     }
 

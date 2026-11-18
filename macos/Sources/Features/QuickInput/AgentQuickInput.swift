@@ -1934,56 +1934,63 @@ struct QuickInputGlassSurface: View {
     var shadowOpacity: Float = 0
     var shadowRadius: CGFloat = 3.5
     var shadowOffsetY: CGFloat = 1.5
+    var isBackdropActive: Bool = true
+    @ObservedObject private var missionControl = MissionControlPresentationMonitor.shared
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        let topRim = colorScheme == .light ? 0.52 : 0.22
-        let bottomRim = colorScheme == .light ? 0.10 : 0.08
-        let rimStroke = LinearGradient(
-            colors: [
-                Color.white.opacity(topRim),
-                Color.primary.opacity(bottomRim)
-            ],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-        let reduceTransparency = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+        if !isBackdropActive {
+            Color.clear
+        } else {
+            let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            let topRim = colorScheme == .light ? 0.52 : 0.22
+            let bottomRim = colorScheme == .light ? 0.10 : 0.08
+            let rimStroke = LinearGradient(
+                colors: [
+                    Color.white.opacity(topRim),
+                    Color.primary.opacity(bottomRim)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            let suppressBackdrop = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency ||
+                missionControl.isMissionControlActive
 
-        ZStack {
-            if shadowOpacity > 0 {
-                QuickInputOuterShadowView(
-                    cornerRadius: cornerRadius,
-                    opacity: shadowOpacity,
-                    radius: shadowRadius,
-                    offsetY: shadowOffsetY
-                )
-                .allowsHitTesting(false)
+            ZStack {
+                if shadowOpacity > 0 {
+                    QuickInputOuterShadowView(
+                        cornerRadius: cornerRadius,
+                        opacity: shadowOpacity,
+                        radius: shadowRadius,
+                        offsetY: shadowOffsetY
+                    )
+                    .allowsHitTesting(false)
+                }
+                if suppressBackdrop {
+                    shape.fill(themeColor)
+                } else {
+                    QuickInputBackdropBlurView(
+                        cornerRadius: cornerRadius,
+                        isLight: colorScheme == .light,
+                        materialOverride: materialOverride,
+                        backdropOpacity: backdropOpacity
+                    )
+                    shape.fill(themeColor.opacity(tintOpacity))
+                }
             }
-            if reduceTransparency {
-                shape.fill(themeColor)
-            } else {
-                QuickInputBackdropBlurView(
-                    cornerRadius: cornerRadius,
-                    isLight: colorScheme == .light,
-                    materialOverride: materialOverride,
-                    backdropOpacity: backdropOpacity
-                )
-                shape.fill(themeColor.opacity(tintOpacity))
-            }
-        }
-        .overlay {
-            if let borderColor {
-                shape
-                    .strokeBorder(borderColor, lineWidth: 1.2)
-                    .allowsHitTesting(false)
-            } else if let borderOpacity {
-                shape
-                    .strokeBorder(Color.primary.opacity(borderOpacity), lineWidth: 1)
-                    .allowsHitTesting(false)
-            } else {
-                shape
-                    .strokeBorder(rimStroke, lineWidth: 1)
-                    .allowsHitTesting(false)
+            .overlay {
+                if let borderColor {
+                    shape
+                        .strokeBorder(borderColor, lineWidth: 1.2)
+                        .allowsHitTesting(false)
+                } else if let borderOpacity {
+                    shape
+                        .strokeBorder(Color.primary.opacity(borderOpacity), lineWidth: 1)
+                        .allowsHitTesting(false)
+                } else {
+                    shape
+                        .strokeBorder(rimStroke, lineWidth: 1)
+                        .allowsHitTesting(false)
+                }
             }
         }
     }
@@ -2572,7 +2579,8 @@ private struct AgentQuickInputComposer: View {
                 themeColor: chromeBackground,
                 tintOpacity: glass.tintOpacity,
                 colorScheme: cardColorScheme,
-                backdropOpacity: glass.backdropOpacity
+                backdropOpacity: glass.backdropOpacity,
+                isBackdropActive: model.isPresented
             )
         )
         .overlay(alignment: .top) {

@@ -30,6 +30,7 @@ struct EditorPaneContainer<Terminal: View>: View {
 struct EditorWorkspaceHost<Terminal: View>: View {
     @ObservedObject private var settings = OhMyGhosttySettings.shared
     @ObservedObject private var trustStore = EditorWorkspaceTrustStore.shared
+    @ObservedObject private var missionControl = MissionControlPresentationMonitor.shared
     @ObservedObject var controller: TerminalController
     @ObservedObject private var workspace: EditorWorkspace
     @ObservedObject var surfaceView: Ghostty.SurfaceView
@@ -390,7 +391,9 @@ struct EditorWorkspaceHost<Terminal: View>: View {
 
     private var followsOMGBackdropFill: NSColor? {
         guard settings.editorSettings.followsOMG else { return nil }
-        let windowIsOpaque = controller.window?.styleMask.contains(.fullScreen) == true || controller.isBackgroundOpaque
+        let windowIsOpaque = controller.window?.styleMask.contains(.fullScreen) == true ||
+            controller.isBackgroundOpaque ||
+            missionControl.isMissionControlActive
         return NSColor(OMGThemeBackground.matchingChrome(
             color: terminalColor,
             opacity: terminalOpacity,
@@ -1723,6 +1726,7 @@ private struct EditorActiveDocumentObserver: View {
 /// multiplying opacity between the gutter, scroll view and surrounding controls.
 struct EditorBackdrop: NSViewRepresentable {
     @Environment(\.controlActiveState) private var activeState
+    @ObservedObject private var missionControl = MissionControlPresentationMonitor.shared
     let color: NSColor
     let opacity: Double
     let blur: OhMyGhosttyBackgroundBlur
@@ -1732,8 +1736,12 @@ struct EditorBackdrop: NSViewRepresentable {
     var localEffect: OhMyGhosttyBackgroundBlur {
         // When following OMG, both ordinary Ghostty blur and macOS liquid glass
         // are already applied at the window level. Never stack a second
-        // NSVisualEffectView or TerminalGlassView inside a split pane.
-        usesWindowBlur ? .disabled : blur
+        // NSVisualEffectView or TerminalGlassView inside a split pane, and
+        // detach pane-level behind-window blur during Mission Control Exposé.
+        if usesWindowBlur || missionControl.isMissionControlActive {
+            return .disabled
+        }
+        return blur
     }
 
     func makeNSView(context: Context) -> BackdropView { BackdropView() }
@@ -1767,7 +1775,8 @@ struct EditorBackdrop: NSViewRepresentable {
         if let windowChromeFill, blur == .disabled {
             view.fillColor = windowChromeFill
         } else {
-            view.fillColor = blur == .disabled ? color.withAlphaComponent(opacity) : .clear
+            let effectiveOpacity = missionControl.isMissionControlActive ? 1.0 : opacity
+            view.fillColor = blur == .disabled ? color.withAlphaComponent(effectiveOpacity) : .clear
         }
 #if compiler(>=6.2)
         if #available(macOS 26.0, *), let glass = view.subviews.first as? TerminalGlassView {

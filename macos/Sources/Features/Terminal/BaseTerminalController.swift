@@ -289,6 +289,11 @@ class BaseTerminalController: NSWindowController,
             selector: #selector(ghosttySurfaceDragEndedNoTarget(_:)),
             name: .ghosttySurfaceDragEndedNoTarget,
             object: nil)
+        center.addObserver(
+            self,
+            selector: #selector(missionControlPresentationDidChange(_:)),
+            name: MissionControlPresentationMonitor.didChangeNotification,
+            object: nil)
 
         // Listen for local events that we need to know of outside of
         // single surface handlers.
@@ -1302,6 +1307,17 @@ class BaseTerminalController: NSWindowController,
     func syncAppearance() {
         // Purposely a no-op. This lets subclasses override this and we can call
         // it virtually from here.
+    }
+
+    @objc private func missionControlPresentationDidChange(_ notification: Notification) {
+        syncMissionControlPresentation()
+    }
+
+    func syncMissionControlPresentation() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        syncAppearance()
     }
 
     // MARK: Fullscreen

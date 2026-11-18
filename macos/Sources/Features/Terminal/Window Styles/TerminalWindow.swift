@@ -571,24 +571,43 @@ class TerminalWindow: NSWindow {
         // In native fullscreen we disable transparency/opacity because the background
         // becomes gray and widgets show through.
         //
-        // Also check if the user has overridden transparency to be fully opaque.
-        let forceOpaque = terminalController?.isBackgroundOpaque ?? false
+        // Also check if the user has overridden transparency to be fully opaque,
+        // or if Mission Control / Spaces Exposé is actively presenting (macOS 26/27
+        // multi-Space Exposé drops behind-window `CABackdropLayer` sampling).
+        let userForceOpaque = terminalController?.isBackgroundOpaque ?? false
+        let reduceTransparency = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+        let wantsBehindWindowBlur = !styleMask.contains(.fullScreen) &&
+            !userForceOpaque &&
+            !reduceTransparency &&
+            (surfaceConfig.backgroundBlur.isGlassStyle ||
+                (surfaceConfig.backgroundOpacity < 1 && surfaceConfig.backgroundBlur.isEnabled))
+        MissionControlPresentationMonitor.shared.updateWindowEligibility(
+            self,
+            wantsBehindWindowBlur: wantsBehindWindowBlur
+        )
+
+        let forceOpaque = userForceOpaque || MissionControlPresentationMonitor.shared.isMissionControlActive
         if !styleMask.contains(.fullScreen) &&
             !forceOpaque &&
             (surfaceConfig.backgroundOpacity < 1 || surfaceConfig.backgroundBlur.isGlassStyle) {
             isOpaque = false
 
-            // CoreAnimation backdrop views (`TerminalGlassView` and `TerminalBackdropBlurView`
-            // in `TerminalViewContainer`) own window blur without calling private
-            // `CGSSetWindowBackgroundBlurRadius`, which washes out and flickers inside
-            // macOS Tahoe Mission Control when fullscreen spaces are present (ghostty#9542).
+            // Keep a minimal non-zero alpha on the window backing instead of `.clear`
+            // (`alpha = 0`), tinted to the terminal's background rather than white on
+            // dark themes, while disabling AppKit layer-tree auto-flattening while blur
+            // is live.
             if surfaceConfig.backgroundBlur.isEnabled {
-                backgroundColor = .clear
+                let baseColor = (preferredBackgroundColor ?? NSColor(surfaceConfig.backgroundColor))
+                    .withAlphaComponent(0.001)
+                backgroundColor = baseColor
+                setAutoFlattenLayerTreeEnabled(false)
             } else {
                 backgroundColor = .white.withAlphaComponent(0.001)
+                setAutoFlattenLayerTreeEnabled(true)
             }
         } else {
             isOpaque = true
+            setAutoFlattenLayerTreeEnabled(true)
 
             let backgroundColor = preferredBackgroundColor ?? NSColor(surfaceConfig.backgroundColor)
             // The window background shows through around the terminal
@@ -638,7 +657,9 @@ class TerminalWindow: NSWindow {
     /// titlebar seam matches `chromeBackdrop` and the Metal surface across
     /// Display P3 quantization, liquid glass, and fullscreen/opaque overrides.
     var renderedTitlebarBackgroundColor: NSColor? {
-        let forceOpaque = styleMask.contains(.fullScreen) || (terminalController?.isBackgroundOpaque ?? false)
+        let forceOpaque = styleMask.contains(.fullScreen) ||
+            (terminalController?.isBackgroundOpaque ?? false) ||
+            MissionControlPresentationMonitor.shared.isMissionControlActive
         let colorspaceIsDisplayP3 = terminalController?.ghostty.config.windowColorspaceIsDisplayP3 ?? false
         let linearBlending = terminalController?.ghostty.config.usesLinearAlphaBlending ?? false
         let allowsGlassClear = derivedConfig.macosTitlebarStyle == .transparent ||

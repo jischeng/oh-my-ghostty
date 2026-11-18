@@ -70,6 +70,17 @@ struct GitWorkingTreeContent: Equatable, Sendable {
     }
 }
 
+struct GitRepositoryHeadInfo: Equatable, Sendable {
+    let branchName: String?
+    let headCommitID: GitCommitID?
+}
+
+struct GitRepositoryRefsSnapshot: Equatable, Sendable {
+    let branches: [GitBranchInfo]
+    let decorationsByCommitID: [GitCommitID: [GitRefDecoration]]
+    let hasRemoteRefs: Bool
+}
+
 extension GitRepositoryService {
     func headCommit(for repository: GitRepositoryIdentity) async throws -> GitCommitID {
         let result = try await (executor ?? repository.executor).execute(arguments: ["--no-optional-locks", "rev-parse", "--verify", "HEAD"],
@@ -93,6 +104,96 @@ extension GitRepositoryService {
             return url.string
         }
         return value
+    }
+
+    func refsSnapshot(for repository: GitRepositoryIdentity, head: GitRepositoryHeadInfo) async throws -> GitRepositoryRefsSnapshot {
+        let result = try await (executor ?? repository.executor).execute(
+            arguments: [
+                "--no-optional-locks",
+                "for-each-ref",
+                "--format=%(refname)%00%(objectname)%00%(*objectname)%00%(HEAD)%00%(upstream:short)%00%(upstream:track)%00%(symref)%1e",
+                "refs/heads",
+                "refs/remotes",
+                "refs/tags",
+            ],
+            workingDirectory: repository.worktreePath,
+            stdin: nil,
+            maxOutputBytes: 2 * 1024 * 1024
+        )
+        guard result.isSuccess else { throw GitDiffServiceError.gitFailed(result.stderrString) }
+
+        var branches: [GitBranchInfo] = []
+        var decorations: [GitCommitID: [GitRefDecoration]] = [:]
+        var hasRemoteRefs = false
+
+        for record in result.stdout.split(separator: 0x1e, omittingEmptySubsequences: true) {
+            let fields = record.split(separator: 0, omittingEmptySubsequences: false)
+            guard fields.count >= 7 else { continue }
+            let fullName = (String(bytes: fields[0], encoding: .utf8) ?? "").trimmingCharacters(in: .newlines)
+            let objectID = (String(bytes: fields[1], encoding: .utf8) ?? "").trimmingCharacters(in: .newlines)
+            let peeledID = (String(bytes: fields[2], encoding: .utf8) ?? "").trimmingCharacters(in: .newlines)
+            let headMarker = String(bytes: fields[3], encoding: .utf8) ?? ""
+            let upstream = String(bytes: fields[4], encoding: .utf8) ?? ""
+            let tracking = String(bytes: fields[5], encoding: .utf8) ?? ""
+            let symref = (String(bytes: fields[6], encoding: .utf8) ?? "").trimmingCharacters(in: .newlines)
+            guard !fullName.isEmpty, !objectID.isEmpty else { continue }
+
+            let isRemote = fullName.hasPrefix("refs/remotes/")
+            if isRemote { hasRemoteRefs = true }
+
+            if (fullName.hasPrefix("refs/heads/") || isRemote) && symref.isEmpty {
+                let prefix = isRemote ? "refs/remotes/" : "refs/heads/"
+                branches.append(GitBranchInfo(
+                    name: String(fullName.dropFirst(prefix.count)),
+                    commit: GitCommitID(objectID),
+                    isCurrent: headMarker == "*",
+                    isRemote: isRemote,
+                    upstream: upstream,
+                    tracking: tracking
+                ))
+            }
+
+            let rawID = peeledID.isEmpty ? objectID : peeledID
+            let kind: GitRefDecorationKind
+            if isRemote {
+                kind = .remoteBranch
+            } else if fullName.hasPrefix("refs/tags/") {
+                kind = .tag
+            } else {
+                kind = .localBranch
+            }
+            let name = fullName.replacingOccurrences(of: "^refs/(heads|remotes|tags)/", with: "", options: .regularExpression)
+            decorations[GitCommitID(rawID), default: []].append(GitRefDecoration(name: name, kind: kind))
+        }
+
+        if let headID = head.headCommitID {
+            if let branchName = head.branchName {
+                decorations[headID]?.removeAll {
+                    $0.name == branchName && $0.kind == .localBranch
+                }
+                decorations[headID, default: []].append(
+                    GitRefDecoration(name: branchName, kind: .currentBranch)
+                )
+            } else {
+                decorations[headID, default: []].append(
+                    GitRefDecoration(name: "HEAD", kind: .head)
+                )
+            }
+        }
+        for key in decorations.keys {
+            decorations[key]?.sort {
+                if $0.name == $1.name {
+                    return $0.kind.rawValue < $1.kind.rawValue
+                }
+                return $0.name < $1.name
+            }
+        }
+
+        return GitRepositoryRefsSnapshot(
+            branches: branches,
+            decorationsByCommitID: decorations,
+            hasRemoteRefs: hasRemoteRefs
+        )
     }
 
     func branches(for repository: GitRepositoryIdentity) async throws -> [GitBranchInfo] {

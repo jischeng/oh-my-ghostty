@@ -3,7 +3,7 @@ import Darwin
 
 /// A remote viewer running inside a local managed PTY. Its lifetime is independent
 /// of the App's window, while its descriptor supplies remote split/file context.
-struct SessionRuntimeInlineSession: Codable, Equatable {
+struct SessionRuntimeInlineSession: Codable, Equatable, Sendable {
     let descriptor: SessionRuntimeDescriptor
     let pane: UUID
     let connectionID: String

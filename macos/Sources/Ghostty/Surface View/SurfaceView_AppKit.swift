@@ -42,7 +42,11 @@ extension Ghostty {
                 }
             }
         }
-        var runtimeInlineSession: SessionRuntimeInlineSession?
+        var runtimeInlineSession: SessionRuntimeInlineSession? {
+            didSet {
+                SessionRuntimeConnections.syncInlineRelaySession(old: oldValue, new: runtimeInlineSession)
+            }
+        }
         @Published var runtimeConnectionError: String?
         private(set) var runtimeAttachmentSuspended = false
         private var runtimeConfirmedSession = false
@@ -672,6 +676,9 @@ extension Ghostty {
         }
 
         deinit {
+            if let runtimeInlineSession {
+                SessionRuntimeConnections.unregisterInlineRelaySession(runtimeInlineSession)
+            }
             if surfaceModel != nil {
                 Task { @MainActor in DevMemoryDiagnostics.surfaceDestroyed() }
             }

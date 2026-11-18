@@ -90,7 +90,7 @@ struct GitSSHConnection: Hashable, Codable, Sendable {
          "-o", "RemoteCommand=none", "-o", "RequestTTY=no", "-o", "StdinNull=no",
          "-o", controlSocket == nil ? "ControlMaster=no" : "ControlMaster=auto",
          "-o", controlSocket == nil ? "ControlPersist=no" : "ControlPersist=3600"] + options +
-            (controlSocket.map { ["-S", $0] } ?? []) + ["--", destination]
+            ["-o", "Compression=yes"] + (controlSocket.map { ["-S", $0] } ?? []) + ["--", destination]
     }
 }
 
@@ -198,6 +198,7 @@ struct SSHGitExecutor: GitExecutor {
         let result = try await SSHSessionTransport.run(
             connection: connection,
             command: command,
+            posixScript: framed,
             stdin: stdin,
             limit: limit.map { $0 + 64 * 1024 },
             executable: executable,

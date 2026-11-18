@@ -262,6 +262,7 @@ final class SSHHostRegistry: ObservableObject {
     }
 
     nonisolated static func readInventory(_ connection: GitSSHConnection) async throws -> AgentIntegrationSnapshot {
+        await SSHSessionTransport.warmControlSocketIfNeeded(connection: connection)
         var snapshot = AgentIntegrationSnapshot()
         var captured = false
         do {

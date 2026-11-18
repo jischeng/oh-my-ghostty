@@ -32,9 +32,9 @@ struct GitRepositoryService: Sendable {
             return .notRepository(directory: directory)
         }
 
-        // 3. Query repository identity
+        // 3. Query repository identity and HEAD state concurrently in one RTT.
         do {
-            let result = try await command.execute(
+            async let revParseTask = command.execute(
                 arguments: [
                     "--no-optional-locks",
                     "rev-parse",
@@ -48,8 +48,22 @@ struct GitRepositoryService: Sendable {
                 stdin: nil,
                 maxOutputBytes: 64 * 1024
             )
+            async let branchTask = command.execute(
+                arguments: ["--no-optional-locks", "symbolic-ref", "--quiet", "--short", "HEAD"],
+                workingDirectory: directory,
+                stdin: nil,
+                maxOutputBytes: 16 * 1024
+            )
+            async let headTask = command.execute(
+                arguments: ["--no-optional-locks", "rev-parse", "--quiet", "--verify", "HEAD"],
+                workingDirectory: directory,
+                stdin: nil,
+                maxOutputBytes: 16 * 1024
+            )
 
+            let result = try await revParseTask
             guard result.isSuccess else {
+                _ = try? await (branchTask, headTask)
                 if result.stderrString.contains("not a git repository") { return .notRepository(directory: directory) }
                 return .error(title: GitL10n.text("Git Error"), message: result.stderrString.isEmpty ? GitL10n.text("Git repository check failed.") : result.stderrString)
             }
@@ -60,6 +74,7 @@ struct GitRepositoryService: Sendable {
 
             guard lines.count == 6, lines[0] == "true", lines[1].hasPrefix("/"), lines[2].hasPrefix("/"),
                   lines.allSatisfy({ !$0.contains("\r") && !$0.contains("\0") }) else {
+                _ = try? await (branchTask, headTask)
                 return .error(title: GitL10n.text("Git Path"), message: GitL10n.text("Git returned unsupported repository paths. Use Git 2.23+ and a repository root without line breaks."))
             }
 
@@ -75,8 +90,13 @@ struct GitRepositoryService: Sendable {
                 commonGitDirPath: commonGitDir
             )
 
-            // 4. Resolve HEAD and branch state
-            return await resolveHeadState(for: identity)
+            // 4. Consume concurrent HEAD and branch state results.
+            do {
+                let (branchExec, headExec) = try await (branchTask, headTask)
+                return Self.headStatus(for: identity, branchExec: branchExec, headExec: headExec)
+            } catch {
+                return .error(title: GitL10n.text("Head Resolution Error"), message: error.localizedDescription)
+            }
         } catch let error as GitExecutionError {
             switch error {
             case .cancelled:
@@ -101,52 +121,33 @@ struct GitRepositoryService: Sendable {
         return "/" + parts.joined(separator: "/")
     }
 
-    private func resolveHeadState(
-        for identity: GitRepositoryIdentity
-    ) async -> GitRepositoryStatusKind {
-        do {
-            async let branchResult = (executor ?? identity.executor).execute(
-                arguments: ["--no-optional-locks", "symbolic-ref", "--quiet", "--short", "HEAD"],
-                workingDirectory: identity.worktreePath,
-                stdin: nil,
-                maxOutputBytes: 16 * 1024
-            )
-            async let headResult = (executor ?? identity.executor).execute(
-                arguments: ["--no-optional-locks", "rev-parse", "--quiet", "--verify", "HEAD"],
-                workingDirectory: identity.worktreePath,
-                stdin: nil,
-                maxOutputBytes: 16 * 1024
-            )
+    private static func headStatus(
+        for identity: GitRepositoryIdentity,
+        branchExec: GitExecutionResult,
+        headExec: GitExecutionResult
+    ) -> GitRepositoryStatusKind {
+        let headCommitID: GitCommitID? = if headExec.isSuccess {
+            GitCommitID(headExec.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines))
+        } else {
+            nil
+        }
 
-            let (branchExec, headExec) = try await (branchResult, headResult)
-
-            let headCommitID: GitCommitID? = if headExec.isSuccess {
-                GitCommitID(headExec.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines))
+        if branchExec.isSuccess {
+            let branchName = branchExec.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let headCommitID {
+                return .ready(
+                    repository: identity,
+                    branch: branchName,
+                    headCommitID: headCommitID
+                )
             } else {
-                nil
+                return .unborn(repository: identity, branch: branchName)
             }
-
-            if branchExec.isSuccess {
-                let branchName = branchExec.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines)
-                if let headCommitID {
-                    return .ready(
-                        repository: identity,
-                        branch: branchName,
-                        headCommitID: headCommitID
-                    )
-                } else {
-                    return .unborn(repository: identity, branch: branchName)
-                }
-            } else {
-                // Detached HEAD
-                if let headCommitID {
-                    return .detached(repository: identity, commitID: headCommitID)
-                } else {
-                    return .unborn(repository: identity, branch: "HEAD")
-                }
-            }
-        } catch {
-            return .error(title: GitL10n.text("Head Resolution Error"), message: error.localizedDescription)
+        } else if let headCommitID {
+            // Detached HEAD
+            return .detached(repository: identity, commitID: headCommitID)
+        } else {
+            return .unborn(repository: identity, branch: "HEAD")
         }
     }
 }

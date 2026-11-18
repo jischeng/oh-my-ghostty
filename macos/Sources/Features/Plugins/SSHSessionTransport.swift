@@ -107,6 +107,7 @@ enum SSHSessionTransport {
     static let connectionLimiter = SSHConnectionConcurrencyLimiter()
     static let coldHandshakeLimiter = SSHConnectionConcurrencyLimiter(maxConcurrentPerConnection: 1)
 
+    private static let shellCommandPrefix = "exec /bin/sh -c 'exec /bin/sh -c \"$(printf %s "
     private static let execLimitSentinel = Data("\u{1e}OMG-EXEC-LIMIT\u{1f}".utf8)
     private static let execUnsupportedSentinel = Data("\u{1e}OMG-EXEC-UNSUPPORTED\u{1f}".utf8)
     private static let execTransportSentinelLine = Data("\u{1e}OMG-EXEC-TRANSPORT\u{1f}\n".utf8)
@@ -133,6 +134,7 @@ enum SSHSessionTransport {
     static func run(
         connection: GitSSHConnection,
         command: String,
+        posixScript: String? = nil,
         stdin: Data? = nil,
         limit: Int? = 1_048_576,
         timeout: TimeInterval = 60,
@@ -141,18 +143,19 @@ enum SSHSessionTransport {
         idempotent: Bool = false,
         omgdExecutableOverride: String? = nil
     ) async throws -> GitExecutionResult {
-        // All auxiliary shell tasks enter through the same remote OMG runtime.
-        // Plain SSH hosts without bootstrap retain their existing behavior.
-        let routedCommand = shellCommand("""
-        if [ -f "$HOME/.local/share/oh-my-ghostty/remote/omg" ] && command -v python3 >/dev/null 2>&1; then
-          exec python3 "$HOME/.local/share/oh-my-ghostty/remote/omg" exec \(Ghostty.Shell.quote(command))
-        fi
-        exec /bin/sh -c \(Ghostty.Shell.quote(command))
-        """)
+        let relayCommand = posixScript ?? command
+        let sshCommand: String = if let posixScript {
+            shellCommand(posixScript)
+        } else if command.hasPrefix(Self.shellCommandPrefix) {
+            command
+        } else {
+            shellCommand(command)
+        }
 
         let request = RunRequest(
             connection: connection,
-            routedCommand: routedCommand,
+            relayCommand: relayCommand,
+            sshCommand: sshCommand,
             stdin: stdin,
             limit: limit,
             timeout: timeout,
@@ -186,9 +189,31 @@ enum SSHSessionTransport {
         )
     }
 
+    static func warmControlSocketIfNeeded(connection: GitSSHConnection) async {
+        if SessionRuntimeConnections.activeRelaySocket(for: connection) != nil {
+            return
+        }
+        guard let socket = try? GitSSHControlSocket.path(
+            for: connection,
+            executablePath: connection.executablePath
+        ), !FileManager.default.fileExists(atPath: socket) else {
+            return
+        }
+        _ = try? await run(
+            connection: connection,
+            command: ":",
+            posixScript: ":",
+            limit: 1024,
+            timeout: 15,
+            multiplexing: true,
+            idempotent: true
+        )
+    }
+
     private struct RunRequest: Sendable {
         let connection: GitSSHConnection
-        let routedCommand: String
+        let relayCommand: String
+        let sshCommand: String
         let stdin: Data?
         let limit: Int?
         let timeout: TimeInterval
@@ -213,7 +238,7 @@ enum SSHSessionTransport {
                         "exec-local",
                         relaySocket.path,
                         String(request.limit ?? 67_108_864),
-                        request.routedCommand,
+                        request.relayCommand,
                     ],
                     workingDirectory: request.connection.localWorkingDirectory,
                     stdin: request.stdin,
@@ -267,7 +292,7 @@ enum SSHSessionTransport {
                 let runSSH: @Sendable () async throws -> GitExecutionResult = {
                     try await GitProcessRunner().run(
                         executablePath: executable,
-                        arguments: request.connection.arguments(controlSocket: socket) + [request.routedCommand],
+                        arguments: request.connection.arguments(controlSocket: socket) + [request.sshCommand],
                         workingDirectory: request.connection.localWorkingDirectory,
                         stdin: request.stdin,
                         maxOutputBytes: request.limit,

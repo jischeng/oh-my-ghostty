@@ -14,6 +14,11 @@ enum GitHistoryError: Error, Equatable, Sendable, LocalizedError {
     }
 }
 
+struct GitPrefetchedRefs: Sendable {
+    let head: GitRepositoryHeadInfo
+    let refs: GitRepositoryRefsSnapshot
+}
+
 struct GitHistoryService: Sendable {
     static let pageSize = 100
     /// Cap the remote-only walk so a never-fetched fork cannot stall snapshots.
@@ -56,22 +61,9 @@ struct GitHistoryService: Sendable {
             stdin: nil,
             maxOutputBytes: 16 * 1024
         )
-        // Fetched but not pulled: reachable from remote-tracking refs only.
-        async let remoteOnlyResult = (executor ?? repository.executor).execute(
-            arguments: [
-                "--no-optional-locks",
-                "rev-list",
-                "--max-count=\(Self.remoteOnlyLimit)",
-                "--remotes",
-                "--not",
-                "--branches",
-            ],
-            workingDirectory: repository.worktreePath,
-            stdin: nil,
-            maxOutputBytes: 2 * 1024 * 1024
-        )
+        async let remoteOnlyResult = fetchRemoteOnlyCommitIDs(for: repository)
 
-        let (refs, branch, head, remoteOnly) = try await (refsResult, branchResult, headResult, remoteOnlyResult)
+        let (refs, branch, head, remoteOnlyIDs) = try await (refsResult, branchResult, headResult, remoteOnlyResult)
         guard refs.isSuccess else {
             throw GitHistoryError.commandFailed(refs.stderrString)
         }
@@ -146,14 +138,6 @@ struct GitHistoryService: Sendable {
             }
         }
 
-        var remoteOnlyIDs = Set<GitCommitID>()
-        if remoteOnly.isSuccess {
-            for line in remoteOnly.stdoutString.split(whereSeparator: \.isNewline) {
-                let value = line.trimmingCharacters(in: .whitespaces)
-                if !value.isEmpty { remoteOnlyIDs.insert(GitCommitID(value)) }
-            }
-        }
-
         return GitHistorySnapshot(
             scope: scope,
             branchName: branchName,
@@ -161,6 +145,55 @@ struct GitHistoryService: Sendable {
             tipCommitIDs: tipIDs,
             decorationsByCommitID: decorations,
             remoteOnlyCommitIDs: remoteOnlyIDs
+        )
+    }
+
+    func fetchRemoteOnlyCommitIDs(for repository: GitRepositoryIdentity) async throws -> Set<GitCommitID> {
+        let remoteOnly = try await (executor ?? repository.executor).execute(
+            arguments: [
+                "--no-optional-locks",
+                "rev-list",
+                "--max-count=\(Self.remoteOnlyLimit)",
+                "--remotes",
+                "--not",
+                "--branches",
+            ],
+            workingDirectory: repository.worktreePath,
+            stdin: nil,
+            maxOutputBytes: 2 * 1024 * 1024
+        )
+        var remoteOnlyIDs = Set<GitCommitID>()
+        if remoteOnly.isSuccess {
+            for line in remoteOnly.stdoutString.split(whereSeparator: \.isNewline) {
+                let value = line.trimmingCharacters(in: .whitespaces)
+                if !value.isEmpty { remoteOnlyIDs.insert(GitCommitID(value)) }
+            }
+        }
+        return remoteOnlyIDs
+    }
+
+    static func buildSnapshot(
+        scope: GitHistoryScope,
+        head: GitRepositoryHeadInfo,
+        refs: GitRepositoryRefsSnapshot,
+        favoriteRefs: Set<String> = [],
+        worktrees: [GitWorktreeInfo] = [],
+        remoteOnlyCommitIDs: Set<GitCommitID> = []
+    ) -> GitHistorySnapshot {
+        let tipIDs = GitHistorySnapshot.tipCommitIDs(
+            for: scope,
+            headCommitID: head.headCommitID,
+            decorationsByCommitID: refs.decorationsByCommitID,
+            favoriteRefs: favoriteRefs,
+            worktrees: worktrees
+        )
+        return GitHistorySnapshot(
+            scope: scope,
+            branchName: head.branchName,
+            headCommitID: head.headCommitID,
+            tipCommitIDs: tipIDs,
+            decorationsByCommitID: refs.decorationsByCommitID,
+            remoteOnlyCommitIDs: remoteOnlyCommitIDs
         )
     }
 

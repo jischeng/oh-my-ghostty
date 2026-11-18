@@ -536,15 +536,26 @@ final class BuiltInGitInspectorProvider {
             }
             var workingTree = oldContent?.repository == status.repository
                 ? (oldContent?.workingTree ?? GitWorkingTreeContent()) : GitWorkingTreeContent()
+            var prefetched: GitPrefetchedRefs?
             if let repository = status.repository {
+                let headInfo = Self.headInfo(from: status)
+                let needsRemoteAddress = force || oldContent?.repository != repository
                 async let files = Self.readFiles(service: self.diffService, repository: repository)
-                async let branches = Self.result { try await self.repositoryService.branches(for: repository) }
+                async let refs = Self.result { try await self.repositoryService.refsSnapshot(for: repository, head: headInfo) }
                 async let worktrees = Self.result { try await self.repositoryService.worktrees(for: repository, includeStatus: force || activeTab == .branches) }
+                async let remoteURL = Self.result { () -> String? in
+                    guard needsRemoteAddress else { return nil }
+                    return try await self.repositoryService.remoteAddress(for: repository)
+                }
                 Self.updateFiles(await files, workingTree: &workingTree)
-                Self.update(await branches, values: &workingTree.branches, error: &workingTree.branchesError)
+                let refsResult = await refs
+                Self.update(refsResult.map(\.branches), values: &workingTree.branches, error: &workingTree.branchesError)
                 Self.update(await worktrees, values: &workingTree.worktrees, error: &workingTree.worktreesError)
-                if force || oldContent?.repository != repository {
-                    workingTree.remoteURL = try? await self.repositoryService.remoteAddress(for: repository)
+                if needsRemoteAddress, case .success(let fetchedRemoteURL) = await remoteURL {
+                    workingTree.remoteURL = fetchedRemoteURL
+                }
+                if case .success(let resolvedRefs) = refsResult {
+                    prefetched = GitPrefetchedRefs(head: headInfo, refs: resolvedRefs)
                 }
             }
             guard !Task.isCancelled, self.generations[context.tabID] == generation else { return }
@@ -558,12 +569,33 @@ final class BuiltInGitInspectorProvider {
                                               activeTab: latestState.activeTab, history: latestState.history)
             content.workingTree = workingTree
             self.publish(content, tabID: context.tabID)
-            if repo != nil, content.activeTab == .history || force { self.loadHistory(context: context, force: force, refreshing: true) }
+            if repo != nil, content.activeTab == .history || force {
+                self.loadHistory(context: context, force: force, refreshing: true, prefetched: prefetched)
+            }
             self.refreshChangedRepository(tabID: context.tabID)
         }
     }
 
-    private func loadHistory(context: InspectorPaneContext, force: Bool, refreshing: Bool = false, reuseSnapshot: Bool = false) {
+    nonisolated private static func headInfo(from status: GitRepositoryStatusKind) -> GitRepositoryHeadInfo {
+        switch status {
+        case .ready(_, let branch, let headCommitID):
+            return .init(branchName: branch, headCommitID: headCommitID)
+        case .unborn(_, let branch):
+            return .init(branchName: branch, headCommitID: nil)
+        case .detached(_, let commitID):
+            return .init(branchName: nil, headCommitID: commitID)
+        case .notRepository, .ssh, .error:
+            return .init(branchName: nil, headCommitID: nil)
+        }
+    }
+
+    private func loadHistory(
+        context: InspectorPaneContext,
+        force: Bool,
+        refreshing: Bool = false,
+        reuseSnapshot: Bool = false,
+        prefetched: GitPrefetchedRefs? = nil
+    ) {
         guard let current = lastPublishedContent[context.tabID], let repository = current.repository else { return }
         if refreshing, historyTasks[context.tabID] != nil {
             pendingHistoryRefreshes[context.tabID] = force || (pendingHistoryRefreshes[context.tabID] ?? false)
@@ -588,6 +620,7 @@ final class BuiltInGitInspectorProvider {
             publish(makeContent(from: current, history: loading), tabID: context.tabID)
         }
         let worktrees = current.workingTree.worktrees
+        let worktreesLoaded = current.workingTree.worktreesError == nil
         historyTasks[context.tabID] = Task { [weak self] in
             guard let self else { return }
             defer {
@@ -600,19 +633,78 @@ final class BuiltInGitInspectorProvider {
                 }
             }
             do {
-                let snapshot: GitHistorySnapshot
-                if let existing = stateBefore.history.snapshot, (reuseSnapshot && !refreshing) || (!force && !refreshing) {
-                    snapshot = existing
-                } else {
-                    snapshot = try await self.captureSnapshot(repository: repository, state: stateBefore, worktrees: worktrees)
-                }
+                let pageSize = refreshing ? max(GitHistoryService.pageSize, oldCommits.count) : GitHistoryService.pageSize
                 var loaded = stateBefore.history
-                if !refreshing || force || snapshot != stateBefore.history.snapshot {
-                    let page = try await self.historyService.loadPage(snapshot: snapshot, repository: repository, offset: offset,
-                        pageSize: refreshing ? max(GitHistoryService.pageSize, oldCommits.count) : GitHistoryService.pageSize,
-                        query: stateBefore.historyQuery)
+                if let existing = stateBefore.history.snapshot, (reuseSnapshot && !refreshing) || (!force && !refreshing) {
+                    let page = try await self.historyService.loadPage(snapshot: existing, repository: repository, offset: offset,
+                        pageSize: pageSize, query: stateBefore.historyQuery)
                     loaded = InspectorGitHistoryContent(scope: stateBefore.historyScope,
-                        commits: (refreshing ? [] : oldCommits) + page.commits, hasMore: page.hasMore, snapshot: snapshot)
+                        commits: oldCommits + page.commits, hasMore: page.hasMore, snapshot: existing)
+                } else if let prefetched {
+                    let preliminarySnapshot = try await self.resolvePrefetchedSnapshot(
+                        repository: repository,
+                        state: stateBefore,
+                        worktrees: worktrees,
+                        worktreesLoaded: worktreesLoaded,
+                        prefetched: prefetched
+                    )
+                    var normalizedExisting = stateBefore.history.snapshot
+                    normalizedExisting?.remoteOnlyCommitIDs = []
+                    let refsChanged = normalizedExisting != preliminarySnapshot
+                    if !refreshing || force || refsChanged {
+                        async let remoteOnlyTask: Set<GitCommitID> = prefetched.refs.hasRemoteRefs
+                            ? (try await self.historyService.fetchRemoteOnlyCommitIDs(for: repository))
+                            : []
+                        async let pageTask = self.historyService.loadPage(
+                            snapshot: preliminarySnapshot,
+                            repository: repository,
+                            offset: offset,
+                            pageSize: pageSize,
+                            query: stateBefore.historyQuery
+                        )
+                        let (remoteOnlyIDs, rawPage) = try await (remoteOnlyTask, pageTask)
+                        var finalSnapshot = preliminarySnapshot
+                        finalSnapshot.remoteOnlyCommitIDs = remoteOnlyIDs
+                        var commits = rawPage.commits
+                        if !remoteOnlyIDs.isEmpty {
+                            for idx in commits.indices {
+                                commits[idx].isRemoteOnly = remoteOnlyIDs.contains(commits[idx].id)
+                            }
+                        }
+                        loaded = InspectorGitHistoryContent(
+                            scope: stateBefore.historyScope,
+                            commits: (refreshing ? [] : oldCommits) + commits,
+                            hasMore: rawPage.hasMore,
+                            snapshot: finalSnapshot
+                        )
+                    } else if prefetched.refs.hasRemoteRefs {
+                        let remoteOnlyIDs = try await self.historyService.fetchRemoteOnlyCommitIDs(for: repository)
+                        var finalSnapshot = preliminarySnapshot
+                        finalSnapshot.remoteOnlyCommitIDs = remoteOnlyIDs
+                        if finalSnapshot != stateBefore.history.snapshot {
+                            let page = try await self.historyService.loadPage(
+                                snapshot: finalSnapshot,
+                                repository: repository,
+                                offset: offset,
+                                pageSize: pageSize,
+                                query: stateBefore.historyQuery
+                            )
+                            loaded = InspectorGitHistoryContent(
+                                scope: stateBefore.historyScope,
+                                commits: page.commits,
+                                hasMore: page.hasMore,
+                                snapshot: finalSnapshot
+                            )
+                        }
+                    }
+                } else {
+                    let snapshot = try await self.captureSnapshot(repository: repository, state: stateBefore, worktrees: worktrees)
+                    if !refreshing || force || snapshot != stateBefore.history.snapshot {
+                        let page = try await self.historyService.loadPage(snapshot: snapshot, repository: repository, offset: offset,
+                            pageSize: pageSize, query: stateBefore.historyQuery)
+                        loaded = InspectorGitHistoryContent(scope: stateBefore.historyScope,
+                            commits: (refreshing ? [] : oldCommits) + page.commits, hasMore: page.hasMore, snapshot: snapshot)
+                    }
                 }
                 guard !Task.isCancelled, self.historyGenerations[context.tabID] == generation else { return }
                 var updated = self.state(for: context.tabID, worktreeKey: key)
@@ -633,6 +725,57 @@ final class BuiltInGitInspectorProvider {
                 if let latest = self.lastPublishedContent[context.tabID] { self.publish(self.makeContent(from: latest, history: history), tabID: context.tabID) }
             }
         }
+    }
+
+    private func resolvePrefetchedSnapshot(
+        repository: GitRepositoryIdentity,
+        state: WorktreeUIState,
+        worktrees: [GitWorktreeInfo],
+        worktreesLoaded: Bool,
+        prefetched: GitPrefetchedRefs
+    ) async throws -> GitHistorySnapshot {
+        let favoriteRefs = state.historyScope == .favorites ? GitHistoryBranchFavorites(repository: repository).refs : []
+        let snapshot = GitHistoryService.buildSnapshot(
+            scope: state.historyScope,
+            head: prefetched.head,
+            refs: prefetched.refs,
+            favoriteRefs: favoriteRefs,
+            worktrees: worktrees
+        )
+        if let path = state.browsedWorktree {
+            let trees = worktreesLoaded ? worktrees : (try await repositoryService.worktrees(for: repository))
+            guard let derived = snapshot.browsingWorktree(path: path, worktrees: trees) else {
+                throw GitDiffServiceError.gitFailed(GitL10n.format("Worktree no longer exists: {0}", String(describing: path)))
+            }
+            return derived
+        }
+        guard let branch = state.browsedBranch else { return snapshot }
+        if branch.hasPrefix("refs/tags/") {
+            if let derived = snapshot.browsingBranch(ref: branch, branches: []) {
+                return derived
+            }
+            let result = try await (repositoryService.executor ?? repository.executor).execute(
+                arguments: ["--no-optional-locks", "rev-parse", "--verify", branch + "^{commit}"],
+                workingDirectory: repository.worktreePath
+            )
+            guard result.isSuccess else { throw GitDiffServiceError.gitFailed(result.stderrString) }
+            return GitHistorySnapshot(
+                scope: snapshot.scope,
+                branchName: snapshot.branchName,
+                headCommitID: snapshot.headCommitID,
+                repositoryHeadCommitID: snapshot.repositoryHeadCommitID,
+                tipCommitIDs: [.init(result.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines))],
+                decorationsByCommitID: snapshot.decorationsByCommitID,
+                remoteOnlyCommitIDs: snapshot.remoteOnlyCommitIDs,
+                sortedTags: snapshot.sortedTags,
+                browsedBranch: String(branch.dropFirst("refs/tags/".count)),
+                browsedRef: branch
+            )
+        }
+        if let derived = snapshot.browsingBranch(ref: branch, branches: prefetched.refs.branches) {
+            return derived
+        }
+        throw GitDiffServiceError.gitFailed(GitL10n.format("Branch no longer exists: {0}", String(describing: branch)))
     }
 
     private func toggleCommit(_ commit: GitCommitID, context: InspectorPaneContext) {

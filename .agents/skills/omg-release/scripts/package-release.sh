@@ -96,18 +96,13 @@ printf '%s\n' "$release_requirement" > "$build_root/signing-requirement.txt"
 rm -rf "$artifacts"
 mkdir -p "$artifacts"
 
-# Compress all 3 macOS DMGs concurrently (hdiutil is independent of Xcode build.db).
-dmg_pids=()
+# Package all 3 macOS DMGs serially to avoid concurrent `hdiutil create` races.
 for arch in arm64 x86_64 universal; do
   OMG_SKIP_PRE_DMG_SIGN_VERIFY=1 dist/macos/package_omg_dmg.sh \
     "$omg_version" \
     "$arch" \
     "$build_root/$arch/Release/OMG.app" \
-    "$artifacts" &
-  dmg_pids+=("$!")
-done
-for pid in "${dmg_pids[@]}"; do
-  wait "$pid"
+    "$artifacts"
 done
 
 if [[ -x "$repo_root/ios/scripts/package-release.sh" ]]; then

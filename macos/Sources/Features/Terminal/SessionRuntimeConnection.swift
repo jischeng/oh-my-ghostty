@@ -586,6 +586,40 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
     nonisolated private static let activeRemoteRelayOwners = OSAllocatedUnfairLock(
         initialState: [String: ObjectIdentifier]()
     )
+    nonisolated private static let activeInlineRelaySessions = OSAllocatedUnfairLock(
+        initialState: [String: SessionRuntimeInlineSession]()
+    )
+
+    nonisolated static func syncInlineRelaySession(
+        old: SessionRuntimeInlineSession?,
+        new: SessionRuntimeInlineSession?
+    ) {
+        activeInlineRelaySessions.withLock { sessions in
+            if let old, old.connectionID != new?.connectionID {
+                sessions.removeValue(forKey: old.connectionID)
+            }
+            if let new, new.descriptor.connection != nil {
+                sessions[new.connectionID] = new
+            }
+        }
+    }
+
+    nonisolated static func unregisterInlineRelaySession(_ session: SessionRuntimeInlineSession) {
+        activeInlineRelaySessions.withLock { _ = $0.removeValue(forKey: session.connectionID) }
+    }
+
+    nonisolated static func setTestInlineRelaySession(
+        _ session: SessionRuntimeInlineSession?,
+        key: String = "test-inline"
+    ) {
+        activeInlineRelaySessions.withLock { sessions in
+            if let session {
+                sessions[key] = session
+            } else {
+                sessions.removeValue(forKey: key)
+            }
+        }
+    }
 
     nonisolated private static func registerActiveRemoteRelaySocket(
         identity: String,
@@ -645,6 +679,24 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
             && entry.connection.executablePath == connection.executablePath {
             if FileManager.default.fileExists(atPath: entry.socket.path) {
                 return entry.socket
+            }
+        }
+        let inlineSessions = activeInlineRelaySessions.withLock { sessions -> [SessionRuntimeInlineSession] in
+            sessions = sessions.filter { $0.value.isRunningInThisBoot }
+            return Array(sessions.values)
+        }
+        for session in inlineSessions where session.descriptor.connection == connection {
+            if FileManager.default.fileExists(atPath: session.socket.path) {
+                return session.socket
+            }
+        }
+        for session in inlineSessions {
+            guard let candidate = session.descriptor.connection,
+                  candidate.destination == connection.destination,
+                  candidate.options == connection.options,
+                  candidate.executablePath == connection.executablePath else { continue }
+            if FileManager.default.fileExists(atPath: session.socket.path) {
+                return session.socket
             }
         }
         return nil
@@ -1192,6 +1244,7 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
         for identity in activeIdentities {
             Self.clearActiveRemoteRelaySocket(identity: identity)
         }
+        Self.activeInlineRelaySessions.withLock { $0.removeAll() }
         GitSSHControlSocket.closeAll()
         Self.terminateDirectSSHChildren()
     }

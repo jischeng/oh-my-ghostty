@@ -1120,4 +1120,127 @@ struct SSHGitExecutorTests {
         #expect(!loadingFetch.isEnabled)
         #expect(!loadingRetry.isEnabled)
     }
+
+    @Test func inlineRelayRegistrationSingleShellWrapAndControlSocketWarmup() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-inline-git-fast-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let relaySocket = root.appendingPathComponent("relay.sock")
+        let omgdStub = root.appendingPathComponent("omgd")
+        let sshStub = root.appendingPathComponent("ssh")
+        let omgdLog = root.appendingPathComponent("omgd.log")
+        let sshLog = root.appendingPathComponent("ssh.log")
+
+        let omgdScript = """
+        #!/bin/sh
+        printf '%s\\n' "$4" >> \(SSHGitExecutor.quote(omgdLog.path))
+        printf '\\036OMG-GIT-v1\\037ok-inline\\n'
+        exit 0
+        """
+        try omgdScript.write(to: omgdStub, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: omgdStub.path)
+
+        let sshScript = """
+        #!/bin/sh
+        printf '%s\\n' "$*" >> \(SSHGitExecutor.quote(sshLog.path))
+        SOCKET=""
+        PREV=""
+        for arg in "$@"; do
+          if [ "$PREV" = "-S" ]; then
+            SOCKET="$arg"
+            break
+          fi
+          PREV="$arg"
+        done
+        if [ -n "$SOCKET" ] && [ ! -e "$SOCKET" ]; then
+          touch "$SOCKET"
+        fi
+        printf '\\036OMG-GIT-v1\\037ok-ssh\\n'
+        exit 0
+        """
+        try sshScript.write(to: sshStub, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: sshStub.path)
+
+        let connection = try GitSSHConnection(
+            destination: "inline-fast-\(UUID().uuidString)",
+            options: ["-p", "2222"],
+            workspaceID: "ssh:inline-primary",
+            executablePath: sshStub.path,
+            localWorkingDirectory: root.path
+        )
+        let args = connection.arguments(controlSocket: "/tmp/omg-compress.sock")
+        #expect(args.contains("Compression=yes"))
+        let portIndex = try #require(args.lastIndex(of: "2222"))
+        let compressionIndex = try #require(args.lastIndex(of: "Compression=yes"))
+        #expect(compressionIndex > portIndex)
+
+        let descriptor = SessionRuntimeDescriptor(
+            connection: connection,
+            revision: "rev-inline-test",
+            policy: SessionRuntimePolicy(),
+            localWorkingDirectory: root.path,
+            initialWorkingDirectory: "/remote/repo"
+        )
+        let inlineSession = SessionRuntimeInlineSession(
+            descriptor: descriptor,
+            pane: UUID(),
+            connectionID: "omg-ssh-inline-\(UUID().uuidString)",
+            socket: relaySocket,
+            helperPID: getpid(),
+            bootID: try #require(SessionRuntimeInlineSession.currentBootID)
+        )
+        FileManager.default.createFile(atPath: relaySocket.path, contents: Data())
+        SessionRuntimeConnections.syncInlineRelaySession(old: nil, new: inlineSession)
+        defer { SessionRuntimeConnections.syncInlineRelaySession(old: inlineSession, new: nil) }
+
+        #expect(SessionRuntimeConnections.activeRelaySocket(for: connection) == relaySocket)
+        let siblingConnection = try GitSSHConnection(
+            destination: connection.destination,
+            options: connection.options,
+            workspaceID: "ssh:inline-sibling",
+            executablePath: sshStub.path,
+            localWorkingDirectory: "/tmp"
+        )
+        #expect(SessionRuntimeConnections.activeRelaySocket(for: siblingConnection) == relaySocket)
+
+        let relayExecutor = SSHGitExecutor(connection: siblingConnection, omgdPath: omgdStub.path)
+        let relayResult = try await relayExecutor.execute(arguments: ["--version"], workingDirectory: root.path)
+        #expect(relayResult.isSuccess && relayResult.stdoutString == "ok-inline\n")
+        #expect(!FileManager.default.fileExists(atPath: sshLog.path))
+        let recordedRelay = try String(contentsOf: omgdLog, encoding: .utf8)
+        #expect(recordedRelay.contains("printf '\\036OMG-GIT-v1\\037'"))
+        #expect(!recordedRelay.contains("base64 -d"))
+        #expect(!recordedRelay.contains("remote/omg"))
+
+        SessionRuntimeConnections.syncInlineRelaySession(old: inlineSession, new: nil)
+        #expect(SessionRuntimeConnections.activeRelaySocket(for: connection) == nil)
+
+        let controlSocket = try GitSSHControlSocket.path(for: connection, executablePath: sshStub.path)
+        defer { Darwin.unlink(controlSocket) }
+        try? FileManager.default.removeItem(atPath: controlSocket)
+
+        let sshExecutor = SSHGitExecutor(connection: connection, sshPath: sshStub.path)
+        let sshResult = try await sshExecutor.execute(arguments: ["--version"], workingDirectory: root.path)
+        #expect(sshResult.isSuccess && sshResult.stdoutString == "ok-ssh\n")
+        let recordedSSH = try String(contentsOf: sshLog, encoding: .utf8)
+        #expect(recordedSSH.contains("-o Compression=yes"))
+        #expect(recordedSSH.components(separatedBy: "base64 -d").count - 1 == 1)
+        #expect(!recordedSSH.contains("remote/omg"))
+
+        try? FileManager.default.removeItem(atPath: controlSocket)
+        try Data().write(to: sshLog)
+        await SSHSessionTransport.warmControlSocketIfNeeded(connection: connection)
+        #expect(FileManager.default.fileExists(atPath: controlSocket))
+        let warmupLines = try String(contentsOf: sshLog, encoding: .utf8)
+            .split(separator: "\n", omittingEmptySubsequences: true)
+        #expect(warmupLines.count == 1)
+        #expect(warmupLines[0].components(separatedBy: "base64 -d").count - 1 == 1)
+
+        await SSHSessionTransport.warmControlSocketIfNeeded(connection: connection)
+        let afterSecondWarmup = try String(contentsOf: sshLog, encoding: .utf8)
+            .split(separator: "\n", omittingEmptySubsequences: true)
+        #expect(afterSecondWarmup.count == 1)
+    }
 }

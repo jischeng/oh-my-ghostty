@@ -491,6 +491,13 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Last committed Agent Quick Input dock height in points.",
             requiresNewWindow: false, category: "keyboard"),
         .init(
+            id: "keyboard.quickInputOpacity", type: .number, defaultValue: "0.45",
+            allowedValues: nil,
+            minimum: AgentQuickInputMetrics.minimumOpacity,
+            maximum: AgentQuickInputMetrics.maximumOpacity,
+            description: "Agent Quick Input floating card background opacity.",
+            requiresNewWindow: false, category: "keyboard"),
+        .init(
             id: "keyboard.quickInputControlJNewline", type: .boolean, defaultValue: "false",
             allowedValues: nil, minimum: nil, maximum: nil,
             description: "Insert a newline with Control-J in Quick Input.",
@@ -929,6 +936,21 @@ final class OhMyGhosttySettings: ObservableObject {
                 quickInputHeight = clamped
             } else {
                 persist("keyboard.quickInputHeight", clamped)
+            }
+        }
+    }
+    @Published var quickInputOpacity = AgentQuickInputMetrics.defaultOpacity {
+        didSet {
+            let value = quickInputOpacity.isFinite
+                ? min(
+                    max(quickInputOpacity, AgentQuickInputMetrics.minimumOpacity),
+                    AgentQuickInputMetrics.maximumOpacity
+                )
+                : AgentQuickInputMetrics.defaultOpacity
+            if quickInputOpacity != value {
+                quickInputOpacity = value
+            } else {
+                persist("keyboard.quickInputOpacity", value)
             }
         }
     }
@@ -1438,6 +1460,11 @@ final class OhMyGhosttySettings: ObservableObject {
                 "keyboard.quickInputHeight",
                 fallback: Double(AgentQuickInputMetrics.defaultHeight),
                 range: Double(AgentQuickInputMetrics.minimumHeight)...Double(AgentQuickInputMetrics.maximumHeight)
+            )
+            quickInputOpacity = numberValue(
+                "keyboard.quickInputOpacity",
+                fallback: AgentQuickInputMetrics.defaultOpacity,
+                range: AgentQuickInputMetrics.minimumOpacity...AgentQuickInputMetrics.maximumOpacity
             )
             quickInputHistoryScope = enumValue("keyboard.quickInputHistoryScope", fallback: .tab)
             quickInputHistoryInsertionMode = enumValue("keyboard.quickInputHistoryInsertionMode", fallback: .append)

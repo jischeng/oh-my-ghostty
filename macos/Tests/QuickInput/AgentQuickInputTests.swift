@@ -1675,4 +1675,73 @@ struct AgentQuickInputTests {
         model.collapseAccessoryStacks()
         #expect(!model.isQueueExpanded)
     }
+
+    @Test func quickInputGlassRecipeScalesMonotonicallyAndOrdersSurfaceRoles() {
+        #expect(AgentQuickInputMetrics.defaultOpacity == 0.45)
+
+        let levels = [0.05, 0.25, 0.45, 0.75, 1.0]
+        var previousComposer = AgentQuickInputMetrics.QuickInputGlassRecipe(backdropOpacity: -1, tintOpacity: -1)
+        for level in levels {
+            let composer = AgentQuickInputMetrics.glassRecipe(role: .composer, opacity: level)
+            #expect(composer.backdropOpacity > previousComposer.backdropOpacity)
+            #expect(composer.tintOpacity > previousComposer.tintOpacity)
+            previousComposer = composer
+        }
+
+        let minimalComposer = AgentQuickInputMetrics.glassRecipe(role: .composer, opacity: 0.05)
+        #expect(minimalComposer.backdropOpacity <= 0.20)
+        #expect(minimalComposer.tintOpacity <= 0.05)
+
+        let fullRoles: [AgentQuickInputMetrics.QuickInputGlassRole] = [
+            .composer,
+            .collapsedQueuePill(emphasized: false),
+            .collapsedQueuePill(emphasized: true),
+            .standaloneQueueCapsule(emphasized: false),
+            .standaloneQueueCapsule(emphasized: true),
+            .elevatedCapsule(emphasized: false),
+            .elevatedCapsule(emphasized: true),
+        ]
+        for role in fullRoles {
+            let full = AgentQuickInputMetrics.glassRecipe(role: role, opacity: 1.0)
+            #expect(full.backdropOpacity == 1.0)
+            #expect(full.tintOpacity == 1.0)
+        }
+
+        let defaultOpacity = AgentQuickInputMetrics.defaultOpacity
+        let composer = AgentQuickInputMetrics.glassRecipe(role: .composer, opacity: defaultOpacity)
+        let pill = AgentQuickInputMetrics.glassRecipe(
+            role: .collapsedQueuePill(emphasized: false),
+            opacity: defaultOpacity
+        )
+        let pillEmphasized = AgentQuickInputMetrics.glassRecipe(
+            role: .collapsedQueuePill(emphasized: true),
+            opacity: defaultOpacity
+        )
+        let standalone = AgentQuickInputMetrics.glassRecipe(
+            role: .standaloneQueueCapsule(emphasized: false),
+            opacity: defaultOpacity
+        )
+        let standaloneEmphasized = AgentQuickInputMetrics.glassRecipe(
+            role: .standaloneQueueCapsule(emphasized: true),
+            opacity: defaultOpacity
+        )
+        let elevated = AgentQuickInputMetrics.glassRecipe(
+            role: .elevatedCapsule(emphasized: false),
+            opacity: defaultOpacity
+        )
+        let elevatedEmphasized = AgentQuickInputMetrics.glassRecipe(
+            role: .elevatedCapsule(emphasized: true),
+            opacity: defaultOpacity
+        )
+
+        #expect(composer.tintOpacity < pill.tintOpacity)
+        #expect(pill.tintOpacity < standalone.tintOpacity)
+        #expect(standalone.tintOpacity < elevated.tintOpacity)
+        #expect(pillEmphasized.backdropOpacity > pill.backdropOpacity)
+        #expect(pillEmphasized.tintOpacity > pill.tintOpacity)
+        #expect(standaloneEmphasized.backdropOpacity > standalone.backdropOpacity)
+        #expect(standaloneEmphasized.tintOpacity > standalone.tintOpacity)
+        #expect(elevatedEmphasized.backdropOpacity > elevated.backdropOpacity)
+        #expect(elevatedEmphasized.tintOpacity > elevated.tintOpacity)
+    }
 }

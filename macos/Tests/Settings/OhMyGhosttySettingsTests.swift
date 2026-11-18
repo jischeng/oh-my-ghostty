@@ -263,6 +263,7 @@ struct OhMyGhosttySettingsTests {
         settings.inspectorPanel3Shortcut = "option+command+3"
         settings.inspectorPanel4Shortcut = "option+command+4"
         settings.quickInputHeight = 318
+        settings.quickInputOpacity = 0.25
         settings.terminalResizeRendering = .onRelease
         settings.editorKeymapPreset = .vscode
         settings.editorBackgroundMode = .system
@@ -293,6 +294,7 @@ struct OhMyGhosttySettingsTests {
         #expect(object["keyboard.inspectorPanel3"] as? String == "option+command+3")
         #expect(object["keyboard.inspectorPanel4"] as? String == "option+command+4")
         #expect((object["keyboard.quickInputHeight"] as? NSNumber)?.doubleValue == 318)
+        #expect((object["keyboard.quickInputOpacity"] as? NSNumber)?.doubleValue == 0.25)
         #expect(object["terminal.resizeRendering"] as? String == "onRelease")
         #expect(object["editor.keymapPreset"] as? String == "vscode")
         #expect(object["editor.backgroundMode"] as? String == "system")
@@ -324,6 +326,7 @@ struct OhMyGhosttySettingsTests {
         #expect(restored.inspectorPanelShortcut(slot: 3) == "option+command+3")
         #expect(restored.inspectorPanelShortcut(slot: 4) == "option+command+4")
         #expect(restored.quickInputHeight == 318)
+        #expect(restored.quickInputOpacity == 0.25)
         #expect(restored.terminalResizeRendering == .onRelease)
         #expect(restored.editorSettings.keymapPreset == .vscode)
         #expect(restored.editorSettings.backgroundMode == .system)
@@ -556,6 +559,7 @@ struct OhMyGhosttySettingsTests {
         #expect(descriptors.contains { $0.id == "agents.openQuickInputOnComplete" })
         #expect(descriptors.contains { $0.id == "keyboard.quickInput" })
         #expect(descriptors.contains { $0.id == "keyboard.quickInputHeight" })
+        #expect(descriptors.contains { $0.id == "keyboard.quickInputOpacity" })
         #expect(descriptors.contains { $0.id == "keyboard.quickInputHistoryScope" })
         #expect(descriptors.contains { $0.id == "keyboard.quickInputHistoryInsertionMode" })
         #expect(descriptors.contains { $0.id == "keyboard.quickInputHistoryRetentionDays" })
@@ -944,6 +948,22 @@ struct OhMyGhosttySettingsTests {
             .appendingPathComponent(".config")
             .path
         #expect(!OhMyGhosttySettings.fileURL.path.hasPrefix(realConfigPath))
+    }
+
+    @Test func quickInputOpacityDefaultsClampsAndReloadsFromDisk() throws {
+        let (settings, url) = temporarySettings()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        #expect(settings.quickInputOpacity == 0.45)
+
+        settings.quickInputOpacity = 0.0
+        #expect(settings.quickInputOpacity == 0.05)
+
+        settings.quickInputOpacity = 1.5
+        #expect(settings.quickInputOpacity == 1.0)
+
+        try #"{"keyboard.quickInputOpacity":0.2}"#.write(to: url, atomically: true, encoding: .utf8)
+        settings.reloadFromDisk()
+        #expect(settings.quickInputOpacity == 0.2)
     }
 
     private func temporarySettings() -> (OhMyGhosttySettings, URL) {

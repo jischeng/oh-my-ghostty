@@ -233,15 +233,69 @@ enum AgentQuickInputMetrics {
     static let collapsedQueueHeight: CGFloat = 28
     static let collapsedQueueMinimumWidth: CGFloat = 96
     static let collapsedQueueMaximumWidth: CGFloat = 224
-    static let composerTintOpacity: Double = 0.22
-    static let queueCardTintOpacity: Double = 0.36
-    static let collapsedQueueTintOpacity: Double = 0.24
+    static let minimumOpacity: Double = 0.05
+    static let defaultOpacity: Double = 0.45
+    static let maximumOpacity: Double = 1.0
     static let queueButtonHitSize: CGFloat = 30
     static let queueHoverDelayMilliseconds = 300
     static let queueMinimumWidth: CGFloat = 150
     static let queueMaximumWidth: CGFloat = 420
     static let queueHorizontalInset: CGFloat = 12
     static let editorLineSpacing: CGFloat = 1
+
+    enum QuickInputGlassRole: Equatable {
+        case composer
+        case collapsedQueuePill(emphasized: Bool)
+        case standaloneQueueCapsule(emphasized: Bool)
+        case elevatedCapsule(emphasized: Bool)
+    }
+
+    struct QuickInputGlassRecipe: Equatable {
+        let backdropOpacity: Double
+        let tintOpacity: Double
+    }
+
+    /// Maps the user-facing Quick Input opacity setting into paired backdrop-blur
+    /// and theme-tint alphas while keeping elevated capsules legible over text.
+    static func glassRecipe(role: QuickInputGlassRole, opacity: Double) -> QuickInputGlassRecipe {
+        let clamped = min(
+            max(opacity.isFinite ? opacity : defaultOpacity, minimumOpacity),
+            maximumOpacity
+        )
+        switch role {
+        case .composer:
+            return baseGlass(for: clamped)
+        case .collapsedQueuePill(let emphasized):
+            let base = baseGlass(for: min(maximumOpacity, clamped + 0.05))
+            guard emphasized else { return base }
+            return QuickInputGlassRecipe(
+                backdropOpacity: min(maximumOpacity, base.backdropOpacity + 0.12),
+                tintOpacity: min(maximumOpacity, base.tintOpacity + 0.12)
+            )
+        case .standaloneQueueCapsule(let emphasized):
+            let base = baseGlass(for: min(maximumOpacity, clamped + 0.10))
+            guard emphasized else { return base }
+            return QuickInputGlassRecipe(
+                backdropOpacity: min(maximumOpacity, base.backdropOpacity + 0.12),
+                tintOpacity: min(maximumOpacity, base.tintOpacity + 0.14)
+            )
+        case .elevatedCapsule(let emphasized):
+            let base = baseGlass(for: min(maximumOpacity, max(0.25, clamped + 0.20)))
+            guard emphasized else { return base }
+            return QuickInputGlassRecipe(
+                backdropOpacity: min(maximumOpacity, base.backdropOpacity + 0.08),
+                tintOpacity: min(maximumOpacity, base.tintOpacity + 0.12)
+            )
+        }
+    }
+
+    private static func baseGlass(for level: Double) -> QuickInputGlassRecipe {
+        let clamped = min(max(level, minimumOpacity), maximumOpacity)
+        let norm = (clamped - minimumOpacity) / (maximumOpacity - minimumOpacity)
+        let backdrop = min(1.0, 0.14 + norm * 1.14)
+        let tint = min(1.0, 0.03 + 0.97 * pow(norm, 2.2))
+        return QuickInputGlassRecipe(backdropOpacity: backdrop, tintOpacity: tint)
+    }
 
     static func queueCardWidth(
         previewCount: Int,
@@ -1620,6 +1674,7 @@ private struct AgentQuickInputQueueItemCapsule: View {
     let send: () -> Void
     let edit: () -> Void
     let remove: () -> Void
+    @ObservedObject private var settings = OhMyGhosttySettings.shared
     @State private var isHovered = false
 
     private var colorScheme: ColorScheme {
@@ -1635,11 +1690,14 @@ private struct AgentQuickInputQueueItemCapsule: View {
         let materialOverride: NSVisualEffectView.Material? = elevatedOverCard
             ? (colorScheme == .light ? .popover : .hudWindow)
             : nil
-        let tintOpacity: Double = if elevatedOverCard {
-            (isHovered || isEditing) ? 0.88 : 0.80
-        } else {
-            (isHovered || isEditing) ? 0.50 : AgentQuickInputMetrics.queueCardTintOpacity
-        }
+        let emphasized = isHovered || isEditing
+        let role: AgentQuickInputMetrics.QuickInputGlassRole = elevatedOverCard
+            ? .elevatedCapsule(emphasized: emphasized)
+            : .standaloneQueueCapsule(emphasized: emphasized)
+        let glass = AgentQuickInputMetrics.glassRecipe(
+            role: role,
+            opacity: settings.quickInputOpacity
+        )
 
         return HStack(spacing: 6) {
             Text("#\(index)")
@@ -1697,10 +1755,11 @@ private struct AgentQuickInputQueueItemCapsule: View {
             QuickInputGlassSurface(
                 cornerRadius: QuickInputQueueStackLayout.capsuleHeight * 0.5,
                 themeColor: chromeBackground,
-                tintOpacity: tintOpacity,
+                tintOpacity: glass.tintOpacity,
                 colorScheme: colorScheme,
                 borderColor: isEditing ? Color.accentColor.opacity(0.65) : nil,
                 materialOverride: materialOverride,
+                backdropOpacity: glass.backdropOpacity,
                 shadowOpacity: elevatedOverCard ? 0.18 : 0.15,
                 shadowRadius: 3.5,
                 shadowOffsetY: 1.5
@@ -1838,6 +1897,7 @@ struct QuickInputBackdropBlurView: NSViewRepresentable {
     let cornerRadius: CGFloat
     let isLight: Bool
     var materialOverride: NSVisualEffectView.Material?
+    var backdropOpacity: Double = 1.0
 
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
@@ -1852,8 +1912,9 @@ struct QuickInputBackdropBlurView: NSViewRepresentable {
     private func configure(_ view: NSVisualEffectView) {
         view.blendingMode = .withinWindow
         view.state = .active
-        view.material = materialOverride ?? (isLight ? .selection : .fullScreenUI)
+        view.material = materialOverride ?? (isLight ? .selection : .hudWindow)
         view.appearance = NSAppearance(named: isLight ? .aqua : .darkAqua)
+        view.alphaValue = CGFloat(min(max(backdropOpacity, 0), 1))
         view.wantsLayer = true
         view.layer?.cornerRadius = cornerRadius
         view.layer?.cornerCurve = .continuous
@@ -1869,6 +1930,7 @@ struct QuickInputGlassSurface: View {
     var borderOpacity: Double?
     var borderColor: Color?
     var materialOverride: NSVisualEffectView.Material?
+    var backdropOpacity: Double = 1.0
     var shadowOpacity: Float = 0
     var shadowRadius: CGFloat = 3.5
     var shadowOffsetY: CGFloat = 1.5
@@ -1903,7 +1965,8 @@ struct QuickInputGlassSurface: View {
                 QuickInputBackdropBlurView(
                     cornerRadius: cornerRadius,
                     isLight: colorScheme == .light,
-                    materialOverride: materialOverride
+                    materialOverride: materialOverride,
+                    backdropOpacity: backdropOpacity
                 )
                 shape.fill(themeColor.opacity(tintOpacity))
             }
@@ -1932,6 +1995,7 @@ private struct AgentQuickInputCollapsedQueuePill: View {
     let strings: SettingsStrings
     var isExpanded = false
     let toggle: () -> Void
+    @ObservedObject private var settings = OhMyGhosttySettings.shared
     @State private var isHovered = false
 
     private var colorScheme: ColorScheme {
@@ -1945,6 +2009,10 @@ private struct AgentQuickInputCollapsedQueuePill: View {
     }
 
     var body: some View {
+        let glass = AgentQuickInputMetrics.glassRecipe(
+            role: .collapsedQueuePill(emphasized: isHovered || isExpanded),
+            opacity: settings.quickInputOpacity
+        )
         Button(action: toggle) {
             HStack(spacing: 6) {
                 Image(systemName: "tray.full")
@@ -1968,10 +2036,9 @@ private struct AgentQuickInputCollapsedQueuePill: View {
                 QuickInputGlassSurface(
                     cornerRadius: AgentQuickInputMetrics.collapsedQueueHeight * 0.5,
                     themeColor: chromeBackground,
-                    tintOpacity: (isHovered || isExpanded)
-                        ? 0.40
-                        : AgentQuickInputMetrics.collapsedQueueTintOpacity,
+                    tintOpacity: glass.tintOpacity,
                     colorScheme: colorScheme,
+                    backdropOpacity: glass.backdropOpacity,
                     shadowOpacity: 0.15,
                     shadowRadius: 3.5,
                     shadowOffsetY: 1.5
@@ -2340,6 +2407,10 @@ private struct AgentQuickInputComposer: View {
             style: .continuous
         )
 
+        let glass = AgentQuickInputMetrics.glassRecipe(
+            role: .composer,
+            opacity: settings.quickInputOpacity
+        )
         return VStack(alignment: .leading, spacing: 6) {
             AgentQuickInputTextEditor(
                 text: $model.draft,
@@ -2499,8 +2570,9 @@ private struct AgentQuickInputComposer: View {
             QuickInputGlassSurface(
                 cornerRadius: AgentQuickInputMetrics.cardCornerRadius,
                 themeColor: chromeBackground,
-                tintOpacity: AgentQuickInputMetrics.composerTintOpacity,
-                colorScheme: cardColorScheme
+                tintOpacity: glass.tintOpacity,
+                colorScheme: cardColorScheme,
+                backdropOpacity: glass.backdropOpacity
             )
         )
         .overlay(alignment: .top) {

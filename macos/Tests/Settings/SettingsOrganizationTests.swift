@@ -21,6 +21,7 @@ struct SettingsOrganizationTests {
             #expect(entries.first { $0.settingIDs.contains("agents.historyLimit") }?.tab == .agents)
             #expect(entries.first { $0.settingIDs.contains("sessions.startupMode") }?.tab == .terminal)
             #expect(entries.first { $0.settingIDs.contains("keyboard.quickInputHistoryScope") }?.tab == .controls)
+            #expect(entries.first { $0.settingIDs.contains("keyboard.quickInputOpacity") }?.tab == .controls)
             #expect(entries.first { $0.settingIDs.contains("keyboard.quickInput") }?.tab == .keyboard)
             #expect(entries.first { $0.settingIDs.contains("appearance.tabIconSize") }?.tab == .tabs)
             let focus = entries.first { $0.settingIDs.contains("terminal.focusedSplitBorderPosition") }
@@ -31,6 +32,8 @@ struct SettingsOrganizationTests {
             #expect(focus?.matches("unfocused-split-opacity") == true)
             #expect(entries.contains { $0.matches("clipboard paste") && $0.tab == .controls })
             #expect(entries.contains { $0.matches("粘贴") && $0.tab == .controls })
+            #expect(entries.contains { $0.matches("透明度") && $0.tab == .controls })
+            #expect(entries.contains { $0.matches("quickInputOpacity") && $0.tab == .controls })
             #expect(entries.contains { $0.matches("Shell 集成") && $0.tab == .terminal })
             #expect(!entries.contains { $0.matches("   ") })
             #expect(!entries.contains { $0.matches("not-a-setting-xyz") })

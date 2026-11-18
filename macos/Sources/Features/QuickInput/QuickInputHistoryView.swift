@@ -177,6 +177,7 @@ struct QuickInputHistoryView: View {
                     text: strings.quickInputHistoryStorageError,
                     width: stackWidth,
                     chromeBackground: chromeBackground,
+                    glassOpacity: settings.quickInputOpacity,
                     isExpanded: isExpanded
                 )
                 .modifier(
@@ -196,6 +197,7 @@ struct QuickInputHistoryView: View {
                         : strings.quickInputHistoryEmpty,
                     width: stackWidth,
                     chromeBackground: chromeBackground,
+                    glassOpacity: settings.quickInputOpacity,
                     isExpanded: isExpanded
                 )
                 .modifier(
@@ -397,6 +399,7 @@ struct QuickInputHistoryView: View {
                     isExpanded: isExpanded && (isFanOutSettled || isVisibleSlot),
                     suppressHover: isLiveScrolling,
                     chromeBackground: chromeBackground,
+                    glassOpacity: settings.quickInputOpacity,
                     strings: strings,
                     onHoverChanged: { hovered in
                         guard !isLiveScrolling else { return }
@@ -468,6 +471,7 @@ private struct QuickInputHistoryEntryCapsule: View {
     let isExpanded: Bool
     var suppressHover = false
     let chromeBackground: Color
+    let glassOpacity: Double
     let strings: SettingsStrings
     let onHoverChanged: (Bool) -> Void
     let onChoose: () -> Void
@@ -553,17 +557,7 @@ private struct QuickInputHistoryEntryCapsule: View {
             .padding(.horizontal, 11)
             .frame(width: width, height: QuickInputHistoryLayout.entryCapsuleHeight)
             .background(
-                QuickInputGlassSurface(
-                    cornerRadius: QuickInputHistoryLayout.entryCapsuleHeight * 0.5,
-                    themeColor: chromeBackground,
-                    tintOpacity: (isSelected || isHovered) ? 0.88 : 0.80,
-                    colorScheme: colorScheme,
-                    borderColor: isSelected ? Color.accentColor.opacity(0.82) : nil,
-                    materialOverride: colorScheme == .light ? .popover : .hudWindow,
-                    shadowOpacity: 0.18,
-                    shadowRadius: 3.5,
-                    shadowOffsetY: 1.5
-                )
+                glassSurface
             )
             .contentShape(Capsule())
         }
@@ -579,6 +573,25 @@ private struct QuickInputHistoryEntryCapsule: View {
         .background(FloatingAccessoryAnchor(isActive: isExpanded))
         .allowsHitTesting(isExpanded)
         .environment(\.colorScheme, colorScheme)
+    }
+
+    private var glassSurface: some View {
+        let glass = AgentQuickInputMetrics.glassRecipe(
+            role: .elevatedCapsule(emphasized: isSelected || isHovered),
+            opacity: glassOpacity
+        )
+        return QuickInputGlassSurface(
+            cornerRadius: QuickInputHistoryLayout.entryCapsuleHeight * 0.5,
+            themeColor: chromeBackground,
+            tintOpacity: glass.tintOpacity,
+            colorScheme: colorScheme,
+            borderColor: isSelected ? Color.accentColor.opacity(0.82) : nil,
+            materialOverride: colorScheme == .light ? .popover : .hudWindow,
+            backdropOpacity: glass.backdropOpacity,
+            shadowOpacity: 0.18,
+            shadowRadius: 3.5,
+            shadowOffsetY: 1.5
+        )
     }
 }
 
@@ -601,7 +614,11 @@ private struct QuickInputHistoryControlCapsule: View {
     }
 
     var body: some View {
-        HStack(spacing: 6) {
+        let glass = AgentQuickInputMetrics.glassRecipe(
+            role: .elevatedCapsule(emphasized: presentation.isSearching),
+            opacity: settings.quickInputOpacity
+        )
+        return HStack(spacing: 6) {
             Button {
                 if presentation.isSearching {
                     presentation.endSearch()
@@ -679,10 +696,11 @@ private struct QuickInputHistoryControlCapsule: View {
             QuickInputGlassSurface(
                 cornerRadius: QuickInputHistoryLayout.controlCapsuleHeight * 0.5,
                 themeColor: chromeBackground,
-                tintOpacity: presentation.isSearching ? 0.88 : 0.80,
+                tintOpacity: glass.tintOpacity,
                 colorScheme: colorScheme,
                 borderColor: presentation.isSearching ? Color.accentColor.opacity(0.65) : nil,
                 materialOverride: colorScheme == .light ? .popover : .hudWindow,
+                backdropOpacity: glass.backdropOpacity,
                 shadowOpacity: 0.18,
                 shadowRadius: 3.5,
                 shadowOffsetY: 1.5
@@ -708,6 +726,7 @@ private struct QuickInputHistoryEmptyCapsule: View {
     let text: String
     let width: CGFloat
     let chromeBackground: Color
+    let glassOpacity: Double
     let isExpanded: Bool
 
     private var colorScheme: ColorScheme {
@@ -715,7 +734,11 @@ private struct QuickInputHistoryEmptyCapsule: View {
     }
 
     var body: some View {
-        HStack(spacing: 6) {
+        let glass = AgentQuickInputMetrics.glassRecipe(
+            role: .elevatedCapsule(emphasized: false),
+            opacity: glassOpacity
+        )
+        return HStack(spacing: 6) {
             Image(systemName: "clock")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
@@ -731,9 +754,10 @@ private struct QuickInputHistoryEmptyCapsule: View {
             QuickInputGlassSurface(
                 cornerRadius: QuickInputHistoryLayout.entryCapsuleHeight * 0.5,
                 themeColor: chromeBackground,
-                tintOpacity: 0.80,
+                tintOpacity: glass.tintOpacity,
                 colorScheme: colorScheme,
                 materialOverride: colorScheme == .light ? .popover : .hudWindow,
+                backdropOpacity: glass.backdropOpacity,
                 shadowOpacity: 0.18,
                 shadowRadius: 3.5,
                 shadowOffsetY: 1.5
@@ -750,6 +774,7 @@ private struct QuickInputHistoryErrorCapsule: View {
     let text: String
     let width: CGFloat
     let chromeBackground: Color
+    let glassOpacity: Double
     let isExpanded: Bool
 
     private var colorScheme: ColorScheme {
@@ -757,7 +782,11 @@ private struct QuickInputHistoryErrorCapsule: View {
     }
 
     var body: some View {
-        HStack(spacing: 6) {
+        let glass = AgentQuickInputMetrics.glassRecipe(
+            role: .elevatedCapsule(emphasized: false),
+            opacity: glassOpacity
+        )
+        return HStack(spacing: 6) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 11))
                 .foregroundStyle(.orange)
@@ -774,10 +803,11 @@ private struct QuickInputHistoryErrorCapsule: View {
             QuickInputGlassSurface(
                 cornerRadius: QuickInputHistoryLayout.entryCapsuleHeight * 0.5,
                 themeColor: chromeBackground,
-                tintOpacity: 0.80,
+                tintOpacity: glass.tintOpacity,
                 colorScheme: colorScheme,
                 borderColor: Color.orange.opacity(0.55),
                 materialOverride: colorScheme == .light ? .popover : .hudWindow,
+                backdropOpacity: glass.backdropOpacity,
                 shadowOpacity: 0.18,
                 shadowRadius: 3.5,
                 shadowOffsetY: 1.5

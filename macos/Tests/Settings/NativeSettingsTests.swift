@@ -426,6 +426,36 @@ struct NativeSettingsTests {
         #expect(!controller.isShowing("agents:" + id))
     }
 
+    @Test func quickInputOpacityControlUpdatesPersistsAndResetsToDefault() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("settings.json")
+        let settings = OhMyGhosttySettings(fileURL: url)
+        settings.language = .english
+        let controller = NativeSettingsController(settings: settings, initialSelection: .controls)
+        _ = controller.view
+        let form = try #require(controller.children.compactMap { $0 as? NativeSettingsForm }.first)
+        let strings = SettingsStrings(language: .english)
+        #expect(form.rowTitles.contains(strings.quickInputOpacityLabel))
+
+        let controls = descendants(controller.view)
+        let opacitySlider = try #require(controls.compactMap { $0 as? NSSlider }.first { $0.minValue == 5 })
+        #expect(opacitySlider.doubleValue == 45)
+        opacitySlider.doubleValue = 20
+        opacitySlider.sendAction(opacitySlider.action, to: opacitySlider.target)
+        #expect(settings.quickInputOpacity == 0.20)
+
+        let restored = OhMyGhosttySettings(fileURL: url)
+        #expect(restored.quickInputOpacity == 0.20)
+
+        let rowControl = try #require(opacitySlider.superview?.superview)
+        let resetButton = try #require(descendants(rowControl).compactMap { $0 as? SettingsActionButton }
+            .first { $0.title == "Default" })
+        resetButton.performClick(nil)
+        #expect(settings.quickInputOpacity == 0.45)
+        #expect(opacitySlider.doubleValue == 45)
+    }
+
     private func capture(_ view: NSView, name: String) throws {
         view.layoutSubtreeIfNeeded()
         let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))

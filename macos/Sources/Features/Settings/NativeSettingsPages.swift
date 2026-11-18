@@ -322,6 +322,24 @@ extension NativeSettingsController {
         form.section(strings.quickInputSection)
         number(form, strings.quickInputHeightLabel, \.quickInputHeight,
                range: Double(AgentQuickInputMetrics.minimumHeight)...Double(AgentQuickInputMetrics.maximumHeight))
+        let quickInputOpacity = SettingsSlider(
+            value: settings.quickInputOpacity,
+            minimum: AgentQuickInputMetrics.minimumOpacity
+        ) { [weak settings] in
+            settings?.quickInputOpacity = $0
+        }
+        let resetQuickInputOpacity = SettingsActionButton(text("Default", "默认")) { [weak settings, weak quickInputOpacity] in
+            settings?.quickInputOpacity = AgentQuickInputMetrics.defaultOpacity
+            quickInputOpacity?.setValue(AgentQuickInputMetrics.defaultOpacity)
+        }
+        form.row(
+            strings.quickInputOpacityLabel,
+            control: NSStackView(views: [quickInputOpacity, resetQuickInputOpacity]),
+            help: strings.quickInputOpacityCaption
+        )
+        form.refreshers.append { [weak settings, weak quickInputOpacity] in
+            if let settings { quickInputOpacity?.setValue(settings.quickInputOpacity) }
+        }
         toggle(form, strings.quickInputControlJNewlineLabel, \.quickInputControlJNewline)
         form.toggle(strings.quickInputImportLabel, value: !settings.quickInputImportShortcut.isEmpty) { [weak settings] in
             settings?.quickInputImportShortcut = $0 ? "auto" : ""

@@ -368,6 +368,14 @@
       "enum": ["pane", "tab", "global"],
       "type": "string"
     },
+    "keyboard.quickInputOpacity": {
+      "category": "keyboard",
+      "default": 0.45,
+      "description": "Agent Quick Input floating card background opacity.",
+      "maximum": 1,
+      "minimum": 0.05,
+      "type": "number"
+    },
     "notifications.attention": {
       "category": "agents",
       "default": true,

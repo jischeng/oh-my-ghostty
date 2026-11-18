@@ -456,6 +456,13 @@ struct SettingsStrings: Equatable, Sendable {
         t("Waiting for password input in terminal", "终端正在等待密码输入")
     }
     var quickInputHeightLabel: String { t("Composer Height", "输入框高度") }
+    var quickInputOpacityLabel: String { t("Composer Opacity", "输入框不透明度") }
+    var quickInputOpacityCaption: String {
+        t(
+            "Controls frosted-glass opacity for Quick Input and its floating capsules.",
+            "控制快速输入框及悬浮胶囊的毛玻璃不透明度。"
+        )
+    }
     var quickInputControlJNewlineLabel: String { t("Control-J Inserts Newline", "Control-J 换行") }
     var focusedSplitBorderSection: String { t("Focus", "聚焦") }
     var focusedSplitBorderLabel: String { t("Mark focused pane", "标记聚焦窗格") }

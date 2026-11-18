@@ -12,6 +12,18 @@ struct QuickInputSettingsView: View {
                 Text("\(Int(settings.quickInputHeight)) pt").monospacedDigit().frame(width: 52, alignment: .trailing)
             }.frame(width: 200)
         }
+        OMGSettingsRow(strings.quickInputOpacityLabel, subtitle: strings.quickInputOpacityCaption) {
+            HStack {
+                Slider(
+                    value: $settings.quickInputOpacity,
+                    in: AgentQuickInputMetrics.minimumOpacity...AgentQuickInputMetrics.maximumOpacity,
+                    step: 0.05
+                )
+                Text("\(Int((settings.quickInputOpacity * 100).rounded()))%")
+                    .monospacedDigit()
+                    .frame(width: 52, alignment: .trailing)
+            }.frame(width: 200)
+        }
         OMGSettingsRow(strings.quickInputControlJNewlineLabel) {
             Toggle("", isOn: $settings.quickInputControlJNewline).labelsHidden()
         }

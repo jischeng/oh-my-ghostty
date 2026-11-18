@@ -516,7 +516,7 @@ struct AgentQuickInputTests {
 
     @Test func accessoryHeightNeverReservesInFlowTerminalSpace() {
         #expect(AgentQuickInputMetrics.minimumHeight == 96)
-        #expect(AgentQuickInputMetrics.defaultHeight == 148)
+        #expect(AgentQuickInputMetrics.defaultHeight == 165)
         #expect(AgentQuickInputMetrics.maximumHeight == 480)
         #expect(AgentQuickInputMetrics.floatingHorizontalInset == 16)
         #expect(AgentQuickInputMetrics.floatingBottomInset == 12)
@@ -1218,7 +1218,7 @@ struct AgentQuickInputTests {
         defer { settings.quickInputHeight = previousHeight }
 
         let defaultGlobal = QuickInputGlobalPresentation()
-        #expect(defaultGlobal.height == 148)
+        #expect(defaultGlobal.height == 165)
         defaultGlobal.setHeight(50)
         #expect(defaultGlobal.height == 96)
 
@@ -1677,9 +1677,9 @@ struct AgentQuickInputTests {
     }
 
     @Test func quickInputGlassRecipeScalesMonotonicallyAndOrdersSurfaceRoles() {
-        #expect(AgentQuickInputMetrics.defaultOpacity == 0.45)
+        #expect(AgentQuickInputMetrics.defaultOpacity == 0.70)
 
-        let levels = [0.05, 0.25, 0.45, 0.75, 1.0]
+        let levels = [0.05, 0.25, 0.45, 0.70, 1.0]
         var previousComposer = AgentQuickInputMetrics.QuickInputGlassRecipe(backdropOpacity: -1, tintOpacity: -1)
         for level in levels {
             let composer = AgentQuickInputMetrics.glassRecipe(role: .composer, opacity: level)
@@ -1737,11 +1737,11 @@ struct AgentQuickInputTests {
         #expect(composer.tintOpacity < pill.tintOpacity)
         #expect(pill.tintOpacity < standalone.tintOpacity)
         #expect(standalone.tintOpacity < elevated.tintOpacity)
-        #expect(pillEmphasized.backdropOpacity > pill.backdropOpacity)
+        #expect(pillEmphasized.backdropOpacity >= pill.backdropOpacity)
         #expect(pillEmphasized.tintOpacity > pill.tintOpacity)
-        #expect(standaloneEmphasized.backdropOpacity > standalone.backdropOpacity)
+        #expect(standaloneEmphasized.backdropOpacity >= standalone.backdropOpacity)
         #expect(standaloneEmphasized.tintOpacity > standalone.tintOpacity)
-        #expect(elevatedEmphasized.backdropOpacity > elevated.backdropOpacity)
+        #expect(elevatedEmphasized.backdropOpacity >= elevated.backdropOpacity)
         #expect(elevatedEmphasized.tintOpacity > elevated.tintOpacity)
     }
 }

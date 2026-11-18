@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 enum NativeActionStyle {
-    case plain, bordered, prominent
+    case plain, bordered, prominent, destructive
 }
 
 /// Layout may remain declarative; activation, accessibility and menus belong to AppKit.
@@ -218,6 +218,12 @@ class NativeActionControl: NSButton, NSMenuDelegate {
 
     var effectiveFill: NSColor {
         if !isEnabled { return actionStyle == .plain ? .clear : theme.controlFill }
+        if actionStyle == .destructive {
+            if isHighlighted && NativePointerLocation.contains(self) {
+                return NSColor.systemRed.withAlphaComponent(0.38)
+            }
+            return NSColor.systemRed.withAlphaComponent(isHovered ? 0.30 : 0.20)
+        }
         if isMenuOpen || (isHighlighted && NativePointerLocation.contains(self)) { return theme.selectedFill }
         if !showsKeyboardFocusBorder, window?.firstResponder === self { return theme.hoverFill }
         if actionStyle == .prominent { return theme.accent.withAlphaComponent(isHovered ? 0.32 : 0.23) }
@@ -244,12 +250,26 @@ class NativeActionControl: NSButton, NSMenuDelegate {
         effectiveFill.setFill()
         shape.fill()
         if actionStyle != .plain || isMenuOpen || (showsKeyboardFocusBorder && window?.firstResponder === self) {
-            (isEnabled && (isMenuOpen || window?.firstResponder === self)
-                ? theme.accent.withAlphaComponent(0.55) : theme.border).setStroke()
+            let strokeColor: NSColor = if isEnabled && actionStyle == .destructive {
+                NSColor.systemRed.withAlphaComponent(isHovered || window?.firstResponder === self ? 0.65 : 0.42)
+            } else if isEnabled && (isMenuOpen || window?.firstResponder === self) {
+                theme.accent.withAlphaComponent(0.55)
+            } else {
+                theme.border
+            }
+            strokeColor.setStroke()
             shape.lineWidth = 0.5
             shape.stroke()
         }
-        let color = isEnabled ? theme.foreground : theme.disabled
+        let color: NSColor = if !isEnabled {
+            theme.disabled
+        } else if actionStyle == .destructive, theme.background.isLightColor {
+            NSColor(srgbRed: 0.80, green: 0.14, blue: 0.18, alpha: 1)
+        } else if actionStyle == .destructive {
+            NSColor(srgbRed: 1.0, green: 0.44, blue: 0.46, alpha: 1)
+        } else {
+            theme.foreground
+        }
         if let image {
             let tinted = NSImage(size: image.size, flipped: false) { rect in
                 image.draw(in: rect)

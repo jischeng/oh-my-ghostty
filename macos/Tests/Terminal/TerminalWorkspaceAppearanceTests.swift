@@ -164,5 +164,35 @@ struct TerminalWorkspaceAppearanceTests {
                     .write(to: URL(fileURLWithPath: "/tmp/omg-workspace-\(editing ? "edit" : "create")-\(name).png"))
             }
         }
+
+        // Delete confirmation shrinks to a compact card, pins destructive confirm + cancel
+        // at the bottom-trailing edge, and restores full height on Back.
+        let deletable = try #require(fixture.store.create(name: "test", symbol: "folder", color: "blue"))
+        fixture.model.beginDelete(deletable)
+        try await Task.sleep(for: .milliseconds(50))
+        let deleteSize = picker.fittingSize(proposedWidth: nil)
+        #expect(deleteSize.width == 360)
+        #expect(deleteSize.height >= 188 && deleteSize.height <= 240)
+        #expect(picker.preferredContentSize == deleteSize)
+        window.setContentSize(deleteSize)
+        picker.view.layoutSubtreeIfNeeded()
+
+        let confirmDelete = try #require(find(NativeActionControl.self, in: picker.view).first {
+            $0.accessibilityIdentifier() == "workspace.confirm-delete"
+        })
+        let cancelDelete = try #require(find(NativeActionControl.self, in: picker.view).first {
+            $0.title == WorkspaceL10n.text("Cancel", "取消")
+        })
+        #expect(confirmDelete.controlStyle == .destructive)
+        let confirmRect = confirmDelete.convert(confirmDelete.bounds, to: picker.view)
+        let cancelRect = cancelDelete.convert(cancelDelete.bounds, to: picker.view)
+        #expect(abs(confirmRect.minY - 14) < 2)
+        #expect(abs(cancelRect.minY - 14) < 2)
+        #expect(abs(confirmRect.maxX - (picker.view.bounds.maxX - 16)) < 2)
+        #expect(abs((confirmRect.minX - cancelRect.maxX) - 8) < 2)
+
+        fixture.model.back()
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(picker.preferredContentSize == NSSize(width: 360, height: 500))
     }
 }

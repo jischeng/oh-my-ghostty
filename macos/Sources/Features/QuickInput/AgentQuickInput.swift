@@ -219,7 +219,7 @@ enum AgentQuickInputFocusDirection: Equatable {
 
 enum AgentQuickInputMetrics {
     static let minimumHeight: CGFloat = 96
-    static let defaultHeight: CGFloat = 148
+    static let defaultHeight: CGFloat = 165
     static let maximumHeight: CGFloat = 480
     static let minimumTerminalHeight: CGFloat = 160
     static let floatingHorizontalInset: CGFloat = 16
@@ -234,7 +234,7 @@ enum AgentQuickInputMetrics {
     static let collapsedQueueMinimumWidth: CGFloat = 96
     static let collapsedQueueMaximumWidth: CGFloat = 224
     static let minimumOpacity: Double = 0.05
-    static let defaultOpacity: Double = 0.45
+    static let defaultOpacity: Double = 0.70
     static let maximumOpacity: Double = 1.0
     static let queueButtonHitSize: CGFloat = 30
     static let queueHoverDelayMilliseconds = 300

@@ -92,6 +92,7 @@ final class TerminalWorkspacePickerController: NSViewController, NSSearchFieldDe
             self?.table.enumerateAvailableRowViews { row, _ in row.needsDisplay = true }
             self?.footer.textColor = theme.secondary
             self?.moveTitle.textColor = theme.secondary
+            self?.deleteDescriptionLabel.textColor = theme.secondary
         }
         root.wantsLayer = true
         root.setAccessibilityIdentifier("workspace.picker")
@@ -227,7 +228,12 @@ final class TerminalWorkspacePickerController: NSViewController, NSSearchFieldDe
     }
 
     func fittingSize(proposedWidth _: CGFloat?) -> CGSize {
-        CGSize(width: 360, height: 500)
+        if case .delete = model.page {
+            stack.layoutSubtreeIfNeeded()
+            let fitted = ceil(stack.fittingSize.height) + 28
+            return CGSize(width: 360, height: min(280, max(188, fitted)))
+        }
+        return CGSize(width: 360, height: 500)
     }
 
     private var listHeight: CGFloat { min(330, 54 * CGFloat(max(1, model.filtered.count))) }
@@ -420,18 +426,76 @@ final class TerminalWorkspacePickerController: NSViewController, NSSearchFieldDe
     }
 
     private func buildDeletion(id: UUID, into pageStack: NSStackView) {
+        let badge = NSView()
+        badge.wantsLayer = true
+        badge.layer?.cornerRadius = 8
+        badge.layer?.backgroundColor = NSColor.systemRed.withAlphaComponent(0.14).cgColor
+        badge.translatesAutoresizingMaskIntoConstraints = false
+        let badgeIcon = NSImageView()
+        badgeIcon.image = NSImage(
+            systemSymbolName: "trash",
+            accessibilityDescription: nil
+        )?.withSymbolConfiguration(.init(pointSize: 14, weight: .semibold))
+        badgeIcon.contentTintColor = .systemRed
+        badgeIcon.translatesAutoresizingMaskIntoConstraints = false
+        badge.addSubview(badgeIcon)
+
         deleteTitleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        deleteTitleLabel.lineBreakMode = .byTruncatingTail
+        deleteTitleLabel.maximumNumberOfLines = 2
+        deleteTitleLabel.preferredMaxLayoutWidth = 284
+
         deleteDescriptionLabel.font = .systemFont(ofSize: 12)
-        deleteDescriptionLabel.textColor = .secondaryLabelColor
+        deleteDescriptionLabel.textColor = root.theme.secondary
         deleteDescriptionLabel.maximumNumberOfLines = 0
-        let buttons = NSStackView(views: [cancelButton, NSView(), confirmButton])
+        deleteDescriptionLabel.lineBreakMode = .byWordWrapping
+        deleteDescriptionLabel.preferredMaxLayoutWidth = 284
+
+        let textStack = NSStackView(views: [deleteTitleLabel, deleteDescriptionLabel])
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 5
+        textStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let bodyRow = NSStackView(views: [badge, textStack])
+        bodyRow.orientation = .horizontal
+        bodyRow.alignment = .top
+        bodyRow.spacing = 12
+        bodyRow.translatesAutoresizingMaskIntoConstraints = false
+
+        let divider = NSBox()
+        divider.boxType = .separator
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .vertical)
+
+        let buttons = NSStackView(views: [NSView(), cancelButton, confirmButton])
         buttons.orientation = .horizontal
-        pageStack.addArrangedSubview(deleteTitleLabel)
-        pageStack.addArrangedSubview(deleteDescriptionLabel)
+        buttons.distribution = .fill
+        buttons.alignment = .centerY
+        buttons.spacing = 8
+
+        pageStack.addArrangedSubview(divider)
+        pageStack.addArrangedSubview(bodyRow)
+        pageStack.addArrangedSubview(spacer)
         pageStack.addArrangedSubview(buttons)
-        buttons.widthAnchor.constraint(equalTo: pageStack.widthAnchor).isActive = true
+
+        NSLayoutConstraint.activate([
+            divider.widthAnchor.constraint(equalTo: pageStack.widthAnchor),
+            badge.widthAnchor.constraint(equalToConstant: 32),
+            badge.heightAnchor.constraint(equalToConstant: 32),
+            badgeIcon.centerXAnchor.constraint(equalTo: badge.centerXAnchor),
+            badgeIcon.centerYAnchor.constraint(equalTo: badge.centerYAnchor),
+            bodyRow.widthAnchor.constraint(equalTo: pageStack.widthAnchor),
+            deleteTitleLabel.widthAnchor.constraint(equalTo: textStack.widthAnchor),
+            deleteDescriptionLabel.widthAnchor.constraint(equalTo: textStack.widthAnchor),
+            spacer.heightAnchor.constraint(greaterThanOrEqualToConstant: 8),
+            buttons.widthAnchor.constraint(equalTo: pageStack.widthAnchor),
+            buttons.heightAnchor.constraint(equalToConstant: 28),
+        ])
+
         confirmButton.title = WorkspaceL10n.text("Delete Workspace", "删除工作区")
-        confirmButton.contentTintColor = .systemRed
+        confirmButton.controlStyle = .destructive
         confirmButton.action = #selector(confirmDelete)
         confirmButton.setAccessibilityIdentifier("workspace.confirm-delete")
         renderDeletionControls(id: id)
@@ -541,6 +605,7 @@ final class TerminalWorkspacePickerController: NSViewController, NSSearchFieldDe
         confirmButton.title = model.page == .create
             ? WorkspaceL10n.text("Create & Open", "创建并打开")
             : WorkspaceL10n.text("Save", "保存")
+        confirmButton.controlStyle = .prominent
         confirmButton.contentTintColor = nil
         confirmButton.action = #selector(save)
         confirmButton.keyEquivalent = "\r"
@@ -567,8 +632,9 @@ final class TerminalWorkspacePickerController: NSViewController, NSSearchFieldDe
             "Its \(model.tabCount(id, allWindows: true)) tabs will move to “\(destination.name)” in their own windows. Running sessions will stay open.",
             "其中的 \(model.tabCount(id, allWindows: true)) 个标签将移至各自窗口的“\(destination.name)”。运行中的会话会保留。"
         )
+        deleteDescriptionLabel.textColor = root.theme.secondary
         confirmButton.title = WorkspaceL10n.text("Delete Workspace", "删除工作区")
-        confirmButton.contentTintColor = .systemRed
+        confirmButton.controlStyle = .destructive
         confirmButton.action = #selector(confirmDelete)
         confirmButton.keyEquivalent = ""
         confirmButton.setAccessibilityIdentifier("workspace.confirm-delete")

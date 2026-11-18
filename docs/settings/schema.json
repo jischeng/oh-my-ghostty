@@ -334,7 +334,7 @@
     },
     "keyboard.quickInputHeight": {
       "category": "keyboard",
-      "default": 148,
+      "default": 165,
       "description": "Last committed Agent Quick Input floating card height in points.",
       "maximum": 480,
       "minimum": 96,
@@ -370,7 +370,7 @@
     },
     "keyboard.quickInputOpacity": {
       "category": "keyboard",
-      "default": 0.45,
+      "default": 0.7,
       "description": "Agent Quick Input floating card background opacity.",
       "maximum": 1,
       "minimum": 0.05,

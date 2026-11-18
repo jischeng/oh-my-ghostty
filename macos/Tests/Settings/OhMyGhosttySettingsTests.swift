@@ -953,7 +953,7 @@ struct OhMyGhosttySettingsTests {
     @Test func quickInputOpacityDefaultsClampsAndReloadsFromDisk() throws {
         let (settings, url) = temporarySettings()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        #expect(settings.quickInputOpacity == 0.45)
+        #expect(settings.quickInputOpacity == 0.70)
 
         settings.quickInputOpacity = 0.0
         #expect(settings.quickInputOpacity == 0.05)

@@ -486,12 +486,12 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Agent draft import: auto selects the external-editor shortcut; empty disables; other values override it. Comma separates chords.",
             requiresNewWindow: true, category: "keyboard"),
         .init(
-            id: "keyboard.quickInputHeight", type: .number, defaultValue: "148",
+            id: "keyboard.quickInputHeight", type: .number, defaultValue: "165",
             allowedValues: nil, minimum: 96, maximum: 480,
             description: "Last committed Agent Quick Input dock height in points.",
             requiresNewWindow: false, category: "keyboard"),
         .init(
-            id: "keyboard.quickInputOpacity", type: .number, defaultValue: "0.45",
+            id: "keyboard.quickInputOpacity", type: .number, defaultValue: "0.7",
             allowedValues: nil,
             minimum: AgentQuickInputMetrics.minimumOpacity,
             maximum: AgentQuickInputMetrics.maximumOpacity,

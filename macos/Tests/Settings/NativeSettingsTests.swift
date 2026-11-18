@@ -440,7 +440,7 @@ struct NativeSettingsTests {
 
         let controls = descendants(controller.view)
         let opacitySlider = try #require(controls.compactMap { $0 as? NSSlider }.first { $0.minValue == 5 })
-        #expect(opacitySlider.doubleValue == 45)
+        #expect(opacitySlider.doubleValue == 70)
         opacitySlider.doubleValue = 20
         opacitySlider.sendAction(opacitySlider.action, to: opacitySlider.target)
         #expect(settings.quickInputOpacity == 0.20)
@@ -452,8 +452,8 @@ struct NativeSettingsTests {
         let resetButton = try #require(descendants(rowControl).compactMap { $0 as? SettingsActionButton }
             .first { $0.title == "Default" })
         resetButton.performClick(nil)
-        #expect(settings.quickInputOpacity == 0.45)
-        #expect(opacitySlider.doubleValue == 45)
+        #expect(settings.quickInputOpacity == 0.70)
+        #expect(opacitySlider.doubleValue == 70)
     }
 
     private func capture(_ view: NSView, name: String) throws {

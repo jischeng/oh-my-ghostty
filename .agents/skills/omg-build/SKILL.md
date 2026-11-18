@@ -2,7 +2,7 @@
 name: omg-build
 description: Build, compile, test, and run Oh My Ghostty (OMG) on macOS without opening the Xcode GUI. Use when asked to build OMG, compile GhosttyKit, run tests, diagnose build errors, or run OMG from source. Covers Xcode command-line workflows, Nushell scripts, Zig core builds, and fast targeted testing.
 metadata:
-  compatibility: macOS, Xcode command-line tools, Zig 0.16.0 via mise, Nushell, SwiftLint.
+  compatibility: macOS, Xcode command-line tools, Zig 0.17.0 via mise, Nushell, SwiftLint.
 ---
 
 # OMG Build Guide
@@ -19,7 +19,7 @@ Use this skill in the `oh-my-ghostty` repository to build, compile, and test the
    - Development builds target `macos/build/Debug/OMG.app` or `/Applications/OMG Dev.app`.
 3. **Use the right build tool for the layer**:
    - **macOS Swift app**: `macos/build.nu` (wraps `xcodebuild` cleanly).
-   - **Ghostty Zig core / GhosttyKit**: `mise exec zig@0.16.0 -- zig build`.
+   - **Ghostty Zig core / GhosttyKit**: `mise exec zig@0.17.0 -- zig build`.
    - **Dev install**: `.agents/skills/omg-release/scripts/install-dev.sh`.
 4. **Resolve local tools without the Apple Python installer shim**:
    - Use `dist/macos/dev-tool.sh python3 ...`, `... xcrun ...`, and
@@ -125,13 +125,13 @@ When modifying Zig files under `src/`:
 
 ```bash
 # Always pass -Dversion-string to avoid the upstream tag check assertion
-mise exec zig@0.16.0 -- zig build test -Dversion-string=1.3.2-dev
+mise exec zig@0.17.0 -- zig build test -Dversion-string=1.3.2-dev
 
 # Run targeted Zig tests with a filter
-mise exec zig@0.16.0 -- zig build test -Dtest-filter="font cache invalidates" -Dversion-string=1.3.2-dev
+mise exec zig@0.17.0 -- zig build test -Dtest-filter="font cache invalidates" -Dversion-string=1.3.2-dev
 
 # libghostty-vt tests (when editing include/ghostty/vt or src/vt)
-mise exec zig@0.16.0 -- zig build test-lib-vt -Dversion-string=1.3.2-dev
+mise exec zig@0.17.0 -- zig build test-lib-vt -Dversion-string=1.3.2-dev
 ```
 
 ---
@@ -145,7 +145,7 @@ The Swift app links against `macos/GhosttyKit.xcframework`. When Zig files (`src
 ```bash
 env -u SDKROOT -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
   -u ALL_PROXY -u all_proxy \
-  mise exec zig@0.16.0 -- zig build \
+  mise exec zig@0.17.0 -- zig build \
     -Doptimize=ReleaseFast \
     -Demit-xcframework=true \
     -Dxcframework-target=native \
@@ -158,7 +158,7 @@ env -u SDKROOT -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
 ```bash
 env -u SDKROOT -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
   -u ALL_PROXY -u all_proxy \
-  mise exec zig@0.16.0 -- zig build \
+  mise exec zig@0.17.0 -- zig build \
     -Doptimize=ReleaseFast \
     -Demit-xcframework=true \
     -Dxcframework-target=universal \
@@ -177,7 +177,7 @@ Before committing changes or installing to OMG Dev, run the validation gate:
 dist/macos/dev-tool.sh swiftlint lint --strict --config macos/.swiftlint.yml macos
 
 # 2. Zig formatting
-git ls-files -z '*.zig' | xargs -0 mise exec zig@0.16.0 -- zig fmt --check
+git ls-files -z '*.zig' | xargs -0 mise exec zig@0.17.0 -- zig fmt --check
 
 # 3. OMG documentation contract (checks PLUGIN_DEVELOPMENT.md & friends)
 dist/macos/dev-tool.sh python3 dist/check_omg_docs.py

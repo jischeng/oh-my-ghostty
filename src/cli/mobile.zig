@@ -38,7 +38,7 @@ fn extractXMLPlistBundleID(raw: []const u8) ?[]const u8 {
 }
 
 fn detectHostAppBundle(io: std.Io, alloc: std.mem.Allocator, executable_dir: []const u8) ?HostAppBundle {
-    if (comptime builtin.os.tag != .macos) return null;
+    if (comptime builtin.target.os.tag != .macos) return null;
     if (!std.mem.eql(u8, std.fs.path.basename(executable_dir), "MacOS")) return null;
     const contents_dir = std.fs.path.dirname(executable_dir) orelse return null;
     if (!std.mem.eql(u8, std.fs.path.basename(contents_dir), "Contents")) return null;
@@ -128,7 +128,7 @@ test "mobile helper stays in executable bundle" {
 }
 
 test "populateHostBundleEnv records enclosing OMG bundle metadata and skips unrelated apps" {
-    if (comptime builtin.os.tag != .macos) return;
+    if (comptime builtin.target.os.tag != .macos) return;
     const testing = std.testing;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

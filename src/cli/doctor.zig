@@ -7,7 +7,7 @@ const Action = @import("ghostty.zig").Action;
 const Config = @import("../config.zig").Config;
 const global = @import("../global.zig");
 
-const fstatat_sym = if (builtin.os.tag == .windows) void else if (posix.lfs64_abi) posix.system.fstatat64 else posix.system.fstatat;
+const fstatat_sym = if (builtin.target.os.tag == .windows) void else if (posix.lfs64_abi) posix.system.fstatat64 else posix.system.fstatat;
 
 pub const Options = struct {
     /// Emit machine-readable JSON diagnostics to stdout.
@@ -180,7 +180,7 @@ pub fn run(gpa: Allocator) !u8 {
 }
 
 fn defaultSSHControlDir(alloc: Allocator) ![]const u8 {
-    if (comptime builtin.os.tag == .windows) {
+    if (comptime builtin.target.os.tag == .windows) {
         return try alloc.dupe(u8, "");
     }
     const uid = std.c.getuid();
@@ -206,7 +206,7 @@ pub fn configHasGlobalKeybinds(cfg: *const Config) bool {
 }
 
 fn checkMacOSAccessibilityTrusted() bool {
-    if (comptime builtin.os.tag != .macos) return true;
+    if (comptime builtin.target.os.tag != .macos) return true;
     const handle = std.c.dlopen(
         "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices",
         .{ .LAZY = true },
@@ -567,7 +567,7 @@ fn inspectMacOSLeafCertificate(
 }
 
 pub fn inspectSignerTrustAtPath(alloc: Allocator, target_path: []const u8) SignerTrustReport {
-    if (comptime builtin.os.tag != .macos) return defaultSignerTrustReport();
+    if (comptime builtin.target.os.tag != .macos) return defaultSignerTrustReport();
     const cf = MacOSCF.load() orelse return defaultSignerTrustReport();
     defer cf.deinit();
     const sec = MacOSSecurity.load() orelse return defaultSignerTrustReport();
@@ -640,7 +640,7 @@ pub fn inspectSignerTrustAtPath(alloc: Allocator, target_path: []const u8) Signe
 }
 
 fn checkMacOSSignerTrust(io: std.Io, alloc: Allocator, executable_dir: ?[]const u8) SignerTrustReport {
-    if (comptime builtin.os.tag != .macos) return defaultSignerTrustReport();
+    if (comptime builtin.target.os.tag != .macos) return defaultSignerTrustReport();
     if (executable_dir) |exe_dir| {
         if (std.mem.eql(u8, std.fs.path.basename(exe_dir), "MacOS")) {
             if (std.fs.path.dirname(exe_dir)) |contents| {
@@ -723,7 +723,7 @@ pub fn inspectEnvironment(
         } else |_| {}
     }
 
-    const expected_uid: u32 = if (comptime builtin.os.tag == .windows)
+    const expected_uid: u32 = if (comptime builtin.target.os.tag == .windows)
         0
     else
         params.expected_uid orelse @intCast(std.c.getuid());
@@ -731,7 +731,7 @@ pub fn inspectEnvironment(
     var ssh_exists = false;
     var ssh_private = true;
     if (params.ssh_control_dir.len > 0) {
-        if (comptime builtin.os.tag != .windows) {
+        if (comptime builtin.target.os.tag != .windows) {
             switch (try posixLstat(alloc, params.ssh_control_dir)) {
                 .not_found => {
                     ssh_exists = false;
@@ -794,7 +794,7 @@ pub fn inspectEnvironment(
     if (params.home_dir.len > 0) {
         for (agent_rel_paths) |rel| {
             const bak_path = try std.fmt.allocPrint(alloc, "{s}/{s}.omg.bak", .{ params.home_dir, rel });
-            if (comptime builtin.os.tag != .windows) {
+            if (comptime builtin.target.os.tag != .windows) {
                 switch (try posixLstat(alloc, bak_path)) {
                     .not_found => continue,
                     .inaccessible => {
@@ -846,7 +846,7 @@ pub fn inspectEnvironment(
 
     if (params.home_dir.len > 0) {
         var should_read_settings = false;
-        if (comptime builtin.os.tag != .windows) {
+        if (comptime builtin.target.os.tag != .windows) {
             switch (try posixLstat(alloc, settings_path)) {
                 .not_found => {},
                 .inaccessible => {
@@ -893,7 +893,7 @@ pub fn inspectEnvironment(
                     settings_valid = false;
                 }
             } else |err| {
-                if (comptime builtin.os.tag == .windows) {
+                if (comptime builtin.target.os.tag == .windows) {
                     if (err != error.FileNotFound) {
                         settings_exists = true;
                         settings_private = false;
@@ -1115,7 +1115,7 @@ test "doctor reports TCC warning and audits sessions, backups, and portable sett
     {
         var d = try std.Io.Dir.openDirAbsolute(testing.io, ssh_mux_path, .{});
         defer d.close(testing.io);
-        if (comptime builtin.os.tag != .windows) {
+        if (comptime builtin.target.os.tag != .windows) {
             try d.setPermissions(testing.io, .fromMode(0o700));
         }
     }
@@ -1173,8 +1173,8 @@ const PosixLstatResult = union(enum) {
 };
 
 fn posixLstat(alloc: Allocator, path: []const u8) !PosixLstatResult {
-    if (comptime builtin.os.tag == .windows) unreachable;
-    const path_z = try alloc.dupeZ(u8, path);
+    if (comptime builtin.target.os.tag == .windows) unreachable;
+    const path_z = try alloc.dupeSentinel(u8, path, 0);
     var st = std.mem.zeroes(posix.Stat);
     while (true) {
         switch (posix.errno(fstatat_sym(
@@ -1215,7 +1215,7 @@ test "doctor rejects symlinks, wrong-UID squatting, and resolves all dev channel
         settingsRelPathForExecutableDir("/Applications/OMG.app/Contents/MacOS"),
     );
 
-    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    if (comptime builtin.target.os.tag == .windows) return error.SkipZigTest;
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1327,7 +1327,7 @@ test "doctor reports signer_trust warnings in overall status and inspects real m
     try testing.expect(std.mem.indexOf(u8, json_alloc.written(), "\"signer_trust\"") != null);
     try testing.expect(std.mem.indexOf(u8, json_alloc.written(), "\"self_signed_untrusted\"") != null);
 
-    if (comptime builtin.os.tag == .macos) {
+    if (comptime builtin.target.os.tag == .macos) {
         const cf = MacOSCF.load().?;
         defer cf.deinit();
         const sec = MacOSSecurity.load().?;

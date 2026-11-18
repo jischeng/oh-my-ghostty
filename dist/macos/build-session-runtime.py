@@ -131,7 +131,7 @@ def main():
         digest.update(str(path.relative_to(ROOT)).encode())
         digest.update(path.read_bytes())
     revision = digest.hexdigest()[:20]
-    zig = Path(subprocess.check_output(['mise', 'exec', 'zig@0.16.0', '--', 'which', 'zig'], text=True).strip())
+    zig = Path(subprocess.check_output(['mise', 'exec', 'zig@0.17.0', '--', 'which', 'zig'], text=True).strip())
     zig_ver = subprocess.check_output([str(zig), 'version'], text=True).strip()
     rustc = subprocess.check_output(['rustup', 'which', 'rustc'], text=True).strip()
     rustc_ver = subprocess.check_output([rustc, '--version'], text=True).strip()

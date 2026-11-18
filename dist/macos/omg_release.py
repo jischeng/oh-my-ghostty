@@ -493,7 +493,7 @@ def run_parallel_static_gates(root: Path, changed: list[str]) -> list[dict[str, 
         ("release-contract", ["bash", dev_tool, "python3", "-m", "unittest", "discover", "-s", "dist", "-p", "test_omg_release.py"]),
     ]
     if zig_changed:
-        tasks.append(("zig-fmt", ["mise", "exec", "zig@0.16.0", "--", "zig", "fmt", "--check", *zig_changed]))
+        tasks.append(("zig-fmt", ["mise", "exec", "zig@0.17.0", "--", "zig", "fmt", "--check", *zig_changed]))
 
     results: list[dict[str, object]] = []
     if not zig_changed:

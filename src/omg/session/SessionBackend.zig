@@ -12,13 +12,25 @@ const internal_os = @import("../../os/main.zig");
 const SnapshotPresentation = @import("SnapshotPresentation.zig");
 const build_config = @import("../../build_config.zig");
 const connect_wait_budget_us: u64 = 60_000_000;
-const c = @cImport({
-    @cInclude("sys/socket.h");
-    @cInclude("sys/un.h");
-    @cInclude("unistd.h");
-    @cInclude("sys/time.h");
-    @cInclude("errno.h");
-});
+const c = struct {
+    const struct_sockaddr_un = std.c.sockaddr.un;
+    const struct_timeval = std.c.timeval;
+    const AF_UNIX: c_int = std.c.AF.UNIX;
+    const SOCK_STREAM: c_int = std.c.SOCK.STREAM;
+    const SOL_SOCKET: c_int = std.c.SOL.SOCKET;
+    const SO_SNDTIMEO: c_int = std.c.SO.SNDTIMEO;
+    const SHUT_RDWR: c_int = std.c.SHUT.RDWR;
+    const MSG_DONTWAIT: c_int = std.c.MSG.DONTWAIT;
+    extern "c" fn socket(domain: c_int, sock_type: c_int, protocol: c_int) c_int;
+    extern "c" fn socketpair(domain: c_int, sock_type: c_int, protocol: c_int, sv: *[2]c_int) c_int;
+    extern "c" fn setsockopt(sockfd: c_int, level: c_int, optname: c_int, optval: ?*const anyopaque, optlen: std.c.socklen_t) c_int;
+    extern "c" fn shutdown(sockfd: c_int, how: c_int) c_int;
+    extern "c" fn close(fd: c_int) c_int;
+    extern "c" fn send(sockfd: c_int, buf: *const anyopaque, len: usize, flags: c_int) isize;
+    extern "c" fn recv(sockfd: c_int, buf: *anyopaque, len: usize, flags: c_int) isize;
+    extern "c" fn read(fd: c_int, buf: [*]u8, nbyte: usize) isize;
+    extern "c" fn connect(sockfd: c_int, sock_addr: *const std.c.sockaddr, addrlen: std.c.socklen_t) c_int;
+};
 const max_pre_ready_input = 64 * 1024;
 alloc: std.mem.Allocator,
 path: [:0]u8,
@@ -74,7 +86,7 @@ pub const Options = struct {
 };
 
 pub fn init(alloc: std.mem.Allocator, path: []const u8, pane_id: ?[]const u8, options: Options) !Self {
-    const owned_path = try alloc.dupeZ(u8, path);
+    const owned_path = try alloc.dupeSentinel(u8, path, 0);
     errdefer alloc.free(owned_path);
     const owned_id = if (pane_id) |id| try alloc.dupe(u8, id) else null;
     errdefer if (owned_id) |id| alloc.free(id);
@@ -138,7 +150,7 @@ pub const ThreadData = struct {
 };
 pub fn threadEnter(self: *Self, _: std.mem.Allocator, io: *HostIO, td: *HostIO.ThreadData) !void {
     const address: c.struct_sockaddr_un = undefined;
-    if (self.path.len >= address.sun_path.len) return error.SocketPathTooLong;
+    if (self.path.len >= address.path.len) return error.SocketPathTooLong;
     const grid = io.size.grid();
     self.requested_size.store((@as(u32, grid.columns) << 16) | grid.rows, .release);
     self.requested_pixels.store(packedPixels(io.size.terminal()), .release);
@@ -151,11 +163,11 @@ fn openSocket(self: *Self) !void {
     if (!self.attachment_enabled.load(.acquire) or self.close_requested.load(.acquire)) return error.SessionPaused;
     self.fd = c.socket(c.AF_UNIX, c.SOCK_STREAM, 0);
     if (self.fd < 0) return error.SocketFailed;
-    if (@hasDecl(c, "SO_NOSIGPIPE")) {
+    if (@hasDecl(std.c.SO, "NOSIGPIPE")) {
         var enabled: c_int = 1;
-        _ = c.setsockopt(self.fd, c.SOL_SOCKET, c.SO_NOSIGPIPE, &enabled, @sizeOf(c_int));
+        _ = c.setsockopt(self.fd, c.SOL_SOCKET, std.c.SO.NOSIGPIPE, &enabled, @sizeOf(c_int));
     }
-    var timeout = c.struct_timeval{ .tv_sec = 1, .tv_usec = 0 };
+    var timeout = c.struct_timeval{ .sec = 1, .usec = 0 };
     _ = c.setsockopt(self.fd, c.SOL_SOCKET, c.SO_SNDTIMEO, &timeout, @sizeOf(@TypeOf(timeout)));
 }
 fn closeSocket(self: *Self) void {
@@ -557,7 +569,7 @@ fn updateProcessInfo(self: *Self, value: ProcessMetadata) !void {
         }
     }
     if (self.tty_names.items.len >= 64) return error.InvalidMetadata;
-    const saved = try self.alloc.dupeZ(u8, name);
+    const saved = try self.alloc.dupeSentinel(u8, name, 0);
     errdefer self.alloc.free(saved);
     try self.tty_names.append(self.alloc, saved);
     self.tty_name.store(@intFromPtr(saved.ptr), .release);
@@ -830,8 +842,8 @@ fn nextReconnectDelay(delay_us: u32) u32 {
 
 fn readLoop(self: *Self, io: *HostIO, epoch: u64, attached: *bool, connected_once: *bool) !void {
     var address: c.struct_sockaddr_un = std.mem.zeroes(c.struct_sockaddr_un);
-    address.sun_family = c.AF_UNIX;
-    @memcpy(@as([*]u8, @ptrCast(&address.sun_path))[0..self.path.len], self.path);
+    address.family = c.AF_UNIX;
+    @memcpy(@as([*]u8, @ptrCast(&address.path))[0..self.path.len], self.path);
     // Deployment may upload the runtime before publishing the local socket.
     // This runs on the dedicated reader, never the AppKit thread.
     var retry_delay_us: u32 = 100_000;
@@ -1656,7 +1668,7 @@ fn normalizeRestoredPwd(alloc: std.mem.Allocator, term: *terminal.Terminal) void
     defer arena.deinit();
     const path: []const u8 = path: {
         const uri = internal_os.uri.parse(raw, .{
-            .mac_address = comptime @import("builtin").os.tag != .macos,
+            .mac_address = comptime @import("builtin").target.os.tag != .macos,
             .raw_path = std.mem.startsWith(u8, raw, "kitty-shell-cwd://"),
         }) catch break :path "";
         if (!std.mem.eql(u8, uri.scheme, "file") and !std.mem.eql(u8, uri.scheme, "kitty-shell-cwd")) break :path "";

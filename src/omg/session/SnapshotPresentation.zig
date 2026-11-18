@@ -17,7 +17,14 @@ pub fn prepare(previous: *terminal.Terminal, replacement: *terminal.Terminal) vo
         replacement.screens.generations.put(key, previous.screens.generation(key) +% 1);
     }
     if (comptime terminal.options.kitty_graphics) {
-        replacement.screens.active.kitty_images.dirty = true;
+        for ([_]terminal.ScreenSet.Key{ .primary, .alternate }) |key| {
+            const old_screen = previous.screens.get(key) orelse continue;
+            const new_screen = replacement.screens.get(key) orelse continue;
+            new_screen.kitty_images.dirty = old_screen.kitty_images.dirty +% 1;
+            if (new_screen.kitty_images.generation == old_screen.kitty_images.generation) {
+                new_screen.kitty_images.generation +%= 1;
+            }
+        }
     }
     replacement.flags.search_viewport_dirty = true;
     // Secure input belongs to the local view; termios metadata updates it via

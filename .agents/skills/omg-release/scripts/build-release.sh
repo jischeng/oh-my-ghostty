@@ -72,7 +72,7 @@ rm -rf "$build_root"
 mkdir -p "$build_root" "$cache_root"
 
 # 1. Universal GhosttyKit.xcframework (content-addressed cache across patch releases).
-zig_ver=$(mise exec zig@0.16.0 -- zig version)
+zig_ver=$(mise exec zig@0.17.0 -- zig version)
 gk_key=$(python3 - "$repo_root" "$ghostty_version" "$zig_ver" <<'PY'
 import hashlib
 from pathlib import Path
@@ -117,7 +117,7 @@ if [[ "$no_cache" == "0" && -s "$gk_cached_lib" ]]; then
 else
   env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
     -u ALL_PROXY -u all_proxy \
-    mise exec zig@0.16.0 -- zig build \
+    mise exec zig@0.17.0 -- zig build \
       -Doptimize=ReleaseFast \
       -Demit-xcframework=true \
       -Dxcframework-target=universal \

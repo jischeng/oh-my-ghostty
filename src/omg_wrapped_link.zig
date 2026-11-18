@@ -25,7 +25,7 @@ pub const Result = struct {
     pub fn fromMatch(alloc: Allocator, match: terminal.StringMap.Match) !Result {
         const lo = match.offset + @as(usize, @intCast(match.region.starts()[0]));
         const hi = match.offset + @as(usize, @intCast(match.region.ends()[0]));
-        const target = try alloc.dupeZ(u8, match.map.string[lo..hi]);
+        const target = try alloc.dupeSentinel(u8, match.map.string[lo..hi], 0);
         errdefer alloc.free(target);
         var spans: std.ArrayList(terminal.Selection) = .empty;
         defer spans.deinit(alloc);
@@ -231,7 +231,7 @@ test "OMG inset agent URL and image path normalize before existence checks" {
             var row: usize = 1;
             while (offset < target.len) : (row += 1) {
                 var buf: [32]u8 = undefined;
-                stream.nextSlice(try std.fmt.bufPrint(&buf, "\x1b[{d};{d}H", .{ row, inset + 1 }));
+                stream.nextSlice(try std.mem.print(&buf, "\x1b[{d};{d}H", .{ row, inset + 1 }));
                 const width = 40 - inset - @max(inset, 1);
                 const end = @min(offset + width, target.len);
                 stream.nextSlice(target[offset..end]);
@@ -386,7 +386,7 @@ test "OMG enclosed component wraps span three rows without joining unrelated row
         defer stream.deinit();
         stream.nextSlice(prefix ++ head);
         var position: [32]u8 = undefined;
-        stream.nextSlice(try std.fmt.bufPrint(&position, "\x1b[2;{d}H", .{case.column}));
+        stream.nextSlice(try std.mem.print(&position, "\x1b[2;{d}H", .{case.column}));
         stream.nextSlice(if (case.prose) "unrelated text" else middle);
         stream.nextSlice("\x1b[3;3H" ++ tail);
         stream.nextSlice(case.close);

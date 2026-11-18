@@ -100,7 +100,7 @@ if [[ "$skip_build" != true ]]; then
   ghostty_version=$(plutil -extract GhosttyBaseVersion raw macos/Ghostty-Info.plist)
   env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
     -u ALL_PROXY -u all_proxy \
-    mise exec zig@0.16.0 -- zig build \
+    mise exec zig@0.17.0 -- zig build \
       -Doptimize=ReleaseFast \
       -Demit-xcframework=true \
       -Dxcframework-target=native \

@@ -39,8 +39,14 @@ pub const FrameCache = struct {
         hash.update(std.mem.asBytes(&frame.cols));
         hash.update(std.mem.asBytes(&frame.rows));
         hash.update(std.mem.asBytes(&cache.revision));
+        const range = frame.rowDataRange();
         const rows = frame.row_data.slice();
-        for (rows.items(.pin), rows.items(.serial), rows.items(.raw), rows.items(.cells)) |pin, serial, raw, cells| {
+        for (
+            rows.items(.pin)[range.start..range.end],
+            rows.items(.serial)[range.start..range.end],
+            rows.items(.raw)[range.start..range.end],
+            rows.items(.cells)[range.start..range.end],
+        ) |pin, serial, raw, cells| {
             const node = @intFromPtr(pin.node);
             hash.update(std.mem.asBytes(&node));
             hash.update(std.mem.asBytes(&pin.y));
@@ -87,8 +93,10 @@ pub fn collect(
     var result: terminal.RenderState.CellSet = .empty;
     errdefer result.deinit(alloc);
     if (!mods.equal(input.ctrlOrSuper(.{}))) return result;
+    const range = frame.rowDataRange();
     const rows = frame.row_data.slice();
-    const pins = rows.items(.pin);
+    const pins = rows.items(.pin)[range.start..range.end];
+    const row_cells = rows.items(.cells)[range.start..range.end];
     if (pins.len == 0) return result;
     const top = (screen.pages.pointFromPin(.screen, pins[0]) orelse return result).coord().y;
     var previous_end: ?terminal.Pin = null;
@@ -132,23 +140,25 @@ pub fn collect(
                     const pt = (screen.pages.pointFromPin(.screen, span.start()) orelse continue).coord();
                     if (pt.y < top or pt.y >= top + pins.len) continue;
                     const row = pt.y - top;
-                    const cells = rows.items(.cells)[row].items(.raw);
+                    const cells = row_cells[row].items(.raw);
+                    const y: terminal.size.CellCountInt = @intCast(range.start + row);
                     const end_x = @min(@as(usize, span.end().x) + 1, cells.len);
                     for (pt.x..end_x) |x| {
                         if (cells[x].semantic_content == .prompt) continue;
-                        try result.put(alloc, .{ .x = @intCast(x), .y = @intCast(row) }, {});
+                        try result.put(alloc, .{ .x = @intCast(x), .y = y }, {});
                         if (cells[x].wide == .wide and x + 1 < cells.len)
-                            try result.put(alloc, .{ .x = @intCast(x + 1), .y = @intCast(row) }, {});
+                            try result.put(alloc, .{ .x = @intCast(x + 1), .y = y }, {});
                     }
                 }
             }
         }
     }
     // Explicit OSC8 links already carry their target; expose all visible cells.
-    for (rows.items(.cells), 0..) |cells, y| {
+    for (row_cells, 0..) |cells, row| {
+        const y: terminal.size.CellCountInt = @intCast(range.start + row);
         for (cells.items(.raw), 0..) |cell, x| {
             if (cell.hyperlink and cell.semantic_content != .prompt) {
-                try result.put(alloc, .{ .x = @intCast(x), .y = @intCast(y) }, {});
+                try result.put(alloc, .{ .x = @intCast(x), .y = y }, {});
             }
         }
     }
@@ -198,7 +208,7 @@ test "OMG link decoration revision updates all rows after async verification" {
 }
 
 test "OMG viewport links reveal multiple verified paths without hover and follow content" {
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
     const alloc = std.testing.allocator;
     var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 30, .rows = 3 });
     defer t.deinit(alloc);
@@ -270,7 +280,7 @@ test "OMG viewport links reveal multiple verified paths without hover and follow
 }
 
 test "OMG agent Python and cd quoted paths survive terminal soft wrapping" {
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
     const alloc = std.testing.allocator;
     const path = "/home/chengjisheng/deeproute/mapping.worktrees/trajectory_server_to_paimon/lake_search/ETL/bag_topic_pipeline";
     var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 50, .rows = 12 });
@@ -298,7 +308,7 @@ test "OMG agent Python and cd quoted paths survive terminal soft wrapping" {
 }
 
 test "OMG unquoted spaced paths underline full span and fall back when missing" {
-    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    if (@import("builtin").target.os.tag != .macos) return error.SkipZigTest;
     const alloc = std.testing.allocator;
     var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 120, .rows = 4 });
     defer t.deinit(alloc);
@@ -338,4 +348,38 @@ test "OMG unquoted spaced paths underline full span and fall back when missing" 
     var cells = try collect(alloc, alloc, t.screens.active, &frame, config.links, &cache, mods);
     defer cells.deinit(alloc);
     try std.testing.expectEqual(@as(usize, spaced.len + plain.len + "/repo/a".len + "b/c".len), cells.count());
+}
+
+test "OMG link cache ignores uncaptured trailing overscan row at bottom of scrollback" {
+    const alloc = std.testing.allocator;
+    var t = try terminal.Terminal.init(std.testing.io, alloc, .{ .cols = 20, .rows = 3 });
+    defer t.deinit(alloc);
+    try t.setPwd("/repo");
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("https://example.com");
+
+    const mods = input.ctrlOrSuper(.{});
+    var config = try @import("link.zig").Set.fromConfig(alloc, &.{.{
+        .regex = @import("../config/url.zig").no_space_regex,
+        .action = .{ .open = {} },
+        .highlight = .{ .hover_mods = mods },
+    }});
+    defer config.deinit(alloc);
+    var cache: Cache = .{};
+    defer cache.deinit(alloc);
+
+    var frame: terminal.RenderState = .empty;
+    defer frame.deinit(alloc);
+    frame.overscan_request = .{ .below = 1 };
+    try frame.update(alloc, &t);
+    try std.testing.expectEqual(@as(u16, 0), frame.overscan.below);
+    try std.testing.expectEqual(@as(usize, 4), frame.row_data.len);
+    try std.testing.expectEqual(@as(usize, 3), frame.rowDataRange().end);
+
+    var cached: FrameCache = .{};
+    defer cached.deinit(alloc);
+    var cells = try cached.get(alloc, alloc, alloc, t.screens.active, &frame, config.links, &cache, mods);
+    defer cells.deinit(alloc);
+    try std.testing.expectEqual("https://example.com".len, cells.count());
 }

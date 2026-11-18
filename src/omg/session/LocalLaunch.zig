@@ -36,7 +36,7 @@ pub fn workingDirectory(alloc: std.mem.Allocator, io: std.Io, candidates: []cons
         defer alloc.free(candidate);
         var directory = std.Io.Dir.cwd().openDir(io, candidate, .{}) catch continue;
         directory.close(io);
-        const result = try alloc.dupeZ(u8, candidate);
+        const result = try alloc.dupeSentinel(u8, candidate, 0);
         alloc.free(inherited);
         return result;
     }

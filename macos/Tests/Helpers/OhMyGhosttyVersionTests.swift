@@ -7,8 +7,8 @@ struct OhMyGhosttyVersionTests {
         let versions = OhMyGhosttyVersion()
 
         #expect(versions.omg == "0.21.6")
-        #expect(versions.ghostty == "1.3.2-dev")
-        #expect(versions.ghosttyRevision == "b58ef1d678be2747c830bc1b1e6c0a086afecf9a")
+        #expect(versions.ghostty == "1.4.0")
+        #expect(versions.ghosttyRevision == "83fb95624b0439ee660c2679b43b38c8b63769cd")
     }
 
     @Test func appBundleUsesIndependentOMGIdentity() {

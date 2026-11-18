@@ -80,7 +80,7 @@ class RemoteAgentWrappersTests(unittest.TestCase):
             '}\n'
         )
         compiled = subprocess.run(
-            ["mise", "exec", "zig@0.16.0", "--", "zig", "run", "-lc", str(driver)],
+            ["mise", "exec", "zig@0.17.0", "--", "zig", "run", "-lc", str(driver)],
             cwd=ROOT, capture_output=True, check=True, timeout=120,
         )
         fish, shell, cls.bootstrap, _ = compiled.stdout.decode().split("\0")

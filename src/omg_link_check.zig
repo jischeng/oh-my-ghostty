@@ -240,7 +240,7 @@ test "OMG link check cache stays bounded" {
     defer cache.deinit(alloc);
     var buf: [16]u8 = undefined;
     for (0..max_entries + 10) |i| {
-        const value = try std.fmt.bufPrint(&buf, "f{d}", .{i});
+        const value = try std.mem.print(&buf, "f{d}", .{i});
         _ = try cache.putPending(alloc, "/a", value);
     }
     try testing.expect(cache.map.count() <= max_entries);

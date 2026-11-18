@@ -65,9 +65,10 @@ if ! $skip_build; then
   (
     cd "$root"
     unset SDKROOT
-    mise exec zig@0.16.0 -- zig build -Doptimize=ReleaseFast \
+    ghostty_version=$(/usr/bin/plutil -extract GhosttyBaseVersion raw macos/Ghostty-Info.plist 2>/dev/null || echo "1.4.0")
+    mise exec zig@0.17.0 -- zig build -Doptimize=ReleaseFast \
       -Demit-xcframework=true -Dxcframework-target=native \
-      -Demit-macos-app=false -Dversion-string=1.3.2-dev
+      -Demit-macos-app=false "-Dversion-string=$ghostty_version"
     macos/build.nu --configuration Debug --action build
     rm -rf macos/build/Debug/OMG.app/Contents/Resources/session-runtime
     bash "$devtool" python3 dist/macos/build-session-runtime.py \

@@ -548,6 +548,14 @@ pub fn changeConfig(self: *Termio, td: *ThreadData, config: *DerivedConfig) !voi
     // Set the image limits
     self.terminal.setKittyGraphicsSizeLimit(self.alloc, config.image_storage_limit);
     self.terminal.setKittyGraphicsLoadingLimits(.allWithTempDir(global.tmpDirPath()));
+
+    // The config could have changed any of our colors so update mode 2031.
+    // This is written directly rather than queued as a color_scheme_report
+    // message because we're on the io thread, the only reader of our
+    // mailbox: if the mailbox were full, queueing would wait forever.
+    self.colorSchemeReportLocked(td, false) catch |err| {
+        log.warn("error sending color scheme report err={}", .{err});
+    };
 }
 
 /// Resize the terminal grid and renderer, then publish the new geometry to
@@ -1106,7 +1114,7 @@ test "Termio: resetSynchronizedOutput releases held sync output without dropping
 
     for (0..40) |i| {
         var buf: [32]u8 = undefined;
-        const line = try std.fmt.bufPrint(&buf, "history-{d:0>2}\r\n", .{i});
+        const line = try std.mem.print(&buf, "history-{d:0>2}\r\n", .{i});
         io.terminal_stream.nextSlice(line);
     }
     io.terminal.scrollViewport(.{ .row = 12 });
@@ -1133,7 +1141,7 @@ test "Termio: resetSynchronizedOutput releases held sync output without dropping
     io.terminal_stream.nextSlice("\x1b[?2026h");
     for (0..40) |i| {
         var buf: [32]u8 = undefined;
-        const line = try std.fmt.bufPrint(&buf, "history-{d:0>2}\r\n", .{i});
+        const line = try std.mem.print(&buf, "history-{d:0>2}\r\n", .{i});
         io.terminal_stream.nextSlice(line);
     }
     io.terminal_stream.nextSlice("\x1b[?2026l");
@@ -1227,7 +1235,7 @@ test "Termio: resetSynchronizedOutput releases tui_wipe_hold, processOutput rene
     // clears `synchronized_output`, resets `tui_wipe_hold`, pins bottom, and clears sync timestamps.
     for (0..30) |i| {
         var buf: [32]u8 = undefined;
-        const line = try std.fmt.bufPrint(&buf, "history-{d:0>2}\r\n", .{i});
+        const line = try std.mem.print(&buf, "history-{d:0>2}\r\n", .{i});
         io.processOutput(line);
     }
     io.terminal.scrollViewport(.{ .row = 5 });
@@ -1262,7 +1270,7 @@ test "Termio: resetSynchronizedOutput releases tui_wipe_hold, processOutput rene
     // 3. `clearScreen` cancels held `tui_wipe_hold`.
     for (0..30) |i| {
         var buf: [32]u8 = undefined;
-        const line = try std.fmt.bufPrint(&buf, "line-{d:0>2}\r\n", .{i});
+        const line = try std.mem.print(&buf, "line-{d:0>2}\r\n", .{i});
         io.processOutput(line);
     }
     io.processOutput("\x1b[?2026h\x1b[2J\x1b[3J\x1b[H? for shortcuts\x1b[?2026l");

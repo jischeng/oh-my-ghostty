@@ -65,7 +65,7 @@ pub fn begin(self: *Self, alloc: Allocator, pages: *PageList, cursor: PageList.P
         for (id) |byte| {
             if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != ':') break :key null;
         }
-        break :key try alloc.dupeZ(u8, id);
+        break :key try alloc.dupeSentinel(u8, id, 0);
     } else null;
     errdefer if (replay_key) |key| alloc.free(key);
     self.input = try pages.trackPin(cursor);
@@ -141,7 +141,7 @@ pub fn finish(self: *Self, alloc: Allocator, pages: *PageList, cursor: PageList.
     }
     const trimmed = reported orelse std.mem.trim(u8, text.items, " \t\r\n");
     if (trimmed.len == 0) return;
-    const copy = try alloc.dupeZ(u8, trimmed);
+    const copy = try alloc.dupeSentinel(u8, trimmed, 0);
     errdefer alloc.free(copy);
     // Fish's submitted command identifies a suffix of this single OSC 133
     // input region, even when Starship redrew prompt decoration after B.
@@ -325,7 +325,7 @@ pub fn rebuildFromSemanticPages(
                 if (overflow_flag.*) return;
                 const trimmed = std.mem.trim(u8, buf.items, " \t\r\n");
                 if (trimmed.len == 0) return;
-                const copy = try alloc_.dupeZ(u8, trimmed);
+                const copy = try alloc_.dupeSentinel(u8, trimmed, 0);
                 errdefer alloc_.free(copy);
                 try list.append(alloc_, .{
                     .start = start_pin,
@@ -507,14 +507,14 @@ pub fn rebuildFromSemanticPages(
         errdefer pages.untrackPin(anchor);
         const end_anchor = try pages.trackPin(cand.end);
         errdefer pages.untrackPin(end_anchor);
-        const copy = try alloc.dupeZ(u8, cand.text);
+        const copy = try alloc.dupeSentinel(u8, cand.text, 0);
         errdefer alloc.free(copy);
 
         if (idx >= unmatched_len) {
             const prev_idx = prev_valid.items.len - matched_tail + (idx - unmatched_len);
             const prev_entry = prev_valid.items[prev_idx];
             const replay_copy: ?[:0]const u8 = if (prev_entry.replay_key) |k|
-                try alloc.dupeZ(u8, k)
+                try alloc.dupeSentinel(u8, k, 0)
             else
                 null;
             errdefer if (replay_copy) |k| alloc.free(k);

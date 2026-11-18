@@ -205,7 +205,7 @@ Release 附带 `SHA256SUMS.txt`；详情见[发版规范](docs/RELEASING.md)。
 
 ## 从源码构建
 
-需要 Xcode、Zig 0.16.0、Nushell 与 SwiftLint。**干净 checkout 先构建 GhosttyKit**，
+需要 Xcode、Zig 0.17.0、Nushell 与 SwiftLint。**干净 checkout 先构建 GhosttyKit**，
 具体步骤见[贡献规范](docs/CONTRIBUTING.md)。然后执行：
 
 ```bash

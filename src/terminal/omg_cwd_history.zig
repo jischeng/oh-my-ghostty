@@ -154,7 +154,7 @@ test "OMG cwd history binary search resolves intermediate transitions accurately
 
     var path_buf: [32]u8 = undefined;
     for (0..pins.len) |idx| {
-        const cwd = try std.fmt.bufPrint(&path_buf, "/dir/{d}", .{idx});
+        const cwd = try std.mem.print(&path_buf, "/dir/{d}", .{idx});
         try t.setPwd(cwd);
         pins[idx] = try screen.pages.trackPin(screen.cursor.page_pin.*);
         initialized += 1;
@@ -164,7 +164,7 @@ test "OMG cwd history binary search resolves intermediate transitions accurately
     }
 
     for (pins, 0..) |p, idx| {
-        const expected = try std.fmt.bufPrint(&path_buf, "/dir/{d}", .{idx});
+        const expected = try std.mem.print(&path_buf, "/dir/{d}", .{idx});
         try std.testing.expectEqualStrings(expected, screen.omg_cwd_history.cwdAt(p.*).?);
     }
 }

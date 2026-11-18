@@ -147,8 +147,6 @@ class QuickTerminalController: BaseTerminalController {
         // If we're not visible we don't care to run the logic below. It only
         // applies if we can be seen.
         guard visible else { return }
-
-        terminalViewContainer?.updateGlassTintOverlay(isKeyWindow: true)
     }
 
     override func windowDidResignKey(_ notification: Notification) {
@@ -159,8 +157,6 @@ class QuickTerminalController: BaseTerminalController {
         // windowDidResignKey will also get called after animateOut so this
         // ensures we don't run logic twice.
         guard visible else { return }
-
-        terminalViewContainer?.updateGlassTintOverlay(isKeyWindow: false)
 
         // We don't animate out if there is a modal sheet being shown currently.
         // This lets us show alerts without causing the window to disappear.

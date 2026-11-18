@@ -8,7 +8,10 @@ pub fn prepare(previous: *terminal.Terminal, replacement: *terminal.Terminal) vo
     replacement.colors.background.default = previous.colors.background.default;
     replacement.colors.foreground.default = previous.colors.foreground.default;
     replacement.colors.cursor.default = previous.colors.cursor.default;
-    replacement.colors.palette.changeDefault(previous.colors.palette.original);
+    replacement.colors.palette.changeDefault(
+        replacement.gpa(),
+        previous.colors.palette.original.*,
+    ) catch replacement.colors.palette.resetDefault(replacement.gpa());
     replacement.flags.dirty.palette = true;
     for ([_]terminal.ScreenSet.Key{ .primary, .alternate }) |key| {
         replacement.screens.generations.put(key, previous.screens.generation(key) +% 1);
@@ -65,7 +68,7 @@ test "session snapshot presentation keeps viewer theme defaults and snapshot col
     previous.colors.cursor.default = cursor;
     var palette = terminal.color.default;
     palette[1] = .{ .r = 181, .g = 45, .b = 58 };
-    previous.colors.palette.changeDefault(palette);
+    try previous.colors.palette.changeDefault(alloc, palette);
     // The program reset its old background and changed a palette entry while
     // this viewer was disconnected. Only the snapshot owns those overrides.
     previous.colors.background.set(.{ .r = 1, .g = 2, .b = 3 });

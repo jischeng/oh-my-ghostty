@@ -119,16 +119,14 @@ const ThreadEnterState = struct {
     ) (Allocator.Error || error{InputNotFound})![]const Input {
         const alloc = self.arena.allocator();
 
-        var input = try alloc.alloc(
-            Input,
+        var inputs: std.ArrayList(Input) = try .initCapacity(
+            alloc,
             self.input.list.items.len,
         );
-        var initialized: usize = 0;
-        errdefer for (input[0..initialized]) |item| {
-            if (item == .file) item.file.close(global.io());
-        };
-        for (self.input.list.items, 0..) |item, i| {
-            input[i] = switch (item) {
+        errdefer for (inputs.items) |item| item.deinit();
+
+        for (self.input.list.items) |item| {
+            inputs.appendAssumeCapacity(switch (item) {
                 .raw => |v| .{ .string = try alloc.dupe(u8, v) },
                 .path => |path| file: {
                     const f = std.Io.Dir.cwd().openFile(
@@ -145,22 +143,42 @@ const ThreadEnterState = struct {
 
                     break :file .{ .file = f };
                 },
-            };
-            initialized += 1;
+            });
         }
 
-        return input;
+        return inputs.items;
     }
 
     const Input = union(enum) {
         string: []const u8,
         file: std.Io.File,
+
+        fn deinit(self: Input) void {
+            switch (self) {
+                .string => {},
+                .file => |f| f.close(global.io()),
+            }
+        }
     };
 };
 
 /// The configuration for this IO that is derived from the main
 /// configuration. This must be exported so that we don't need to
 /// pass around Config pointers which makes memory management a pain.
+/// Convert the vt-xt-checksum-extension config, whose values are named for
+/// what they turn on, to the XTCHECKSUM bits, which turn things off.
+fn xtChecksumFlags(
+    ext: configpkg.Config.XtChecksumExtension,
+) terminalpkg.xt_checksum.Flags {
+    return .{
+        .positive = !ext.negate,
+        .no_attributes = !ext.attributes,
+        .no_trim = !ext.trim,
+        .undrawn = ext.undrawn,
+        .full = ext.full,
+    };
+}
+
 pub const DerivedConfig = struct {
     arena: ArenaAllocator,
 
@@ -173,7 +191,10 @@ pub const DerivedConfig = struct {
     background: configpkg.Config.Color,
     osc_color_report_format: configpkg.Config.OSCColorReportFormat,
     clipboard_write: configpkg.ClipboardAccess,
+    clipboard_write_limit: usize,
     enquiry_response: []const u8,
+    xt_checksum_report: bool,
+    xt_checksum_extension: terminalpkg.xt_checksum.Flags,
     conditional_state: configpkg.ConditionalState,
 
     pub fn init(
@@ -209,7 +230,10 @@ pub const DerivedConfig = struct {
             .background = config.background,
             .osc_color_report_format = config.@"osc-color-report-format",
             .clipboard_write = config.@"clipboard-write",
+            .clipboard_write_limit = config.@"clipboard-write-limit-bytes".value,
             .enquiry_response = try alloc.dupe(u8, config.@"enquiry-response"),
+            .xt_checksum_report = config.@"vt-xt-checksum-report",
+            .xt_checksum_extension = xtChecksumFlags(config.@"vt-xt-checksum-extension"),
             .conditional_state = config._conditional_state,
 
             // This has to be last so that we copy AFTER the arena allocations
@@ -260,6 +284,7 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
             .default_modes = default_modes,
             .default_cursor_style = opts.config.cursor_style,
             .default_cursor_blink = opts.config.cursor_blink,
+            .default_xt_checksum = opts.config.xt_checksum_extension,
             .colors = .{
                 .background = .init(opts.config.background.toTerminalRGB()),
                 .foreground = .init(opts.config.foreground.toTerminalRGB()),
@@ -268,13 +293,17 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
                     const rgb = color.toTerminalRGB() orelse break :cursor .unset;
                     break :cursor .init(rgb);
                 },
-                .palette = .init(opts.config.palette),
+                .palette = .default,
             },
             .kitty_image_storage_limit = opts.config.image_storage_limit,
             .kitty_image_loading_limits = .allWithTempDir(global.tmpDirPath()),
         };
     });
     errdefer term.deinit(alloc);
+
+    // The default palette may be an allocator-owned copy, so it is set
+    // once the terminal owns its memory and can release it on deinit.
+    try term.colors.palette.changeDefault(alloc, opts.config.palette);
 
     // Setup our terminal size in pixels for certain requests.
     term.width_px = term.cols * opts.size.cell.width;
@@ -299,7 +328,9 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
         .terminal = &self.terminal,
         .osc_color_report_format = opts.config.osc_color_report_format,
         .clipboard_write = opts.config.clipboard_write,
+        .clipboard_write_limit = opts.config.clipboard_write_limit,
         .enquiry_response = opts.config.enquiry_response,
+        .xt_checksum_report = opts.config.xt_checksum_report,
     };
 
     const thread_enter_state = try ThreadEnterState.create(
@@ -360,8 +391,8 @@ pub fn threadEnter(
         try v.prepareInput()
     else
         null;
-    defer for (inputs orelse &.{}) |input| {
-        if (input == .file) input.file.close(global.io());
+    defer if (inputs) |items| {
+        for (items) |input| input.deinit();
     };
 
     data.* = .{
@@ -398,7 +429,7 @@ pub fn threadEnter(
             return error.InputFailed;
         },
         .file => |f| {
-            const bytes = compat_file.readToEndAlloc(
+            const contents = compat_file.readToEndAlloc(
                 f,
                 self.alloc,
                 10 * 1024 * 1024, // 10 MiB max
@@ -406,8 +437,9 @@ pub fn threadEnter(
                 log.warn("failed to read input file err={}", .{err});
                 return error.InputFailed;
             };
-            defer self.alloc.free(bytes);
-            self.queueWrite(data, bytes, false) catch |err| {
+            defer self.alloc.free(contents);
+
+            self.queueWrite(data, contents, false) catch |err| {
                 log.warn("failed to queue input file err={}", .{err});
                 return error.InputFailed;
             };
@@ -493,8 +525,16 @@ pub fn changeConfig(self: *Termio, td: *ThreadData, config: *DerivedConfig) !voi
     //   - command, working-directory: we never restart the underlying
     //   process so we don't care or need to know about these.
 
-    // Update the default palette.
-    self.terminal.colors.palette.changeDefault(config.palette);
+    // Update the default palette. A config change must not fail here, so
+    // if we can't allocate the copy of the configured palette we fall back
+    // to the built-in default, which never allocates.
+    self.terminal.colors.palette.changeDefault(
+        self.alloc,
+        config.palette,
+    ) catch |err| {
+        log.warn("error changing default palette, using built-in default err={}", .{err});
+        self.terminal.colors.palette.resetDefault(self.alloc);
+    };
     self.terminal.flags.dirty.palette = true;
 
     // Update all our other colors
@@ -618,7 +658,7 @@ pub fn resizeTerminalLocked(
         (self.terminal_stream.handler.seen_synchronized_output or
             activeHasContentBelowCursor(self.terminal.screens.active)))
     {
-        resize_opts.pull_scrollback = true;
+        resize_opts.force_pull_scrollback = true;
     }
 
     try self.terminal.resize(self.alloc, resize_opts);
@@ -661,12 +701,12 @@ pub fn commitResize(
 ) !void {
     self.size = size;
     const grid_size = size.grid();
-    try self.backend.resize(grid_size, size.terminal());
 
     var wake_termio = false;
     {
         self.renderer_state.mutex.lockUncancelable(global.io());
         defer self.renderer_state.mutex.unlock(global.io());
+        try self.backend.resize(grid_size, size.terminal());
         self.terminal_stream.handler.noteChildResizeCommitted();
         if (self.backend != .omg_session and self.terminal.modes.get(.in_band_size_reports)) {
             try self.sizeReportLocked(td, .mode_2048);
@@ -905,6 +945,19 @@ fn processOutputLocked(self: *Termio, buf: []const u8) void {
 }
 
 /// Sends a DSR response for the current color scheme to the pty.
+/// Record a Kitty clipboard protocol session grant so future requests
+/// carrying the password skip the permission prompt.
+pub fn kittyClipboardGrant(
+    self: *Termio,
+    pw: []const u8,
+    dir: terminalpkg.kitty.clipboard.Grants.Direction,
+) error{OutOfMemory}!void {
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+
+    try self.terminal_stream.handler.kittyClipboardGrant(pw, dir);
+}
+
 pub fn colorSchemeReport(self: *Termio, td: *ThreadData, force: bool) !void {
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());
@@ -1059,7 +1112,7 @@ test "Termio: resetSynchronizedOutput releases held sync output without dropping
     io.terminal.scrollViewport(.{ .row = 12 });
     const pre_sb = io.terminal.screens.active.pages.scrollbar();
     const pre_cy = io.terminal.screens.active.cursor.y;
-    try io.terminal.resize(alloc, .{ .cols = 40, .rows = 8, .pull_scrollback = true });
+    try io.terminal.resize(alloc, .{ .cols = 40, .rows = 8, .force_pull_scrollback = true });
     io.terminal_stream.handler.noteTerminalResize(true, pre_sb, pre_cy);
     io.terminal_stream.handler.noteChildResizeCommitted();
 

@@ -36,8 +36,13 @@ MODULES = {
             "macos/Sources/Features/QuickTerminal/**",
             "macos/Sources/Features/Global Keybinds/**",
             "macos/Sources/Features/Command Palette/**",
+            "macos/Sources/Features/AppleScript/**",
         ),
-        ("macos/Tests/Terminal/*.swift", "macos/Tests/Splits/*.swift"),
+        (
+            "macos/Tests/Terminal/*.swift",
+            "macos/Tests/Splits/*.swift",
+            "macos/Tests/Features/AppleScript/*.swift",
+        ),
         ("tabs", "inspector", "agents", "editor"),
     ),
     "tabs": Module(

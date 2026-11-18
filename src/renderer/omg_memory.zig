@@ -18,8 +18,13 @@ fn trim(renderer: anytype, io: std.Io, comptime preserve_front: bool) !void {
     if (!preserve_front and @hasField(@TypeOf(renderer.*), "visible")) {
         if (renderer.visible.load(.acquire)) return;
     }
-    const chain = &renderer.swap_chain;
-    if (chain.defunct) return;
+    const chain = switch (@typeInfo(@TypeOf(renderer.swap_chain))) {
+        .optional => &(renderer.swap_chain orelse return),
+        else => brk: {
+            if (renderer.swap_chain.defunct) return;
+            break :brk &renderer.swap_chain;
+        },
+    };
 
     // GPU completion callbacks return these permits without taking draw_mutex.
     // Never replace buffers while a submitted frame may still reference them.

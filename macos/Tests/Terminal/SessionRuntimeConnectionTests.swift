@@ -466,7 +466,10 @@ struct SessionRuntimeConnectionTests {
     }
 
     @MainActor
-    @Test func sshHandoffApprovesAnInlineViewerWithoutReplacingThePaneOrOpeningATab() throws {
+    @Test(.enabled(if: FileManager.default.isExecutableFile(atPath:
+        Bundle.main.resourceURL!.appendingPathComponent("session-runtime/omgd").path),
+        "Requires the bundled Session Runtime helper"))
+    func sshHandoffApprovesAnInlineViewerWithoutReplacingThePaneOrOpeningATab() throws {
         let app = try #require(NSApp.delegate as? AppDelegate).ghostty
         var config = Ghostty.SurfaceConfiguration()
         config.command = "/bin/sleep 60"

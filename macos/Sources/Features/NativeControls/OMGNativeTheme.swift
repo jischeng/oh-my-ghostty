@@ -170,6 +170,12 @@ class OMGNativeSurfaceView: NSView {
 #if compiler(>=6.2)
             if #available(macOS 26.0, *), blur.isGlassStyle {
                 backdrop = TerminalGlassView(topOffset: 0)
+            } else if case .radius(let radius) = blur, radius > 0 {
+                backdrop = TerminalBackdropBlurView(topOffset: 0)
+            }
+#else
+            if case .radius(let radius) = blur, radius > 0 {
+                backdrop = TerminalBackdropBlurView(topOffset: 0)
             }
 #endif
             if let backdrop {
@@ -185,19 +191,29 @@ class OMGNativeSurfaceView: NSView {
                             cornerRadius: 0, isKeyWindow: window?.isKeyWindow ?? true)
         }
 #endif
+        if let blurView = backdrop as? TerminalBackdropBlurView, case .radius(let radius) = blur {
+            blurView.configure(radius: radius, backgroundColor: theme.background, cornerRadius: 0)
+        }
         // Only configure an auxiliary window owned by this surface, never its terminal origin.
         if paintsBackground, let window, window.contentViewController?.view === self ||
             (hasExplicitSource && window !== themeObserver.sourceWindow) {
             window.isOpaque = effectiveOpacity >= 1
             window.backgroundColor = effectiveOpacity >= 1 ? theme.background : .clear
-            if !blur.isGlassStyle, let app = (NSApp.delegate as? AppDelegate)?.ghostty.app {
-                ghostty_set_window_background_blur(app, Unmanaged.passUnretained(window).toOpaque())
-            }
         }
     }
 
     override func updateLayer() {
-        layer?.backgroundColor = (paintsBackground && backdrop == nil ? theme.background.withAlphaComponent(effectiveOpacity) : .clear).cgColor
+        let usesGlassBackdrop: Bool
+#if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            usesGlassBackdrop = backdrop is TerminalGlassView
+        } else {
+            usesGlassBackdrop = false
+        }
+#else
+        usesGlassBackdrop = false
+#endif
+        layer?.backgroundColor = (paintsBackground && !usesGlassBackdrop ? theme.background.withAlphaComponent(effectiveOpacity) : .clear).cgColor
     }
 }
 

@@ -4401,7 +4401,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // Call this last in case it uses any of the properties above.
         window.syncAppearance(surfaceConfig)
-        terminalViewContainer?.ghosttyConfigDidChange(ghostty.config, preferredBackgroundColor: window.preferredBackgroundColor)
+        terminalViewContainer?.ghosttyConfigDidChange(
+            ghostty.config,
+            preferredBackgroundColor: window.preferredBackgroundColor,
+            isWindowOpaque: windowIsOpaque
+        )
     }
 
     /// The background color app shell chrome should paint with.

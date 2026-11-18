@@ -519,16 +519,14 @@ class TerminalWindow: NSWindow {
             (surfaceConfig.backgroundOpacity < 1 || surfaceConfig.backgroundBlur.isGlassStyle) {
             isOpaque = false
 
-            // This is weird, but we don't use ".clear" because this creates a look that
-            // matches Terminal.app much more closer. This lets users transition from
-            // Terminal.app more easily.
-            backgroundColor = .white.withAlphaComponent(0.001)
-
-            // We don't need to set blur when using glass
-            if !surfaceConfig.backgroundBlur.isGlassStyle, let appDelegate = NSApp.delegate as? AppDelegate {
-                ghostty_set_window_background_blur(
-                    appDelegate.ghostty.app,
-                    Unmanaged.passUnretained(self).toOpaque())
+            // CoreAnimation backdrop views (`TerminalGlassView` and `TerminalBackdropBlurView`
+            // in `TerminalViewContainer`) own window blur without calling private
+            // `CGSSetWindowBackgroundBlurRadius`, which washes out and flickers inside
+            // macOS Tahoe Mission Control when fullscreen spaces are present (ghostty#9542).
+            if surfaceConfig.backgroundBlur.isEnabled {
+                backgroundColor = .clear
+            } else {
+                backgroundColor = .white.withAlphaComponent(0.001)
             }
         } else {
             isOpaque = true

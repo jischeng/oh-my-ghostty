@@ -8,6 +8,8 @@ class TerminalViewContainer: NSView {
 
     /// Combined glass effect and inactive tint overlay view
     private(set) var glassEffectView: NSView?
+    /// Behind-window CoreAnimation blur view for classic radius/boolean blur modes
+    private(set) var backdropBlurView: TerminalBackdropBlurView?
     private var derivedConfig: DerivedConfig?
 
     var windowThemeFrameView: NSView? {
@@ -20,6 +22,10 @@ class TerminalViewContainer: NSView {
         }
 
         return window.value(forKey: "_cornerRadius") as? CGFloat
+    }
+
+    var shouldReduceTransparency: Bool {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
     }
 
     init<Root: View>(@ViewBuilder rootView: () -> Root) {
@@ -74,8 +80,18 @@ class TerminalViewContainer: NSView {
         updateGlassEffectTopInsetIfNeeded()
     }
 
-    func ghosttyConfigDidChange(_ config: Ghostty.Config, preferredBackgroundColor: NSColor?) {
-        let newValue = DerivedConfig(config: config, preferredBackgroundColor: preferredBackgroundColor, cornerRadius: windowCornerRadius)
+    func ghosttyConfigDidChange(
+        _ config: Ghostty.Config,
+        preferredBackgroundColor: NSColor?,
+        isWindowOpaque: Bool = false
+    ) {
+        let newValue = DerivedConfig(
+            config: config,
+            preferredBackgroundColor: preferredBackgroundColor,
+            cornerRadius: windowCornerRadius,
+            isWindowOpaque: isWindowOpaque,
+            reduceTransparency: shouldReduceTransparency
+        )
         guard newValue != derivedConfig else { return }
         derivedConfig = newValue
         DispatchQueue.main.async(execute: updateGlassEffectIfNeeded)
@@ -90,7 +106,64 @@ extension BaseTerminalController {
     }
 }
 
-// MARK: Glass
+// MARK: Glass & Backdrop Blur
+
+/// Behind-window CoreAnimation backdrop blur (`NSVisualEffectView` / `CABackdropLayer`)
+/// used for classic `background-blur = true` / `<radius>` configurations instead of
+/// legacy private `CGSSetWindowBackgroundBlurRadius`, which washes out to gray and
+/// flickers inside macOS Tahoe Mission Control when fullscreen spaces exist (`ghostty#9542`).
+final class TerminalBackdropBlurView: NSView {
+    private(set) var effectView: NSVisualEffectView
+    private var topConstraint: NSLayoutConstraint!
+
+    init(topOffset: CGFloat) {
+        self.effectView = NSVisualEffectView()
+        super.init(frame: .zero)
+
+        translatesAutoresizingMaskIntoConstraints = false
+        effectView.translatesAutoresizingMaskIntoConstraints = false
+        effectView.blendingMode = .behindWindow
+        effectView.state = .active
+        effectView.wantsLayer = true
+        effectView.layer?.cornerCurve = .continuous
+        effectView.layer?.masksToBounds = true
+        addSubview(effectView)
+
+        topConstraint = effectView.topAnchor.constraint(
+            equalTo: topAnchor,
+            constant: topOffset
+        )
+        NSLayoutConstraint.activate([
+            topConstraint,
+            effectView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            effectView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            effectView.trailingAnchor.constraint(equalTo: trailingAnchor),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func configure(
+        radius: Int,
+        backgroundColor: NSColor,
+        cornerRadius: CGFloat?
+    ) {
+        let isLight = backgroundColor.isLightColor
+        effectView.material = .hudWindow
+        effectView.appearance = NSAppearance(named: isLight ? .aqua : .darkAqua)
+        effectView.alphaValue = min(1.0, max(0.0, CGFloat(radius) / 20.0))
+        effectView.layer?.cornerRadius = cornerRadius ?? 0
+    }
+
+    func updateTopInset(_ offset: CGFloat) {
+        topConstraint.constant = offset
+    }
+}
 
 /// An `NSView` that contains a liquid glass background effect and
 /// an inactive-window tint overlay.
@@ -203,37 +276,76 @@ extension TerminalViewContainer {
     }
 #endif // compiler(>=6.2)
 
+    private func addBackdropBlurViewIfNeeded() -> TerminalBackdropBlurView? {
+        if let existed = backdropBlurView {
+            updateGlassEffectTopInsetIfNeeded()
+            return existed
+        }
+        guard let themeFrameView = windowThemeFrameView else {
+            return nil
+        }
+        let effectView = TerminalBackdropBlurView(topOffset: -themeFrameView.safeAreaInsets.top)
+        addSubview(effectView, positioned: .below, relativeTo: terminalView)
+        NSLayoutConstraint.activate([
+            effectView.topAnchor.constraint(equalTo: topAnchor),
+            effectView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            effectView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            effectView.trailingAnchor.constraint(equalTo: trailingAnchor),
+        ])
+        backdropBlurView = effectView
+        return effectView
+    }
+
     private func updateGlassEffectIfNeeded() {
-#if compiler(>=6.2)
-        guard #available(macOS 26.0, *), let derivedConfig else {
+        guard let derivedConfig else {
             glassEffectView?.removeFromSuperview()
             glassEffectView = nil
-            return
-        }
-        guard let effectView = addGlassEffectViewIfNeeded() else {
+            backdropBlurView?.removeFromSuperview()
+            backdropBlurView = nil
             return
         }
 
-        effectView.configure(
-            style: derivedConfig.style.official,
-            backgroundColor: derivedConfig.backgroundColor,
-            backgroundOpacity: derivedConfig.backgroundOpacity,
-            cornerRadius: derivedConfig.cornerRadius,
-            isKeyWindow: window?.isKeyWindow ?? true
-        )
-#endif // compiler(>=6.2)
+        switch derivedConfig.effect {
+        case .glass(let style):
+            backdropBlurView?.removeFromSuperview()
+            backdropBlurView = nil
+#if compiler(>=6.2)
+            guard #available(macOS 26.0, *), let effectView = addGlassEffectViewIfNeeded() else {
+                glassEffectView?.removeFromSuperview()
+                glassEffectView = nil
+                return
+            }
+            effectView.configure(
+                style: style.official,
+                backgroundColor: derivedConfig.backgroundColor,
+                backgroundOpacity: derivedConfig.backgroundOpacity,
+                cornerRadius: derivedConfig.cornerRadius,
+                isKeyWindow: window?.isKeyWindow ?? true
+            )
+#else
+            glassEffectView?.removeFromSuperview()
+            glassEffectView = nil
+#endif
+        case .blur(let radius):
+            glassEffectView?.removeFromSuperview()
+            glassEffectView = nil
+            guard let effectView = addBackdropBlurViewIfNeeded() else { return }
+            effectView.configure(
+                radius: radius,
+                backgroundColor: derivedConfig.backgroundColor,
+                cornerRadius: derivedConfig.cornerRadius
+            )
+        }
     }
 
     private func updateGlassEffectTopInsetIfNeeded() {
+        guard let themeFrameView = windowThemeFrameView else { return }
+        let inset = -themeFrameView.safeAreaInsets.top
+        backdropBlurView?.updateTopInset(inset)
 #if compiler(>=6.2)
-        guard
-            #available(macOS 26.0, *),
-            let effectView = glassEffectView as? TerminalGlassView,
-            let themeFrameView = windowThemeFrameView
-        else {
-            return
+        if #available(macOS 26.0, *), let effectView = glassEffectView as? TerminalGlassView {
+            effectView.updateTopInset(inset)
         }
-        effectView.updateTopInset(-themeFrameView.safeAreaInsets.top)
 #endif // compiler(>=6.2)
     }
 
@@ -251,17 +363,33 @@ extension TerminalViewContainer {
     }
 
     struct DerivedConfig: Equatable {
-        let style: BackportNSGlassStyle
+        enum Effect: Equatable {
+            case glass(BackportNSGlassStyle)
+            case blur(radius: Int)
+        }
+
+        let effect: Effect
         let backgroundColor: NSColor
         let backgroundOpacity: Double
         let cornerRadius: CGFloat?
 
-        init?(config: Ghostty.Config, preferredBackgroundColor: NSColor?, cornerRadius: CGFloat?) {
+        init?(
+            config: Ghostty.Config,
+            preferredBackgroundColor: NSColor?,
+            cornerRadius: CGFloat?,
+            isWindowOpaque: Bool = false,
+            reduceTransparency: Bool = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+        ) {
+            guard !isWindowOpaque else { return nil }
             switch config.backgroundBlur {
             case .macosGlassRegular:
-                style = .regular
+                effect = .glass(.regular)
             case .macosGlassClear:
-                style = .clear
+                effect = .glass(.clear)
+            case .radius(let radius) where radius > 0
+                && config.backgroundOpacity < 1
+                && !reduceTransparency:
+                effect = .blur(radius: radius)
             default:
                 return nil
             }

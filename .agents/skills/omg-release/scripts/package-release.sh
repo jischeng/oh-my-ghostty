@@ -75,11 +75,12 @@ for arch in arm64 x86_64 universal; do
   python3 dist/macos/check-session-runtime.py --all-macos "$app/Contents/Resources/session-runtime" >/dev/null
 
   if [[ "$arch" == x86_64 ]] && ! arch -x86_64 true >/dev/null 2>&1; then
-    # Rosetta 2 is not installed; verify architecture and ReleaseFast marker via strings instead
+    # Rosetta 2 is not installed; verify x86_64 slice and _ghostty_info ReleaseFast (mode=2)
     lipo -archs "$app/Contents/MacOS/omg" | grep -q 'x86_64' || { echo "$arch binary missing x86_64 slice" >&2; exit 1; }
-    _strtmp=$(mktemp); /usr/bin/strings "$app/Contents/MacOS/omg" > "$_strtmp"; grep -q 'ReleaseFast' "$_strtmp"; rm -f "$_strtmp"
-    [[ $? -eq 0 ]] || { echo "$arch binary does not contain ReleaseFast" >&2; exit 1; }
-    printf '[%s] signature=valid runtime=valid launch=skipped(no-rosetta) mode=.ReleaseFast\n' "$arch"
+    xcrun otool -arch x86_64 -tvV -p _ghostty_info "$app/Contents/MacOS/omg" | grep -Eq 'movl[[:space:]]+\$0x2,' || {
+      echo "$arch binary _ghostty_info is not ReleaseFast (.fast)" >&2; exit 1;
+    }
+    printf '[%s] signature=valid runtime=valid launch=skipped(no-rosetta) mode=.fast\n' "$arch"
   else
     if [[ "$arch" == x86_64 ]]; then
       output=$(arch -x86_64 "$app/Contents/MacOS/omg" --version 2>&1)
@@ -87,7 +88,7 @@ for arch in arm64 x86_64 universal; do
       output=$("$app/Contents/MacOS/omg" --version 2>&1)
     fi
     mode=$(awk '/build mode/{print $NF}' <<<"$output")
-    [[ "$mode" == ".ReleaseFast" ]] || { echo "$arch build mode is $mode" >&2; exit 1; }
+    [[ "$mode" == ".fast" || "$mode" == ".ReleaseFast" ]] || { echo "$arch build mode is $mode" >&2; exit 1; }
     printf '[%s] signature=valid runtime=valid launch=ok mode=%s\n' "$arch" "$mode"
   fi
 done
@@ -238,9 +239,10 @@ for arch in arm64 x86_64 universal; do
   bin="$mount_base/mnt/OMG.app/Contents/MacOS/omg"
   if [[ "$arch" == x86_64 ]] && ! arch -x86_64 true >/dev/null 2>&1; then
     lipo -archs "$bin" | grep -q 'x86_64' || { echo "$arch DMG binary missing x86_64 slice" >&2; exit 1; }
-    _strtmp=$(mktemp); /usr/bin/strings "$bin" > "$_strtmp"; grep -q 'ReleaseFast' "$_strtmp"; rm -f "$_strtmp"
-    [[ $? -eq 0 ]] || { echo "$arch DMG binary does not contain ReleaseFast" >&2; exit 1; }
-    printf '[%s] DMG launch=skipped(no-rosetta) mode=.ReleaseFast\n' "$arch"
+    xcrun otool -arch x86_64 -tvV -p _ghostty_info "$bin" | grep -Eq 'movl[[:space:]]+\$0x2,' || {
+      echo "$arch DMG binary _ghostty_info is not ReleaseFast (.fast)" >&2; exit 1;
+    }
+    printf '[%s] DMG launch=skipped(no-rosetta) mode=.fast\n' "$arch"
   else
     if [[ "$arch" == x86_64 ]]; then
       output=$(arch -x86_64 "$bin" --version 2>&1)
@@ -248,7 +250,7 @@ for arch in arm64 x86_64 universal; do
       output=$("$bin" --version 2>&1)
     fi
     mode=$(awk '/build mode/{print $NF}' <<<"$output")
-    [[ "$mode" == ".ReleaseFast" ]] || { echo "$arch DMG build mode is $mode" >&2; exit 1; }
+    [[ "$mode" == ".fast" || "$mode" == ".ReleaseFast" ]] || { echo "$arch DMG build mode is $mode" >&2; exit 1; }
     printf '[%s] DMG launch=ok mode=%s\n' "$arch" "$mode"
   fi
   detached=false

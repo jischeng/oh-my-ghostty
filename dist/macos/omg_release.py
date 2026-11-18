@@ -742,7 +742,7 @@ def write_release_summary(
         f"- **Bundle version**: `{pkg_info['bundle_version']}`",
         f"- **Ghostty base**: `{ghostty_base[0]}` (`{ghostty_base[1]}`)",
         f"- **Signing**: persistently self-signed; **not notarized** (`{pkg_info['designated_requirement']}`)",
-        f"- **x86_64 verification**: {'launched via Rosetta 2' if rosetta_ok else 'Mach-O + signature + .ReleaseFast verified (Rosetta 2 not installed)'}",
+        f"- **x86_64 verification**: {'launched via Rosetta 2' if rosetta_ok else 'Mach-O + signature + .fast (ReleaseFast) verified (Rosetta 2 not installed)'}",
         f"- **Session runtime**: revision `{pkg_info['runtime_revision']}`, snapshot `{pkg_info['snapshot_revision']}`",
         f"- **Timings (s)**: `{json.dumps(timings)}`",
     ]

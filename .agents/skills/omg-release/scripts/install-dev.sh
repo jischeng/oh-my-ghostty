@@ -158,7 +158,7 @@ designated_requirement=$(codesign -d -r- "$source_app" 2>&1)
 
 version_output=$("$source_bin" --version 2>&1)
 build_mode=$(awk '/build mode/{print $NF}' <<<"$version_output")
-[[ "$build_mode" == ".ReleaseFast" ]] || {
+[[ "$build_mode" == ".fast" || "$build_mode" == ".ReleaseFast" ]] || {
   echo "refusing routine Dev install with GhosttyKit build mode $build_mode" >&2
   exit 1
 }

@@ -54,7 +54,7 @@ with open(path, 'wb') as f: plistlib.dump(info, f)
 PY
 OMG_SIGNING_MODE=development OMG_SIGNING_IDENTITY="$identity" OMG_SIGNING_KEYCHAIN= \
   OMG_SIGNING_ENTITLEMENTS="$repo_root/macos/GhosttyDebug.entitlements" dist/macos/sign_omg_app.sh "$source_app"
-"$source_app/Contents/MacOS/omg" --version | grep -q '.ReleaseFast'
+"$source_app/Contents/MacOS/omg" --version | grep -Eq 'build mode[[:space:]]*:[[:space:]]*\.(fast|ReleaseFast)'
 OMG_TEST_BINARY="$source_app/Contents/MacOS/omg" \
   bash "$dev_tool" python3 dist/test_ssh_agent_wrappers.py
 if pgrep -f '^/Applications/OMG Dev PTY.app/Contents/MacOS/omg' >/dev/null; then

@@ -477,7 +477,7 @@ class NativeSigningSmokeTests(unittest.TestCase):
                 with patch.dict(os.environ, config):
                     signing.verify(app)
                 output = subprocess.check_output([str(app / "Contents/MacOS/omg"), "--version"]).decode()
-                self.assertIn(".ReleaseFast", output)
+                self.assertRegex(output, r"build mode\s*:\s*\.(?:fast|ReleaseFast)")
             finally:
                 keychain = identity_dir / "release.keychain-db"
                 if keychain.exists():

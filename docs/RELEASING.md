@@ -377,14 +377,15 @@ a dirty tree or move/force-update an existing Dev tag because either action
 would make the installed version misleading.
 
 Success for a routine development or acceptance build means `xcodebuild` exits
-zero, this executable exists, and the GhosttyKit core reports ReleaseFast:
+zero, this executable exists, and the GhosttyKit core reports ReleaseFast
+(`.fast` under Zig 0.17):
 
 ```bash
 macos/build/Debug/OMG.app/Contents/MacOS/omg --version \
-  | grep -F 'build mode    : .ReleaseFast'
+  | grep -F 'build mode    : .fast'
 ```
 
-A deliberately core-debug build may report `.Debug`; label it as such and do
+A deliberately core-debug build may report `.debug`; label it as such and do
 not treat its large-output performance as representative of OMG release
 artifacts.
 
@@ -477,7 +478,7 @@ for arch in arm64 x86_64 universal; do
   plutil -extract GhosttyBaseVersion raw "$app/Contents/Info.plist"
   plutil -extract GhosttyBaseRevision raw "$app/Contents/Info.plist"
   "$app/Contents/MacOS/omg" --version \
-    | grep -F 'build mode    : .ReleaseFast'
+    | grep -F 'build mode    : .fast'
 done
 ```
 

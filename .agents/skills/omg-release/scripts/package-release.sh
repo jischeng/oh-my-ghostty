@@ -77,7 +77,7 @@ for arch in arm64 x86_64 universal; do
   if [[ "$arch" == x86_64 ]] && ! arch -x86_64 true >/dev/null 2>&1; then
     # Rosetta 2 is not installed; verify x86_64 slice and _ghostty_info ReleaseFast (mode=2)
     lipo -archs "$app/Contents/MacOS/omg" | grep -q 'x86_64' || { echo "$arch binary missing x86_64 slice" >&2; exit 1; }
-    xcrun otool -arch x86_64 -tvV -p _ghostty_info "$app/Contents/MacOS/omg" | grep -Eq 'movl[[:space:]]+\$0x2,' || {
+    (set +o pipefail; xcrun otool -arch x86_64 -tvV -p _ghostty_info "$app/Contents/MacOS/omg" | sed '/[[:space:]]retq$/q' | grep -Eq 'movl[[:space:]]+\$0x2,') || {
       echo "$arch binary _ghostty_info is not ReleaseFast (.fast)" >&2; exit 1;
     }
     printf '[%s] signature=valid runtime=valid launch=skipped(no-rosetta) mode=.fast\n' "$arch"
@@ -239,7 +239,7 @@ for arch in arm64 x86_64 universal; do
   bin="$mount_base/mnt/OMG.app/Contents/MacOS/omg"
   if [[ "$arch" == x86_64 ]] && ! arch -x86_64 true >/dev/null 2>&1; then
     lipo -archs "$bin" | grep -q 'x86_64' || { echo "$arch DMG binary missing x86_64 slice" >&2; exit 1; }
-    xcrun otool -arch x86_64 -tvV -p _ghostty_info "$bin" | grep -Eq 'movl[[:space:]]+\$0x2,' || {
+    (set +o pipefail; xcrun otool -arch x86_64 -tvV -p _ghostty_info "$bin" | sed '/[[:space:]]retq$/q' | grep -Eq 'movl[[:space:]]+\$0x2,') || {
       echo "$arch DMG binary _ghostty_info is not ReleaseFast (.fast)" >&2; exit 1;
     }
     printf '[%s] DMG launch=skipped(no-rosetta) mode=.fast\n' "$arch"

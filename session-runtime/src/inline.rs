@@ -828,11 +828,9 @@ mod tests {
     fn repaint_skips_preserve_rows_scroll_when_in_alt_screen() {
         let mut screen = Screen::new(80, 24).unwrap();
         let primary_repaint = screen.repaint(Some(24)).unwrap();
-        assert!(
-            primary_repaint
-                .windows(b"\x1b[999;1H\r\n".len())
-                .any(|w| w == b"\x1b[999;1H\r\n")
-        );
+        assert!(primary_repaint
+            .windows(b"\x1b[999;1H\r\n".len())
+            .any(|w| w == b"\x1b[999;1H\r\n"));
 
         screen.write(b"\x1b[?1049halt-app");
         let alt_repaint = screen.repaint(Some(24)).unwrap();

@@ -10,7 +10,9 @@ fn parse_zig_string_literal(input: &str) -> Result<(String, &str), String> {
         match ch {
             '"' => return Ok((out, &rest[idx + 1..])),
             '\\' => {
-                let (_, esc) = chars.next().ok_or_else(|| "unterminated escape".to_string())?;
+                let (_, esc) = chars
+                    .next()
+                    .ok_or_else(|| "unterminated escape".to_string())?;
                 match esc {
                     '\\' => out.push('\\'),
                     '"' => out.push('"'),

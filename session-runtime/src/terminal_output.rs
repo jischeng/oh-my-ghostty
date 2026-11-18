@@ -178,7 +178,13 @@ mod tests {
         }
         let expected: Vec<u8> = [hyperlink.as_slice(), title, cwd, status].concat();
         assert_eq!(visible, expected);
-        assert!(screen.written.windows(b"\x1b]10;?\x07".len()).any(|w| w == b"\x1b]10;?\x07"));
-        assert!(screen.written.windows(b"\x1b]7501;?\x07".len()).any(|w| w == b"\x1b]7501;?\x07"));
+        assert!(screen
+            .written
+            .windows(b"\x1b]10;?\x07".len())
+            .any(|w| w == b"\x1b]10;?\x07"));
+        assert!(screen
+            .written
+            .windows(b"\x1b]7501;?\x07".len())
+            .any(|w| w == b"\x1b]7501;?\x07"));
     }
 }

@@ -3096,9 +3096,15 @@ mod tests {
         let mut empty_pending_src = Vt::new(80, 24).unwrap();
         empty_pending_src.write(b"\x1b]7501;state=working:app=antigravity:id=t3\x07");
         empty_pending_src.write(b"\x1b]3008;start=omg-agent-sync;begin\x07");
-        let encoded = empty_pending_src.activity().snapshot().inline_bytes_with_mode("restore");
+        let encoded = empty_pending_src
+            .activity()
+            .snapshot()
+            .inline_bytes_with_mode("restore");
         let mut rx2 = Vt::new(80, 24).unwrap();
         rx2.write(&encoded);
-        assert_eq!(rx2.activity().snapshot().presentation().unwrap().state, "working");
+        assert_eq!(
+            rx2.activity().snapshot().presentation().unwrap().state,
+            "working"
+        );
     }
 }

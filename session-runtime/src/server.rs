@@ -1929,8 +1929,7 @@ pub fn serve_managed(
                                         revents: 0,
                                     };
                                     let rc = unsafe { libc::poll(&mut pfd, 1, wait_ms) };
-                                    if rc > 0
-                                        && (pfd.revents & (libc::POLLIN | libc::POLLHUP)) != 0
+                                    if rc > 0 && (pfd.revents & (libc::POLLIN | libc::POLLHUP)) != 0
                                     {
                                         continue;
                                     }
@@ -2800,8 +2799,16 @@ mod tests {
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
         fs::set_permissions(&sessions, fs::Permissions::from_mode(0o700)).unwrap();
         // Provide synthetic compiled xterm-ghostty entries with Sync capability in state_dir/terminfo.
-        fs::write(terminfo_x.join("xterm-ghostty"), b"synthetic-terminfo\0Sync\0").unwrap();
-        fs::write(terminfo_hex.join("xterm-ghostty"), b"synthetic-terminfo\0Sync\0").unwrap();
+        fs::write(
+            terminfo_x.join("xterm-ghostty"),
+            b"synthetic-terminfo\0Sync\0",
+        )
+        .unwrap();
+        fs::write(
+            terminfo_hex.join("xterm-ghostty"),
+            b"synthetic-terminfo\0Sync\0",
+        )
+        .unwrap();
 
         let id = "44444444-4444-4444-4444-444444444444";
         let sock_path = dir.join("sess.sock");
@@ -2900,7 +2907,10 @@ time.sleep(0.05)'";
         drop(client);
         handle.join().unwrap().unwrap();
 
-        assert_eq!(info_size, Some((Some(120), Some(36), Some(1200), Some(720))));
+        assert_eq!(
+            info_size,
+            Some((Some(120), Some(36), Some(1200), Some(720)))
+        );
         let text = String::from_utf8_lossy(&collected);
         assert!(text.contains("SIZE=120x36:1200x720"), "{text:?}");
         assert!(

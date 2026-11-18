@@ -71,7 +71,8 @@ unsafe extern "C" {
     fn omg_vt_continuation(vt: *mut c_void, data: *mut *mut u8, len: *mut usize) -> i32;
     fn omg_vt_screen_only(vt: *mut c_void) -> i32;
     fn omg_vt_in_alt_screen(vt: *mut c_void) -> i32;
-    fn omg_vt_in_sync_and_screen(vt: *mut c_void, in_sync: *mut bool, alt_screen: *mut bool) -> i32;
+    fn omg_vt_in_sync_and_screen(vt: *mut c_void, in_sync: *mut bool, alt_screen: *mut bool)
+        -> i32;
     fn omg_vt_ui_modes(
         vt: *mut c_void,
         in_sync: *mut bool,
@@ -1208,17 +1209,32 @@ mod tests {
             b"\x1b[>q\x1b[c\x1b[>c\x1bP+q544e\x1b\\\x1b[?996n\x1b[14t\x1b[16t\x1b[18t\x1b]10;?\x07\x1b]11;?\x07\x1b]12;?\x07\x1b]7501;?\x07",
         );
         let replies = String::from_utf8_lossy(&captured.lock().unwrap()).into_owned();
-        assert!(replies.contains("\x1bP>|ghostty 1.3.2-test\x1b\\"), "{replies:?}");
+        assert!(
+            replies.contains("\x1bP>|ghostty 1.3.2-test\x1b\\"),
+            "{replies:?}"
+        );
         assert!(replies.contains("\x1b[?62;22;52c"), "{replies:?}");
         assert!(replies.contains("\x1b[>1;10;0c"), "{replies:?}");
-        assert!(replies.contains("1+r544E=787465726D2D67686F73747479\x1b\\"), "{replies:?}");
+        assert!(
+            replies.contains("1+r544E=787465726D2D67686F73747479\x1b\\"),
+            "{replies:?}"
+        );
         assert!(replies.contains("\x1b[?997;1n"), "{replies:?}");
         assert!(replies.contains("\x1b[4;720;1200t"), "{replies:?}");
         assert!(replies.contains("\x1b[6;20;10t"), "{replies:?}");
         assert!(replies.contains("\x1b[8;36;120t"), "{replies:?}");
-        assert!(replies.contains("\x1b]10;rgb:ffff/ffff/ffff\x07"), "{replies:?}");
-        assert!(replies.contains("\x1b]11;rgb:2828/2c2c/3434\x07"), "{replies:?}");
-        assert!(replies.contains("\x1b]12;rgb:aaaa/bbbb/cccc\x07"), "{replies:?}");
+        assert!(
+            replies.contains("\x1b]10;rgb:ffff/ffff/ffff\x07"),
+            "{replies:?}"
+        );
+        assert!(
+            replies.contains("\x1b]11;rgb:2828/2c2c/3434\x07"),
+            "{replies:?}"
+        );
+        assert!(
+            replies.contains("\x1b]12;rgb:aaaa/bbbb/cccc\x07"),
+            "{replies:?}"
+        );
         assert!(replies.contains("\x1b]7501;?:states="), "{replies:?}");
 
         vt.write(b"\x1b[?2026h\x1b[?1049h\x1b[?25l\x1b[?1000h");
@@ -1232,7 +1248,10 @@ mod tests {
         vt.write(b"\x1b[?2026l\x1b[>q\x1b[18t");
         assert!(!vt.in_sync());
         let after = String::from_utf8_lossy(&captured.lock().unwrap()).into_owned();
-        assert!(after.contains("\x1bP>|ghostty 1.3.2-test\x1b\\"), "{after:?}");
+        assert!(
+            after.contains("\x1bP>|ghostty 1.3.2-test\x1b\\"),
+            "{after:?}"
+        );
         assert!(after.contains("\x1b[8;36;120t"), "{after:?}");
         drop(vt);
         unsafe { drop(Box::from_raw(ctx)) };

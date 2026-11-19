@@ -270,9 +270,9 @@ fn host_connection_with_limit(
                         .unwrap_or_else(|p| p.into_inner())
                         .is_local();
                     let capabilities = if is_local {
-                        b"durable-close/1,strict-open/1,local-launch/1,local-resurrect/1,inline-viewer/1,agent-state/1,holder-presentation/1,recreate-if-gone/1,exec/1,init-size/1,remote-env/1".as_slice()
+                        b"durable-close/1,strict-open/1,local-launch/1,local-resurrect/1,inline-viewer/1,agent-state/1,holder-presentation/1,recreate-if-gone/1,exec/1,init-size/1,remote-env/1,handoff-resume/1".as_slice()
                     } else {
-                        b"durable-close/1,strict-open/1,inline-viewer/1,agent-state/1,recreate-if-gone/1,exec/1,init-size/1,remote-env/1".as_slice()
+                        b"durable-close/1,strict-open/1,inline-viewer/1,agent-state/1,recreate-if-gone/1,exec/1,init-size/1,remote-env/1,handoff-resume/1".as_slice()
                     };
                     transport.push(Frame::new(b'P', 0, capabilities));
                 }

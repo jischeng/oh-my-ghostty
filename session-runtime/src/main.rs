@@ -680,6 +680,28 @@ fn main() -> io::Result<()> {
         }
         Some("ensure-host") if a.len() == 3 => ensure_host(&a[2], None),
         Some("report") if a.len() >= 4 => report_cli(&a[2..]),
+        Some("handoff-probe") if a.len() >= 4 => {
+            let interactive = a.iter().skip(4).any(|arg| arg == "--interactive");
+            session_cli::handoff_probe(Path::new(&a[2]), &a[3], interactive)
+        }
+        Some("handoff-close") if a.len() >= 4 => {
+            let interactive = a.iter().skip(4).any(|arg| arg == "--interactive");
+            let mut timeout_secs = 15u64;
+            let mut idx = 4;
+            while idx < a.len() {
+                if a[idx] == "--timeout-secs" {
+                    if let Some(raw) = a.get(idx + 1) {
+                        timeout_secs = raw
+                            .parse::<u64>()
+                            .map_err(|_| io::Error::other("invalid --timeout-secs"))?;
+                        idx += 2;
+                        continue;
+                    }
+                }
+                idx += 1;
+            }
+            session_cli::handoff_close(Path::new(&a[2]), &a[3], interactive, timeout_secs)
+        }
         Some("handoff-check") if a.len() >= 3 => {
             if unsafe { libc::isatty(libc::STDIN_FILENO) } == 1
                 && unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1

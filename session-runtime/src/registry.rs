@@ -403,6 +403,8 @@ pub struct OpenRequest {
     pub background: Option<[u8; 3]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<[u8; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<crate::record::Resume>,
 }
 
 fn valid_remote_header_value(value: Option<&String>) -> bool {
@@ -478,6 +480,7 @@ struct ConnectOptions<'a> {
     remote_launch: Option<server::RemoteSessionLaunch>,
     inline_viewer: bool,
     recreate_if_gone: bool,
+    initial_resume: Option<&'a crate::record::Resume>,
 }
 
 type SessionInflightTable = Arc<(Mutex<std::collections::HashSet<String>>, std::sync::Condvar)>;
@@ -1612,6 +1615,7 @@ impl Registry {
                 remote_launch: Some(request.to_remote_launch(&self.root)),
                 inline_viewer: request.inline_viewer,
                 recreate_if_gone: request.recreate_if_gone,
+                initial_resume: request.resume.as_ref(),
             },
         )
     }
@@ -1657,6 +1661,7 @@ impl Registry {
             remote_launch,
             inline_viewer,
             recreate_if_gone,
+            initial_resume,
         } = options;
         if !valid_id(id) {
             return Err(io::Error::other("invalid session identity"));
@@ -1699,6 +1704,7 @@ impl Registry {
                     remote_launch,
                     inline_viewer,
                     recreate_if_gone,
+                    initial_resume: None,
                 },
             );
         }
@@ -1804,6 +1810,25 @@ impl Registry {
                 .open(self.root.join(format!("{id}.created")))?;
             Record::new(id, policy.unwrap_or_else(|| self.policy.clone()))?
         };
+        if let Some(resume) = initial_resume {
+            resume.validate()?;
+            let args = resume.arguments()?;
+            let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+            let cmd = args.iter().map(|s| quote(s)).collect::<Vec<_>>().join(" ");
+            let shell = self
+                .command
+                .first()
+                .ok_or_else(|| io::Error::other("missing shell"))?
+                .clone();
+            let script = format!("{cmd}; exec {} -l", quote(&shell));
+            argv = vec![shell, "-l".into(), "-i".into(), "-c".into(), script];
+            record.resume = Some(resume.clone());
+            if working_directory.is_none()
+                && fs::metadata(&resume.cwd).is_ok_and(|meta| meta.is_dir())
+            {
+                working_directory = Some(PathBuf::from(&resume.cwd));
+            }
+        }
         record.contained = self.containment_root.is_some();
         record.inline_viewer = inline_viewer;
         record.save(&path)?;
@@ -3080,6 +3105,7 @@ impl Registry {
                 remote_launch: None,
                 inline_viewer: request.inline_viewer,
                 recreate_if_gone: request.recreate_if_gone,
+                initial_resume: None,
             },
         )
     }

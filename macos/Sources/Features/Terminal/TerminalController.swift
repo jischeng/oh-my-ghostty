@@ -917,6 +917,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         quickInputModel.bindGlobalTarget { [weak self] in
             (self?.focusedSurface ?? self?.surfaceTree.first)?.id
         }
+        for surfaceID in paneSessionObservers.keys where !activeIDs.contains(surfaceID) {
+            cancelRevisionHandoff(for: surfaceID)
+        }
         paneSessionObservers = paneSessionObservers.filter { activeIDs.contains($0.key) }
         paneSessionContexts = paneSessionContexts.filter { activeIDs.contains($0.key) }
         agentActivities = agentActivities.filter { activeIDs.contains($0.key) }
@@ -963,6 +966,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
 
         for surface in surfaces where paneSessionObservers[surface.id] == nil {
+            if !OMGApplicationEnvironment.isRunningTests,
+               surface.pendingRevisionHandoff != nil {
+                startRevisionHandoffProbeIfNeeded(for: surface)
+            }
             if !OMGApplicationEnvironment.isRunningTests,
                let runtime = surface.runtimeDescriptor {
                 _ = SessionRuntimeHistoryStore.seedRestoredWorkingDirectoryIfNeeded(

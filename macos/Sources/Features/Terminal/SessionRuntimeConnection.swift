@@ -96,6 +96,7 @@ struct SessionRuntimeDescriptor: Codable, Equatable, Sendable {
     static let attachExistingEnvironmentKey = "OMG_RUNTIME_ATTACH_EXISTING"
     static let resurrectWorkingDirectoryEnvironmentKey = "OMG_RUNTIME_RESURRECT_CWD"
     static let recreateIfGoneEnvironmentKey = "OMG_RUNTIME_RECREATE_IF_GONE"
+    static let handoffResumeEnvironmentKey = "OMG_RUNTIME_HANDOFF_RESUME"
     /// Nil identifies a local host runtime. Older archives always contain an SSH connection.
     var connection: GitSSHConnection?
     var revision: String
@@ -188,7 +189,8 @@ struct SessionRuntimeDescriptor: Codable, Equatable, Sendable {
         term: String? = nil,
         colorterm: String? = nil,
         termProgram: String? = nil,
-        termProgramVersion: String? = nil
+        termProgramVersion: String? = nil,
+        resume: SessionRuntimeHandoffResume? = nil
     ) throws -> String {
         struct Request: Encodable {
             let id: String
@@ -204,9 +206,10 @@ struct SessionRuntimeDescriptor: Codable, Equatable, Sendable {
             let colorterm: String?
             let termProgram: String?
             let termProgramVersion: String?
+            let resume: SessionRuntimeHandoffResume?
 
             enum CodingKeys: String, CodingKey {
-                case id, policy, create, cwd
+                case id, policy, create, cwd, resume
                 case recreateIfGone = "recreate_if_gone"
                 case cols, rows
                 case pixelWidth = "pixel_width"
@@ -243,7 +246,8 @@ struct SessionRuntimeDescriptor: Codable, Equatable, Sendable {
             term: term,
             colorterm: colorterm ?? (remoteSpawns ? "truecolor" : nil),
             termProgram: termProgram ?? (remoteSpawns ? "ghostty" : nil),
-            termProgramVersion: termProgramVersion ?? (remoteSpawns ? (bundleVersion?.isEmpty == false ? bundleVersion : nil) : nil)
+            termProgramVersion: termProgramVersion ?? (remoteSpawns ? (bundleVersion?.isEmpty == false ? bundleVersion : nil) : nil),
+            resume: remoteSpawns ? resume : nil
         ))
         guard let result = String(data: data, encoding: .utf8) else { throw CocoaError(.fileReadCorruptFile) }
         return result
@@ -859,33 +863,33 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
         return home.appendingPathComponent(".omg/run/\(hash)")
     }
 
-    nonisolated static func normalizedForRestore(
+    nonisolated static func restoreNormalization(
         _ descriptor: SessionRuntimeDescriptor,
         applicationSupportRoot: URL? = nil,
         resources: URL? = Bundle.main.resourceURL
-    ) -> SessionRuntimeDescriptor {
+    ) -> SessionRuntimeRestoreNormalization {
         guard let resources,
               let currentRevision = try? String(
                 contentsOf: resources.appendingPathComponent("session-runtime/revision"),
                 encoding: .utf8
               ).trimmingCharacters(in: .whitespacesAndNewlines),
               !currentRevision.isEmpty else {
-            return descriptor
+            return .init(descriptor: descriptor, handoffSourceDescriptor: nil)
         }
         var updated = descriptor
         if descriptor.isLocal {
             updated.revision = currentRevision
-            return updated
+            return .init(descriptor: updated, handoffSourceDescriptor: nil)
         }
         if descriptor.revision == currentRevision {
-            return descriptor
+            return .init(descriptor: descriptor, handoffSourceDescriptor: nil)
         }
         let rev = descriptor.revision
         let validRevision = !rev.isEmpty && rev.count <= 128 &&
             rev.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "._-".contains($0)) }
         guard validRevision else {
             updated.revision = currentRevision
-            return updated
+            return .init(descriptor: updated, handoffSourceDescriptor: nil)
         }
         let supportRoot = applicationSupportRoot ?? OMGApplicationEnvironment.applicationSupportURL()
         let versionDir = supportRoot
@@ -898,15 +902,27 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
               let cachedSnapshot = try? String(contentsOf: cachedSnapshotFile, encoding: .utf8),
               let currentSnapshot = try? String(contentsOf: currentSnapshotFile, encoding: .utf8) else {
             updated.revision = currentRevision
-            return updated
+            return .init(descriptor: updated, handoffSourceDescriptor: descriptor)
         }
         let canonicalCached = canonicalSnapshotRevision(cachedSnapshot)
         let canonicalCurrent = canonicalSnapshotRevision(currentSnapshot)
         guard !canonicalCached.isEmpty, canonicalCached == canonicalCurrent else {
             updated.revision = currentRevision
-            return updated
+            return .init(descriptor: updated, handoffSourceDescriptor: descriptor)
         }
-        return descriptor
+        return .init(descriptor: descriptor, handoffSourceDescriptor: nil)
+    }
+
+    nonisolated static func normalizedForRestore(
+        _ descriptor: SessionRuntimeDescriptor,
+        applicationSupportRoot: URL? = nil,
+        resources: URL? = Bundle.main.resourceURL
+    ) -> SessionRuntimeDescriptor {
+        restoreNormalization(
+            descriptor,
+            applicationSupportRoot: applicationSupportRoot,
+            resources: resources
+        ).descriptor
     }
 
     nonisolated static func shouldCreateUnrecordedLocalSessionOnRestore(
@@ -1047,6 +1063,50 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
             bundle: artifacts.path, policy: descriptor.policy, revision: descriptor.revision,
             hooks: connection == nil || !installsHooks ? nil : try AgentHookInstaller.remoteInstallerScript(agents: [.codex, .claude, .pi]),
             localStateDirectory: connection == nil ? localStateDirectory : nil, ttyAuthentication: ttyAuthentication)
+        return try JSONEncoder().encode(config)
+    }
+
+    /// Control-only SSH connection JSON for querying or closing a single session
+    /// on a previous incompatible revision. Does not require cached local artifacts.
+    nonisolated static func handoffConnectionConfiguration(
+        _ descriptor: SessionRuntimeDescriptor,
+        interactive: Bool
+    ) throws -> Data {
+        guard let connection = descriptor.connection else {
+            throw CocoaError(.validationMissingMandatoryProperty)
+        }
+        let rev = descriptor.revision
+        guard !rev.isEmpty, rev.count <= 128,
+              rev.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || "._-".contains($0)) }) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        struct Configuration: Encodable {
+            let autoInstall: Bool
+            let transport: String
+            let executable: String
+            let arguments: [String]
+            let cwd: String
+            let bundle: String
+            let policy: SessionRuntimePolicy
+            let revision: String
+
+            enum CodingKeys: String, CodingKey {
+                case transport, executable, arguments, cwd, bundle, policy, revision
+                case autoInstall = "auto_install"
+            }
+        }
+        let config = Configuration(
+            autoInstall: false,
+            transport: "ssh",
+            executable: connection.executablePath,
+            arguments: connection.arguments.map {
+                $0 == "BatchMode=yes" || $0 == "BatchMode=no" ? "BatchMode=\(interactive ? "no" : "yes")" : $0
+            },
+            cwd: descriptor.launchWorkingDirectory,
+            bundle: "",
+            policy: descriptor.policy,
+            revision: rev
+        )
         return try JSONEncoder().encode(config)
     }
 

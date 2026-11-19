@@ -62,6 +62,8 @@ struct EditorWorkspaceHost<Terminal: View>: View {
                     SSHRecoveryBanner(controller: controller, surface: surfaceView)
                 }
                 terminal
+            }.overlay {
+                SessionRuntimeRevisionHandoffOverlay(controller: controller, surface: surfaceView)
             }.overlay(alignment: .topTrailing) {
                 VStack(alignment: .trailing, spacing: 6) {
                     if !workspace.isVisible, !workspace.documents.isEmpty || !workspace.gitDiffs.isEmpty {

@@ -1175,9 +1175,155 @@ pub fn run(arguments: &[String]) -> io::Result<u8> {
     Ok(if inventory.errors.is_empty() { 0 } else { 1 })
 }
 
+#[derive(Serialize)]
+struct HandoffProbeOutput {
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ended: Option<omg_session_runtime::lifecycle::EndReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resume: Option<omg_session_runtime::record::Resume>,
+}
+
+#[derive(Serialize)]
+struct HandoffCloseOutput {
+    status: &'static str,
+}
+
+fn validate_handoff_inputs(
+    connection_path: &Path,
+    session_id: &str,
+) -> io::Result<deploy::Connection> {
+    if !omg_session_runtime::host::valid_id(session_id) {
+        return Err(io::Error::other("Invalid session identity"));
+    }
+    let mut connection = deploy::load(connection_path)?;
+    if connection.transport != deploy::TransportKind::Ssh {
+        return Err(io::Error::other(
+            "Revision handoff requires an SSH connection",
+        ));
+    }
+    if !connection
+        .revision
+        .as_deref()
+        .is_some_and(valid_revision)
+    {
+        return Err(io::Error::other("Invalid runtime revision"));
+    }
+    connection.auto_install = false;
+    Ok(connection)
+}
+
+fn summarize_handoff_probe(sessions: &[SessionSummary], session_id: &str) -> HandoffProbeOutput {
+    let Some(found) = sessions
+        .iter()
+        .find(|session| session.id.eq_ignore_ascii_case(session_id))
+    else {
+        return HandoffProbeOutput {
+            status: "gone",
+            pid: None,
+            ended: None,
+            cwd: None,
+            resume: None,
+        };
+    };
+    if let Some(ended) = found.ended {
+        HandoffProbeOutput {
+            status: "exited",
+            pid: None,
+            ended: Some(ended),
+            cwd: found.cwd.clone(),
+            resume: found.resume.clone(),
+        }
+    } else {
+        HandoffProbeOutput {
+            status: "alive",
+            pid: found.pid,
+            ended: None,
+            cwd: found.cwd.clone(),
+            resume: found.resume.clone(),
+        }
+    }
+}
+
+pub fn handoff_probe(
+    connection_path: &Path,
+    session_id: &str,
+    interactive: bool,
+) -> io::Result<()> {
+    let connection = validate_handoff_inputs(connection_path, session_id)?;
+    let child = match deploy::fast_connect(&connection, interactive) {
+        Ok(child) => child,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            println!(
+                "{}",
+                serde_json::to_string(&HandoffProbeOutput {
+                    status: "gone",
+                    pid: None,
+                    ended: None,
+                    cwd: None,
+                    resume: None,
+                })?
+            );
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    let mut transport = super::tunnel_child(child)?;
+    let sessions = list(&mut transport)?;
+    let output = summarize_handoff_probe(&sessions, session_id);
+    println!("{}", serde_json::to_string(&output)?);
+    Ok(())
+}
+
+pub fn handoff_close(
+    connection_path: &Path,
+    session_id: &str,
+    interactive: bool,
+    timeout_secs: u64,
+) -> io::Result<()> {
+    let connection = validate_handoff_inputs(connection_path, session_id)?;
+    let child = match deploy::fast_connect(&connection, interactive) {
+        Ok(child) => child,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            println!(
+                "{}",
+                serde_json::to_string(&HandoffCloseOutput { status: "gone" })?
+            );
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    let mut transport = super::tunnel_child(child)?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs.clamp(1, 60));
+    loop {
+        if close(&mut transport, session_id)? {
+            println!(
+                "{}",
+                serde_json::to_string(&HandoffCloseOutput { status: "closed" })?
+            );
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Timed out waiting for the previous session to exit.",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ssh_transport_arguments, Ssh};
+    use super::{ssh_transport_arguments, summarize_handoff_probe, Ssh};
+    use omg_session_runtime::{
+        lifecycle::EndReason,
+        record::{Resume, SessionSummary},
+    };
 
     #[test]
     fn ssh_transport_arguments_match_heartbeat_tolerance() {
@@ -1192,5 +1338,63 @@ mod tests {
         assert!(args.contains(&"ConnectTimeout=15".to_string()));
         assert!(args.contains(&"ServerAliveInterval=15".to_string()));
         assert!(args.contains(&"ServerAliveCountMax=3".to_string()));
+    }
+
+    #[test]
+    fn summarize_handoff_probe_distinguishes_gone_exited_and_alive() {
+        let id = "11111111-1111-1111-1111-111111111111";
+        let gone = summarize_handoff_probe(&[], id);
+        assert_eq!(gone.status, "gone");
+
+        let alive_session = SessionSummary {
+            id: id.into(),
+            generation: "gen-1".into(),
+            created_at: 1,
+            updated_at: 2,
+            pid: Some(4242),
+            ended: None,
+            resume: Some(Resume {
+                agent: "antigravity".into(),
+                conversation_id: "conv-123".into(),
+                cwd: "/srv/app".into(),
+            }),
+            cwd: Some("/srv/app".into()),
+            ssh: None,
+            activity: None,
+            policy: Default::default(),
+        };
+        let alive = summarize_handoff_probe(&[alive_session], &id.to_uppercase());
+        assert_eq!(alive.status, "alive");
+        assert_eq!(alive.pid, Some(4242));
+        assert_eq!(alive.cwd.as_deref(), Some("/srv/app"));
+        assert_eq!(
+            alive.resume.as_ref().map(|r| r.conversation_id.as_str()),
+            Some("conv-123")
+        );
+
+        let exited_session = SessionSummary {
+            id: id.into(),
+            generation: "gen-1".into(),
+            created_at: 1,
+            updated_at: 3,
+            pid: None,
+            ended: Some(EndReason::ProcessExited),
+            resume: Some(Resume {
+                agent: "claude".into(),
+                conversation_id: "conv-456".into(),
+                cwd: "/srv/app".into(),
+            }),
+            cwd: Some("/srv/app".into()),
+            ssh: None,
+            activity: None,
+            policy: Default::default(),
+        };
+        let exited = summarize_handoff_probe(&[exited_session], id);
+        assert_eq!(exited.status, "exited");
+        assert_eq!(exited.ended, Some(EndReason::ProcessExited));
+        assert_eq!(
+            exited.resume.as_ref().map(|r| r.agent.as_str()),
+            Some("claude")
+        );
     }
 }

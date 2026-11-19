@@ -48,11 +48,15 @@ extension Ghostty {
             }
         }
         @Published var runtimeConnectionError: String?
+        @Published var pendingRevisionHandoff: SessionRuntimeRevisionHandoffContext?
+        @Published var revisionHandoffState: SessionRuntimeRevisionHandoffState?
         private(set) var runtimeAttachmentSuspended = false
         private var runtimeConfirmedSession = false
 
         var runtimeNeedsCreationOnRestore: Bool {
-            guard runtimeDescriptor != nil, !runtimeConfirmedSession else {
+            guard runtimeDescriptor != nil,
+                  pendingRevisionHandoff == nil,
+                  !runtimeConfirmedSession else {
                 return false
             }
             if case .failed = runtimeConnectionState { return true }
@@ -408,7 +412,8 @@ extension Ghostty {
             _ app: ghostty_app_t,
             baseConfig: SurfaceConfiguration? = nil,
             uuid: UUID? = nil,
-            initialSize: CGSize? = nil
+            initialSize: CGSize? = nil,
+            pendingRevisionHandoff: SessionRuntimeRevisionHandoffContext? = nil
         ) {
             self.markedText = NSMutableAttributedString()
 
@@ -582,6 +587,20 @@ extension Ghostty {
                 }
             )
 
+            // Defer launching a new runtime session when a cross-snapshot-revision
+            // handoff is pending so we never double-open a live remote Agent lock.
+            if let handoff = pendingRevisionHandoff {
+                self.runtimeDescriptor = handoff.sourceDescriptor
+                self.pendingRevisionHandoff = handoff
+                self.revisionHandoffState = .probing
+                self.agentResumeDescriptor = handoff.savedAgentResume
+                if let savedWorkingDirectory = handoff.savedWorkingDirectory,
+                   savedWorkingDirectory.hasPrefix("/") {
+                    self.pwd = savedWorkingDirectory
+                }
+                return
+            }
+
             // Setup our surface. This will also initialize all the terminal IO.
             var surface_cfg = baseConfig ?? SurfaceConfiguration()
             if let encoded = surface_cfg.environmentVariables[SessionRuntimeDescriptor.environmentKey] {
@@ -592,6 +611,10 @@ extension Ghostty {
                     surface_cfg.environmentVariables.removeValue(
                         forKey: SessionRuntimeDescriptor.recreateIfGoneEnvironmentKey
                     ) == "1"
+                let handoffResume: SessionRuntimeHandoffResume? =
+                    surface_cfg.environmentVariables.removeValue(
+                        forKey: SessionRuntimeDescriptor.handoffResumeEnvironmentKey
+                    ).flatMap { try? JSONDecoder().decode(SessionRuntimeHandoffResume.self, from: Data($0.utf8)) }
                 do {
                     let descriptor = try JSONDecoder().decode(SessionRuntimeDescriptor.self, from: Data(encoded.utf8))
                     runtimeDescriptor = descriptor
@@ -609,7 +632,8 @@ extension Ghostty {
                         pane: id,
                         attachExisting: attachExisting,
                         recreateIfGone: recreateIfGone,
-                        fallbackWorkingDirectory: resurrectCwd
+                        fallbackWorkingDirectory: resurrectCwd,
+                        resume: handoffResume
                     )
                 } catch {
                     if runtimeDescriptor?.isLocal != false {
@@ -2490,15 +2514,33 @@ extension Ghostty {
             )
             if let decodedRuntime = try container.decodeIfPresent(SessionRuntimeDescriptor.self, forKey: .runtimeDescriptor),
                !(archivedCreateRuntime && decodedRuntime.isLocal && !OhMyGhosttySettings.shared.localRuntimeEnabled) {
-                let runtime = SessionRuntimeConnections.normalizedForRestore(decodedRuntime)
+                let normalization = SessionRuntimeConnections.restoreNormalization(decodedRuntime)
+                let runtime = normalization.descriptor
                 let createRuntime = archivedCreateRuntime || SessionRuntimeConnections.shouldCreateUnrecordedLocalSessionOnRestore(
                     for: runtime,
                     pane: uuid
                 )
                 let attachesSavedRuntime = SessionRuntimeRestorationPolicy.attachesSavedRuntime(for: startupMode)
                 if attachesSavedRuntime {
-                    try runtime.configureSavedRestore(&config, createRuntime: createRuntime, recreateIfGone: true)
-                    self.init(app, baseConfig: config, uuid: uuid)
+                    if !createRuntime,
+                       let handoffSource = normalization.handoffSourceDescriptor,
+                       let paneID = uuid {
+                        let savedAgentResume = try? container.decodeIfPresent(
+                            AgentResumeDescriptor.self,
+                            forKey: .agentResumeDescriptor
+                        )
+                        let handoff = SessionRuntimeRevisionHandoffContext(
+                            paneID: paneID,
+                            sourceDescriptor: handoffSource,
+                            targetDescriptor: runtime,
+                            savedWorkingDirectory: config.workingDirectory,
+                            savedAgentResume: savedAgentResume
+                        )
+                        self.init(app, baseConfig: config, uuid: paneID, pendingRevisionHandoff: handoff)
+                    } else {
+                        try runtime.configureSavedRestore(&config, createRuntime: createRuntime, recreateIfGone: true)
+                        self.init(app, baseConfig: config, uuid: uuid)
+                    }
                 } else {
                     config.environmentVariables.removeValue(forKey: SessionRuntimeDescriptor.environmentKey)
                     config.environmentVariables[SessionRuntimeDescriptor.localRuntimeEnvironmentKey] = ""

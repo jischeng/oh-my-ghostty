@@ -112,6 +112,7 @@ struct RemoteCapabilities {
     exec: bool,
     init_size: bool,
     remote_env: bool,
+    handoff_resume: bool,
 }
 
 impl RemoteCapabilities {
@@ -130,6 +131,7 @@ impl RemoteCapabilities {
         self.exec = has_capability(data, "exec/1");
         self.init_size = has_capability(data, "init-size/1");
         self.remote_env = has_capability(data, "remote-env/1");
+        self.handoff_resume = has_capability(data, "handoff-resume/1");
     }
 }
 
@@ -233,6 +235,9 @@ fn open_request(peer: &LocalPeer, capabilities: &RemoteCapabilities) -> io::Resu
     if !capabilities.remote_env || peer.snapshot_confirmed || !spawns_session {
         request.clear_remote_env();
     }
+    if !capabilities.handoff_resume || peer.snapshot_confirmed || !spawns_session {
+        request.resume = None;
+    }
     Ok((b'C', serde_json::to_vec(&request)?))
 }
 
@@ -256,6 +261,7 @@ fn clear_launch_data(peer: &mut LocalPeer, clear_resurrect: bool) {
     request.create = false;
     request.launch = None;
     request.recreate_if_gone = false;
+    request.resume = None;
     request.clear_remote_options();
     if clear_resurrect {
         request.resurrect_launch = None;
@@ -2819,5 +2825,43 @@ mod error_classification_tests {
         peer.snapshot_confirmed = true;
         let (_, encoded_reattach) = super::open_request(&peer, &modern_caps).unwrap();
         assert!(serde_json::from_slice::<PinnedLegacyOpen>(&encoded_reattach).is_ok());
+    }
+
+    #[test]
+    fn handoff_resume_open_request_is_gated_by_capability_and_cleared_after_snapshot() {
+        let req = OpenRequest {
+            id: "22222222-2222-2222-2222-222222222222".into(),
+            policy: Policy::default(),
+            create: true,
+            cwd: Some("/srv/app".into()),
+            resume: Some(crate::record::Resume {
+                agent: "antigravity".into(),
+                conversation_id: "conv-abc".into(),
+                cwd: "/srv/app".into(),
+            }),
+            ..Default::default()
+        };
+        let (sock, _other) = UnixStream::pair().unwrap();
+        let mut peer = super::LocalPeer::new(super::Peer::new(sock, 1).unwrap(), 1);
+        peer.open = Some(serde_json::to_vec(&req).unwrap());
+
+        let legacy_caps = super::RemoteCapabilities::default();
+        let (_, encoded_legacy) = super::open_request(&peer, &legacy_caps).unwrap();
+        let parsed_legacy: OpenRequest = serde_json::from_slice(&encoded_legacy).unwrap();
+        assert!(parsed_legacy.resume.is_none());
+
+        let mut modern_caps = super::RemoteCapabilities::default();
+        modern_caps.update(b"handoff-resume/1");
+        let (_, encoded_modern) = super::open_request(&peer, &modern_caps).unwrap();
+        let parsed_modern: OpenRequest = serde_json::from_slice(&encoded_modern).unwrap();
+        assert_eq!(
+            parsed_modern.resume.as_ref().map(|r| r.conversation_id.as_str()),
+            Some("conv-abc")
+        );
+
+        peer.snapshot_confirmed = true;
+        let (_, encoded_reattach) = super::open_request(&peer, &modern_caps).unwrap();
+        let parsed_reattach: OpenRequest = serde_json::from_slice(&encoded_reattach).unwrap();
+        assert!(parsed_reattach.resume.is_none());
     }
 }

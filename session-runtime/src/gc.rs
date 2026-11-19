@@ -321,6 +321,13 @@ fn run_dir_is_safe_to_remove(
         };
         for entry in entries.take(4096).flatten() {
             let path = entry.path();
+            if path
+                .extension()
+                .is_some_and(|ext| ext == "sock" || ext == "ctl")
+                && UnixStream::connect(&path).is_ok()
+            {
+                return false;
+            }
             if path.extension().is_some_and(|ext| ext == "json") {
                 let Ok(record) = Record::load(&path) else {
                     // Unreadable or mid-write record: preserve conservatively.

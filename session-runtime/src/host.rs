@@ -559,10 +559,10 @@ fn host_connection_full(
                         let _ = transport.flush();
                         continue;
                     }
-                    ctrl.shutdown_requested.store(true, Ordering::SeqCst);
-                    ctrl.wake.notify();
                     transport.push(Frame::new(b'T', 0, b"ok"));
                     let _ = transport.flush();
+                    ctrl.shutdown_requested.store(true, Ordering::SeqCst);
+                    ctrl.wake.notify();
                 }
                 b'K' if f.seq != 0 => {
                     let result = std::str::from_utf8(&f.data)

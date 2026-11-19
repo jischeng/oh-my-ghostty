@@ -1731,6 +1731,13 @@ impl Registry {
         } else {
             None
         };
+        let validated_initial_resume = if let Some(resume) = initial_resume {
+            resume.validate()?;
+            let args = resume.arguments()?;
+            Some((resume, args))
+        } else {
+            None
+        };
         let mut record = if let Some(mut record) = existing_record {
             if !closed
                 && resume_generation == Some(record.generation.as_str())
@@ -1810,9 +1817,7 @@ impl Registry {
                 .open(self.root.join(format!("{id}.created")))?;
             Record::new(id, policy.unwrap_or_else(|| self.policy.clone()))?
         };
-        if let Some(resume) = initial_resume {
-            resume.validate()?;
-            let args = resume.arguments()?;
+        if let Some((resume, args)) = validated_initial_resume {
             let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
             let cmd = args.iter().map(|s| quote(s)).collect::<Vec<_>>().join(" ");
             let shell = self

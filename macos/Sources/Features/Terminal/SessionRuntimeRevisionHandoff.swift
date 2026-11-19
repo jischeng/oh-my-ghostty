@@ -432,7 +432,7 @@ final class SessionRuntimeRevisionHandoffCoordinator {
 
 @MainActor
 private enum SessionRuntimeRevisionHandoffTasks {
-    private static var tasks: [UUID: Task<Void, Never>] = [:]
+    private static var tasks: [UUID: (token: UUID, task: Task<Void, Never>)] = [:]
     private static var coordinators: [UUID: SessionRuntimeRevisionHandoffCoordinator] = [:]
 
     static func coordinator(
@@ -446,18 +446,24 @@ private enum SessionRuntimeRevisionHandoffTasks {
         return coordinator
     }
 
-    static func setTask(_ task: Task<Void, Never>, for paneID: UUID) {
-        tasks[paneID]?.cancel()
-        tasks[paneID] = task
+    static func setTask(_ task: Task<Void, Never>, token: UUID, for paneID: UUID) {
+        tasks[paneID]?.task.cancel()
+        tasks[paneID] = (token: token, task: task)
+    }
+
+    static func finishTask(token: UUID, for paneID: UUID) {
+        if tasks[paneID]?.token == token {
+            tasks.removeValue(forKey: paneID)
+        }
     }
 
     static func cancel(for paneID: UUID) {
-        tasks.removeValue(forKey: paneID)?.cancel()
+        tasks.removeValue(forKey: paneID)?.task.cancel()
         coordinators.removeValue(forKey: paneID)
     }
 
-    static func hasActiveTask(for paneID: UUID) -> Bool {
-        tasks[paneID] != nil
+    static func hasStarted(for paneID: UUID) -> Bool {
+        tasks[paneID] != nil || coordinators[paneID] != nil
     }
 }
 
@@ -469,7 +475,7 @@ extension TerminalController {
     ) {
         guard let context = surface.pendingRevisionHandoff,
               surfaceTree.contains(where: { $0 === surface }),
-              !SessionRuntimeRevisionHandoffTasks.hasActiveTask(for: context.paneID) else {
+              !SessionRuntimeRevisionHandoffTasks.hasStarted(for: context.paneID) else {
             return
         }
         runRevisionHandoffProbe(for: surface, context: context, interactive: interactive, transport: transport)
@@ -499,7 +505,9 @@ extension TerminalController {
             cwd: coordinator.state.effectiveWorkingDirectory ?? context.savedWorkingDirectory,
             resume: coordinator.state.effectiveResume ?? context.fallbackResume()
         )
+        let token = UUID()
         let task = Task { @MainActor [weak self, weak surface] in
+            defer { SessionRuntimeRevisionHandoffTasks.finishTask(token: token, for: context.paneID) }
             let resolution = await coordinator.performGracefulHandoff(transport: transport)
             guard !Task.isCancelled,
                   let self,
@@ -510,7 +518,7 @@ extension TerminalController {
             }
             self.applyRevisionHandoffResolution(resolution, to: surface)
         }
-        SessionRuntimeRevisionHandoffTasks.setTask(task, for: context.paneID)
+        SessionRuntimeRevisionHandoffTasks.setTask(task, token: token, for: context.paneID)
     }
 
     func openFreshShellForRevisionHandoff(for surface: Ghostty.SurfaceView) {
@@ -536,7 +544,9 @@ extension TerminalController {
     ) {
         let coordinator = SessionRuntimeRevisionHandoffTasks.coordinator(for: context)
         surface.revisionHandoffState = .probing
+        let token = UUID()
         let task = Task { @MainActor [weak self, weak surface] in
+            defer { SessionRuntimeRevisionHandoffTasks.finishTask(token: token, for: context.paneID) }
             let resolution = await coordinator.runProbe(interactive: interactive, transport: transport)
             guard !Task.isCancelled,
                   let self,
@@ -547,7 +557,7 @@ extension TerminalController {
             }
             self.applyRevisionHandoffResolution(resolution, to: surface)
         }
-        SessionRuntimeRevisionHandoffTasks.setTask(task, for: context.paneID)
+        SessionRuntimeRevisionHandoffTasks.setTask(task, token: token, for: context.paneID)
     }
 
     private func applyRevisionHandoffResolution(

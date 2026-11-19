@@ -5234,6 +5234,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     override func windowWillClose(_ notification: Notification) {
+        for surface in surfaceTree {
+            cancelRevisionHandoff(for: surface.id)
+        }
         let terminating = workspaceCoordinator.isTerminating
         if !terminating {
             workspacePopover.close()

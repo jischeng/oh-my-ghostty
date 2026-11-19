@@ -25,7 +25,7 @@ def validate(root: Path, native: str, *, all_macos: bool = False, linux_archs=("
         if manifest["revision"] != revision or manifest["platform"] != target:
             raise ValueError(f"mismatched runtime manifest: {target}")
         names = {item["name"] for item in manifest["files"]}
-        if "omgd" not in names or not any(name.startswith("libghostty-vt") for name in names):
+        if "omgd" not in names or "snapshot-revision" not in names or not any(name.startswith("libghostty-vt") for name in names):
             raise ValueError(f"missing runtime binary or dependency: {target}")
         for item in manifest["files"]:
             name = item["name"]

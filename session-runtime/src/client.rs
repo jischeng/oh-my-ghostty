@@ -2855,7 +2855,10 @@ mod error_classification_tests {
         let (_, encoded_modern) = super::open_request(&peer, &modern_caps).unwrap();
         let parsed_modern: OpenRequest = serde_json::from_slice(&encoded_modern).unwrap();
         assert_eq!(
-            parsed_modern.resume.as_ref().map(|r| r.conversation_id.as_str()),
+            parsed_modern
+                .resume
+                .as_ref()
+                .map(|r| r.conversation_id.as_str()),
             Some("conv-abc")
         );
 

@@ -65,6 +65,16 @@ pub fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+pub fn remote_state_dir_name_for_snapshot(snapshot_revision: &str) -> Option<String> {
+    let canonical = crate::canonical_snapshot_revision(snapshot_revision);
+    if !crate::valid_revision(canonical) {
+        return None;
+    }
+    use sha2::{Digest, Sha256};
+    let digest = format!("{:x}", Sha256::digest(canonical.as_bytes()));
+    Some(format!("s-{}", &digest[..12]))
+}
+
 fn ssh_option_key(value: &str) -> Option<String> {
     let (key, _) = value.split_once('=')?;
     Some(key.trim().to_ascii_lowercase())
@@ -381,11 +391,25 @@ pub fn prepare(config: &Connection, interactive: bool) -> io::Result<(String, St
     }
     let root = format!("{home}/.local/share/oh-my-ghostty/session-runtime");
     let version = format!("{root}/versions/{}", manifest.revision);
+    let snapshot_revision = fs::read_to_string(local.join("snapshot-revision"))
+        .or_else(|_| fs::read_to_string(config.bundle.join("snapshot-revision")))
+        .ok()
+        .map(|s| crate::canonical_snapshot_revision(&s).to_owned())
+        .filter(|s| crate::valid_revision(s));
+    let remote_state_name = snapshot_revision
+        .as_deref()
+        .and_then(remote_state_dir_name_for_snapshot);
     use sha2::{Digest, Sha256};
     let key = format!("{:x}", Sha256::digest(manifest.revision.as_bytes()));
     // Unix socket paths on macOS are limited to about 104 bytes. Keep runtime
     // sockets short; versioned binaries can remain in the descriptive directory.
-    let state = format!("{home}/.omg/run/{}", &key[..12]);
+    // Unified remote hosts share one state directory per canonical snapshot
+    // epoch (`s-<hash12>`) so compatible upgrades take over in-place without
+    // piling up daemons, while incompatible snapshot epochs remain isolated.
+    let state = match &remote_state_name {
+        Some(state_name) => format!("{home}/.omg/run/{state_name}"),
+        None => format!("{home}/.omg/run/{}", &key[..12]),
+    };
     let exists = run(
         config,
         &format!(
@@ -528,8 +552,40 @@ fi
     let policy = serde_json::to_string(&config.policy)?;
     // Policy updates are atomic. Existing sessions retain their policy snapshot;
     // the host reloads the file for newly created sessions without restarting.
-    let setup = format!(
-        r#"set -eu
+    let setup = if let (Some(state_name), Some(snap_rev)) = (&remote_state_name, &snapshot_revision)
+    {
+        format!(
+            r#"set -eu
+umask 077
+mkdir -p {state}
+[ ! -L {state} ] && [ -O {state} ] || exit 1
+chmod 700 {state}
+if [ ! -f {version}/snapshot-revision ]; then
+  snap_tmp={version}/snapshot-revision.$$.new
+  printf '%s\n' {snap_rev} > "$snap_tmp"
+  mv "$snap_tmp" {version}/snapshot-revision
+fi
+rstate_tmp={version}/remote-state-dir.$$.new
+printf '%s\n' {state_name} > "$rstate_tmp"
+mv "$rstate_tmp" {version}/remote-state-dir
+policy_tmp={state}/policy.$$.new
+printf '%s\n' {policy} > "$policy_tmp"
+mv "$policy_tmp" {state}/policy.json
+{binary} ensure-host --remote-holder {state}
+{binary} gc-remote --active-revision {revision} --active-state-dir {state} >/dev/null 2>&1 || true
+printf '\nOMG_RUNTIME_READY\n'
+"#,
+            state = quote(&state),
+            version = quote(&version),
+            snap_rev = quote(snap_rev),
+            state_name = quote(state_name),
+            policy = quote(&policy),
+            binary = quote(&format!("{version}/omgd")),
+            revision = quote(&manifest.revision)
+        )
+    } else {
+        format!(
+            r#"set -eu
 umask 077
 mkdir -p {state}
 [ ! -L {state} ] && [ -O {state} ] || exit 1
@@ -540,10 +596,11 @@ mv "$policy_tmp" {state}/policy.json
 {binary} ensure-host {state}
 printf '\nOMG_RUNTIME_READY\n'
 "#,
-        state = quote(&state),
-        policy = quote(&policy),
-        binary = quote(&format!("{version}/omgd"))
-    );
+            state = quote(&state),
+            policy = quote(&policy),
+            binary = quote(&format!("{version}/omgd"))
+        )
+    };
     let out = run(config, &setup, None, interactive)?;
     if !out.ends_with(b"OMG_RUNTIME_READY\n") {
         return Err(io::Error::other("remote daemon not ready"));
@@ -602,10 +659,18 @@ pub fn fast_connect(config: &Connection, interactive: bool) -> io::Result<std::p
     let key = format!("{:x}", Sha256::digest(revision.as_bytes()));
     let script = format!(
         r#"set -eu
-binary="$HOME/.local/share/oh-my-ghostty/session-runtime/versions/{revision}/omgd"
-state="$HOME/.omg/run/{key}"
-if [ ! -x "$binary" ] || [ ! -f "${{binary%/*}}/verified" ]; then printf M; exit 0; fi
-"$binary" ensure-host "$state" || exit 1
+vdir="$HOME/.local/share/oh-my-ghostty/session-runtime/versions/{revision}"
+binary="$vdir/omgd"
+if [ ! -x "$binary" ] || [ ! -f "$vdir/verified" ]; then printf M; exit 0; fi
+if [ -f "$vdir/remote-state-dir" ]; then
+  rstate=$(cat "$vdir/remote-state-dir")
+  case "$rstate" in ''|*/*|..|.) exit 1 ;; esac
+  state="$HOME/.omg/run/$rstate"
+  "$binary" ensure-host --remote-holder "$state" || exit 1
+else
+  state="$HOME/.omg/run/{key}"
+  "$binary" ensure-host "$state" || exit 1
+fi
 printf R
 exec "$binary" bridge "$state/host.sock"
 "#,
@@ -957,5 +1022,17 @@ mod fast_tests {
         assert_eq!(valid_status, "HAVE");
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn remote_state_dir_name_uses_canonical_snapshot_epoch() {
+        let name = remote_state_dir_name_for_snapshot("7abe5365444c63ee8df6").unwrap();
+        assert!(name.starts_with("s-"));
+        assert_eq!(name.len(), 14);
+        let alias = remote_state_dir_name_for_snapshot("c9147626cf9b9ba9a27e").unwrap();
+        let canonical = remote_state_dir_name_for_snapshot("59c5cc7b4d1fe408faf5").unwrap();
+        assert_eq!(alias, canonical);
+        assert!(remote_state_dir_name_for_snapshot("").is_none());
+        assert!(remote_state_dir_name_for_snapshot("../escape").is_none());
     }
 }

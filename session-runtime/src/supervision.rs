@@ -7,6 +7,17 @@ use std::{
 };
 
 pub fn start(root: &Path, shell: &str) -> io::Result<bool> {
+    start_with_mode(root, shell, false)
+}
+
+/// Starts a decoupled `host-remote` under systemd with `KillMode=process` and a
+/// unique unit name per incarnation so in-place host upgrades never terminate
+/// detached `session-holder` processes or collide with an exiting unit.
+pub fn start_remote_holder(root: &Path, shell: &str) -> io::Result<bool> {
+    start_with_mode(root, shell, true)
+}
+
+fn start_with_mode(root: &Path, shell: &str, remote_holder: bool) -> io::Result<bool> {
     if !cfg!(target_os = "linux") || !Path::new("/sys/fs/cgroup/cgroup.controllers").exists() {
         return Ok(false);
     }
@@ -40,7 +51,16 @@ pub fn start(root: &Path, shell: &str) -> io::Result<bool> {
     }
     use sha2::{Digest, Sha256};
     let identity = format!("{:x}", Sha256::digest(root.as_os_str().as_encoded_bytes()));
-    let unit = format!("omg-runtime-{}.service", &identity[..24]);
+    let unit = if remote_holder {
+        let suffix = crate::record::nonce().unwrap_or_else(|_| std::process::id().to_string());
+        format!(
+            "omg-runtime-{}-{}.service",
+            &identity[..16],
+            &suffix[..8.min(suffix.len())]
+        )
+    } else {
+        format!("omg-runtime-{}.service", &identity[..24])
+    };
     let mut launch = Command::new("systemd-run");
     if !system {
         launch.arg("--user");
@@ -52,20 +72,29 @@ pub fn start(root: &Path, shell: &str) -> io::Result<bool> {
             launch.arg(format!("--property=SELinuxContext={context}"));
         }
     }
+    let kill_mode = if remote_holder {
+        "--property=KillMode=process"
+    } else {
+        "--property=KillMode=control-group"
+    };
+    let subcommand = if remote_holder { "host-remote" } else { "host" };
+    let mut args = vec![
+        "--quiet",
+        "--collect",
+        "--unit",
+        &unit,
+        "--property=Type=exec",
+        kill_mode,
+        "--property=TimeoutStopSec=10s",
+        "--property=SendSIGKILL=yes",
+        "--property=Restart=no",
+    ];
+    if !remote_holder {
+        args.push("--property=Delegate=yes");
+        args.push("--setenv=OMG_RUNTIME_SUPERVISED=1");
+    }
     let status = launch
-        .args([
-            "--quiet",
-            "--collect",
-            "--unit",
-            &unit,
-            "--property=Type=exec",
-            "--property=Delegate=yes",
-            "--property=KillMode=control-group",
-            "--property=TimeoutStopSec=10s",
-            "--property=SendSIGKILL=yes",
-            "--property=Restart=no",
-            "--setenv=OMG_RUNTIME_SUPERVISED=1",
-        ])
+        .args(&args)
         .arg(format!(
             "--working-directory={}",
             std::env::var("HOME").unwrap_or_else(|_| "/".into())
@@ -84,7 +113,7 @@ pub fn start(root: &Path, shell: &str) -> io::Result<bool> {
         // arguments stay positional, never interpolated into shell source.
         .args(["/bin/sh", "-c", "exec \"$@\"", "omg-runtime"])
         .arg(std::env::current_exe()?)
-        .arg("host")
+        .arg(subcommand)
         .arg(root)
         .args(["--", shell, "-l"])
         .stdin(Stdio::null())

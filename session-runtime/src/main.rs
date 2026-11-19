@@ -196,8 +196,11 @@ fn relay_connector(
     }
 }
 
-fn ensure_host(directory: &str, shell_override: Option<&str>) -> io::Result<()> {
-    ensure_host_with(directory, shell_override, &env::current_exe()?, false, None)
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HostLaunchMode {
+    LegacyRemote,
+    RemoteHolder { force_takeover: bool },
+    Local,
 }
 
 struct BootstrapLock(std::fs::File);
@@ -253,6 +256,125 @@ fn wait_for_socket_after_early_exit(socket: &Path) -> bool {
     }
 }
 
+fn ensure_host_cli(args: &[String]) -> io::Result<()> {
+    let mut remote_holder = false;
+    let mut force_takeover = false;
+    let mut directory: Option<&str> = None;
+    for arg in args {
+        match arg.as_str() {
+            "--remote-holder" => remote_holder = true,
+            "--force-takeover" => force_takeover = true,
+            flag if flag.starts_with("--") => {
+                return Err(io::Error::other(format!(
+                    "unknown ensure-host flag: {flag}"
+                )));
+            }
+            value => {
+                if directory.is_some() {
+                    return Err(io::Error::other(
+                        "usage: omgd ensure-host [--remote-holder] [--force-takeover] DIRECTORY",
+                    ));
+                }
+                directory = Some(value);
+            }
+        }
+    }
+    let directory = directory.ok_or_else(|| {
+        io::Error::other("usage: omgd ensure-host [--remote-holder] [--force-takeover] DIRECTORY")
+    })?;
+    let mode = if remote_holder {
+        HostLaunchMode::RemoteHolder { force_takeover }
+    } else {
+        HostLaunchMode::LegacyRemote
+    };
+    ensure_host_mode(directory, None, &env::current_exe()?, mode, None)
+}
+
+fn gc_remote_cli(args: &[String]) -> io::Result<()> {
+    let mut options = omg_session_runtime::gc::GcOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--active-revision" => {
+                i += 1;
+                let rev = args
+                    .get(i)
+                    .ok_or_else(|| io::Error::other("missing --active-revision value"))?;
+                if !omg_session_runtime::valid_revision(rev) {
+                    return Err(io::Error::other("invalid --active-revision value"));
+                }
+                options.active_revision = Some(rev.clone());
+            }
+            "--active-state-dir" => {
+                i += 1;
+                let dir = args
+                    .get(i)
+                    .ok_or_else(|| io::Error::other("missing --active-state-dir value"))?;
+                let path = std::path::PathBuf::from(dir);
+                if !path.is_absolute() {
+                    return Err(io::Error::other("--active-state-dir must be absolute"));
+                }
+                options.active_state_dir = Some(path);
+            }
+            "--min-age-secs" => {
+                i += 1;
+                let raw = args
+                    .get(i)
+                    .ok_or_else(|| io::Error::other("missing --min-age-secs value"))?;
+                options.min_age_secs = raw
+                    .parse::<u64>()
+                    .map_err(|_| io::Error::other("invalid --min-age-secs value"))?;
+            }
+            "--dry-run" => {
+                options.dry_run = true;
+            }
+            flag => {
+                return Err(io::Error::other(format!(
+                    "unknown gc-remote option: {flag}"
+                )));
+            }
+        }
+        i += 1;
+    }
+    if options.active_revision.is_none() {
+        options.active_revision = Some(omg_session_runtime::host::current_host_revision());
+    }
+    let _ = omg_session_runtime::gc::gc_remote_default(&options)?;
+    Ok(())
+}
+
+fn wait_for_host_lock_release(root: &Path, timeout: std::time::Duration) -> io::Result<()> {
+    use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
+    let lock_path = root.join("host.lock");
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&lock_path)
+        {
+            Ok(file) => {
+                let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+                if rc == 0 {
+                    unsafe {
+                        libc::flock(file.as_raw_fd(), libc::LOCK_UN);
+                    }
+                    return Ok(());
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "timed out waiting for previous host to step down",
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 fn ensure_host_with(
     directory: &str,
     shell_override: Option<&str>,
@@ -260,7 +382,29 @@ fn ensure_host_with(
     local: bool,
     support_override: Option<&Path>,
 ) -> io::Result<()> {
+    let mode = if local {
+        HostLaunchMode::Local
+    } else {
+        HostLaunchMode::LegacyRemote
+    };
+    ensure_host_mode(
+        directory,
+        shell_override,
+        executable,
+        mode,
+        support_override,
+    )
+}
+
+fn ensure_host_mode(
+    directory: &str,
+    shell_override: Option<&str>,
+    executable: &Path,
+    mode: HostLaunchMode,
+    support_override: Option<&Path>,
+) -> io::Result<()> {
     use std::os::{unix::fs::PermissionsExt, unix::process::CommandExt};
+    let local = mode == HostLaunchMode::Local;
     let root = Path::new(directory);
     std::fs::create_dir_all(root)?;
     std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
@@ -309,7 +453,52 @@ fn ensure_host_with(
     }
     let socket = root.join("host.sock");
     if UnixStream::connect(&socket).is_ok() {
-        return Ok(());
+        if let HostLaunchMode::RemoteHolder { force_takeover } = mode {
+            match omg_session_runtime::host::query_host_identity(&socket) {
+                Ok(running) => {
+                    if running.mode != "remote-holder" {
+                        return Ok(());
+                    }
+                    let my_revision =
+                        omg_session_runtime::host::current_host_revision_for_exe(executable);
+                    if running.revision == my_revision {
+                        return Ok(());
+                    }
+                    let my_snapshot =
+                        omg_session_runtime::host::current_snapshot_revision_for_exe(executable);
+                    if !omg_session_runtime::host::snapshot_revisions_compatible(
+                        running.snapshot_revision.as_deref(),
+                        my_snapshot.as_deref(),
+                    ) {
+                        return Err(io::Error::other(
+                            "incompatible snapshot-revision host running in state directory; refusing takeover",
+                        ));
+                    }
+                    if !force_takeover {
+                        let my_mtime = omg_session_runtime::host::binary_mtime_for_exe(executable);
+                        if let (Some(running_mtime), Some(my_mtime)) =
+                            (running.binary_mtime, my_mtime)
+                        {
+                            if running_mtime > my_mtime.saturating_add(1) {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    omg_session_runtime::host::request_host_takeover(
+                        &socket,
+                        &my_revision,
+                        my_snapshot.as_deref(),
+                    )?;
+                    wait_for_host_lock_release(root, std::time::Duration::from_secs(5))?;
+                }
+                Err(_) => {
+                    // Older host does not support identity/takeover frames; preserve it safely.
+                    return Ok(());
+                }
+            }
+        } else {
+            return Ok(());
+        }
     }
     let log = std::fs::OpenOptions::new()
         .create(true)
@@ -319,14 +508,32 @@ fn ensure_host_with(
         .map(str::to_string)
         .or_else(|| env::var("SHELL").ok())
         .unwrap_or_else(|| "/bin/sh".into());
-    if !local && omg_session_runtime::supervision::start(root, &shell)? {
-        for _ in 0..100 {
-            if UnixStream::connect(&socket).is_ok() {
-                return Ok(());
+    match mode {
+        HostLaunchMode::LegacyRemote => {
+            if omg_session_runtime::supervision::start(root, &shell)? {
+                for _ in 0..100 {
+                    if UnixStream::connect(&socket).is_ok() {
+                        return Ok(());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                return Err(io::Error::other("supervised host failed to become ready"));
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        return Err(io::Error::other("supervised host failed to become ready"));
+        HostLaunchMode::RemoteHolder { .. } => {
+            if omg_session_runtime::supervision::start_remote_holder(root, &shell)? {
+                for _ in 0..100 {
+                    if UnixStream::connect(&socket).is_ok() {
+                        return Ok(());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                return Err(io::Error::other(
+                    "supervised remote-holder host failed to become ready",
+                ));
+            }
+        }
+        HostLaunchMode::Local => {}
     }
     if local {
         // The relay runs inside the app; keep the persistent host out of the
@@ -366,8 +573,13 @@ fn ensure_host_with(
         }
     }
     eprintln!("runtime supervision unavailable; process-group cleanup only");
+    let subcommand = match mode {
+        HostLaunchMode::Local => "host-local",
+        HostLaunchMode::RemoteHolder { .. } => "host-remote",
+        HostLaunchMode::LegacyRemote => "host",
+    };
     let mut c = Command::new(executable);
-    c.arg(if local { "host-local" } else { "host" })
+    c.arg(subcommand)
         .arg(root)
         .args(["--", &shell, "-l"])
         .stdin(Stdio::null())
@@ -606,6 +818,9 @@ fn main() -> io::Result<()> {
         Some("host") if a.len() >= 5 && a[3] == "--" => {
             omg_session_runtime::host::serve(Path::new(&a[2]), a[4..].to_vec())
         }
+        Some("host-remote") if a.len() >= 5 && a[3] == "--" => {
+            omg_session_runtime::host::serve_remote_holder(Path::new(&a[2]), a[4..].to_vec())
+        }
         Some("host-local") if a.len() >= 5 && a[3] == "--" => {
             omg_session_runtime::host::serve_local(Path::new(&a[2]), a[4..].to_vec())
         }
@@ -678,7 +893,8 @@ fn main() -> io::Result<()> {
             };
             std::process::exit(exec_local(Path::new(&a[2]), max_output_bytes, &a[4]));
         }
-        Some("ensure-host") if a.len() == 3 => ensure_host(&a[2], None),
+        Some("ensure-host") if a.len() >= 3 => ensure_host_cli(&a[2..]),
+        Some("gc-remote") => gc_remote_cli(&a[2..]),
         Some("report") if a.len() >= 4 => report_cli(&a[2..]),
         Some("handoff-probe") if a.len() >= 4 => {
             let interactive = a.iter().skip(4).any(|arg| arg == "--interactive");

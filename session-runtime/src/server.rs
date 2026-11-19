@@ -849,7 +849,8 @@ pub fn serve(path: &Path, argv: &[String]) -> io::Result<()> {
     serve_managed(path, argv.to_vec(), None)
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteSessionLaunch {
     pub cols: Option<u16>,
     pub rows: Option<u16>,

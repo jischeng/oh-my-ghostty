@@ -1206,11 +1206,7 @@ fn validate_handoff_inputs(
             "Revision handoff requires an SSH connection",
         ));
     }
-    if !connection
-        .revision
-        .as_deref()
-        .is_some_and(valid_revision)
-    {
+    if !connection.revision.as_deref().is_some_and(valid_revision) {
         return Err(io::Error::other("Invalid runtime revision"));
     }
     connection.auto_install = false;

@@ -1,5 +1,6 @@
-//! Local-only PTY holder processes. The broker can restart without owning the
-//! PTY master or terminal parser; launch data arrives over a private pipe.
+//! Decoupled PTY holder processes (local and remote). The host broker can
+//! restart or upgrade without owning the PTY master or terminal parser; launch
+//! data arrives over a private pipe.
 use crate::{
     host,
     record::Record,
@@ -86,7 +87,14 @@ pub struct HolderRequest {
     pub session_socket: PathBuf,
     pub record_path: PathBuf,
     pub record: Record,
-    pub launch: LocalLaunchSpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<LocalLaunchSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_launch: Option<server::RemoteSessionLaunch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argv: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_cwd: Option<PathBuf>,
     #[serde(default)]
     pub resurrect: bool,
 }
@@ -202,18 +210,47 @@ pub fn run_from_stdin() -> io::Result<()> {
     }
     let request: HolderRequest = serde_json::from_slice(&data)?;
     data.fill(0);
-    request.launch.validate_with(!request.resurrect)?;
-    if request.resurrect
-        && request
-            .launch
-            .input_base64
-            .as_ref()
-            .is_some_and(|value| !value.is_empty())
-    {
-        return Err(io::Error::other(
-            "local resurrection launch must not carry initial input",
-        ));
-    }
+    let (argv, initial_cwd, local_launch, remote_launch) = if let Some(launch) = request.launch {
+        launch.validate_with(!request.resurrect)?;
+        if request.resurrect
+            && launch
+                .input_base64
+                .as_ref()
+                .is_some_and(|value| !value.is_empty())
+        {
+            return Err(io::Error::other(
+                "local resurrection launch must not carry initial input",
+            ));
+        }
+        let argv = launch.argv.clone();
+        let initial_cwd = launch.cwd.as_deref().map(PathBuf::from);
+        (argv, initial_cwd, Some(launch), None)
+    } else {
+        if request.resurrect {
+            return Err(io::Error::other(
+                "remote holder does not support local resurrection",
+            ));
+        }
+        let argv = request
+            .argv
+            .ok_or_else(|| io::Error::other("remote holder launch arguments required"))?;
+        if argv.is_empty()
+            || argv.len() > 128
+            || argv[0].is_empty()
+            || argv
+                .iter()
+                .any(|value| value.len() > 64 * 1024 || value.contains('\0'))
+        {
+            return Err(io::Error::other("invalid remote holder launch arguments"));
+        }
+        if let Some(cwd) = &request.initial_cwd {
+            let cwd_str = cwd.to_string_lossy();
+            if !cwd.is_absolute() || cwd_str.len() > 4096 || cwd_str.contains('\0') {
+                return Err(io::Error::other("invalid remote holder working directory"));
+            }
+        }
+        (argv, request.initial_cwd, None, request.remote_launch)
+    };
     if !host::valid_id(&request.record.id)
         || request.record.id.is_empty()
         || request.record.generation.is_empty()
@@ -295,8 +332,6 @@ pub fn run_from_stdin() -> io::Result<()> {
     let id = request.record.id.clone();
     let generation = request.record.generation.clone();
     let capability = request.record.holder_capability.clone().unwrap();
-    let initial_cwd = request.launch.cwd.as_deref().map(PathBuf::from);
-    let argv = request.launch.argv.clone();
     let shutdown_wake = crate::WakePipe::new()?;
     let _shutdown_guard = server::ShutdownSignalGuard::install(&shutdown_wake)?;
     let presentation = std::sync::Arc::new(std::sync::Mutex::new(
@@ -307,8 +342,8 @@ pub fn run_from_stdin() -> io::Result<()> {
         record: request.record,
         containment_root: None,
         initial_cwd,
-        local_launch: Some(request.launch),
-        remote_launch: None,
+        local_launch,
+        remote_launch,
         presentation: Some(presentation.clone()),
         resurrect: request.resurrect,
         shutdown_wake: Some(shutdown_wake),

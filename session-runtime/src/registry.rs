@@ -246,9 +246,10 @@ pub fn read_support_root_stamp(state_dir: &Path) -> Option<PathBuf> {
     let p = normalize_support_path(Path::new(raw));
     p.is_absolute().then_some(p)
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeMode {
     Remote,
+    RemoteHolder,
     Local,
 }
 
@@ -585,6 +586,24 @@ impl Registry {
         let mut registry = Self::new(root, command, policy);
         registry.mode = RuntimeMode::Local;
         registry
+    }
+
+    pub fn new_remote_holder(root: PathBuf, command: Vec<String>, policy: Policy) -> Self {
+        let mut registry = Self::new(root, command, policy);
+        registry.mode = RuntimeMode::RemoteHolder;
+        registry
+    }
+
+    pub fn mode(&self) -> RuntimeMode {
+        self.mode
+    }
+
+    pub fn uses_holders(&self) -> bool {
+        matches!(self.mode, RuntimeMode::Local | RuntimeMode::RemoteHolder)
+    }
+
+    pub fn is_remote_holder(&self) -> bool {
+        self.mode == RuntimeMode::RemoteHolder
     }
 
     pub(crate) fn set_wakeup(&mut self, wakeup: crate::WakePipe) {
@@ -1040,7 +1059,7 @@ impl Registry {
                 let _ = h.join();
             }
         }
-        if self.mode == RuntimeMode::Local {
+        if self.uses_holders() {
             let finished: Vec<_> = self
                 .local_holders
                 .iter_mut()
@@ -1104,7 +1123,7 @@ impl Registry {
                         {
                             continue;
                         }
-                        if self.mode == RuntimeMode::Local {
+                        if self.uses_holders() {
                             if record.ended.is_none() {
                                 if local_probes >= MAX_LOCAL_MAINTENANCE_PROBES {
                                     continue;
@@ -1354,7 +1373,7 @@ impl Registry {
             (self.root.clone(), own_path)
         };
         if let Ok(mut record) = Record::load(&path) {
-            if self.mode == RuntimeMode::Local && (record.ended.is_none() || record.pid.is_some()) {
+            if self.uses_holders() && (record.ended.is_none() || record.pid.is_some()) {
                 match self.probe_and_adopt_in(&target_root, &record, Duration::from_secs(1), true) {
                     Ok(()) => return Ok(false),
                     Err(error)
@@ -1407,7 +1426,7 @@ impl Registry {
                     }
                 }
             }
-            if self.mode != RuntimeMode::Local && record.ended == Some(EndReason::Lost) {
+            if !self.uses_holders() && record.ended == Some(EndReason::Lost) {
                 // Only an owned cgroup provides evidence for cleanup after loss.
                 if !record.contained {
                     return Err(io::Error::other("legacy session loss; cleanup unconfirmed"));
@@ -1427,7 +1446,7 @@ impl Registry {
         Ok(true)
     }
     pub fn is_empty(&self) -> bool {
-        if self.mode != RuntimeMode::Local {
+        if !self.uses_holders() {
             return self.workers.is_empty();
         }
         if !self.local_holders.is_empty() {
@@ -1510,7 +1529,7 @@ impl Registry {
     }
 
     pub fn catalogue(&mut self) -> io::Result<Vec<Record>> {
-        if self.mode == RuntimeMode::Local {
+        if self.uses_holders() {
             self.last_maintenance = Instant::now() - Duration::from_secs(30);
             self.maintenance();
         }
@@ -1524,7 +1543,7 @@ impl Registry {
         for record in &records {
             let mut summary = crate::record::SessionSummary::from(record);
             if record.ended.is_none() {
-                if self.mode == RuntimeMode::Remote {
+                if !self.uses_holders() {
                     if self
                         .workers
                         .get(&record.id)
@@ -1561,7 +1580,7 @@ impl Registry {
         }
         let mut local_launch = request.launch.clone();
         match (self.mode, request.create, local_launch.as_mut()) {
-            (RuntimeMode::Remote, _, Some(_)) => {
+            (RuntimeMode::Remote | RuntimeMode::RemoteHolder, _, Some(_)) => {
                 return Err(io::Error::other(
                     "local launch specifications are forbidden on SSH sessions",
                 ));
@@ -1705,6 +1724,25 @@ impl Registry {
                     inline_viewer,
                     recreate_if_gone,
                     initial_resume: None,
+                },
+            );
+        }
+        if self.mode == RuntimeMode::RemoteHolder {
+            return self.connect_remote_holder(
+                id,
+                resume_generation,
+                &socket,
+                &path,
+                create,
+                policy,
+                ConnectOptions {
+                    cwd: initial_cwd,
+                    launch: None,
+                    resurrect_launch: None,
+                    remote_launch,
+                    inline_viewer,
+                    recreate_if_gone,
+                    initial_resume,
                 },
             );
         }
@@ -2270,7 +2308,10 @@ impl Registry {
             session_socket: socket.to_path_buf(),
             record_path: path.to_path_buf(),
             record: record.clone(),
-            launch,
+            launch: Some(launch),
+            remote_launch: None,
+            argv: None,
+            initial_cwd: None,
             resurrect,
         };
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -2510,6 +2551,476 @@ impl Registry {
         self.connect_local_holder_plan(plan)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_remote_holder_spawn(
+        &mut self,
+        id: &str,
+        socket: &Path,
+        path: &Path,
+        record: &mut Record,
+        argv: Vec<String>,
+        initial_cwd: Option<PathBuf>,
+        remote_launch: Option<server::RemoteSessionLaunch>,
+        created_new_record: bool,
+        created_dest_marker: bool,
+    ) -> io::Result<LocalHolderSpawnPlan> {
+        #[cfg(test)]
+        let executable_override = self.holder_executable.clone();
+        #[cfg(not(test))]
+        let executable_override: Option<PathBuf> = None;
+        let executable = match executable_override {
+            Some(executable) => executable,
+            None => match std::env::current_exe() {
+                Ok(executable) => executable,
+                Err(error) => {
+                    self.cleanup_failed_local_holder_prep(
+                        id,
+                        socket,
+                        path,
+                        record,
+                        None,
+                        created_new_record,
+                        created_dest_marker,
+                    );
+                    return Err(error);
+                }
+            },
+        };
+        let request = crate::holder::HolderRequest {
+            session_socket: socket.to_path_buf(),
+            record_path: path.to_path_buf(),
+            record: record.clone(),
+            launch: None,
+            remote_launch,
+            argv: Some(argv),
+            initial_cwd,
+            resurrect: false,
+        };
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let diagnostics_path = self.root.parent().unwrap().join("host.log");
+        let open_res = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&diagnostics_path)
+            .and_then(|file| {
+                fs::set_permissions(&diagnostics_path, fs::Permissions::from_mode(0o600))?;
+                Ok(file)
+            });
+        let diagnostics = match open_res {
+            Ok(file) => file,
+            Err(error) => {
+                self.cleanup_failed_local_holder_prep(
+                    id,
+                    socket,
+                    path,
+                    record,
+                    None,
+                    created_new_record,
+                    created_dest_marker,
+                );
+                return Err(error);
+            }
+        };
+        let child = match crate::holder::spawn(&executable, &request, Stdio::from(diagnostics)) {
+            Ok(child) => child,
+            Err(error) => {
+                self.cleanup_failed_local_holder_prep(
+                    id,
+                    socket,
+                    path,
+                    record,
+                    None,
+                    created_new_record,
+                    created_dest_marker,
+                );
+                return Err(error);
+            }
+        };
+        Ok(LocalHolderSpawnPlan {
+            id: id.to_owned(),
+            socket: socket.to_path_buf(),
+            path: path.to_path_buf(),
+            record: record.clone(),
+            child: Some(child),
+            migrated_from: None,
+            created_new_record,
+            created_dest_marker,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_connect_remote_holder_plan(
+        &mut self,
+        id: &str,
+        resume_generation: Option<&str>,
+        socket: &Path,
+        path: &Path,
+        create: bool,
+        policy: Option<Policy>,
+        options: ConnectOptions<'_>,
+    ) -> io::Result<LocalHolderSpawnPlan> {
+        let ConnectOptions {
+            cwd: initial_cwd,
+            remote_launch,
+            inline_viewer,
+            recreate_if_gone,
+            initial_resume,
+            ..
+        } = options;
+        let allow_recreate = recreate_if_gone && !create && resume_generation.is_none();
+        let closed = self.is_closed_in_any_root(id);
+        if !allow_recreate && closed {
+            return Err(io::Error::other("session explicitly closed"));
+        }
+        let records = self.list()?;
+        if records
+            .iter()
+            .filter(|r| r.id != id && r.ended.is_none())
+            .count()
+            >= MAX_RUNNING
+        {
+            return Err(io::Error::other("active session quota exceeded"));
+        }
+        let mut argv = self.command.clone();
+        let mut working_directory = None;
+        let existing_record = if path.exists() {
+            match Record::load(path) {
+                Ok(record) => Some(record),
+                Err(_) if allow_recreate => None,
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
+        let validated_initial_resume = if let Some(resume) = initial_resume {
+            resume.validate()?;
+            let args = resume.arguments()?;
+            Some((resume, args))
+        } else {
+            None
+        };
+        let mut created_new_record = false;
+        let mut created_dest_marker = false;
+        let mut record = if let Some(mut record) = existing_record {
+            if !closed && record.ended.is_none() {
+                return Err(io::Error::other(
+                    "remote session holder is active; retry the attach",
+                ));
+            }
+            if !closed
+                && resume_generation == Some(record.generation.as_str())
+                && record.ended.is_some_and(EndReason::resumable)
+            {
+                let resume = record
+                    .resume
+                    .as_ref()
+                    .ok_or_else(|| io::Error::other("session has no Agent recovery descriptor"))?;
+                if !resume.store_exists() {
+                    return Err(io::Error::other(
+                        "Agent conversation store unavailable; refusing new conversation",
+                    ));
+                }
+                let args = resume.arguments()?;
+                let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+                let script = format!(
+                    "exec {}",
+                    args.iter().map(|s| quote(s)).collect::<Vec<_>>().join(" ")
+                );
+                let shell = self
+                    .command
+                    .first()
+                    .ok_or_else(|| io::Error::other("missing shell"))?
+                    .clone();
+                argv = vec![shell, "-l".into(), "-i".into(), "-c".into(), script];
+                record.generation = nonce()?;
+                record.ended = None;
+                record.pid = None;
+                record.boot_time = crate::record::current_boot_time();
+                record.snapshot_revision = crate::current_snapshot_revision();
+                record
+            } else if allow_recreate {
+                let record_cwd = record.cwd.clone();
+                let resume_cwd = record.resume.as_ref().map(|r| r.cwd.clone());
+                let (fresh, cwd_path) = self.recreate_remote_record(
+                    id,
+                    initial_cwd,
+                    record_cwd.as_deref(),
+                    resume_cwd.as_deref(),
+                    policy,
+                )?;
+                working_directory = Some(cwd_path);
+                created_new_record = true;
+                created_dest_marker = true;
+                fresh
+            } else {
+                return Err(io::Error::other(format!(
+                    "session ended: {:?}; inspect its record before resuming",
+                    record.ended
+                )));
+            }
+        } else if allow_recreate {
+            let (fresh, cwd_path) =
+                self.recreate_remote_record(id, initial_cwd, None, None, policy)?;
+            working_directory = Some(cwd_path);
+            created_new_record = true;
+            created_dest_marker = true;
+            fresh
+        } else {
+            if resume_generation.is_some() || !create {
+                return Err(io::Error::other("unknown session; cannot resume"));
+            }
+            if records.len() >= MAX_RECORDS {
+                return Err(io::Error::other("session metadata quota exceeded"));
+            }
+            if let Some(cwd) = initial_cwd {
+                if !cwd.starts_with('/') || cwd.len() > 4096 || cwd.contains('\0') {
+                    return Err(io::Error::other("invalid initial working directory"));
+                }
+                if !fs::metadata(cwd)?.is_dir() {
+                    return Err(io::Error::other(
+                        "initial working directory is not a directory",
+                    ));
+                }
+                working_directory = Some(PathBuf::from(cwd));
+            }
+            use std::os::unix::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(self.root.join(format!("{id}.created")))?;
+            created_new_record = true;
+            created_dest_marker = true;
+            Record::new(id, policy.unwrap_or_else(|| self.policy.clone()))?
+        };
+        if let Some((resume, args)) = validated_initial_resume {
+            let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+            let cmd = args.iter().map(|s| quote(s)).collect::<Vec<_>>().join(" ");
+            let shell = self
+                .command
+                .first()
+                .ok_or_else(|| io::Error::other("missing shell"))?
+                .clone();
+            let script = format!("{cmd}; exec {} -l", quote(&shell));
+            argv = vec![shell, "-l".into(), "-i".into(), "-c".into(), script];
+            record.resume = Some(resume.clone());
+            if working_directory.is_none()
+                && fs::metadata(&resume.cwd).is_ok_and(|meta| meta.is_dir())
+            {
+                working_directory = Some(PathBuf::from(&resume.cwd));
+            }
+        }
+        record.contained = false;
+        record.inline_viewer = inline_viewer;
+        record.holder_capability = Some(nonce()?);
+        record.save(path)?;
+        let _ = fs::remove_file(socket);
+        let _ = fs::remove_file(socket.with_extension("evt"));
+        let _ = fs::remove_file(crate::holder::control_path(socket));
+        self.prepare_remote_holder_spawn(
+            id,
+            socket,
+            path,
+            &mut record,
+            argv,
+            working_directory,
+            remote_launch,
+            created_new_record,
+            created_dest_marker,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn connect_remote_holder(
+        &mut self,
+        id: &str,
+        resume_generation: Option<&str>,
+        socket: &Path,
+        path: &Path,
+        create: bool,
+        policy: Option<Policy>,
+        options: ConnectOptions<'_>,
+    ) -> io::Result<UnixStream> {
+        let allow_recreate = options.recreate_if_gone && !create && resume_generation.is_none();
+        let closed = self.is_closed_in_any_root(id);
+        if !allow_recreate && closed {
+            return Err(io::Error::other("session explicitly closed"));
+        }
+        if !closed && path.exists() {
+            let maybe_record = match Record::load(path) {
+                Ok(record) => Some(record),
+                Err(_) if allow_recreate => None,
+                Err(error) => return Err(error),
+            };
+            if let Some(mut record) = maybe_record {
+                if record.ended.is_none() {
+                    let root = self.root.clone();
+                    match self.probe_and_adopt_in(&root, &record, Duration::from_secs(1), true) {
+                        Ok(()) => return UnixStream::connect(socket),
+                        Err(error)
+                            if crate::holder::listener_is_gone(&error)
+                                && self.local_holder_startup_grace_elapsed(&record) =>
+                        {
+                            self.mark_local_lost_in(&root, &mut record, path)?;
+                        }
+                        Err(error) if crate::holder::listener_is_gone(&error) => {
+                            return Err(io::Error::other(
+                                "remote session holder may still be starting; retry the attach",
+                            ));
+                        }
+                        Err(error) => {
+                            let current_ended = Record::load(path).ok().is_some_and(|c| {
+                                c.generation == record.generation && c.ended.is_some()
+                            });
+                            if !current_ended {
+                                return Err(io::Error::other(format!(
+                                    "remote session holder did not confirm ({:?}); session preserved",
+                                    error.kind()
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let plan = self.prepare_connect_remote_holder_plan(
+            id,
+            resume_generation,
+            socket,
+            path,
+            create,
+            policy,
+            options,
+        )?;
+        self.connect_local_holder_plan(plan)
+    }
+
+    fn connect_remote_holder_unlocked_inner(
+        registry: &Mutex<Self>,
+        id: &str,
+        resume_generation: Option<&str>,
+        reload_policy: bool,
+        policy: Option<Policy>,
+        create: bool,
+        options: ConnectOptions<'_>,
+    ) -> io::Result<UnixStream> {
+        Self::maintenance_unlocked(registry, false);
+        let allow_recreate = options.recreate_if_gone && !create && resume_generation.is_none();
+        let probe_candidate = {
+            let mut state = registry.lock().unwrap_or_else(|p| p.into_inner());
+            state.reap_finished_children();
+            if reload_policy {
+                state.reload_policy_from_disk();
+            }
+            let closed = state.is_closed_in_any_root(id);
+            if !allow_recreate && closed {
+                return Err(io::Error::other("session explicitly closed"));
+            }
+            if closed {
+                None
+            } else {
+                let socket = Self::session_socket_in(&state.root, id);
+                let path = state.root.join(format!("{id}.json"));
+                if path.exists() {
+                    match Record::load(&path) {
+                        Ok(record) if record.ended.is_none() => {
+                            if let Some(cap) = record.holder_capability.as_deref() {
+                                let _ = state.check_owned_holder_child(&record.id, cap, true);
+                            }
+                            Some((state.root.clone(), path, socket, record))
+                        }
+                        Ok(_) => None,
+                        Err(_) if allow_recreate => None,
+                        Err(error) => return Err(error),
+                    }
+                } else {
+                    None
+                }
+            }
+        };
+
+        if let Some((target_root, target_path, target_socket, mut record)) = probe_candidate {
+            let probe_res = match record.holder_capability.as_deref() {
+                Some(cap) => Self::probe_local_holder_outside_lock(
+                    &target_socket,
+                    &target_path,
+                    &record,
+                    cap,
+                    Duration::from_secs(1),
+                    true,
+                )
+                .map(|_| ()),
+                None => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "remote holder capability is missing",
+                )),
+            };
+            match probe_res {
+                Ok(()) => {
+                    {
+                        let mut state = registry.lock().unwrap_or_else(|p| p.into_inner());
+                        if !allow_recreate && state.is_closed_in_any_root(id) {
+                            return Err(io::Error::other("session explicitly closed"));
+                        }
+                        if let Some(cap) = record.holder_capability.as_deref() {
+                            state.adopt_probed_holder(&record.id, cap);
+                        }
+                    }
+                    return UnixStream::connect(&target_socket);
+                }
+                Err(error) => {
+                    let mut state = registry.lock().unwrap_or_else(|p| p.into_inner());
+                    if crate::holder::listener_is_gone(&error)
+                        && state.local_holder_startup_grace_elapsed(&record)
+                    {
+                        state.mark_local_lost_in(&target_root, &mut record, &target_path)?;
+                    } else if crate::holder::listener_is_gone(&error) {
+                        return Err(io::Error::other(
+                            "remote session holder may still be starting; retry the attach",
+                        ));
+                    } else {
+                        let current_ended = match Record::load(&target_path) {
+                            Ok(current) => {
+                                current.generation == record.generation && current.ended.is_some()
+                            }
+                            Err(_) if allow_recreate => true,
+                            Err(load_err) => return Err(load_err),
+                        };
+                        if !current_ended {
+                            return Err(io::Error::other(format!(
+                                "remote session holder did not confirm ({:?}); session preserved",
+                                error.kind()
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+
+        let plan = {
+            let mut state = registry.lock().unwrap_or_else(|p| p.into_inner());
+            state.reap_finished_children();
+            if !allow_recreate && state.is_closed_in_any_root(id) {
+                return Err(io::Error::other("session explicitly closed"));
+            }
+            let socket = Self::session_socket_in(&state.root, id);
+            let path = state.root.join(format!("{id}.json"));
+            state.prepare_connect_remote_holder_plan(
+                id,
+                resume_generation,
+                &socket,
+                &path,
+                create,
+                policy,
+                options,
+            )?
+        };
+
+        Self::await_spawned_local_holder(registry, plan)
+    }
+
     pub fn maintenance_unlocked(registry: &Mutex<Self>, force: bool) {
         let (own_root, own_probes, sibling_probes) = {
             let mut state = registry.lock().unwrap_or_else(|p| p.into_inner());
@@ -2517,7 +3028,7 @@ impl Registry {
             if !force && state.last_maintenance.elapsed() < Duration::from_secs(30) {
                 return;
             }
-            if state.mode != RuntimeMode::Local {
+            if !state.uses_holders() {
                 if force {
                     state.last_maintenance = Instant::now() - Duration::from_secs(30);
                 }
@@ -2825,11 +3336,11 @@ impl Registry {
     pub fn catalogue_summaries_unlocked(
         registry: &Mutex<Self>,
     ) -> io::Result<Vec<crate::record::SessionSummary>> {
-        let is_local = registry
+        let uses_holders = registry
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .is_local();
-        if !is_local {
+            .uses_holders();
+        if !uses_holders {
             return registry
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
@@ -2866,12 +3377,12 @@ impl Registry {
         if !valid_id(id) {
             return Err(io::Error::other("invalid session identity"));
         }
-        let (is_local, inflight) = {
+        let (uses_holders, inflight) = {
             let state = registry.lock().unwrap_or_else(|p| p.into_inner());
-            (state.is_local(), state.inflight_sessions.clone())
+            (state.uses_holders(), state.inflight_sessions.clone())
         };
         let _session_guard = SessionInflightGuard::acquire(&inflight, id);
-        if !is_local {
+        if !uses_holders {
             return registry.lock().unwrap_or_else(|p| p.into_inner()).close(id);
         }
         Self::maintenance_unlocked(registry, false);
@@ -3008,27 +3519,38 @@ impl Registry {
         if !valid_id(id) {
             return Err(io::Error::other("invalid session identity"));
         }
-        let (is_local, inflight) = {
+        let (mode, inflight) = {
             let state = registry.lock().unwrap_or_else(|p| p.into_inner());
-            (state.is_local(), state.inflight_sessions.clone())
+            (state.mode, state.inflight_sessions.clone())
         };
         let _session_guard = SessionInflightGuard::acquire(&inflight, id);
-        if !is_local {
-            let mut state = registry.lock().unwrap_or_else(|p| p.into_inner());
-            if reload_policy {
-                state.reload_policy_from_disk();
+        match mode {
+            RuntimeMode::Remote => {
+                let mut state = registry.lock().unwrap_or_else(|p| p.into_inner());
+                if reload_policy {
+                    state.reload_policy_from_disk();
+                }
+                state.connect(id, resume_generation)
             }
-            return state.connect(id, resume_generation);
+            RuntimeMode::RemoteHolder => Self::connect_remote_holder_unlocked_inner(
+                registry,
+                id,
+                resume_generation,
+                reload_policy,
+                None,
+                true,
+                ConnectOptions::default(),
+            ),
+            RuntimeMode::Local => Self::connect_local_unlocked_inner(
+                registry,
+                id,
+                resume_generation,
+                reload_policy,
+                None,
+                false,
+                ConnectOptions::default(),
+            ),
         }
-        Self::connect_local_unlocked_inner(
-            registry,
-            id,
-            resume_generation,
-            reload_policy,
-            None,
-            false,
-            ConnectOptions::default(),
-        )
     }
 
     pub fn open_unlocked(registry: &Mutex<Self>, request: &OpenRequest) -> io::Result<UnixStream> {
@@ -3036,17 +3558,22 @@ impl Registry {
             return Err(io::Error::other("invalid session identity"));
         }
         request.policy.validate()?;
+        request.validate_remote_options()?;
         let request_size = serde_json::to_vec(request)?.len();
         if request_size > MAX_OPEN_REQUEST_BYTES {
             return Err(io::Error::other("session open request exceeds limit"));
         }
-        let (mode, inflight) = {
+        let (mode, inflight, root) = {
             let state = registry.lock().unwrap_or_else(|p| p.into_inner());
-            (state.mode, state.inflight_sessions.clone())
+            (
+                state.mode,
+                state.inflight_sessions.clone(),
+                state.root.clone(),
+            )
         };
         let mut local_launch = request.launch.clone();
         match (mode, request.create, local_launch.as_mut()) {
-            (RuntimeMode::Remote, _, Some(_)) => {
+            (RuntimeMode::Remote | RuntimeMode::RemoteHolder, _, Some(_)) => {
                 return Err(io::Error::other(
                     "local launch specifications are forbidden on SSH sessions",
                 ));
@@ -3089,30 +3616,49 @@ impl Registry {
             }
         }
         let _session_guard = SessionInflightGuard::acquire(&inflight, &request.id);
-        if mode != RuntimeMode::Local {
-            return registry
+        match mode {
+            RuntimeMode::Remote => registry
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
-                .open(request);
+                .open(request),
+            RuntimeMode::RemoteHolder => Self::connect_remote_holder_unlocked_inner(
+                registry,
+                &request.id,
+                None,
+                false,
+                Some(request.policy.clone()),
+                request.create,
+                ConnectOptions {
+                    cwd: request.cwd.as_deref(),
+                    launch: None,
+                    resurrect_launch: None,
+                    remote_launch: Some(request.to_remote_launch(&root)),
+                    inline_viewer: request.inline_viewer,
+                    recreate_if_gone: request.recreate_if_gone,
+                    initial_resume: request.resume.as_ref(),
+                },
+            ),
+            RuntimeMode::Local => {
+                let create = request.create && local_launch.is_some();
+                Self::connect_local_unlocked_inner(
+                    registry,
+                    &request.id,
+                    None,
+                    false,
+                    Some(request.policy.clone()),
+                    create,
+                    ConnectOptions {
+                        cwd: request.cwd.as_deref(),
+                        launch: local_launch,
+                        resurrect_launch: request.resurrect_launch.clone(),
+                        remote_launch: None,
+                        inline_viewer: request.inline_viewer,
+                        recreate_if_gone: request.recreate_if_gone,
+                        initial_resume: None,
+                    },
+                )
+            }
         }
-        let create = request.create && local_launch.is_some();
-        Self::connect_local_unlocked_inner(
-            registry,
-            &request.id,
-            None,
-            false,
-            Some(request.policy.clone()),
-            create,
-            ConnectOptions {
-                cwd: request.cwd.as_deref(),
-                launch: local_launch,
-                resurrect_launch: request.resurrect_launch.clone(),
-                remote_launch: None,
-                inline_viewer: request.inline_viewer,
-                recreate_if_gone: request.recreate_if_gone,
-                initial_resume: None,
-            },
-        )
     }
 
     fn reload_policy_from_disk(&mut self) {

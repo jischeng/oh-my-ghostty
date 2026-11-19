@@ -29,6 +29,7 @@ pub const CLAIM: u8 = b'W';
 pub const ACKNOWLEDGE: u8 = b'C';
 pub mod activity;
 pub mod client;
+pub mod gc;
 pub mod holder;
 pub mod inline;
 pub(crate) mod terminal_output;
@@ -346,6 +347,12 @@ impl Vt {
                 omg_vt_snapshot(self.0, &mut p, &mut len)
             }
         })?;
+        if p.is_null() || len == 0 {
+            if !p.is_null() {
+                unsafe { omg_vt_buffer_free(p, len) };
+            }
+            return Ok(Vec::new());
+        }
         let bytes = unsafe { std::slice::from_raw_parts(p, len).to_vec() };
         unsafe { omg_vt_buffer_free(p, len) };
         Ok(bytes)

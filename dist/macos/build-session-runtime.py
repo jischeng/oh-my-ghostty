@@ -182,6 +182,8 @@ def main():
     if output.exists():
         shutil.rmtree(output)
     output.mkdir(parents=True, exist_ok=True)
+    compatibility = json.loads((ROOT/'dist/macos/session-runtime-snapshot-compatibility.json').read_text())
+    snap_rev = snapshot_revision(compute_snapshot_source_digest(ROOT), compatibility)
     targets = [(f'macos-{native}', None, None)]
     if args.macos == 'all':
         other = 'x86_64' if native == 'aarch64' else 'aarch64'
@@ -250,6 +252,7 @@ def main():
                 sign_adhoc([destination/'omg-mobile-support'])
             for notice in ('LICENSE.herdr', 'LICENSE.termio', 'THIRD-PARTY-NOTICES'):
                 shutil.copy2(ROOT/'session-runtime'/notice, destination/notice)
+            (destination/'snapshot-revision').write_text(snap_rev + '\n')
             files = [{'name': p.name, 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()}
                      for p in sorted(destination.iterdir()) if p.name != 'manifest.json' and p.is_file()]
             (destination/'manifest.json').write_text(json.dumps({'revision': revision, 'platform': name, 'files': files}, indent=2)+'\n')
@@ -265,8 +268,7 @@ def main():
     shutil.copy2(ROOT/'dist/macos/session-runtime-askpass.sh', output/'askpass')
     (output/'askpass').chmod(0o755)
     (output/'revision').write_text(revision+'\n')
-    compatibility = json.loads((ROOT/'dist/macos/session-runtime-snapshot-compatibility.json').read_text())
-    (output/'snapshot-revision').write_text(snapshot_revision(compute_snapshot_source_digest(ROOT), compatibility)+'\n')
+    (output/'snapshot-revision').write_text(snap_rev+'\n')
     validate(output, native, all_macos=(args.macos == 'all'), linux_archs=linux_archs)
     if use_cache:
         CACHE_ROOT.mkdir(parents=True, exist_ok=True)

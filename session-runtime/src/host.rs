@@ -1,7 +1,10 @@
 //! One host daemon owns all session actors; transport connections multiplex
 //! framed pane streams. Session workers are threads, never daemon subprocesses.
 use crate::*;
-use crate::{lifecycle::Policy, registry::Registry};
+use crate::{
+    lifecycle::Policy,
+    registry::{Registry, RuntimeMode},
+};
 use std::{
     collections::VecDeque,
     fs,
@@ -12,7 +15,7 @@ use std::{
     },
     path::Path,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -104,14 +107,208 @@ pub fn valid_id(id: &str) -> bool {
             }
         })
 }
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HostIdentity {
+    pub pid: u32,
+    pub mode: String,
+    pub revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary_mtime: Option<u64>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TakeoverRequest {
+    pub target_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_revision: Option<String>,
+}
+
+struct HostControl {
+    identity: HostIdentity,
+    shutdown_requested: Arc<AtomicBool>,
+    wake: WakePipe,
+}
+
+fn mode_name(mode: RuntimeMode) -> &'static str {
+    match mode {
+        RuntimeMode::Remote => "remote",
+        RuntimeMode::RemoteHolder => "remote-holder",
+        RuntimeMode::Local => "local",
+    }
+}
+
+pub fn current_host_revision_for_exe(exe: &Path) -> String {
+    if let Some(dir) = exe.parent() {
+        for name in ["revision", "verified"] {
+            if let Ok(text) = fs::read_to_string(dir.join(name)) {
+                let trimmed = text.trim();
+                if crate::valid_revision(trimmed) {
+                    return trimmed.to_owned();
+                }
+            }
+        }
+    }
+    env!("CARGO_PKG_VERSION").to_owned()
+}
+
+pub fn current_host_revision() -> String {
+    std::env::current_exe()
+        .map(|exe| current_host_revision_for_exe(&exe))
+        .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_owned())
+}
+
+pub fn current_snapshot_revision_for_exe(exe: &Path) -> Option<String> {
+    let dir = exe.parent()?;
+    let text = fs::read_to_string(dir.join("snapshot-revision")).ok()?;
+    let trimmed = crate::canonical_snapshot_revision(&text);
+    crate::valid_revision(trimmed).then(|| trimmed.to_owned())
+}
+
+pub fn binary_mtime_for_exe(exe: &Path) -> Option<u64> {
+    let candidate = exe
+        .parent()
+        .map(|dir| dir.join("verified"))
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| exe.to_path_buf());
+    fs::metadata(candidate)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
+pub fn snapshot_revisions_compatible(a: Option<&str>, b: Option<&str>) -> bool {
+    match (a, b) {
+        (Some(left), Some(right)) => {
+            crate::canonical_snapshot_revision(left) == crate::canonical_snapshot_revision(right)
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn build_host_identity(mode: RuntimeMode) -> HostIdentity {
+    let exe = std::env::current_exe().ok();
+    let revision = exe
+        .as_deref()
+        .map(current_host_revision_for_exe)
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned());
+    let snapshot_revision = exe
+        .as_deref()
+        .and_then(current_snapshot_revision_for_exe)
+        .or_else(crate::current_snapshot_revision);
+    let binary_mtime = exe.as_deref().and_then(binary_mtime_for_exe);
+    HostIdentity {
+        pid: std::process::id(),
+        mode: mode_name(mode).to_owned(),
+        revision,
+        snapshot_revision,
+        executable: exe.map(|p| p.to_string_lossy().into_owned()),
+        binary_mtime,
+    }
+}
+
+fn write_host_meta(directory: &Path, identity: &HostIdentity) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let data = serde_json::to_vec(identity)?;
+    let target = directory.join("host.meta");
+    let nonce = crate::record::nonce().unwrap_or_else(|_| std::process::id().to_string());
+    let tmp = directory.join(format!(".host.meta.{}.tmp", &nonce[..8.min(nonce.len())]));
+    let res = (|| -> io::Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&tmp)?;
+        file.write_all(&data)?;
+        file.sync_all()?;
+        fs::rename(&tmp, &target)
+    })();
+    if res.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    res
+}
+
+pub fn read_host_meta(directory: &Path) -> Option<HostIdentity> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = directory.join("host.meta");
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > 16 * 1024 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    file.take(16 * 1024 + 1).read_to_end(&mut bytes).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+pub fn query_host_identity(socket_path: &Path) -> io::Result<HostIdentity> {
+    let mut stream = UnixStream::connect(socket_path)?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    Frame::new(b'V', 0, &[]).send(&mut stream)?;
+    let reply = Frame::read(&mut stream)?;
+    if reply.kind == b'E' {
+        return Err(io::Error::other(
+            String::from_utf8_lossy(&reply.data).into_owned(),
+        ));
+    }
+    if reply.kind != b'V' || reply.seq != 0 {
+        return Err(io::Error::other("unexpected host identity response"));
+    }
+    serde_json::from_slice(&reply.data).map_err(io::Error::other)
+}
+
+pub fn request_host_takeover(
+    socket_path: &Path,
+    target_revision: &str,
+    snapshot_revision: Option<&str>,
+) -> io::Result<()> {
+    let mut stream = UnixStream::connect(socket_path)?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    let payload = serde_json::to_vec(&TakeoverRequest {
+        target_revision: target_revision.to_owned(),
+        snapshot_revision: snapshot_revision.map(str::to_owned),
+    })?;
+    Frame::new(b'T', 0, &payload).send(&mut stream)?;
+    let reply = Frame::read(&mut stream)?;
+    if reply.kind == b'T' && reply.seq == 0 && reply.data == b"ok" {
+        return Ok(());
+    }
+    if reply.kind == b'E' {
+        return Err(io::Error::other(
+            String::from_utf8_lossy(&reply.data).into_owned(),
+        ));
+    }
+    Err(io::Error::other("host refused takeover"))
+}
+
 /// Outer protocol: H(stream, UUID), D(stream, encoded inner frame), E(stream,error),
 /// Q(stream) detach. Outer stream IDs are local to one transport connection.
 pub fn serve(directory: &Path, command: Vec<String>) -> io::Result<()> {
-    serve_mode(directory, command, false)
+    serve_mode(directory, command, RuntimeMode::Remote)
+}
+
+pub fn serve_remote_holder(directory: &Path, command: Vec<String>) -> io::Result<()> {
+    serve_mode(directory, command, RuntimeMode::RemoteHolder)
 }
 
 pub fn serve_local(directory: &Path, command: Vec<String>) -> io::Result<()> {
-    serve_mode(directory, command, true)
+    serve_mode(directory, command, RuntimeMode::Local)
 }
 
 fn raise_nofile_limit() {
@@ -135,7 +332,18 @@ fn raise_nofile_limit() {
     }
 }
 
-fn serve_mode(directory: &Path, command: Vec<String>, local: bool) -> io::Result<()> {
+fn remove_socket_if_owned(path: &Path, expected_identity: Option<(u64, u64)>) {
+    let should_remove = match (expected_identity, fs::symlink_metadata(path)) {
+        (Some(expected), Ok(meta)) => (meta.dev(), meta.ino()) == expected,
+        (None, Ok(_)) => true,
+        (_, Err(_)) => false,
+    };
+    if should_remove {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn serve_mode(directory: &Path, command: Vec<String>, mode: RuntimeMode) -> io::Result<()> {
     raise_nofile_limit();
     private(directory)?;
     let policy_path = directory.join("policy.json");
@@ -146,7 +354,7 @@ fn serve_mode(directory: &Path, command: Vec<String>, local: bool) -> io::Result
     };
     policy.validate()?;
     let _lock = HostLock::acquire(directory)?;
-    if local {
+    if mode == RuntimeMode::Local {
         if let Some(support) = crate::registry::infer_support_root_from_env_or_exe() {
             let preserve_existing = crate::registry::read_support_root_stamp(directory)
                 .is_some_and(|existing| crate::registry::same_canonical_path(&existing, &support));
@@ -155,25 +363,34 @@ fn serve_mode(directory: &Path, command: Vec<String>, local: bool) -> io::Result
             }
         }
     }
-    let _ = fs::remove_file(directory.join("host.sock"));
+    let host_sock_path = directory.join("host.sock");
+    let _ = fs::remove_file(&host_sock_path);
     let root = directory.join("sessions");
     fs::create_dir_all(&root)?;
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
     private(&root)?;
-    let listener = UnixListener::bind(directory.join("host.sock"))?;
-    fs::set_permissions(
-        directory.join("host.sock"),
-        fs::Permissions::from_mode(0o600),
-    )?;
+    let listener = UnixListener::bind(&host_sock_path)?;
+    fs::set_permissions(&host_sock_path, fs::Permissions::from_mode(0o600))?;
+    let socket_identity = fs::symlink_metadata(&host_sock_path)
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()));
     listener.set_nonblocking(true)?;
+    let identity = build_host_identity(mode);
+    let _ = write_host_meta(directory, &identity);
     let wake = WakePipe::new()?;
-    let mut initial = if local {
-        Registry::new_local(root, command, policy.clone())
-    } else {
-        Registry::new(root, command, policy.clone())
+    let shutdown_requested = Arc::new(AtomicBool::new(false));
+    let control = Arc::new(HostControl {
+        identity,
+        shutdown_requested: shutdown_requested.clone(),
+        wake: wake.clone(),
+    });
+    let mut initial = match mode {
+        RuntimeMode::Local => Registry::new_local(root, command, policy.clone()),
+        RuntimeMode::RemoteHolder => Registry::new_remote_holder(root, command, policy.clone()),
+        RuntimeMode::Remote => Registry::new(root, command, policy.clone()),
     };
     initial.set_wakeup(wake.clone());
-    if !local {
+    if mode == RuntimeMode::Remote {
         initial.set_containment_root(crate::containment::host_root()?);
     }
     initial.maintenance();
@@ -182,6 +399,11 @@ fn serve_mode(directory: &Path, command: Vec<String>, local: bool) -> io::Result
     let mut idle_since = Instant::now();
     loop {
         wake.drain();
+        if shutdown_requested.load(Ordering::SeqCst) {
+            drop(listener);
+            remove_socket_if_owned(&host_sock_path, socket_identity);
+            return Ok(());
+        }
         Registry::maintenance_unlocked(&registry, false);
         if !directory.join("sessions").exists()
             && active.load(std::sync::atomic::Ordering::SeqCst) == 0
@@ -194,7 +416,8 @@ fn serve_mode(directory: &Path, command: Vec<String>, local: bool) -> io::Result
                 idle_since = Instant::now();
                 30_000
             } else if idle_since.elapsed() > Duration::from_secs(policy.host_idle_seconds) {
-                let _ = fs::remove_file(directory.join("host.sock"));
+                drop(listener);
+                remove_socket_if_owned(&host_sock_path, socket_identity);
                 return Ok(());
             } else {
                 let deadline = idle_since
@@ -227,6 +450,7 @@ fn serve_mode(directory: &Path, command: Vec<String>, local: bool) -> io::Result
         let registry = registry.clone();
         let active = active.clone();
         let wake = wake.clone();
+        let control = control.clone();
         std::thread::spawn(move || {
             struct ActiveGuard {
                 active: Arc<std::sync::atomic::AtomicUsize>,
@@ -240,18 +464,29 @@ fn serve_mode(directory: &Path, command: Vec<String>, local: bool) -> io::Result
                 }
             }
             let _guard = ActiveGuard { active, wake };
-            let _ = host_connection(socket, registry);
+            let _ = host_connection_full(socket, registry, MAX_STREAMS, Some(control));
         });
     }
 }
+#[cfg(test)]
 fn host_connection(socket: UnixStream, registry: Arc<Mutex<Registry>>) -> io::Result<()> {
     host_connection_with_limit(socket, registry, MAX_STREAMS)
 }
 
+#[cfg(test)]
 fn host_connection_with_limit(
     socket: UnixStream,
     registry: Arc<Mutex<Registry>>,
     max_streams: usize,
+) -> io::Result<()> {
+    host_connection_full(socket, registry, max_streams, None)
+}
+
+fn host_connection_full(
+    socket: UnixStream,
+    registry: Arc<Mutex<Registry>>,
+    max_streams: usize,
+    control: Option<Arc<HostControl>>,
 ) -> io::Result<()> {
     let mut transport = Peer::new(socket, 0)?;
     let mut streams: std::collections::HashMap<u64, StreamEntry> = Default::default();
@@ -265,16 +500,69 @@ fn host_connection_with_limit(
             last_heartbeat = Instant::now();
             match f.kind {
                 b'P' if f.seq == 0 => {
-                    let is_local = registry
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .is_local();
-                    let capabilities = if is_local {
-                        b"durable-close/1,strict-open/1,local-launch/1,local-resurrect/1,inline-viewer/1,agent-state/1,holder-presentation/1,recreate-if-gone/1,exec/1,init-size/1,remote-env/1,handoff-resume/1".as_slice()
-                    } else {
-                        b"durable-close/1,strict-open/1,inline-viewer/1,agent-state/1,recreate-if-gone/1,exec/1,init-size/1,remote-env/1,handoff-resume/1".as_slice()
+                    let mode = registry.lock().unwrap_or_else(|p| p.into_inner()).mode();
+                    let capabilities = match mode {
+                        RuntimeMode::Local => b"durable-close/1,strict-open/1,local-launch/1,local-resurrect/1,inline-viewer/1,agent-state/1,holder-presentation/1,recreate-if-gone/1,exec/1,init-size/1,remote-env/1,handoff-resume/1".as_slice(),
+                        RuntimeMode::RemoteHolder => b"durable-close/1,strict-open/1,inline-viewer/1,agent-state/1,holder-presentation/1,recreate-if-gone/1,exec/1,init-size/1,remote-env/1,handoff-resume/1,remote-holder/1".as_slice(),
+                        RuntimeMode::Remote => b"durable-close/1,strict-open/1,inline-viewer/1,agent-state/1,recreate-if-gone/1,exec/1,init-size/1,remote-env/1,handoff-resume/1".as_slice(),
                     };
                     transport.push(Frame::new(b'P', 0, capabilities));
+                }
+                b'V' if f.seq == 0 && f.data.is_empty() => {
+                    let identity = match &control {
+                        Some(ctrl) => ctrl.identity.clone(),
+                        None => {
+                            let mode = registry.lock().unwrap_or_else(|p| p.into_inner()).mode();
+                            build_host_identity(mode)
+                        }
+                    };
+                    match serde_json::to_vec(&identity) {
+                        Ok(bytes) => transport.push(Frame::new(b'V', 0, &bytes)),
+                        Err(e) => transport.push(Frame::new(b'E', 0, e.to_string().as_bytes())),
+                    }
+                    let _ = transport.flush();
+                }
+                b'T' if f.seq == 0 => {
+                    let Some(ctrl) = &control else {
+                        transport.push(Frame::new(b'E', 0, b"host takeover unavailable"));
+                        let _ = transport.flush();
+                        continue;
+                    };
+                    if ctrl.identity.mode != "remote-holder" {
+                        transport.push(Frame::new(
+                            b'E',
+                            0,
+                            b"host takeover requires remote-holder mode",
+                        ));
+                        let _ = transport.flush();
+                        continue;
+                    }
+                    let Ok(req) = serde_json::from_slice::<TakeoverRequest>(&f.data) else {
+                        transport.push(Frame::new(b'E', 0, b"invalid takeover request"));
+                        let _ = transport.flush();
+                        continue;
+                    };
+                    if !crate::valid_revision(&req.target_revision) {
+                        transport.push(Frame::new(b'E', 0, b"invalid takeover target revision"));
+                        let _ = transport.flush();
+                        continue;
+                    }
+                    if !snapshot_revisions_compatible(
+                        ctrl.identity.snapshot_revision.as_deref(),
+                        req.snapshot_revision.as_deref(),
+                    ) {
+                        transport.push(Frame::new(
+                            b'E',
+                            0,
+                            b"incompatible snapshot-revision; refusing takeover",
+                        ));
+                        let _ = transport.flush();
+                        continue;
+                    }
+                    ctrl.shutdown_requested.store(true, Ordering::SeqCst);
+                    ctrl.wake.notify();
+                    transport.push(Frame::new(b'T', 0, b"ok"));
+                    let _ = transport.flush();
                 }
                 b'K' if f.seq != 0 => {
                     let result = std::str::from_utf8(&f.data)

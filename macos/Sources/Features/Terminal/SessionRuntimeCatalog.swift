@@ -360,7 +360,8 @@ final class SessionRuntimeLibraryModel: ObservableObject {
                 )) ?? SessionRuntimeDescriptor(
                     connection: host.connection,
                     revision: currentRevision,
-                    policy: OhMyGhosttySettings.shared.runtimePolicy
+                    policy: OhMyGhosttySettings.shared.runtimePolicy,
+                    remoteHostModel: SessionRuntimeDescriptor.unifiedRemoteHostModel
                 )
                 result.append(SessionRuntimeCatalogEndpoint(descriptor: descriptor, lastUsedAt: host.capturedAt))
             }
@@ -441,9 +442,20 @@ final class SessionRuntimeLibraryModel: ObservableObject {
               selectedSessionID == session.id,
               sessions.contains(session),
               session.isClosable(isLocalEndpoint: endpoint.descriptor.isLocal) else { return }
-        let targetDescriptor = endpoint.descriptor.isLocal
-            ? SessionRuntimeCatalog.resolveLocalRevisionDescriptor(forPaneID: pane, fallback: endpoint.descriptor)
-            : endpoint.descriptor
+        let targetDescriptor: SessionRuntimeDescriptor
+        if endpoint.descriptor.isLocal {
+            targetDescriptor = SessionRuntimeCatalog.resolveLocalRevisionDescriptor(
+                forPaneID: pane,
+                fallback: endpoint.descriptor
+            )
+        } else if endpoint.descriptor.usesUnifiedRemoteHost {
+            let normalization = SessionRuntimeConnections.restoreNormalization(endpoint.descriptor)
+            targetDescriptor = normalization.handoffSourceDescriptor == nil
+                ? normalization.descriptor
+                : endpoint.descriptor
+        } else {
+            targetDescriptor = endpoint.descriptor
+        }
         try closeQueue.enqueue([SessionRuntimeCloseRequest(pane: pane, descriptor: targetDescriptor)])
         closeQueue.start()
         closeQueue.retry()
@@ -458,7 +470,9 @@ final class SessionRuntimeLibraryModel: ObservableObject {
                 ?? SessionRuntimeConnections.normalizedForRestore(descriptor)
             return try await loadSingleDescriptorSessions(candidate)
         }
-        return try await loadSingleDescriptorSessions(descriptor)
+        return try await loadSingleDescriptorSessions(
+            SessionRuntimeConnections.normalizedForRestore(descriptor)
+        )
     }
 
     private static func loadSingleDescriptorSessions(

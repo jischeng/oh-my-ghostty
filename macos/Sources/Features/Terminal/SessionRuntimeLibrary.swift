@@ -266,6 +266,11 @@ enum SessionRuntimeLibrary {
                 forPaneID: attachedPane,
                 fallback: attachedDescriptor
             )
+        } else if attachedDescriptor.usesUnifiedRemoteHost {
+            let normalization = SessionRuntimeConnections.restoreNormalization(attachedDescriptor)
+            if normalization.handoffSourceDescriptor == nil {
+                attachedDescriptor = normalization.descriptor
+            }
         }
 
         guard let delegate = NSApp.delegate as? AppDelegate,

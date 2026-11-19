@@ -97,6 +97,7 @@ struct SessionRuntimeDescriptor: Codable, Equatable, Sendable {
     static let resurrectWorkingDirectoryEnvironmentKey = "OMG_RUNTIME_RESURRECT_CWD"
     static let recreateIfGoneEnvironmentKey = "OMG_RUNTIME_RECREATE_IF_GONE"
     static let handoffResumeEnvironmentKey = "OMG_RUNTIME_HANDOFF_RESUME"
+    static let unifiedRemoteHostModel = "single-host-v1"
     /// Nil identifies a local host runtime. Older archives always contain an SSH connection.
     var connection: GitSSHConnection?
     var revision: String
@@ -104,8 +105,15 @@ struct SessionRuntimeDescriptor: Codable, Equatable, Sendable {
     var localWorkingDirectory: String?
     /// Used only when creating this pane. Reattach never changes a live cwd.
     var initialWorkingDirectory: String?
+    /// Identifies the remote host state model (`"single-host-v1"` for unified
+    /// snapshot-scoped `omgd host-remote` + `session-holder`; `nil` for legacy
+    /// monolithic per-revision remote `omgd host` archives such as v0.22.1).
+    var remoteHostModel: String?
 
     var isLocal: Bool { connection == nil }
+    var usesUnifiedRemoteHost: Bool {
+        !isLocal && remoteHostModel == Self.unifiedRemoteHostModel
+    }
     var displayEndpoint: String {
         connection?.displayEndpoint ?? localWorkingDirectory ?? FileManager.default.homeDirectoryForCurrentUser.path
     }
@@ -738,7 +746,12 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
         let revision = try String(contentsOf: resources.appendingPathComponent("revision"), encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !revision.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
-        return .init(connection: connection, revision: revision, policy: policy)
+        return .init(
+            connection: connection,
+            revision: revision,
+            policy: policy,
+            remoteHostModel: SessionRuntimeDescriptor.unifiedRemoteHostModel
+        )
     }
 
     static func localDescriptor(workingDirectory: String? = nil, policy: SessionRuntimePolicy) throws -> SessionRuntimeDescriptor {
@@ -863,6 +876,18 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
         return home.appendingPathComponent(".omg/run/\(hash)")
     }
 
+    nonisolated static func supportsUnifiedRemoteHost(versionDirectory: URL) -> Bool {
+        let targets = ["linux-x86_64", "linux-aarch64", "macos-aarch64", "macos-x86_64"]
+        return targets.contains { target in
+            FileManager.default.fileExists(
+                atPath: versionDirectory
+                    .appendingPathComponent(target, isDirectory: true)
+                    .appendingPathComponent("snapshot-revision")
+                    .path
+            )
+        }
+    }
+
     nonisolated static func restoreNormalization(
         _ descriptor: SessionRuntimeDescriptor,
         applicationSupportRoot: URL? = nil,
@@ -889,6 +914,7 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
             rev.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "._-".contains($0)) }
         guard validRevision else {
             updated.revision = currentRevision
+            updated.remoteHostModel = SessionRuntimeDescriptor.unifiedRemoteHostModel
             return .init(descriptor: updated, handoffSourceDescriptor: nil)
         }
         let supportRoot = applicationSupportRoot ?? OMGApplicationEnvironment.applicationSupportURL()
@@ -902,14 +928,23 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
               let cachedSnapshot = try? String(contentsOf: cachedSnapshotFile, encoding: .utf8),
               let currentSnapshot = try? String(contentsOf: currentSnapshotFile, encoding: .utf8) else {
             updated.revision = currentRevision
+            updated.remoteHostModel = SessionRuntimeDescriptor.unifiedRemoteHostModel
             return .init(descriptor: updated, handoffSourceDescriptor: descriptor)
         }
         let canonicalCached = canonicalSnapshotRevision(cachedSnapshot)
         let canonicalCurrent = canonicalSnapshotRevision(currentSnapshot)
         guard !canonicalCached.isEmpty, canonicalCached == canonicalCurrent else {
             updated.revision = currentRevision
+            updated.remoteHostModel = SessionRuntimeDescriptor.unifiedRemoteHostModel
             return .init(descriptor: updated, handoffSourceDescriptor: descriptor)
         }
+        if descriptor.usesUnifiedRemoteHost || supportsUnifiedRemoteHost(versionDirectory: versionDir) {
+            updated.revision = currentRevision
+            updated.remoteHostModel = SessionRuntimeDescriptor.unifiedRemoteHostModel
+            return .init(descriptor: updated, handoffSourceDescriptor: nil)
+        }
+        // Legacy monolithic per-revision remote host (e.g. v0.22.1): keep pinned to its
+        // original revision so fast_connect reattaches the live remote PTY directly.
         return .init(descriptor: descriptor, handoffSourceDescriptor: nil)
     }
 

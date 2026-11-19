@@ -77,8 +77,23 @@ final class SessionRuntimeCloseQueue: ObservableObject {
         if let process = activeCloseProcess, process.isRunning { process.terminate() }
     }
 
+    nonisolated static func effectiveDescriptorForClose(
+        _ descriptor: SessionRuntimeDescriptor,
+        applicationSupportRoot: URL? = nil,
+        resources: URL? = Bundle.main.resourceURL
+    ) -> SessionRuntimeDescriptor {
+        guard descriptor.isLocal || descriptor.usesUnifiedRemoteHost else { return descriptor }
+        let normalization = SessionRuntimeConnections.restoreNormalization(
+            descriptor,
+            applicationSupportRoot: applicationSupportRoot,
+            resources: resources
+        )
+        return normalization.handoffSourceDescriptor == nil ? normalization.descriptor : descriptor
+    }
+
     private func launchClose(_ request: SessionRuntimeCloseRequest, socket prepared: URL? = nil) throws -> Process {
-        let socket = try prepared ?? SessionRuntimeConnections.shared.prepare(request.descriptor, interactive: false)
+        let effectiveDescriptor = Self.effectiveDescriptorForClose(request.descriptor)
+        let socket = try prepared ?? SessionRuntimeConnections.shared.prepare(effectiveDescriptor, interactive: false)
         let process = Process()
         process.executableURL = SessionRuntimeConnections.resources.appendingPathComponent("omgd")
         process.arguments = ["close-local", socket.path, request.pane.uuidString.lowercased()]
@@ -118,7 +133,10 @@ final class SessionRuntimeCloseQueue: ObservableObject {
                 pending.append((request, nil))
             } else if let socket = sockets[request.pane], FileManager.default.fileExists(atPath: socket.path) {
                 pending.append((request, socket))
-            } else if let socket = try? SessionRuntimeConnections.shared.prepare(request.descriptor, interactive: false) {
+            } else if let socket = try? SessionRuntimeConnections.shared.prepare(
+                Self.effectiveDescriptorForClose(request.descriptor),
+                interactive: false
+            ) {
                 pending.append((request, socket))
             }
         }

@@ -1054,6 +1054,123 @@ struct SessionRuntimeConnectionTests {
         ).revision == "rev-current")
     }
 
+    @Test func unifiedRemoteDescriptorNormalizesToCurrentRevisionWhileLegacyMonolithicStaysPinned() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let resources = root.appendingPathComponent("Resources", isDirectory: true)
+        let bundledRuntime = resources.appendingPathComponent("session-runtime", isDirectory: true)
+        let support = root.appendingPathComponent("Support", isDirectory: true)
+        try FileManager.default.createDirectory(at: bundledRuntime, withIntermediateDirectories: true)
+        try Data("rev-0223\n".utf8).write(to: bundledRuntime.appendingPathComponent("revision"))
+        try Data("7abe5365444c63ee8df6\n".utf8).write(to: bundledRuntime.appendingPathComponent("snapshot-revision"))
+
+        let connection = try GitSSHConnection(destination: "cloud")
+
+        // 1. Legacy v0.22.1 JSON archive (no remoteHostModel, no per-target snapshot-revision) stays pinned.
+        let legacyDir = support.appendingPathComponent("session-runtime/versions/ad43611e", isDirectory: true)
+        try FileManager.default.createDirectory(at: legacyDir, withIntermediateDirectories: true)
+        try Data("ad43611e\n".utf8).write(to: legacyDir.appendingPathComponent("revision"))
+        try Data("7abe5365444c63ee8df6\n".utf8).write(to: legacyDir.appendingPathComponent("snapshot-revision"))
+        let legacyJSON = try JSONEncoder().encode(
+            SessionRuntimeDescriptor(connection: connection, revision: "ad43611e", policy: .init())
+        )
+        let legacyDecoded = try JSONDecoder().decode(SessionRuntimeDescriptor.self, from: legacyJSON)
+        #expect(legacyDecoded.remoteHostModel == nil)
+        #expect(!legacyDecoded.usesUnifiedRemoteHost)
+        let legacyNorm = SessionRuntimeConnections.restoreNormalization(
+            legacyDecoded,
+            applicationSupportRoot: support,
+            resources: resources
+        )
+        #expect(legacyNorm.descriptor.revision == "ad43611e")
+        #expect(legacyNorm.descriptor.remoteHostModel == nil)
+        #expect(legacyNorm.handoffSourceDescriptor == nil)
+
+        // 2. Unified remote descriptor with compatible snapshot-revision upgrades to currentRevision in-place.
+        let unifiedDir = support.appendingPathComponent("session-runtime/versions/rev-0222", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: unifiedDir.appendingPathComponent("linux-x86_64", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        try Data("rev-0222\n".utf8).write(to: unifiedDir.appendingPathComponent("revision"))
+        try Data("7abe5365444c63ee8df6\n".utf8).write(to: unifiedDir.appendingPathComponent("snapshot-revision"))
+        try Data("7abe5365444c63ee8df6\n".utf8)
+            .write(to: unifiedDir.appendingPathComponent("linux-x86_64/snapshot-revision"))
+
+        let unifiedExplicit = SessionRuntimeDescriptor(
+            connection: connection,
+            revision: "rev-0222",
+            policy: .init(),
+            remoteHostModel: SessionRuntimeDescriptor.unifiedRemoteHostModel
+        )
+        let roundTripped = try JSONDecoder().decode(
+            SessionRuntimeDescriptor.self,
+            from: JSONEncoder().encode(unifiedExplicit)
+        )
+        #expect(roundTripped.usesUnifiedRemoteHost)
+        let unifiedNorm = SessionRuntimeConnections.restoreNormalization(
+            roundTripped,
+            applicationSupportRoot: support,
+            resources: resources
+        )
+        #expect(unifiedNorm.descriptor.revision == "rev-0223")
+        #expect(unifiedNorm.descriptor.usesUnifiedRemoteHost)
+        #expect(unifiedNorm.handoffSourceDescriptor == nil)
+
+        // 3. Cached per-target snapshot-revision also upgrades compatible descriptors even if field was absent.
+        let unifiedByCache = SessionRuntimeDescriptor(connection: connection, revision: "rev-0222", policy: .init())
+        let cacheNorm = SessionRuntimeConnections.restoreNormalization(
+            unifiedByCache,
+            applicationSupportRoot: support,
+            resources: resources
+        )
+        #expect(cacheNorm.descriptor.revision == "rev-0223")
+        #expect(cacheNorm.descriptor.usesUnifiedRemoteHost)
+        #expect(cacheNorm.handoffSourceDescriptor == nil)
+
+        // 4. Unified remote descriptor with incompatible snapshot-revision triggers graceful handoff.
+        let incompatUnifiedDir = support.appendingPathComponent("session-runtime/versions/rev-0220", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: incompatUnifiedDir.appendingPathComponent("linux-x86_64", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        try Data("rev-0220\n".utf8).write(to: incompatUnifiedDir.appendingPathComponent("revision"))
+        try Data("59c5cc7b4d1fe408faf5\n".utf8).write(to: incompatUnifiedDir.appendingPathComponent("snapshot-revision"))
+        try Data("59c5cc7b4d1fe408faf5\n".utf8)
+            .write(to: incompatUnifiedDir.appendingPathComponent("linux-x86_64/snapshot-revision"))
+        let incompatUnified = SessionRuntimeDescriptor(
+            connection: connection,
+            revision: "rev-0220",
+            policy: .init(),
+            remoteHostModel: SessionRuntimeDescriptor.unifiedRemoteHostModel
+        )
+        let incompatNorm = SessionRuntimeConnections.restoreNormalization(
+            incompatUnified,
+            applicationSupportRoot: support,
+            resources: resources
+        )
+        #expect(incompatNorm.descriptor.revision == "rev-0223")
+        #expect(incompatNorm.descriptor.usesUnifiedRemoteHost)
+        #expect(incompatNorm.handoffSourceDescriptor == incompatUnified)
+
+        // 5. Close queue routes compatible unified closes to currentRevision, but keeps legacy & incompatible pinned.
+        #expect(SessionRuntimeCloseQueue.effectiveDescriptorForClose(
+            unifiedExplicit,
+            applicationSupportRoot: support,
+            resources: resources
+        ).revision == "rev-0223")
+        #expect(SessionRuntimeCloseQueue.effectiveDescriptorForClose(
+            legacyDecoded,
+            applicationSupportRoot: support,
+            resources: resources
+        ).revision == "ad43611e")
+        #expect(SessionRuntimeCloseQueue.effectiveDescriptorForClose(
+            incompatUnified,
+            applicationSupportRoot: support,
+            resources: resources
+        ).revision == "rev-0220")
+    }
+
     @Test func openRequestSupportsRecreateIfGoneOnlyWhenRequested() throws {
         let local = SessionRuntimeDescriptor(
             connection: nil,

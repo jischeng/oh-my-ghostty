@@ -22,6 +22,9 @@ pub const Message = union(enum) {
     /// and still have focus.
     visible: bool,
 
+    /// OMG: Whether sustained occlusion may evict the retained front GPU frame.
+    hibernation_eligible: bool,
+
     /// Reset the cursor blink by immediately showing the cursor then
     /// restarting the timer.
     reset_cursor_blink,

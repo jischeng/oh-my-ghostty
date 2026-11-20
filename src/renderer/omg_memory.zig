@@ -4,6 +4,10 @@
 //! placeholder target so occluded surfaces retain minimal VRAM.
 const std = @import("std");
 
+pub fn shouldHibernate(visible: bool, hibernation_eligible: bool) bool {
+    return !visible and hibernation_eligible;
+}
+
 pub fn trimInactive(renderer: anytype, io: std.Io) !void {
     try trim(renderer, io, true);
 }
@@ -143,4 +147,30 @@ test "idle GPU trim failure preserves resources and semaphore" {
     state.fail = false;
     try trimInactive(&renderer, std.testing.io);
     try std.testing.expectEqual(@as(usize, 102), state.bytes);
+}
+
+test "hibernation policy retains front frame when occluded but ineligible" {
+    try std.testing.expect(!shouldHibernate(true, true));
+    try std.testing.expect(!shouldHibernate(true, false));
+    try std.testing.expect(!shouldHibernate(false, false));
+    try std.testing.expect(shouldHibernate(false, true));
+
+    var state: Mock.State = .{};
+    var renderer = Mock.init(&state);
+    renderer.visible.store(false, .release);
+
+    // Merely occluded active tab (e.g. another Space): trim spare swapchain buffers
+    // immediately, but skip front-frame eviction while hibernation_eligible is false.
+    try trimInactive(&renderer, std.testing.io);
+    if (shouldHibernate(false, false)) try trimAll(&renderer, std.testing.io);
+    try std.testing.expectEqual(@as(usize, 102), state.bytes);
+    try std.testing.expectEqual(@as(usize, 0), state.evictions);
+    try std.testing.expectEqual(@as(usize, 100), renderer.swap_chain.frames[1].target.width);
+
+    // Once the surface becomes eligible (e.g. minimized, hidden, or background tab),
+    // hibernation evicts the front frame onto the 1x1 placeholder target.
+    if (shouldHibernate(false, true)) try trimAll(&renderer, std.testing.io);
+    try std.testing.expectEqual(@as(usize, 3), state.bytes);
+    try std.testing.expectEqual(@as(usize, 1), state.evictions);
+    try std.testing.expectEqual(@as(usize, 1), renderer.swap_chain.frames[1].target.width);
 }

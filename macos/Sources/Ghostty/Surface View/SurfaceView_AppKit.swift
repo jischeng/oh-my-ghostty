@@ -205,6 +205,7 @@ extension Ghostty {
         var isWindowVisible = false
         private(set) var lastReportedOcclusionState: Bool?
         private(set) var lastSentCoreOcclusionState: Bool?
+        private(set) var lastSentCoreHibernationEligible: Bool?
         private(set) var occlusionUpdateCount = 0
 
         // OMG: tracks when focus has moved to this pane's companion Quick Input
@@ -262,15 +263,21 @@ extension Ghostty {
             return isPointOccludedByFloatingAccessory(inWindow: event.locationInWindow)
         }
 
-        func updateSurfaceOcclusion(visible: Bool) {
+        func updateSurfaceOcclusion(visible: Bool, hibernationEligible: Bool = true) {
             if lastReportedOcclusionState != visible {
                 lastReportedOcclusionState = visible
                 isWindowVisible = visible
                 occlusionUpdateCount += 1
             }
-            if let surface = self.surface, lastSentCoreOcclusionState != visible {
-                ghostty_surface_set_occlusion(surface, visible)
-                lastSentCoreOcclusionState = visible
+            if let surface = self.surface {
+                if lastSentCoreHibernationEligible != hibernationEligible {
+                    ghostty_surface_omg_set_hibernation_eligible(surface, hibernationEligible)
+                    lastSentCoreHibernationEligible = hibernationEligible
+                }
+                if lastSentCoreOcclusionState != visible {
+                    ghostty_surface_set_occlusion(surface, visible)
+                    lastSentCoreOcclusionState = visible
+                }
             }
         }
 

@@ -2055,6 +2055,10 @@ pub const CAPI = struct {
         surface.core_surface.omgLinkChecksFlush();
     }
 
+    export fn ghostty_surface_omg_set_hibernation_eligible(surface: *Surface, eligible: bool) void {
+        surface.core_surface.setHibernationEligible(eligible);
+    }
+
     export fn ghostty_surface_omg_has_link_candidate(
         surface: *Surface,
         x: f64,

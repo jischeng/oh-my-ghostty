@@ -1349,6 +1349,9 @@ GHOSTTY_API bool ghostty_surface_omg_export_scrollback_vt(
     size_t,
     void* GHOSTTY_NULLABLE,
     const char* GHOSTTY_NULLABLE (*)(void* GHOSTTY_NULLABLE, uint64_t));
+// Controls whether sustained occlusion may evict the retained front GPU frame.
+// Defaults to true so direct occlusion callers keep hibernation behavior.
+GHOSTTY_API void ghostty_surface_omg_set_hibernation_eligible(ghostty_surface_t, bool);
 
 #ifdef __APPLE__
 GHOSTTY_API void ghostty_surface_set_display_id(ghostty_surface_t, uint32_t);

@@ -98,6 +98,10 @@ flags: packed struct {
     /// if we should be rendering or not.
     visible: bool = true,
 
+    /// OMG: Whether sustained occlusion may evict the retained front GPU frame.
+    /// Defaults to true so direct occlusion callers keep hibernation behavior.
+    hibernation_eligible: bool = true,
+
     /// This is true when the view is focused. This defaults to true
     /// and it is up to the apprt to set the correct value.
     focused: bool = true,
@@ -327,7 +331,7 @@ fn drainMailbox(self: *Thread) !void {
                 // renderer's own visibility as well as the thread flag, so
                 // drawing first silently drops the initial foreground frame.
                 self.renderer.setVisible(v);
-                self.hibernation.setVisible(self, v);
+                self.hibernation.sync(self);
 
                 // If we became visible then we immediately rebuild cells
                 // (renderCallback skips updateFrame while invisible) and
@@ -346,6 +350,12 @@ fn drainMailbox(self: *Thread) !void {
                 // state across different transitions is going to be bug-prone,
                 // so its easier to just let them keep firing and have them
                 // check the visible state themselves to control their behavior.
+            },
+
+            .hibernation_eligible => |eligible| hibernation_eligible: {
+                if (self.flags.hibernation_eligible == eligible) break :hibernation_eligible;
+                self.flags.hibernation_eligible = eligible;
+                self.hibernation.sync(self);
             },
 
             .focus => |v| focus: {
@@ -895,8 +905,15 @@ const Hibernation = struct {
         self.timer.deinit();
     }
 
-    fn setVisible(self: *Hibernation, thread: *Thread, visible: bool) void {
-        if (visible) return;
+    fn shouldHibernate(flags: @FieldType(Thread, "flags")) bool {
+        return @import("omg_memory.zig").shouldHibernate(
+            flags.visible,
+            flags.hibernation_eligible,
+        );
+    }
+
+    fn sync(self: *Hibernation, thread: *Thread) void {
+        if (!shouldHibernate(thread.flags)) return;
         self.timer.reset(
             &thread.loop,
             &self.completion,
@@ -923,9 +940,30 @@ const Hibernation = struct {
         };
 
         const thread = thread_ orelse return .disarm;
-        if (!thread.flags.visible and @hasDecl(rendererpkg.Renderer, "trimHibernated")) {
+        if (shouldHibernate(thread.flags) and @hasDecl(rendererpkg.Renderer, "trimHibernated")) {
             thread.renderer.trimHibernated();
         }
         return .disarm;
     }
 };
+
+test "Hibernation gating requires both occlusion and eligibility" {
+    const Flags = @FieldType(Thread, "flags");
+    const defaults: Flags = .{};
+    try std.testing.expect(defaults.visible);
+    try std.testing.expect(defaults.hibernation_eligible);
+    try std.testing.expect(!Hibernation.shouldHibernate(defaults));
+
+    try std.testing.expect(!Hibernation.shouldHibernate(.{
+        .visible = true,
+        .hibernation_eligible = false,
+    }));
+    try std.testing.expect(!Hibernation.shouldHibernate(.{
+        .visible = false,
+        .hibernation_eligible = false,
+    }));
+    try std.testing.expect(Hibernation.shouldHibernate(.{
+        .visible = false,
+        .hibernation_eligible = true,
+    }));
+}

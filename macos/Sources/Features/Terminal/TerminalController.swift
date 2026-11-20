@@ -3680,8 +3680,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
     }
 
-    override var isControllerPresentingSurfaces: Bool {
-        guard super.isControllerPresentingSurfaces else { return false }
+    override var isControllerRetainingPresentedSurfaces: Bool {
+        guard super.isControllerRetainingPresentedSurfaces else { return false }
         guard !workspacePresentationIsParked, !tabPresentationIsClosing else { return false }
         if let selectedTabID, selectedTabID != ObjectIdentifier(self) {
             return false

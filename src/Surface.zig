@@ -166,6 +166,9 @@ focused: bool = true,
 /// visible so reporting remains conservative.
 visible: bool = true,
 
+/// OMG: Whether sustained occlusion may evict the retained front GPU frame.
+hibernation_eligible: bool = true,
+
 /// Used to determine whether to continuously scroll.
 selection_scroll_active: bool = false,
 
@@ -3691,6 +3694,18 @@ pub fn occlusionCallback(self: *Surface, visible: bool) !void {
     }, .{ .forever = {} });
 
     try self.queueRender();
+}
+
+/// OMG: Controls whether sustained occlusion may evict the retained front GPU frame.
+pub fn setHibernationEligible(self: *Surface, eligible: bool) void {
+    if (self.hibernation_eligible == eligible) return;
+    self.hibernation_eligible = eligible;
+
+    _ = self.renderer_thread.mailbox.push(global.io(), .{
+        .hibernation_eligible = eligible,
+    }, .{ .forever = {} });
+    self.renderer_thread.wakeup.notify() catch |err|
+        log.warn("failed to notify renderer of hibernation eligibility err={}", .{err});
 }
 
 pub fn focusCallback(self: *Surface, focused: bool) !void {

@@ -53,6 +53,7 @@ class BaseTerminalController: NSWindowController,
 
     var editorWorkspaceStore: EditorWorkspaceStore = .shared
     var windowOcclusionOverrideForTesting: Bool?
+    var windowPresentationRetainedOverrideForTesting: Bool?
     var keyWindowOverrideForTesting: Bool?
     var focusFollowsMouseOverrideForTesting: Bool?
 
@@ -226,6 +227,16 @@ class BaseTerminalController: NSWindowController,
             self,
             selector: #selector(didChangeScreenParametersNotification),
             name: NSApplication.didChangeScreenParametersNotification,
+            object: nil)
+        center.addObserver(
+            self,
+            selector: #selector(applicationVisibilityDidChange(_:)),
+            name: NSApplication.didHideNotification,
+            object: nil)
+        center.addObserver(
+            self,
+            selector: #selector(applicationVisibilityDidChange(_:)),
+            name: NSApplication.didUnhideNotification,
             object: nil)
         center.addObserver(
             self,
@@ -1545,6 +1556,10 @@ class BaseTerminalController: NSWindowController,
         sessionCheckpointStateDidChange()
     }
 
+    @objc private func applicationVisibilityDidChange(_ notification: Notification) {
+        syncSurfaceTreeOcclusionState()
+    }
+
     @objc private func editorSurfaceCoverageDidChange(_ notification: Notification) {
         guard let store = notification.object as? EditorWorkspaceStore,
               store === editorWorkspaceStore,
@@ -1553,13 +1568,23 @@ class BaseTerminalController: NSWindowController,
         syncSurfaceTreeOcclusionState()
     }
 
-    /// Whether this controller's window and tab container are actively presenting surfaces on screen.
-    var isControllerPresentingSurfaces: Bool {
-        if let override = windowOcclusionOverrideForTesting {
+    struct SurfaceOcclusionState: Equatable {
+        /// Whether the surface is currently visible on screen and should actively render.
+        let visible: Bool
+        /// Whether sustained occlusion may evict the retained front GPU frame.
+        let hibernationEligible: Bool
+    }
+
+    /// Whether this controller is the active tab of a normal, non-minimized, non-hidden
+    /// window whose front GPU frames should be retained across Space/window occlusion
+    /// (for example, so Mission Control thumbnails remain populated).
+    var isControllerRetainingPresentedSurfaces: Bool {
+        if let override = windowPresentationRetainedOverrideForTesting ?? windowOcclusionOverrideForTesting {
             guard override else { return false }
         } else {
-            guard let window, window.isVisible, !window.isMiniaturized,
-                  window.occlusionState.contains(.visible) else { return false }
+            guard let window, window.isVisible, !window.isMiniaturized, !NSApp.isHidden else {
+                return false
+            }
         }
         if let window, let tabGroup = window.tabGroup,
            let selectedWindow = tabGroup.selectedWindow,
@@ -1569,20 +1594,49 @@ class BaseTerminalController: NSWindowController,
         return true
     }
 
+    /// Whether this controller's window and tab container are actively presenting surfaces on screen.
+    var isControllerPresentingSurfaces: Bool {
+        guard isControllerRetainingPresentedSurfaces else { return false }
+        if let override = windowOcclusionOverrideForTesting {
+            return override
+        }
+        guard let window else { return false }
+        return window.occlusionState.contains(.visible)
+    }
+
+    static func evaluateSurfaceOcclusionState(
+        viewID: UUID,
+        isControllerPresenting: Bool,
+        isControllerRetainingPresentedSurfaces: Bool,
+        zoomedNode: SplitTree<Ghostty.SurfaceView>.Node?,
+        editorWorkspaceStore: EditorWorkspaceStore
+    ) -> SurfaceOcclusionState {
+        let isSurfaceHiddenWithinTab =
+            (zoomedNode != nil && zoomedNode?.find(id: viewID) == nil)
+            || editorWorkspaceStore.isEditorCovering(surfaceID: viewID)
+        if isSurfaceHiddenWithinTab {
+            return .init(visible: false, hibernationEligible: true)
+        }
+        let visible = isControllerPresenting && isControllerRetainingPresentedSurfaces
+        return .init(
+            visible: visible,
+            hibernationEligible: !isControllerRetainingPresentedSurfaces
+        )
+    }
+
     static func evaluateSurfaceVisibility(
         viewID: UUID,
         isControllerPresenting: Bool,
         zoomedNode: SplitTree<Ghostty.SurfaceView>.Node?,
         editorWorkspaceStore: EditorWorkspaceStore
     ) -> Bool {
-        guard isControllerPresenting else { return false }
-        if let zoomedNode, zoomedNode.find(id: viewID) == nil {
-            return false
-        }
-        if editorWorkspaceStore.isEditorCovering(surfaceID: viewID) {
-            return false
-        }
-        return true
+        evaluateSurfaceOcclusionState(
+            viewID: viewID,
+            isControllerPresenting: isControllerPresenting,
+            isControllerRetainingPresentedSurfaces: isControllerPresenting,
+            zoomedNode: zoomedNode,
+            editorWorkspaceStore: editorWorkspaceStore
+        ).visible
     }
 
     func isSurfaceEffectivelyVisible(_ view: Ghostty.SurfaceView) -> Bool {
@@ -1595,17 +1649,22 @@ class BaseTerminalController: NSWindowController,
     }
 
     func syncSurfaceTreeOcclusionState() {
-        let controllerPresenting = isControllerPresentingSurfaces
+        let controllerRetaining = isControllerRetainingPresentedSurfaces
+        let controllerPresenting = controllerRetaining && isControllerPresentingSurfaces
         let zoomedNode = surfaceTree.zoomed
         let store = editorWorkspaceStore
         for view in surfaceTree {
-            let visible = Self.evaluateSurfaceVisibility(
+            let state = Self.evaluateSurfaceOcclusionState(
                 viewID: view.id,
                 isControllerPresenting: controllerPresenting,
+                isControllerRetainingPresentedSurfaces: controllerRetaining,
                 zoomedNode: zoomedNode,
                 editorWorkspaceStore: store
             )
-            view.updateSurfaceOcclusion(visible: visible)
+            view.updateSurfaceOcclusion(
+                visible: state.visible,
+                hibernationEligible: state.hibernationEligible
+            )
         }
     }
 

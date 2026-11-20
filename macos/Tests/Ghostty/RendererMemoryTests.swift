@@ -141,7 +141,7 @@ struct RendererMemoryTests {
         controller.surfaceTree = .init(root: splitNode, zoomed: nil)
 
         // 1. Visible active window: both splits visible, neither hibernation-eligible.
-        controller.windowPresentationRetainedOverrideForTesting = true
+        controller.presentationRetainedOverrideForTesting = true
         controller.windowOcclusionOverrideForTesting = true
         controller.syncSurfaceTreeOcclusionState()
         #expect(primarySurface.lastSentCoreOcclusionState == true)
@@ -196,7 +196,7 @@ struct RendererMemoryTests {
         #expect(primarySurface.lastSentCoreHibernationEligible == false)
 
         // 7. Minimized or hidden window becomes hibernation-eligible.
-        controller.windowPresentationRetainedOverrideForTesting = false
+        controller.presentationRetainedOverrideForTesting = false
         controller.syncSurfaceTreeOcclusionState()
         #expect(primarySurface.lastSentCoreOcclusionState == false)
         #expect(primarySurface.lastSentCoreHibernationEligible == true)

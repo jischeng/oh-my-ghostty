@@ -53,7 +53,7 @@ class BaseTerminalController: NSWindowController,
 
     var editorWorkspaceStore: EditorWorkspaceStore = .shared
     var windowOcclusionOverrideForTesting: Bool?
-    var windowPresentationRetainedOverrideForTesting: Bool?
+    var presentationRetainedOverrideForTesting: Bool?
     var keyWindowOverrideForTesting: Bool?
     var focusFollowsMouseOverrideForTesting: Bool?
 
@@ -1579,7 +1579,7 @@ class BaseTerminalController: NSWindowController,
     /// window whose front GPU frames should be retained across Space/window occlusion
     /// (for example, so Mission Control thumbnails remain populated).
     var isControllerRetainingPresentedSurfaces: Bool {
-        if let override = windowPresentationRetainedOverrideForTesting ?? windowOcclusionOverrideForTesting {
+        if let override = presentationRetainedOverrideForTesting ?? windowOcclusionOverrideForTesting {
             guard override else { return false }
         } else {
             guard let window, window.isVisible, !window.isMiniaturized, !NSApp.isHidden else {

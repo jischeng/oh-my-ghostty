@@ -81,8 +81,10 @@ struct SplitTabPresentationTests {
     }
 
     @Test func nativeAgentColorsAndBadgesPreserveSemanticStatusStyles() throws {
-        func activity(_ state: TabActivityState, _ attention: TabAttentionKind? = nil) -> TabActivity {
-            .init(source: "codex", state: state, attentionKind: attention,
+        func activity(_ state: TabActivityState,
+                      phase: TabActivityPhase? = nil,
+                      _ attention: TabAttentionKind? = nil) -> TabActivity {
+            .init(source: "codex", state: state, phase: phase, attentionKind: attention,
                   label: nil, message: nil, detail: nil, progress: nil, icon: nil)
         }
         for name in [NSAppearance.Name.aqua, .darkAqua] {
@@ -92,13 +94,24 @@ struct SplitTabPresentationTests {
             }
         }
         let working = activity(.working)
+        let background = activity(.working, phase: .background)
         #expect(AgentLogoStyle.nativeColor(working) == AgentLogoStyle.selectedColor)
+        #expect(AgentLogoStyle.nativeColor(background) == .systemPurple)
+        #expect(AgentStatusBadge.resolve(working) == nil)
+        #expect(AgentStatusBadge.resolve(background) == nil)
+        #expect(AgentLogoStyle.localizedStatus(working) == WorkspaceL10n.text("Working", "工作中"))
+        #expect(AgentLogoStyle.localizedStatus(background) == WorkspaceL10n.text("Working in background", "后台运行中"))
+        #expect(AgentLogoStyle.toolTip(title: "Repo", activity: nil) == "Repo")
+        #expect(AgentLogoStyle.toolTip(title: "Repo", activity: background) ==
+            "Repo\ncodex · \(WorkspaceL10n.text("Working in background", "后台运行中"))")
         let done = try #require(AgentStatusBadge.resolve(activity(.done)))
         #expect(done.symbol == "checkmark.circle.fill" && done.color == .systemGreen)
         let question = try #require(AgentStatusBadge.resolve(activity(.needsAttention, .question)))
-        #expect(question.symbol == "questionmark.bubble.fill" && question.color == .systemOrange)
+        #expect(question.symbol == "questionmark.circle.fill" && question.color == .systemOrange)
         let permission = try #require(AgentStatusBadge.resolve(activity(.needsAttention, .permission)))
-        #expect(permission.symbol == "lock.shield.fill" && permission.color == .systemOrange)
+        #expect(permission.symbol == "hand.raised.fill" && permission.color == .systemOrange)
+        let genericAttention = try #require(AgentStatusBadge.resolve(activity(.needsAttention)))
+        #expect(genericAttention.symbol == "exclamationmark.circle.fill" && genericAttention.color == .systemOrange)
         let failed = try #require(AgentStatusBadge.resolve(activity(.error)))
         #expect(failed.symbol == "xmark.circle.fill" && failed.color == .systemRed)
     }

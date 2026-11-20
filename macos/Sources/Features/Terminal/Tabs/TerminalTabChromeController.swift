@@ -221,17 +221,7 @@ final class TerminalTabChromeController {
                 .foregroundColor: OMGNativeTheme.resolve(for: window).foreground,
             ])
             if window.tab.attributedTitle?.isEqual(to: attributed) != true { window.tab.attributedTitle = attributed }
-            var help = title
-            if let activity = value.activity {
-                let state = switch activity.state {
-                case .idle: WorkspaceL10n.text("Idle", "空闲")
-                case .working: WorkspaceL10n.text("Working", "工作中")
-                case .done: WorkspaceL10n.text("Done", "已完成")
-                case .needsAttention: WorkspaceL10n.text("Needs attention", "等待处理")
-                case .error: WorkspaceL10n.text("Error", "错误")
-                }
-                help += "\n\(activity.label ?? activity.source) · \(state)"
-            }
+            let help = AgentLogoStyle.toolTip(title: title, activity: value.activity)
             status.toolTip = help
             status.setAccessibilityLabel(help)
             if window.tab.toolTip != help { window.tab.toolTip = help }

@@ -822,9 +822,10 @@ final class NativeTabCell: NSTableCellView {
         let selected = self.selected
         label.font = .systemFont(ofSize: 13)
         shortcut.stringValue = value.shortcut ?? ""
-        toolTip = value.remoteBreadcrumb?.title ?? value.title
+        let title = value.remoteBreadcrumb?.title ?? value.title
+        toolTip = AgentLogoStyle.toolTip(title: title, activity: value.activity)
         icon.configure(controller: tab.controller, icon: value.icon, selected: selected, activity: value.activity)
-        label.stringValue = value.remoteBreadcrumb?.title ?? value.title
+        label.stringValue = title
         let theme = OMGNativeTheme.resolve(for: self)
         label.textColor = theme.foreground
         shortcut.textColor = theme.secondary
@@ -832,7 +833,7 @@ final class NativeTabCell: NSTableCellView {
         status.isHidden = badge == nil
         status.image = badge.flatMap { NSImage(systemSymbolName: $0.symbol, accessibilityDescription: nil) }
         status.contentTintColor = badge?.color
-        status.toolTip = value.activity?.state.rawValue
+        status.toolTip = value.activity.map(AgentLogoStyle.localizedStatus)
         setAccessibilityLabel(value.title)
     }
 

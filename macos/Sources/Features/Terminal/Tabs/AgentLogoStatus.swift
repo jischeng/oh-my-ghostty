@@ -46,6 +46,25 @@ enum AgentLogoStyle {
     static func animates(state: TabActivityState?, visible: Bool, reduceMotion: Bool) -> Bool {
         state == .working && visible && !reduceMotion
     }
+
+    @MainActor
+    static func localizedStatus(_ activity: TabActivity) -> String {
+        switch activity.state {
+        case .idle: WorkspaceL10n.text("Idle", "空闲")
+        case .working where activity.phase == .background:
+            WorkspaceL10n.text("Working in background", "后台运行中")
+        case .working: WorkspaceL10n.text("Working", "工作中")
+        case .done: WorkspaceL10n.text("Done", "已完成")
+        case .needsAttention: WorkspaceL10n.text("Needs attention", "等待处理")
+        case .error: WorkspaceL10n.text("Error", "错误")
+        }
+    }
+
+    @MainActor
+    static func toolTip(title: String, activity: TabActivity?) -> String {
+        guard let activity else { return title }
+        return "\(title)\n\(activity.label ?? activity.source) · \(localizedStatus(activity))"
+    }
 }
 
 struct AgentStatusBadge {
@@ -59,8 +78,8 @@ struct AgentStatusBadge {
         case .needsAttention:
             let symbol: String
             switch activity?.attentionKind {
-            case .question: symbol = "questionmark.bubble.fill"
-            case .permission: symbol = "lock.shield.fill"
+            case .question: symbol = "questionmark.circle.fill"
+            case .permission: symbol = "hand.raised.fill"
             case nil: symbol = "exclamationmark.circle.fill"
             }
             return .init(symbol: symbol, color: .systemOrange)

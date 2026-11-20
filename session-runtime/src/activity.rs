@@ -180,23 +180,29 @@ impl Snapshot {
             }
         }
 
+        struct TapMetadata {
+            agent: String,
+            session_id: Option<String>,
+            task_progress: Option<String>,
+            title: Option<String>,
+        }
+
         let mut best_t1_7501: Option<Presentation> = None;
         let mut best_t1_tap: Option<Presentation> = None;
-        let mut tap_meta_by_agent: Vec<(String, Option<String>, Option<String>, Option<String>)> =
-            Vec::new();
+        let mut tap_meta_by_agent: Vec<TapMetadata> = Vec::new();
         let mut best_t2: Option<Presentation> = None;
         let mut best_t3: Option<Presentation> = None;
 
         for signal in &self.records {
             if signal.id == TAP {
                 if let Some(tap) = parse_tap(&signal.metadata, inherited_app.as_deref()) {
-                    tap_meta_by_agent.retain(|(agent, _, _, _)| agent != &tap.agent);
-                    tap_meta_by_agent.push((
-                        tap.agent.clone(),
-                        tap.session_id.clone(),
-                        tap.task_progress.clone(),
-                        tap.title.clone(),
-                    ));
+                    tap_meta_by_agent.retain(|meta| meta.agent != tap.agent);
+                    tap_meta_by_agent.push(TapMetadata {
+                        agent: tap.agent.clone(),
+                        session_id: tap.session_id.clone(),
+                        task_progress: tap.task_progress.clone(),
+                        title: tap.title.clone(),
+                    });
                     let item = tap.into_presentation();
                     if best_t1_tap
                         .as_ref()
@@ -225,18 +231,18 @@ impl Snapshot {
 
         // Enrich OSC 7501 with same-agent TAP metadata (`SessionId`, `TaskProgress`, `Title`).
         if let Some(p7501) = best_t1_7501.as_mut() {
-            if let Some((_, session_id, task_progress, title)) = tap_meta_by_agent
+            if let Some(meta) = tap_meta_by_agent
                 .iter()
-                .find(|(agent, _, _, _)| agent == &p7501.agent)
+                .find(|meta| meta.agent == p7501.agent)
             {
                 if p7501.conversation.is_none() {
-                    p7501.conversation = session_id.clone();
+                    p7501.conversation = meta.session_id.clone();
                 }
                 if p7501.task_progress.is_none() {
-                    p7501.task_progress = task_progress.clone();
+                    p7501.task_progress = meta.task_progress.clone();
                 }
                 if p7501.title.is_none() {
-                    p7501.title = title.clone();
+                    p7501.title = meta.title.clone();
                 }
             }
         }
@@ -3572,7 +3578,8 @@ mod tests {
         assert_eq!(p3.state, "needsAttention");
         assert_eq!(p3.attention, Some("question"));
 
-        // Tier 1 TAP `error` is acknowledged to `idle`.
+        // Tier 1 TAP `error` is acknowledged to `idle` once the prior Tier 2 hook has ended.
+        tap_only.write(b"\x1b]3008;end=omg-agent-codex-101\x07");
         tap_only.write(b"\x1b]26;CodeAgent=Codex;Status=error\x07");
         assert_eq!(tap_only.activity().presentation().unwrap().state, "error");
         let mut ack_snap = tap_only.activity().snapshot();

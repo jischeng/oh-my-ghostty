@@ -4047,11 +4047,12 @@ test "StreamHandler: terminal.Stream osc_unknown_max_bytes forwards OSC 26 and d
             self: *@This(),
             comptime action: terminal.StreamAction.Tag,
             value: terminal.StreamAction.Value(action),
-        ) !void {
+        ) void {
             switch (action) {
                 .osc_unknown => {
                     if (StreamHandler.osc26Payload(value)) |payload| {
-                        try self.forwarded.append(self.alloc, try self.alloc.dupe(u8, payload));
+                        const copy = self.alloc.dupe(u8, payload) catch unreachable;
+                        self.forwarded.append(self.alloc, copy) catch unreachable;
                     }
                 },
                 else => {},

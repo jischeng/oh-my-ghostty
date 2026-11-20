@@ -1691,8 +1691,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         _ title: String,
         for surfaceID: UUID
     ) {
-        // Tier 1 (OSC 7501) is strictly higher authority than title heuristics.
-        guard agentProgramStatuses[surfaceID] == nil else {
+        // Tier 1 (OSC 7501 / TAP) and typed Tier 2 Hooks strictly outrank Tier 3
+        // title heuristics; hard-disable Tier 3 whenever either is present.
+        guard agentProgramStatuses[surfaceID] == nil,
+              typedAgentHookContextIDs[surfaceID] == nil else {
             agentTier3TitleIdleWorkItems.removeValue(forKey: surfaceID)?.cancel()
             return
         }
@@ -1700,33 +1702,24 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
               let contextID = agentResumeContextIDs[surfaceID] else { return }
         let definition = descriptor.agent.definition
         let status = definition.titleStatus
-        let typedOwns = typedAgentHookContextIDs[surfaceID] == contextID
-        let hookSupportsAttention = definition.hook.events.contains {
-            $0.state == .needsAttention
-        }
         let now = Date()
-        if typedOwns {
-            agentTier3TitleIdleWorkItems.removeValue(forKey: surfaceID)?.cancel()
-        } else {
-            agentTitleWatchers[surfaceID, default: AgentTitleIdleWatcher()].observe(
-                title: title,
-                status: status,
-                now: now
-            )
-        }
+        agentTitleWatchers[surfaceID, default: AgentTitleIdleWatcher()].observe(
+            title: title,
+            status: status,
+            now: now
+        )
         guard let state = AgentTitleStatusReconciler.nextState(
             status: status,
             title: title,
             current: agentActivities[surfaceID]?.state,
-            typedHookOwnsContext: typedOwns,
-            hookSupportsAttention: hookSupportsAttention
+            typedHookOwnsContext: false
         ) else {
-            if !typedOwns, agentTitleWatchers[surfaceID]?.detected != .idle {
+            if agentTitleWatchers[surfaceID]?.detected != .idle {
                 agentTier3TitleIdleWorkItems.removeValue(forKey: surfaceID)?.cancel()
             }
             return
         }
-        if !typedOwns, state == .idle {
+        if state == .idle {
             let confirmed = agentTitleWatchers[surfaceID]?.confirmsIdle(
                 now: now,
                 delay: AgentTitleStatusReconciler.idleConfirmationDelay
@@ -1738,13 +1731,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
         agentTier3TitleIdleWorkItems.removeValue(forKey: surfaceID)?.cancel()
         let attention = state == .needsAttention ? ";omg_attention=permission" : ""
-        let tier = typedOwns ? "" : ";omg_tier=fallback"
         updateAgentActivity(.init(
             action: .start,
             id: contextID,
             metadata: "type=app;omg_agent=\(descriptor.agent.rawValue);" +
                 "omg_scope=\(descriptor.scope.rawValue);omg_state=\(state.rawValue)" +
-                "\(attention)\(tier)"
+                "\(attention);omg_tier=fallback"
         ), for: surfaceID)
     }
 
@@ -1829,16 +1821,6 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             : nil
         let update = consumedAgentSignal ?? remotePromptUpdate
         agentReducers[surfaceID] = reducer
-        if case .set(let activity) = consumedAgentSignal,
-           activity.state == .working,
-           activity.phase != .background,
-           var programStatus = agentProgramStatuses[surfaceID],
-           programStatus.activity?.state == .done || programStatus.activity?.state == .error {
-            if programStatus.acknowledge() {
-                agentProgramStatuses[surfaceID] = programStatus
-            }
-            updateAcknowledgedAgentStatus(for: surfaceID) { $0.program = nil }
-        }
         let clearsAcknowledgedReducer: Bool = switch consumedAgentSignal {
         case .set(let activity): activity.state != .idle
         case .clear: true

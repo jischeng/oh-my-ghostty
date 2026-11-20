@@ -1201,8 +1201,10 @@ queued commands to a shell.
 
 Native tab logos use the original blue for selection/foreground work and purple
 for background work, independent of terminal-theme accents. Status badges retain
-green checkmarks, orange question bubbles or permission shields, and red error
-crosses across vertical and horizontal tabs.
+green checkmarks (`checkmark.circle.fill`), orange attention badges
+(`hand.raised.fill` for permission, `questionmark.circle.fill` for question, and
+`exclamationmark.circle.fill` for generic attention), and red error crosses
+(`xmark.circle.fill`) across vertical and horizontal tabs.
 
 Pin and History keyboard navigation are also Host-owned UI state. Pin only
 prevents automatic composer dismissal after a user-confirmed Send/Queue/queued
@@ -1578,14 +1580,14 @@ Antigravity manifest now selects a named JSON Hook adapter under
 binary's Customizations Guide. The `antigravity` dialect owns only the
 `omg-agent-status` top-level named hook, preserving all other named hooks.
 `PreInvocation` and `PostToolUse` report working; `Stop` reports `done` for
-normal turn completions (never self-locking in `working` when `fullyIdle` is
-`false`), reports `needsAttention` (`omg_attention=question`) when `terminationReason` is
-`TERMINAL_STEP_TYPE` (such as an `ask_question` prompt awaiting user input),
+normal turn completions (including `TERMINAL_STEP_TYPE`, never self-locking in
+`working` when `fullyIdle` is `false` and never inventing `needsAttention`),
 reports `idle` when `terminationReason` is `USER_CANCELED`, and reports `error`
 for an error termination (`error` or `ERROR`). `PostInvocation` is not completion.
-Tool permission prompts are reported through Antigravity's native OSC 7501
-(`state=blocked:kind=permission:app=antigravity`); the Hook adapter never invents
-attention from tool activity or emits permission grants. Tool hooks use grouped
+Tool permission and question prompts are reported through Antigravity's native
+OSC 7501 (`state=blocked:kind=permission|question:app=antigravity`), declared via
+`nativeStatus.osc7501Blocked: true` in `antigravity.json`; the Hook adapter never
+invents attention from tool or stop activity or emits permission grants. Tool hooks use grouped
 matcher/handler arrays; invocation/stop handlers are flat arrays. Stdout always
 contains a JSON response (`{}` or a non-blocking Stop decision); inside `omgd`
 sessions status is reported via `OMG_RUNTIME_BIN report`, falling back to OSC 3008
@@ -1618,9 +1620,16 @@ Adapters emit OSC 3008 contexts with IDs
 `omg_state`, `omg_scope=local|remote`, `omg_liveness=pid|pgid`, optional
 validated `omg_conversation`, optional validated `omg_cwd` (the session's
 own project directory, used for directory-scoped resume), optional
-`omg_attention=question|permission`, and optional `omg_phase=background` for a
-`working` Pi context whose foreground loop is idle while an owned
-`pi-subagents` run or `pi-background-tasks` task remains active. Pi-compatible
+`omg_context` (scoping subagent/child records independently of the root turn),
+optional `omg_attention=question|permission`, optional
+`omg_event=prompt|attention_resolved` (explicitly unlocking `needsAttention -> working`
+while preventing unqualified sibling `PostToolUse` hooks from clobbering active
+attention), and optional `omg_phase=background` for a `working` context whose
+foreground turn is idle/done while owned subagents or background tasks remain
+active. Both `session-runtime` and `AgentContextSignalReducer` key records by
+`(signal.id, omg_context)`: root `done`/`idle` with an active child `working`
+reduces to `working` (`phase: .background`), and removing the last child via
+`end --id <sub_id>` (`omg_context=<sub_id>`) surfaces root `done`. Pi-compatible
 and other in-process Plugin
 adapters use their process PID as the instance/liveness identity; shell/config
 hooks and host foreground synthesis use the process-group ID. The host verifies
@@ -1665,27 +1674,43 @@ Local Exec shells also set `AGY_CLI_OSC7501=on` when unset so Antigravity CLI
 Known `app` values identify an Agent directly in its originating pane (with
 sub-records such as `id=main/sub` inheriting `app` from ancestor/root records or
 the pane's active Agent); this does not authorize commands, infer a conversation
-ID, or inspect a shared server's TTY. Multi-record status snapshots aggregate by
-strict priority (`needsAttention` > foreground `working` > background `working`
-> `error` > `done` > `idle`) instead of last-record order. Authority follows a
-strict three-tier hierarchy: Tier 1 (`OSC 7501` and `OSC 26` TAP) > Tier 2 (`OMG_RUNTIME_BIN
-report` socket / `OSC 3008` Hooks) > Tier 3 (title/screen detector fallback,
-tagged `omg_tier=fallback`). When Tier 1 reports generic `working` while Tier 2
-reports an explicit `needsAttention` prompt for the same Agent, Tier 2
-`needsAttention` surfaces until resolved; once Tier 1 or Tier 2 owns a context,
-title spinner heuristics never downgrade `working` or `needsAttention` to `idle`
-(and there is no blind 20-second working stall timeout), though `titleStatus.attention`
-still assists Agents whose Hook configuration declares no `needsAttention` event
-(such as Grok or Qwen). OpenCode's in-process plugin auto-registers resumed
-sessions (`opencode -c` / `--session`), forwards child subagent permission and
-question prompts (`permission.updated`, `permission.asked`, `question.asked`) to
-the root session, suppresses cold initial `idle` before any `busy` turn, reports
-clean `end` on exit, and reports over `OMG_RUNTIME_BIN` without `/dev/tty`
-`ENXIO` errors under `opencode serve`. Pi's extension preserves active
-`needsAttention` across parallel sibling `tool_execution_end` events and
-reconciles orphaned subagent/background task counts on settle/abort. Starting a
-new foreground `working` turn clears stale prior-turn `done`/`error` records
-across both `OSC 7501` and Hook channels. User acknowledgement requires
+ID, or inspect a shared server's TTY. Multi-record status snapshots across
+`session-runtime`, `AgentProgramStatus`, `AgentContextSignalReducer`, and
+`AgentActivitySelection` aggregate by a single canonical priority lattice
+(`needsAttention` (5) > foreground `working` (4) > background `working` (3) >
+`error` (2) > `done` (1) > `idle` (0)) instead of last-record order. Authority
+follows a strict three-tier hierarchy: Tier 1 (`OSC 7501` and `OSC 26` TAP) >
+Tier 2 (`OMG_RUNTIME_BIN report` socket / `OSC 3008` Hooks) > Tier 3
+(title/screen detector fallback, always tagged `omg_tier=fallback`). Once an
+Agent has an active Tier 1 record in a pane, Tier 2 hooks for that same Agent
+are metadata-only (resume `conversation_id`/`cwd`): they never cross-channel-supersede
+Tier 1 `done`/`error`, never resurface over Tier 1 `idle`, and only augment
+Tier 1 `working` with `needsAttention` when the Agent does not declare native
+OSC 7501 `blocked` support (`nativeStatus.osc7501Blocked`). Tier 3 title
+heuristics are hard-disabled whenever Tier 1 or typed Tier 2 is present (and
+there is no blind 20-second working stall timeout). Per-agent adapter scoping:
+Claude Code registers `SubagentStart`/`SubagentStop`, scopes hooks carrying
+`agent_id` or `parent_tool_use_id` to `--id <id> --phase background` (and
+`end --id <id>` on subagent completion), and ignores re-entrant `Stop` when
+`stop_hook_active` is `true`; Codex similarly scopes hooks carrying subagent
+metadata (`agent_id`/`parent_tool_use_id`/`subagent_id`/`task_id`) to
+`--id <id> --phase background`; OpenCode's in-process plugin auto-registers
+resumed sessions (`opencode -c` / `--session`), tracks active `busyChildren` so
+root `session.idle` with active children emits `working --phase background` and
+emits `done` only when the last child finishes, forwards child subagent
+permission and question prompts (`permission.updated`, `permission.asked`,
+`question.asked`) to the root session, emits `--event attention_resolved` on
+`permission.replied`/`question.replied`/`question.rejected`, suppresses cold
+initial `idle` before any `busy` turn, reports clean `end` on exit, and reports
+over `OMG_RUNTIME_BIN` without `/dev/tty` `ENXIO` errors under `opencode serve`;
+Pi's extension preserves active `needsAttention` across parallel sibling
+`tool_execution_end` events, emits `--event attention_resolved` when the last
+waiting tool finishes, and reconciles orphaned subagent/background task counts
+on settle/abort; OMP's extension tracks waiting tools and emits
+`working --event attention_resolved` on `tool_result`; Hermes maps
+`post_llm_call` to `working` so multi-tool turns do not flicker `done`. Starting
+a new foreground `working` turn within the same channel clears stale prior-turn
+`done`/`error` records without cross-channel-wiping Tier 1. User acknowledgement requires
 intentional non-repeating key or mouse-press interaction after completion
 arrival (trackpad scroll momentum, mouse release, passive tab-container focus
 restoration, and pre-arrival events never wipe a fresh `done` badge), clears

@@ -55,6 +55,13 @@
         "state": "needsAttention"
       },
       {
+        "name": "SubagentStart",
+        "state": "working"
+      },
+      {
+        "name": "SubagentStop"
+      },
+      {
         "name": "Stop",
         "state": "done"
       },

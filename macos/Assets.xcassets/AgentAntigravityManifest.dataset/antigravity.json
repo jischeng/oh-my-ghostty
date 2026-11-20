@@ -29,5 +29,10 @@
       {"name": "PostToolUse", "state": "working"},
       {"name": "Stop", "state": "done"}
     ]
+  },
+  "nativeStatus": {
+    "osc7501": true,
+    "osc7501Blocked": true,
+    "tap": false
   }
 }

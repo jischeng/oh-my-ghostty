@@ -172,7 +172,7 @@ struct VerticalNativeTabSidebarTests {
         let activeHeaderLabel = header.accessibilityLabel()
         let firstCell = try #require(sidebar.list.outline.view(atColumn: 0, row: 0, makeIfNecessary: true))
         let activityStatus = descendants(firstCell).compactMap { $0 as? NSImageView }
-            .first { $0.toolTip == TabActivityState.done.rawValue }
+            .first { $0.toolTip == WorkspaceL10n.text("Done", "已完成") }
         #expect(activityStatus?.isHidden == false && activityStatus?.image != nil,
                 "The native row must render the activity status after its own store update")
 

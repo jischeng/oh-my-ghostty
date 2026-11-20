@@ -33,7 +33,7 @@
       },
       {
         "name": "post_llm_call",
-        "state": "done"
+        "state": "working"
       },
       {
         "name": "on_session_finalize"

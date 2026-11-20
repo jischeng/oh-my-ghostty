@@ -281,6 +281,22 @@ struct AgentDefinition: Codable, Equatable, Sendable {
         let attention: [String]?
     }
 
+    struct NativeStatusCapabilities: Codable, Equatable, Sendable {
+        let osc7501: Bool
+        let osc7501Blocked: Bool
+        let tap: Bool
+
+        init(
+            osc7501: Bool = false,
+            osc7501Blocked: Bool = false,
+            tap: Bool = false
+        ) {
+            self.osc7501 = osc7501
+            self.osc7501Blocked = osc7501Blocked
+            self.tap = tap
+        }
+    }
+
     let id: String
     let displayName: String
     let command: String
@@ -296,8 +312,13 @@ struct AgentDefinition: Codable, Equatable, Sendable {
     let process: ProcessSpec
     let resume: ResumeSpec
     let hook: HookSpec
+    let nativeStatus: NativeStatusCapabilities?
     let status: StatusSpec?
     let titleStatus: StatusSpec?
+
+    var supportsNativeOSC7501Blocked: Bool {
+        nativeStatus?.osc7501Blocked == true
+    }
 
     var iconScale: CGFloat {
         CGFloat(min(max(opticalScale ?? 0.86, 0.7), 1.1))
@@ -334,6 +355,9 @@ struct AgentDefinition: Codable, Equatable, Sendable {
                 promptTitleField: nil,
                 events: []
             ),
+            nativeStatus: agent == .antigravity
+                ? .init(osc7501: true, osc7501Blocked: true, tap: false)
+                : nil,
             status: nil,
             titleStatus: nil
         )
@@ -354,20 +378,13 @@ enum AgentTitleStatusReconciler {
         hookSupportsAttention: Bool = true
     ) -> TabActivityState? {
         guard let status else { return nil }
-        let detected = AgentScreenStatusDetector.detect(status: status, text: title)
         if typedHookOwnsContext {
-            // Strict authority tiering: once a typed Hook / omgd context is active,
-            // title heuristics must never downgrade `working` or `needsAttention`
-            // to `idle`. Allow `titleStatus.attention` to assist only when the
-            // agent's hook manifest declares no `needsAttention` events.
-            guard !hookSupportsAttention, status.attention?.isEmpty == false else {
-                return nil
-            }
-            if detected == .needsAttention {
-                return current == .working ? .needsAttention : nil
-            }
-            return current == .needsAttention ? .working : nil
+            // Strict authority tiering: Tier 3 title heuristics are hard-disabled
+            // whenever a typed Tier 2 Hook / omgd context owns the pane.
+            _ = hookSupportsAttention
+            return nil
         }
+        let detected = AgentScreenStatusDetector.detect(status: status, text: title)
         if let detected, detected != .idle {
             return current == detected ? nil : detected
         }

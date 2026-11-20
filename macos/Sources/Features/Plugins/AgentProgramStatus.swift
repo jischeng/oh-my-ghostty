@@ -258,14 +258,13 @@ struct AgentProgramStatus {
         return didChange
     }
 
-    /// Resolves effective pane activity when both native OSC 7501 (`program`)
-    /// and OSC 3008 / Hook state (`fallback`) exist.
+    /// Resolves effective pane activity when both Tier 1 native status (`program`:
+    /// OSC 7501 / OSC 26 TAP) and Tier 2/3 Hook/fallback state (`fallback`) exist.
     ///
-    /// Non-idle native program status wins, except when native status only
-    /// reports generic `working` while an explicit Hook reports `needsAttention`
-    /// for the same agent (for CLIs whose permission prompt arrives via Hook).
-    /// When native program status is `idle`, a non-idle Hook status surfaces so
-    /// CLIs that emit `state=idle` on startup still show Hook turn transitions.
+    /// Strict Tier 1 authority: once an agent has an active Tier 1 record in a pane,
+    /// Tier 2 hooks for that same agent are metadata-only — they never resurface over
+    /// Tier 1 `idle`, and only augment Tier 1 `working` with `needsAttention` when the
+    /// agent does not natively support OSC 7501 `blocked`.
     static func preferredActivity(
         program: TabActivity?,
         fallback: TabActivity?
@@ -275,12 +274,18 @@ struct AgentProgramStatus {
                 if program.state == .working,
                    let fallback,
                    fallback.state == .needsAttention,
-                   fallback.source == program.source {
+                   fallback.source == program.source,
+                   SupportedAgent(rawValue: program.source)?
+                       .definition.supportsNativeOSC7501Blocked != true {
                     return fallback
                 }
                 return program
             }
-            if let fallback, fallback.state != .idle { return fallback }
+            if let fallback,
+               fallback.state != .idle,
+               fallback.source != program.source {
+                return fallback
+            }
             return program
         }
         return fallback

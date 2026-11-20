@@ -147,7 +147,7 @@ struct AgentProgramStatusTests {
         #expect(controller.agentActivities[surface.id]?.icon == SupportedAgent.codex.icon)
     }
 
-    @Test func antigravityIdleProgramStatusYieldsToHookStatesWhileNonIdleProgramStatusWins() throws {
+    @Test func antigravityTier1ProgramStatusHasStrictAuthorityOverSameAgentHooks() throws {
         let enabled = OhMyGhosttySettings.shared.agentStatusHooksEnabled
         OhMyGhosttySettings.shared.agentStatusHooksEnabled = true
         defer { OhMyGhosttySettings.shared.agentStatusHooksEnabled = enabled }
@@ -161,28 +161,39 @@ struct AgentProgramStatusTests {
         let surface = try #require(controller.surfaceTree.first)
         let pgid = Int(getpgrp())
 
-        // Startup native OSC 7501 `state=idle:app=antigravity` establishes idle baseline.
+        // Startup native OSC 7501 `state=idle:app=antigravity` establishes Tier 1 ownership.
         surface.contextSignal = .init(action: .start, id: "omg-program-status",
             metadata: "state=idle:app=antigravity")
         #expect(controller.agentActivities[surface.id]?.state == .idle)
 
-        // Local OSC 3008 Hook `PreInvocation` (`working`) must NOT be masked by native `idle`!
+        // Same-agent Tier 2 Hook (`working`, `done`, `needsAttention`) is metadata-only
+        // and MUST NOT resurface over Tier 1 `idle`.
         surface.contextSignal = .init(action: .start, id: "omg-agent-antigravity-\(pgid)",
             metadata: "type=app;omg_agent=antigravity;omg_scope=local;omg_liveness=pgid;omg_state=working;omg_conversation=conv-1")
+        #expect(controller.agentActivities[surface.id]?.state == .idle)
+
+        // When Tier 1 reports `working`, same-agent Tier 2 `needsAttention` MUST NOT
+        // override Tier 1 because `antigravity` natively supports OSC 7501 `blocked`.
+        surface.contextSignal = .init(action: .start, id: "omg-program-status",
+            metadata: "state=working:app=antigravity")
+        #expect(controller.agentActivities[surface.id]?.state == .working)
+        surface.contextSignal = .init(action: .start, id: "omg-agent-antigravity-\(pgid)",
+            metadata: "type=app;omg_agent=antigravity;omg_scope=local;omg_liveness=pgid;omg_state=needsAttention;omg_attention=question;omg_conversation=conv-1")
         #expect(controller.agentActivities[surface.id]?.state == .working)
 
-        // Non-idle native OSC 7501 (`blocked` permission prompt) overrides Hook `working`.
+        // Native OSC 7501 `blocked` drives attention directly.
         surface.contextSignal = .init(action: .start, id: "omg-program-status",
             metadata: "state=blocked:kind=permission:app=antigravity")
         #expect(controller.agentActivities[surface.id]?.state == .needsAttention)
         #expect(controller.agentActivities[surface.id]?.attentionKind == .permission)
 
-        // When native OSC 7501 returns to `idle` and Hook emits `Stop` (`done`), `done` surfaces
-        // and user acknowledgement clears it back to `idle`.
+        // Native OSC 7501 `done` is NOT cross-channel-wiped by a Tier 2 `working` hook,
+        // and user acknowledgement clears it back to `idle` without stale Tier 2 resurfacing.
         surface.contextSignal = .init(action: .start, id: "omg-program-status",
-            metadata: "state=idle:app=antigravity")
+            metadata: "state=done:app=antigravity")
+        #expect(controller.agentActivities[surface.id]?.state == .done)
         surface.contextSignal = .init(action: .start, id: "omg-agent-antigravity-\(pgid)",
-            metadata: "type=app;omg_agent=antigravity;omg_scope=local;omg_liveness=pgid;omg_state=done;omg_conversation=conv-1")
+            metadata: "type=app;omg_agent=antigravity;omg_scope=local;omg_liveness=pgid;omg_state=working;omg_event=prompt;omg_conversation=conv-1")
         #expect(controller.agentActivities[surface.id]?.state == .done)
         controller.acknowledgeTerminalAgentStateFromUserInput(on: surface)
         #expect(controller.agentActivities[surface.id]?.state == .idle)
@@ -388,29 +399,29 @@ struct AgentProgramStatusTests {
         let surface = try #require(controller.surfaceTree.first)
         let pgid = Int(getpgrp())
 
-        // Generic OSC 7501 `working` must not mask an explicit Hook `needsAttention` for the same agent.
+        // For an agent without native OSC 7501 `blocked` support (`codex`), generic OSC 7501
+        // `working` still allows an explicit Tier 2 Hook `needsAttention` for the same agent.
         surface.contextSignal = .init(action: .start, id: "omg-program-status",
-            metadata: "state=working:app=antigravity")
-        surface.contextSignal = .init(action: .start, id: "omg-agent-antigravity-\(pgid)",
-            metadata: "type=app;omg_agent=antigravity;omg_scope=local;omg_liveness=pgid;omg_state=needsAttention;omg_attention=permission")
+            metadata: "state=working:app=codex")
+        surface.contextSignal = .init(action: .start, id: "omg-agent-codex-\(pgid)",
+            metadata: "type=app;omg_agent=codex;omg_scope=local;omg_liveness=pgid;omg_state=needsAttention;omg_attention=permission")
         #expect(controller.agentActivities[surface.id]?.state == .needsAttention)
         #expect(controller.agentActivities[surface.id]?.attentionKind == .permission)
 
-        // Cross-channel new-turn clearing: stale OSC 7501 `done` is cleared when a new Hook `working` turn starts.
+        // Tier 1 `done` is NOT wiped by a Tier 2 Hook `working` signal; clear Tier 1 before
+        // testing pure Hook completion acknowledgement timing below.
         surface.contextSignal = .init(action: .start, id: "omg-program-status",
-            metadata: "state=done:app=antigravity")
-        surface.contextSignal = .init(action: .start, id: "omg-agent-antigravity-\(pgid)",
-            metadata: "type=app;omg_agent=antigravity;omg_scope=local;omg_liveness=pgid;omg_state=done")
+            metadata: "state=done:app=codex")
+        surface.contextSignal = .init(action: .start, id: "omg-agent-codex-\(pgid)",
+            metadata: "type=app;omg_agent=codex;omg_scope=local;omg_liveness=pgid;omg_state=working;omg_event=prompt")
         #expect(controller.agentActivities[surface.id]?.state == .done)
-
-        surface.contextSignal = .init(action: .start, id: "omg-agent-antigravity-\(pgid)",
-            metadata: "type=app;omg_agent=antigravity;omg_scope=local;omg_liveness=pgid;omg_state=working;omg_event=prompt")
-        #expect(controller.agentActivities[surface.id]?.state == .working)
+        surface.contextSignal = .init(action: .start, id: "omg-program-status",
+            metadata: "state=clear")
 
         // Sub-150ms / pre-arrival passive events must NOT wipe a fresh `done` badge.
         let beforeDone = ProcessInfo.processInfo.systemUptime
-        surface.contextSignal = .init(action: .start, id: "omg-agent-antigravity-\(pgid)",
-            metadata: "type=app;omg_agent=antigravity;omg_scope=local;omg_liveness=pgid;omg_state=done")
+        surface.contextSignal = .init(action: .start, id: "omg-agent-codex-\(pgid)",
+            metadata: "type=app;omg_agent=codex;omg_scope=local;omg_liveness=pgid;omg_state=done")
         #expect(controller.agentActivities[surface.id]?.state == .done)
         controller.acknowledgeTerminalAgentStateFromUserInput(on: surface, eventTimestamp: beforeDone - 0.5)
         #expect(controller.agentActivities[surface.id]?.state == .done)
@@ -423,10 +434,10 @@ struct AgentProgramStatusTests {
 
         // Synthetic AppKit/Accessibility events with `eventTimestamp == 0` normalize to `systemUptime`
         // rather than being permanently blocked by `0 < arrived + 0.15`.
-        surface.contextSignal = .init(action: .start, id: "omg-agent-antigravity-\(pgid)",
-            metadata: "type=app;omg_agent=antigravity;omg_scope=local;omg_liveness=pgid;omg_state=working;omg_event=prompt")
-        surface.contextSignal = .init(action: .start, id: "omg-agent-antigravity-\(pgid)",
-            metadata: "type=app;omg_agent=antigravity;omg_scope=local;omg_liveness=pgid;omg_state=done")
+        surface.contextSignal = .init(action: .start, id: "omg-agent-codex-\(pgid)",
+            metadata: "type=app;omg_agent=codex;omg_scope=local;omg_liveness=pgid;omg_state=working;omg_event=prompt")
+        surface.contextSignal = .init(action: .start, id: "omg-agent-codex-\(pgid)",
+            metadata: "type=app;omg_agent=codex;omg_scope=local;omg_liveness=pgid;omg_state=done")
         #expect(controller.agentActivities[surface.id]?.state == .done)
         Thread.sleep(forTimeInterval: 0.17)
         controller.acknowledgeTerminalAgentStateFromUserInput(on: surface, eventTimestamp: 0)

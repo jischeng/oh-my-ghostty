@@ -320,7 +320,7 @@ enum AgentHookRemoteAction: String {
 
 struct AgentHookInstaller {
     static let marker = "_omg_agent_status"
-    static let hookVersion = 13
+    static let hookVersion = 14
     static let detectorMarkerVersion = 1
     static let didChangeNotification = Notification.Name(
         "com.oh-my-ghostty.agentIntegrationDidChange"
@@ -1906,6 +1906,15 @@ else:
         if agent == .antigravity {
             return antigravityHookCommand(state: state, isPromptEvent: promptEvent)
         }
+        if agent == .claude || agent == .codex {
+            return subagentAwareHookCommand(
+                agent: agent,
+                event: event,
+                state: state,
+                attentionKind: attentionKind,
+                isPromptEvent: promptEvent
+            )
+        }
         let action = state == nil ? "end" : "start"
         var metadata = "type=app;omg_agent=\(agent.rawValue);" +
             "omg_scope=%s;omg_liveness=pgid"
@@ -1954,6 +1963,85 @@ else:
             "2>/dev/null || true"
     }
 
+    private static func subagentAwareHookCommand(
+        agent: SupportedAgent,
+        event: String?,
+        state: TabActivityState?,
+        attentionKind: TabAttentionKind?,
+        isPromptEvent: Bool
+    ) -> String {
+        let field = agent.definition.hook.conversationField ?? "session_id"
+        let isSubagentStart = event == "SubagentStart"
+        let isSubagentStop = event == "SubagentStop"
+        let isStop = event == "Stop"
+        let baseState = state?.rawValue ?? "end"
+        let baseAction = state == nil ? "end" : "start"
+        let py = "import json,re,sys,urllib.parse; " +
+            "d=json.load(sys.stdin); d=d if isinstance(d,dict) else {}; " +
+            "raw=d.get(\"\(field)\",\"\"); " +
+            "raw=raw[:128] if isinstance(raw,str) else str(raw or \"\")[:128]; " +
+            "rep=raw if re.fullmatch(r\"[A-Za-z0-9._][A-Za-z0-9._-]{0,127}\",raw) else \"-\"; " +
+            "osc=urllib.parse.quote(raw,safe=\"._~-\"); " +
+            "sub=next((d[k][:128] for k in " +
+            "(\"agent_id\",\"parent_tool_use_id\",\"subagent_id\",\"task_id\") " +
+            "if isinstance(d.get(k),str) and d[k]),\"\"); " +
+            "sub=sub if re.fullmatch(r\"[A-Za-z0-9._-]{1,128}\",sub) else \"\"; " +
+            "skip=\"1\" if d.get(\"stop_hook_active\") is True else \"\"; " +
+            "print(rep+\"|\"+osc+\"|\"+sub+\"|\"+skip,end=\"\")"
+        var setup = "omg_pair=$(env -u SDKROOT -u DEVELOPER_DIR python3 -c '\(py)' " +
+            "2>/dev/null || printf '%s' '-|||'); " +
+            "omg_report_conv=${omg_pair%%|*}; omg_rest=${omg_pair#*|}; " +
+            "omg_conversation=${omg_rest%%|*}; omg_rest=${omg_rest#*|}; " +
+            "omg_sub=${omg_rest%%|*}; omg_skip=${omg_rest#*|}; "
+        if isStop {
+            setup += "test \"$omg_skip\" = 1 && exit 0; "
+        }
+        if isSubagentStart || isSubagentStop {
+            setup += "omg_sub=${omg_sub:-subagent}; "
+        }
+        setup += "omg_state=\(baseState); omg_action=\(baseAction); omg_phase=; "
+        if isStop {
+            setup += "if [ -n \"$omg_sub\" ]; then omg_state=end; omg_action=end; fi; "
+        } else if state == .working {
+            setup += "if [ -n \"$omg_sub\" ]; then omg_phase=background; fi; "
+        }
+        var runtimeBlock = "if [ -n \"${OMG_RUNTIME_BIN-}\" ]; then " +
+            "set -- report \(agent.rawValue) \"$omg_state\" \"${omg_report_conv:--}\" \"$PWD\"; " +
+            "if [ -n \"$omg_sub\" ]; then set -- \"$@\" --id \"$omg_sub\"; fi; " +
+            "if [ -n \"$omg_phase\" ]; then set -- \"$@\" --phase \"$omg_phase\"; fi; "
+        if let attentionKind {
+            runtimeBlock += "set -- \"$@\" --attention \(attentionKind.rawValue); "
+        }
+        if isPromptEvent {
+            runtimeBlock += "if [ -z \"$omg_sub\" ]; then set -- \"$@\" --event prompt; fi; "
+        }
+        runtimeBlock += "\"$OMG_RUNTIME_BIN\" \"$@\" >/dev/null 2>&1 && exit 0; fi; "
+
+        var oscExtra = "omg_extra=; " +
+            "if [ \"$omg_action\" = start ]; then omg_extra=\";omg_state=$omg_state\"; fi; " +
+            "if [ -n \"$omg_sub\" ]; then omg_extra=\"$omg_extra;omg_context=$omg_sub\"; fi; " +
+            "if [ -n \"$omg_phase\" ]; then omg_extra=\"$omg_extra;omg_phase=$omg_phase\"; fi; "
+        if let attentionKind {
+            oscExtra += "omg_extra=\"$omg_extra;omg_attention=\(attentionKind.rawValue)\"; "
+        }
+        if isPromptEvent {
+            oscExtra += "if [ -z \"$omg_sub\" ]; then omg_extra=\"$omg_extra;omg_event=prompt\"; fi; "
+        }
+
+        return ": \(marker); : _omg_agent_status_v\(hookVersion); " + setup + runtimeBlock +
+            "omg_tty=$(ps -o tty= -p \"$PPID\" 2>/dev/null | tr -d ' '); " +
+            "omg_pgid=$(ps -o pgid= -p \"$PPID\" 2>/dev/null | tr -d ' '); " +
+            "case \"$omg_pgid\" in ''|*[!0-9]*) exit 0;; esac; " +
+            "case \"$omg_tty\" in ''|*[!A-Za-z0-9/._-]*) omg_tty=tty;; esac; " +
+            "omg_scope=local; test -n \"${SSH_CONNECTION-}${OMG_RUNTIME_REMOTE-}\" && omg_scope=remote; " +
+            oscExtra +
+            "printf '\\033]3008;%s=omg-agent-\(agent.rawValue)-%s;" +
+            "type=app;omg_agent=\(agent.rawValue);omg_scope=%s;omg_liveness=pgid%s;" +
+            "omg_conversation=%s\\007' \"$omg_action\" \"$omg_pgid\" \"$omg_scope\" " +
+            "\"$omg_extra\" \"$omg_conversation\" > \"/dev/$omg_tty\" " +
+            "2>/dev/null || true"
+    }
+
     private static let antigravityHookName = "omg-agent-status"
 
     /// agy stdout is a JSON protocol channel; report via omgd socket when inside a
@@ -1974,10 +2062,6 @@ try:
     if state == "done":
         reason = str(payload.get("terminationReason") or "").upper()
         if payload.get("error") or reason == "ERROR": state = "error"
-        elif reason == "TERMINAL_STEP_TYPE":
-            state = "needsAttention"
-            attention = ";omg_attention=question"
-            attention_kind = "question"
         elif reason == "USER_CANCELED": state = "idle"
     sid = os.getsid(0)
     owner = os.getppid()
@@ -2056,7 +2140,7 @@ function report(
   context?: any,
   attention?: string,
   phase?: string,
-  isPrompt = false,
+  eventKind?: string,
 ) {
   let fd: number | undefined;
   try {
@@ -2086,17 +2170,17 @@ function report(
       ];
       if (attention) args.push("--attention", attention);
       if (phase) args.push("--phase", phase, "--message", "Background work running");
-      if (isPrompt && state === "working") args.push("--event", "prompt");
+      if (eventKind && state === "working") args.push("--event", eventKind);
       const res = spawnSync(process.env.OMG_RUNTIME_BIN, args, { stdio: "ignore", timeout: 1000 });
       if (res.status === 0) return;
     }
     const attentionKind = attention ? `;omg_attention=${attention}` : "";
     const activityPhase = phase ? `;omg_phase=${phase};message=Background%20work%20running` : "";
-    const promptTag = isPrompt && state === "working" ? ";omg_event=prompt" : "";
+    const eventTag = eventKind && state === "working" ? `;omg_event=${eventKind}` : "";
     fd = openSync("/dev/tty", "w");
     const sequence = end
       ? `\u001b]3008;end=${contextId};type=app;omg_agent=pi;omg_scope=${scope};omg_liveness=pid${conversation}\u0007`
-      : `\u001b]3008;start=${contextId};type=app;omg_agent=pi;omg_scope=${scope};omg_liveness=pid;omg_state=${state}${conversation}${sessionCwd}${attentionKind}${activityPhase}${promptTag}\u0007`;
+      : `\u001b]3008;start=${contextId};type=app;omg_agent=pi;omg_scope=${scope};omg_liveness=pid;omg_state=${state}${conversation}${sessionCwd}${attentionKind}${activityPhase}${eventTag}\u0007`;
     writeSync(fd, sequence);
   } catch {
   } finally {
@@ -2222,14 +2306,14 @@ export default function (pi: any) {
     clearWaitingTools();
     clearSettleVerify();
     currentContext = context;
-    report("working", false, context, undefined, undefined, true);
+    report("working", false, context, undefined, undefined, "prompt");
   });
   pi.on("agent_start", async (_event: any, context: any) => {
     completionPending = true;
     clearWaitingTools();
     clearSettleVerify();
     currentContext = context;
-    report("working", false, context, undefined, undefined, true);
+    report("working", false, context, undefined, undefined, "prompt");
   });
   pi.on("tool_execution_start", async (event: any, context: any) => {
     currentContext = context;
@@ -2244,6 +2328,7 @@ export default function (pi: any) {
   });
   pi.on("tool_execution_end", async (event: any, context: any) => {
     currentContext = context;
+    const hadWaiting = waitingToolCalls.size > 0 || waitingUnnamedCount > 0;
     const callId = validID(event?.toolCallId) ? event.toolCallId : undefined;
     if (callId && waitingToolCalls.has(callId)) {
       waitingToolCalls.delete(callId);
@@ -2258,7 +2343,7 @@ export default function (pi: any) {
       refreshBackgroundTasks();
     }
     if (waitingToolCalls.size === 0 && waitingUnnamedCount === 0) {
-      report("working", false, context);
+      report("working", false, context, undefined, undefined, hadWaiting ? "attention_resolved" : undefined);
     }
   });
   pi.on("agent_settled", async (event: any, context: any) => {
@@ -2360,7 +2445,7 @@ import { spawnSync } from "node:child_process";
 
 const contextId = `omg-agent-omp-${process.pid}`;
 const scope = process.env.SSH_CONNECTION || process.env.OMG_RUNTIME_REMOTE ? "remote" : "local";
-function report(state?: string, end = false, context?: any, attention?: string, isPrompt = false) {
+function report(state?: string, end = false, context?: any, attention?: string, eventKind?: string) {
   let fd: number | undefined;
   try {
     const raw = context?.sessionManager?.getSessionId?.();
@@ -2387,16 +2472,16 @@ function report(state?: string, end = false, context?: any, attention?: string, 
         String(process.pid),
       ];
       if (attention) args.push("--attention", attention);
-      if (isPrompt && state === "working") args.push("--event", "prompt");
+      if (eventKind && state === "working") args.push("--event", eventKind);
       const res = spawnSync(process.env.OMG_RUNTIME_BIN, args, { stdio: "ignore", timeout: 1000 });
       if (res.status === 0) return;
     }
     const attentionKind = attention ? `;omg_attention=${attention}` : "";
-    const promptTag = isPrompt && state === "working" ? ";omg_event=prompt" : "";
+    const eventTag = eventKind && state === "working" ? `;omg_event=${eventKind}` : "";
     fd = openSync("/dev/tty", "w");
     const sequence = end
       ? `\u001b]3008;end=${contextId};type=app;omg_agent=omp;omg_scope=${scope};omg_liveness=pid${conversation}\u0007`
-      : `\u001b]3008;start=${contextId};type=app;omg_agent=omp;omg_scope=${scope};omg_liveness=pid;omg_state=${state}${conversation}${sessionCwd}${attentionKind}${promptTag}\u0007`;
+      : `\u001b]3008;start=${contextId};type=app;omg_agent=omp;omg_scope=${scope};omg_liveness=pid;omg_state=${state}${conversation}${sessionCwd}${attentionKind}${eventTag}\u0007`;
     writeSync(fd, sequence);
   } catch {
   } finally {
@@ -2407,15 +2492,48 @@ function report(state?: string, end = false, context?: any, attention?: string, 
 }
 
 export default function (omp: any) {
-  omp.on("session_start", async (_event: any, context: any) => report("idle", false, context));
-  omp.on("agent_start", async (_event: any, context: any) => report("working", false, context, undefined, true));
-  omp.on("tool_call", async (event: any, context: any) => {
-    const waitingTools = new Set(["ask_user_question", "ask_question", "question", "confirm"]);
-    const waiting = waitingTools.has(String(event.toolName));
-    if (waiting) report("needsAttention", false, context, "question");
+  let waitingUnnamedCount = 0;
+  const waitingToolCalls = new Set<string>();
+  const waitingTools = new Set(["ask_user_question", "ask_question", "question", "confirm"]);
+  const validID = (value: any) => typeof value === "string" && value.length > 0 && value.length <= 256;
+  const clearWaitingTools = () => {
+    waitingToolCalls.clear();
+    waitingUnnamedCount = 0;
+  };
+  omp.on("session_start", async (_event: any, context: any) => {
+    clearWaitingTools();
+    report("idle", false, context);
   });
-  omp.on("agent_end", async (_event: any, context: any) => report("done", false, context));
+  omp.on("agent_start", async (_event: any, context: any) => {
+    clearWaitingTools();
+    report("working", false, context, undefined, "prompt");
+  });
+  omp.on("tool_call", async (event: any, context: any) => {
+    const waiting = waitingTools.has(String(event?.toolName));
+    const callId = validID(event?.toolCallId) ? event.toolCallId : undefined;
+    if (waiting) {
+      if (callId) waitingToolCalls.add(callId); else waitingUnnamedCount += 1;
+      report("needsAttention", false, context, "question");
+    }
+  });
+  omp.on("tool_result", async (event: any, context: any) => {
+    const hadWaiting = waitingToolCalls.size > 0 || waitingUnnamedCount > 0;
+    const callId = validID(event?.toolCallId) ? event.toolCallId : undefined;
+    if (callId && waitingToolCalls.has(callId)) {
+      waitingToolCalls.delete(callId);
+    } else if (!callId && waitingUnnamedCount > 0 && waitingTools.has(String(event?.toolName))) {
+      waitingUnnamedCount = Math.max(0, waitingUnnamedCount - 1);
+    }
+    if (hadWaiting && waitingToolCalls.size === 0 && waitingUnnamedCount === 0) {
+      report("working", false, context, undefined, "attention_resolved");
+    }
+  });
+  omp.on("agent_end", async (_event: any, context: any) => {
+    clearWaitingTools();
+    report("done", false, context);
+  });
   omp.on("session_shutdown", async (_event: any, context: any) => {
+    clearWaitingTools();
     report("idle", false, context);
     report(undefined, true, context);
   });
@@ -2433,10 +2551,12 @@ const scope = process.env.SSH_CONNECTION || process.env.OMG_RUNTIME_REMOTE ? "re
 const roots = new Set();
 const children = new Map();
 const busySessions = new Set();
+const busyChildren = new Set();
+const pendingDoneRoots = new Set();
 let lastConversation;
 let exitHookRegistered = false;
 
-function report(state, conversation, end = false, attention, isPrompt = false) {
+function report(state, conversation, end = false, attention, eventKind, phase) {
   let fd;
   try {
     const validConv = Boolean(
@@ -2454,18 +2574,20 @@ function report(state, conversation, end = false, attention, isPrompt = false) {
         String(process.pid),
       ];
       if (attention) args.push("--attention", attention);
-      if (isPrompt && state === "working") args.push("--event", "prompt");
+      if (phase) args.push("--phase", phase, "--message", "Background work running");
+      if (eventKind && state === "working") args.push("--event", eventKind);
       const res = spawnSync(process.env.OMG_RUNTIME_BIN, args, { stdio: "ignore", timeout: 1000 });
       if (res.status === 0) return;
     }
     const safe = validConv
       ? `;omg_conversation=${encodeURIComponent(String(conversation))}` : "";
     const attentionKind = attention ? `;omg_attention=${attention}` : "";
-    const promptTag = isPrompt && state === "working" ? ";omg_event=prompt" : "";
+    const activityPhase = phase ? `;omg_phase=${phase};message=Background%20work%20running` : "";
+    const eventTag = eventKind && state === "working" ? `;omg_event=${eventKind}` : "";
     fd = openSync("/dev/tty", "w");
     const sequence = end
       ? `\u001b]3008;end=${contextId};type=app;omg_agent=opencode;omg_scope=${scope};omg_liveness=pid${safe}\u0007`
-      : `\u001b]3008;start=${contextId};type=app;omg_agent=opencode;omg_scope=${scope};omg_liveness=pid;omg_state=${state}${safe}${attentionKind}${promptTag}\u0007`;
+      : `\u001b]3008;start=${contextId};type=app;omg_agent=opencode;omg_scope=${scope};omg_liveness=pid;omg_state=${state}${safe}${attentionKind}${activityPhase}${eventTag}\u0007`;
     writeSync(fd, sequence);
   } catch {
   } finally {
@@ -2483,6 +2605,13 @@ function resolveRoot(id) {
   }
   roots.add(current);
   return current;
+}
+
+function hasBusyChildren(rootId) {
+  for (const childId of busyChildren) {
+    if (resolveRoot(childId) === rootId) return true;
+  }
+  return false;
 }
 
 function registerExitHook() {
@@ -2514,9 +2643,23 @@ export const OmgAgentStatus = async () => {
       }
       if (event.type === "session.deleted") {
         if (info?.id) {
+          const parentRoot = children.has(info.id) ? resolveRoot(info.id) : undefined;
           children.delete(info.id);
           busySessions.delete(info.id);
-          if (roots.delete(info.id)) report(undefined, info.id, true);
+          const wasBusyChild = busyChildren.delete(info.id);
+          if (roots.delete(info.id)) {
+            pendingDoneRoots.delete(info.id);
+            report(undefined, info.id, true);
+          } else if (
+            wasBusyChild &&
+            parentRoot &&
+            !busySessions.has(parentRoot) &&
+            pendingDoneRoots.has(parentRoot) &&
+            !hasBusyChildren(parentRoot)
+          ) {
+            pendingDoneRoots.delete(parentRoot);
+            report("done", parentRoot);
+          }
         }
         return;
       }
@@ -2528,7 +2671,7 @@ export const OmgAgentStatus = async () => {
         event.type === "question.asked"
       ) {
         const rootId = resolveRoot(id);
-        busySessions.add(rootId);
+        if (!hasBusyChildren(rootId)) busySessions.add(rootId);
         const kind = event.type === "question.asked" ? "question" : "permission";
         return report("needsAttention", rootId, false, kind);
       }
@@ -2538,13 +2681,48 @@ export const OmgAgentStatus = async () => {
         event.type === "question.rejected"
       ) {
         const rootId = resolveRoot(id);
-        if (busySessions.has(rootId)) return report("working", rootId);
+        if (busySessions.has(rootId)) {
+          return report("working", rootId, false, undefined, "attention_resolved");
+        }
+        if (hasBusyChildren(rootId)) {
+          return report("working", rootId, false, undefined, "attention_resolved", "background");
+        }
         return;
       }
-      if (children.has(id)) return;
+      if (children.has(id)) {
+        const rootId = resolveRoot(id);
+        if (event.type === "session.status") {
+          const statusType = event.properties?.status?.type ?? event.properties?.status;
+          if (statusType === "busy" || statusType === "retry") {
+            busyChildren.add(id);
+            if (!busySessions.has(rootId)) {
+              pendingDoneRoots.add(rootId);
+              return report("working", rootId, false, undefined, undefined, "background");
+            }
+            return;
+          }
+          if (statusType === "idle") {
+            const wasBusy = busyChildren.delete(id);
+            if (wasBusy && !busySessions.has(rootId) && pendingDoneRoots.has(rootId) && !hasBusyChildren(rootId)) {
+              pendingDoneRoots.delete(rootId);
+              return report("done", rootId);
+            }
+            return;
+          }
+        }
+        if (event.type === "session.idle" || event.type === "session.error") {
+          const wasBusy = busyChildren.delete(id);
+          if (wasBusy && !busySessions.has(rootId) && pendingDoneRoots.has(rootId) && !hasBusyChildren(rootId)) {
+            pendingDoneRoots.delete(rootId);
+            return report("done", rootId);
+          }
+        }
+        return;
+      }
       roots.add(id);
       if (event.type === "session.error") {
         busySessions.delete(id);
+        pendingDoneRoots.delete(id);
         return report("error", id);
       }
       if (event.type === "session.status") {
@@ -2552,14 +2730,27 @@ export const OmgAgentStatus = async () => {
         if (statusType === "busy" || statusType === "retry") {
           const isFirstBusy = !busySessions.has(id);
           busySessions.add(id);
-          return report("working", id, false, undefined, isFirstBusy);
+          pendingDoneRoots.delete(id);
+          return report("working", id, false, undefined, isFirstBusy ? "prompt" : undefined);
         }
         if (statusType === "idle") {
-          return report(busySessions.delete(id) ? "done" : "idle", id);
+          const wasBusy = busySessions.delete(id);
+          if (hasBusyChildren(id)) {
+            if (wasBusy) pendingDoneRoots.add(id);
+            return report("working", id, false, undefined, undefined, "background");
+          }
+          pendingDoneRoots.delete(id);
+          return report(wasBusy ? "done" : "idle", id);
         }
       }
       if (event.type === "session.idle") {
-        return report(busySessions.delete(id) ? "done" : "idle", id);
+        const wasBusy = busySessions.delete(id);
+        if (hasBusyChildren(id)) {
+          if (wasBusy) pendingDoneRoots.add(id);
+          return report("working", id, false, undefined, undefined, "background");
+        }
+        pendingDoneRoots.delete(id);
+        return report(wasBusy ? "done" : "idle", id);
       }
     },
   };
@@ -2594,8 +2785,8 @@ enum AgentActivitySelection {
         _ candidates: [AgentActivityCandidate]
     ) -> TabActivity? {
         candidates.max { lhs, rhs in
-            let lhsPriority = priority(lhs.activity.state)
-            let rhsPriority = priority(rhs.activity.state)
+            let lhsPriority = priority(lhs.activity)
+            let rhsPriority = priority(rhs.activity)
             if lhsPriority != rhsPriority { return lhsPriority < rhsPriority }
             if lhs.isFocused != rhs.isFocused {
                 return !lhs.isFocused && rhs.isFocused
@@ -2604,13 +2795,13 @@ enum AgentActivitySelection {
         }?.activity
     }
 
-    private static func priority(_ state: TabActivityState) -> Int {
-        switch state {
+    static func priority(_ activity: TabActivity) -> Int {
+        switch activity.state {
         case .needsAttention: 5
-        case .error: 4
-        case .working: 3
-        case .done: 2
-        case .idle: 1
+        case .working: activity.phase == .background ? 3 : 4
+        case .error: 2
+        case .done: 1
+        case .idle: 0
         }
     }
 }
@@ -2638,11 +2829,13 @@ struct AgentContextSignalReducer: Sendable {
 
     private struct Record: Sendable {
         let id: String
+        let context: String?
         let activity: TabActivity
         let scope: Scope
         let liveness: AgentLivenessIdentity?
         let updatedAt: Date
         let terminated: Bool
+        let isFallbackTier: Bool
     }
 
     static let maximumTrackedContexts = 32
@@ -2728,11 +2921,18 @@ struct AgentContextSignalReducer: Sendable {
         return value
     }
 
+    private static func subContext(from metadata: [String: String]) -> String? {
+        guard let raw = metadata["omg_context"]?.removingPercentEncoding,
+              !raw.isEmpty,
+              raw.utf8.count <= 128 else { return nil }
+        return raw
+    }
+
     mutating func consume(_ signal: Ghostty.ContextSignal) -> AgentActivityUpdate? {
         guard signal.id.hasPrefix("omg-agent-") else { return nil }
         switch signal.action {
         case .end:
-            return consumeEnd(signal.id)
+            return consumeEnd(signal)
 
         case .start:
             let metadata = Self.metadata(signal.metadata)
@@ -2743,6 +2943,8 @@ struct AgentContextSignalReducer: Sendable {
                   let rawState = metadata["omg_state"],
                   let state = Self.state(rawState) else { return nil }
             let scope = metadata["omg_scope"].flatMap(Scope.init) ?? .legacy
+            let context = Self.subContext(from: metadata)
+            let isFallbackTier = metadata["omg_tier"] == "fallback"
             let liveness = Self.liveness(
                 identity: identity,
                 agent: agent,
@@ -2755,14 +2957,29 @@ struct AgentContextSignalReducer: Sendable {
             let attentionKind = state == .needsAttention
                 ? metadata["omg_attention"].flatMap(TabAttentionKind.init)
                 : nil
-            let phase = state == .working
-                ? metadata["omg_phase"].flatMap(TabActivityPhase.init)
-                : nil
-            let isPrompt = metadata["omg_event"] == "prompt"
-            if state == .working, phase == .background,
-               let existing = activities.first(where: { $0.id == signal.id }),
+            let phase: TabActivityPhase? = if state == .working {
+                if metadata["omg_phase"] == "background" {
+                    .background
+                } else if metadata["omg_phase"] == "foreground" {
+                    nil
+                } else if context != nil {
+                    .background
+                } else {
+                    nil
+                }
+            } else {
+                nil
+            }
+            let eventKind = metadata["omg_event"]
+            let isPrompt = eventKind == "prompt"
+            let unlocksAttention = isPrompt || eventKind == "attention_resolved"
+            if state == .working,
+               let existing = activities.first(where: {
+                   $0.id == signal.id && $0.context == context
+               }),
                !existing.terminated,
-               existing.activity.state == .needsAttention {
+               existing.activity.state == .needsAttention,
+               !unlocksAttention || phase == .background {
                 return nil
             }
             activities.removeAll { $0.terminated && $0.scope == scope }
@@ -2772,13 +2989,15 @@ struct AgentContextSignalReducer: Sendable {
                         ($0.activity.state == .done || $0.activity.state == .error)
                 }
                 for idx in activities.indices
-                where activities[idx].id != signal.id &&
+                where !(activities[idx].id == signal.id && activities[idx].context == context) &&
                     (activities[idx].activity.state == .done ||
                         activities[idx].activity.state == .error ||
-                        (isPrompt && activities[idx].activity.state == .needsAttention)) {
+                        (unlocksAttention && activities[idx].activity.state == .needsAttention &&
+                            (isPrompt || activities[idx].id == signal.id))) {
                     let old = activities[idx]
                     activities[idx] = Record(
                         id: old.id,
+                        context: old.context,
                         activity: TabActivity(
                             source: old.activity.source,
                             state: .idle,
@@ -2791,7 +3010,8 @@ struct AgentContextSignalReducer: Sendable {
                         scope: old.scope,
                         liveness: old.liveness,
                         updatedAt: old.updatedAt,
-                        terminated: false
+                        terminated: false,
+                        isFallbackTier: old.isFallbackTier
                     )
                 }
             }
@@ -2806,7 +3026,7 @@ struct AgentContextSignalReducer: Sendable {
                 progress: progress,
                 icon: agent.icon
             )
-            activities.removeAll { $0.id == signal.id }
+            activities.removeAll { $0.id == signal.id && $0.context == context }
             if activities.count >= Self.maximumTrackedContexts {
                 activities.removeFirst(
                     activities.count - Self.maximumTrackedContexts + 1
@@ -2814,11 +3034,13 @@ struct AgentContextSignalReducer: Sendable {
             }
             activities.append(Record(
                 id: signal.id,
+                context: context,
                 activity: activity,
                 scope: scope,
                 liveness: liveness,
                 updatedAt: Date(),
-                terminated: false
+                terminated: false,
+                isFallbackTier: isFallbackTier
             ))
             return currentRecord.map { .set($0.activity) } ?? .clear
         }
@@ -2845,6 +3067,7 @@ struct AgentContextSignalReducer: Sendable {
             }
             if current.activity.state == .working ||
                 current.activity.state == .needsAttention {
+                activities.removeAll { $0.id == current.id && $0.context != current.context }
                 return markUnexpectedInterruption(record: current, now: now)
             }
             activities.remove(at: index)
@@ -2886,11 +3109,13 @@ struct AgentContextSignalReducer: Sendable {
         )
         activities[index] = Record(
             id: current.id,
+            context: current.context,
             activity: idle,
             scope: current.scope,
             liveness: current.liveness,
             updatedAt: current.updatedAt,
-            terminated: false
+            terminated: false,
+            isFallbackTier: current.isFallbackTier
         )
         return currentRecord.map { .set($0.activity) } ?? .clear
     }
@@ -2921,37 +3146,55 @@ struct AgentContextSignalReducer: Sendable {
     private var selectedIndex: Int? {
         guard !activities.isEmpty else { return nil }
         let useRemote = hasRemoteActivity
-        let candidateIndices = activities.indices.filter {
+        let scopedIndices = activities.indices.filter {
             !useRemote || activities[$0].scope == .remote
         }
-        if let attentionIndex = candidateIndices.last(where: {
-            !activities[$0].terminated &&
-                activities[$0].activity.state == .needsAttention
-        }) {
-            return attentionIndex
+        let typedAgents = Set(scopedIndices.compactMap { idx -> String? in
+            let rec = activities[idx]
+            return rec.isFallbackTier ? nil : rec.activity.source
+        })
+        let candidateIndices = scopedIndices.filter { idx in
+            let rec = activities[idx]
+            return !rec.isFallbackTier || !typedAgents.contains(rec.activity.source)
         }
-        return candidateIndices.last ?? activities.indices.last
+        var bestIndex: Int?
+        var bestPriority = -1
+        for index in candidateIndices {
+            let priority = AgentActivitySelection.priority(activities[index].activity)
+            if priority >= bestPriority {
+                bestPriority = priority
+                bestIndex = index
+            }
+        }
+        return bestIndex ?? scopedIndices.last ?? activities.indices.last
     }
 
     private var currentRecord: Record? {
         selectedIndex.map { activities[$0] }
     }
 
-    private mutating func consumeEnd(_ id: String) -> AgentActivityUpdate? {
-        guard let index = activities.firstIndex(where: { $0.id == id }) else {
+    private mutating func consumeEnd(_ signal: Ghostty.ContextSignal) -> AgentActivityUpdate? {
+        let metadata = Self.metadata(signal.metadata)
+        if let context = Self.subContext(from: metadata) {
+            return remove(id: signal.id, context: context)
+        }
+        guard let index = activities.firstIndex(where: { $0.id == signal.id && $0.context == nil })
+            ?? activities.lastIndex(where: { $0.id == signal.id }) else {
             return nil
         }
         let current = activities[index]
         if current.id == currentRecord?.id,
+           current.context == currentRecord?.context,
            current.activity.state == .working ||
             current.activity.state == .needsAttention {
+            activities.removeAll { $0.id == signal.id && $0.context != current.context }
             return markUnexpectedInterruption(record: current)
         }
         if current.activity.state == .error,
            current.terminated {
             return nil
         }
-        return remove(id)
+        return removeAll(id: signal.id)
     }
 
     private mutating func markUnexpectedInterruption(
@@ -2967,27 +3210,52 @@ struct AgentContextSignalReducer: Sendable {
             progress: nil,
             icon: record.activity.icon
         )
-        if let index = activities.firstIndex(where: { $0.id == record.id }) {
+        if let index = activities.firstIndex(where: {
+            $0.id == record.id && $0.context == record.context
+        }) {
             activities[index] = Record(
                 id: record.id,
+                context: record.context,
                 activity: error,
                 scope: record.scope,
                 liveness: nil,
                 updatedAt: now,
-                terminated: true
+                terminated: true,
+                isFallbackTier: record.isFallbackTier
             )
         }
         return currentRecord.map { .set($0.activity) } ?? .set(error)
     }
 
-    private mutating func remove(_ id: String) -> AgentActivityUpdate? {
+    private mutating func remove(id: String, context: String?) -> AgentActivityUpdate? {
         let previous = currentRecord?.activity
         let previousID = currentRecord?.id
-        guard let index = activities.firstIndex(where: { $0.id == id }) else {
+        let previousContext = currentRecord?.context
+        guard let index = activities.firstIndex(where: {
+            $0.id == id && $0.context == context
+        }) else {
             return nil
         }
         activities.remove(at: index)
-        guard previousID != currentRecord?.id || previous != currentRecord?.activity else {
+        guard previousID != currentRecord?.id ||
+                previousContext != currentRecord?.context ||
+                previous != currentRecord?.activity else {
+            return nil
+        }
+        return currentRecord.map { .set($0.activity) } ?? .clear
+    }
+
+    private mutating func removeAll(id: String) -> AgentActivityUpdate? {
+        let previous = currentRecord?.activity
+        let previousID = currentRecord?.id
+        let previousContext = currentRecord?.context
+        guard activities.contains(where: { $0.id == id }) else {
+            return nil
+        }
+        activities.removeAll { $0.id == id }
+        guard previousID != currentRecord?.id ||
+                previousContext != currentRecord?.context ||
+                previous != currentRecord?.activity else {
             return nil
         }
         return currentRecord.map { .set($0.activity) } ?? .clear

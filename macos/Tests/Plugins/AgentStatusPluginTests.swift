@@ -490,13 +490,15 @@ struct AgentStatusPluginTests {
             current: .working,
             typedHookOwnsContext: true
         ) == nil)
+        // Strict authority tiering: Tier 3 title heuristics are hard-disabled whenever
+        // a typed Tier 2 Hook owns the pane, even if `hookSupportsAttention` is false.
         #expect(AgentTitleStatusReconciler.nextState(
             status: SupportedAgent.grok.definition.titleStatus,
             title: "Action Required",
             current: .working,
             typedHookOwnsContext: true,
             hookSupportsAttention: false
-        ) == .needsAttention)
+        ) == nil)
         for nonWorking in [TabActivityState.idle, .done, .error, nil] {
             #expect(AgentTitleStatusReconciler.nextState(
                 status: SupportedAgent.grok.definition.titleStatus,
@@ -922,7 +924,7 @@ struct AgentStatusPluginTests {
 
     @Test func nestedAgentInterruptionRestoresPreviousAfterAcknowledgement() throws {
         var reducer = AgentContextSignalReducer()
-        _ = reducer.consume(signal(agent: .codex, state: "working"))
+        _ = reducer.consume(signal(agent: .codex, state: "idle"))
         _ = reducer.consume(signal(agent: .pi, state: "working"))
         let update = reducer.consume(.init(
             action: .end,
@@ -940,7 +942,7 @@ struct AgentStatusPluginTests {
             return
         }
         #expect(restored.source == "codex")
-        #expect(restored.state == .working)
+        #expect(restored.state == .idle)
     }
 
     @Test func backgroundAttentionOutranksFocusedWorkingActivity() throws {
@@ -960,9 +962,10 @@ struct AgentStatusPluginTests {
             .init(activity: attention, isFocused: false),
         ])
         #expect(preferred == attention)
-        guard case .set(let claudeWorking) = reducer.consume(signal(
-            agent: .claude,
-            state: "working"
+        guard case .set(let claudeWorking) = reducer.consume(.init(
+            action: .start,
+            id: "omg-agent-claude",
+            metadata: "type=app;omg_agent=claude;omg_state=working;omg_event=attention_resolved"
         )) else {
             Issue.record("Expected focused activity")
             return
@@ -972,6 +975,62 @@ struct AgentStatusPluginTests {
             .init(activity: claudeWorking, isFocused: true),
         ])
         #expect(focusedTie == claudeWorking)
+
+        // Canonical priority lattice:
+        // needsAttention (5) > working(fg) (4) > working(bg) (3) > error (2) > done (1) > idle (0).
+        let workingBg = TabActivity(
+            source: "claude",
+            state: .working,
+            phase: .background,
+            label: "Claude Code",
+            message: nil,
+            detail: nil,
+            progress: nil,
+            icon: nil
+        )
+        let error = TabActivity(
+            source: "codex",
+            state: .error,
+            label: "Codex",
+            message: nil,
+            detail: nil,
+            progress: nil,
+            icon: nil
+        )
+        let done = TabActivity(
+            source: "codex",
+            state: .done,
+            label: "Codex",
+            message: nil,
+            detail: nil,
+            progress: nil,
+            icon: nil
+        )
+        let idle = TabActivity(
+            source: "codex",
+            state: .idle,
+            label: "Codex",
+            message: nil,
+            detail: nil,
+            progress: nil,
+            icon: nil
+        )
+        #expect(AgentActivitySelection.preferred([
+            .init(activity: error, isFocused: true),
+            .init(activity: workingBg, isFocused: false),
+        ]) == workingBg)
+        #expect(AgentActivitySelection.preferred([
+            .init(activity: workingBg, isFocused: true),
+            .init(activity: working, isFocused: false),
+        ]) == working)
+        #expect(AgentActivitySelection.preferred([
+            .init(activity: done, isFocused: true),
+            .init(activity: error, isFocused: false),
+        ]) == error)
+        #expect(AgentActivitySelection.preferred([
+            .init(activity: idle, isFocused: true),
+            .init(activity: done, isFocused: false),
+        ]) == done)
     }
 
     @Test func hookInstallerPreservesExistingCodexAndClaudeHooks() throws {
@@ -2395,6 +2454,314 @@ struct AgentStatusPluginTests {
             isProcessAlive: { _ in false },
             isProcessGroupAlive: { $0 == 100 }
         ))
+    }
+
+    @Test func reducerKeysByContextAndReducesRootAndChildSubWork() throws {
+        var reducer = AgentContextSignalReducer()
+        let rootID = "omg-agent-claude-500"
+
+        // Root foreground turn starts.
+        guard case .set(let rootWorking) = reducer.consume(.init(
+            action: .start,
+            id: rootID,
+            metadata: "type=app;omg_agent=claude;omg_scope=local;omg_liveness=pgid;omg_state=working;omg_event=prompt"
+        )) else {
+            Issue.record("Expected root working")
+            return
+        }
+        #expect(rootWorking.state == .working && rootWorking.phase == nil)
+
+        // Child subagent starts in background — root foreground working (4) still outranks bg (3).
+        guard case .set(let stillFg) = reducer.consume(.init(
+            action: .start,
+            id: rootID,
+            metadata: "type=app;omg_agent=claude;omg_scope=local;omg_liveness=pgid;omg_state=working;omg_context=sub-1;omg_phase=background"
+        )) else {
+            Issue.record("Expected foreground working while root is active")
+            return
+        }
+        #expect(stillFg.state == .working && stillFg.phase == nil)
+
+        // Root finishes (`done`), while child `sub-1` is still running -> background working (3 > 1).
+        guard case .set(let bgWorking) = reducer.consume(.init(
+            action: .start,
+            id: rootID,
+            metadata: "type=app;omg_agent=claude;omg_scope=local;omg_liveness=pgid;omg_state=done"
+        )) else {
+            Issue.record("Expected background working while child is active")
+            return
+        }
+        #expect(bgWorking.state == .working && bgWorking.phase == .background)
+
+        // Child requests permission -> bubbles up to `needsAttention` (5).
+        guard case .set(let childAttention) = reducer.consume(.init(
+            action: .start,
+            id: rootID,
+            metadata: "type=app;omg_agent=claude;omg_scope=local;omg_liveness=pgid;omg_state=needsAttention;omg_attention=permission;omg_context=sub-1"
+        )) else {
+            Issue.record("Expected child needsAttention")
+            return
+        }
+        #expect(childAttention.state == .needsAttention && childAttention.attentionKind == .permission)
+
+        // Unqualified sibling `working` on same child cannot clobber `needsAttention`.
+        #expect(reducer.consume(.init(
+            action: .start,
+            id: rootID,
+            metadata: "type=app;omg_agent=claude;omg_scope=local;omg_liveness=pgid;omg_state=working;omg_context=sub-1"
+        )) == nil)
+
+        // Child completes via `end` with `omg_context=sub-1` -> cleanly removes child (NOT an error)
+        // and surfaces root `done`!
+        guard case .set(let allDone) = reducer.consume(.init(
+            action: .end,
+            id: rootID,
+            metadata: "type=app;omg_agent=claude;omg_scope=local;omg_context=sub-1"
+        )) else {
+            Issue.record("Expected root done after last child ends")
+            return
+        }
+        #expect(allDone.state == .done)
+
+        // Typed Tier 2 shadows Tier 3 (`omg_tier=fallback`) for the same agent.
+        guard case .set(let shadowed) = reducer.consume(.init(
+            action: .start,
+            id: "omg-agent-claude-501",
+            metadata: "type=app;omg_agent=claude;omg_scope=local;omg_state=needsAttention;omg_tier=fallback"
+        )) else {
+            Issue.record("Expected typed record to shadow fallback")
+            return
+        }
+        #expect(shadowed.state == .done)
+    }
+
+    @Test func reducerUnlocksAttentionWithAttentionResolvedEvent() throws {
+        var reducer = AgentContextSignalReducer()
+        let id = "omg-agent-pi-600"
+        _ = reducer.consume(.init(
+            action: .start,
+            id: id,
+            metadata: "type=app;omg_agent=pi;omg_scope=local;omg_liveness=pid;omg_state=needsAttention;omg_attention=question"
+        ))
+        // Unqualified `working` (e.g. sibling PostToolUse) must not clobber `needsAttention`.
+        #expect(reducer.consume(.init(
+            action: .start,
+            id: id,
+            metadata: "type=app;omg_agent=pi;omg_scope=local;omg_liveness=pid;omg_state=working"
+        )) == nil)
+        #expect(reducer.currentActivity?.state == .needsAttention)
+
+        // Explicit `omg_event=attention_resolved` unlocks `needsAttention -> working`.
+        guard case .set(let unlocked) = reducer.consume(.init(
+            action: .start,
+            id: id,
+            metadata: "type=app;omg_agent=pi;omg_scope=local;omg_liveness=pid;omg_state=working;omg_event=attention_resolved"
+        )) else {
+            Issue.record("Expected attention_resolved to unlock working")
+            return
+        }
+        #expect(unlocked.state == .working)
+    }
+
+    @Test func manifestsDeclareAntigravityNativeBlockedAndHermesWorkingPostLLMCall() {
+        #expect(SupportedAgent.antigravity.definition.supportsNativeOSC7501Blocked)
+        #expect(!SupportedAgent.codex.definition.supportsNativeOSC7501Blocked)
+        let hermesPost = SupportedAgent.hermes.definition.hook.events.first {
+            $0.name == "post_llm_call"
+        }
+        #expect(hermesPost?.state == .working)
+        let claudeEvents = Set(SupportedAgent.claude.definition.hook.events.map(\.name))
+        #expect(claudeEvents.contains("SubagentStart"))
+        #expect(claudeEvents.contains("SubagentStop"))
+    }
+
+    @Test func antigravityStopHookMapsTerminalStepTypeToDoneNotNeedsAttention() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        try AgentHookInstaller(homeURL: home).install(.antigravity)
+        let root = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf:
+                home.appendingPathComponent(".gemini/config/hooks.json")
+            )) as? [String: Any]
+        )
+        let hooks = try #require(root["omg-agent-status"] as? [String: Any])
+        let stops = try #require(hooks["Stop"] as? [[String: Any]])
+        let command = try #require(stops.first?["command"] as? String)
+        let helper = home.appendingPathComponent("mock-omgd")
+        let capture = home.appendingPathComponent("args")
+        try "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$OMG_TEST_REPORT\"\n"
+            .write(to: helper, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", command]
+        process.currentDirectoryURL = home
+        process.environment = [
+            "PATH": "/opt/homebrew/bin:/usr/bin:/bin",
+            "OMG_RUNTIME_BIN": helper.path,
+            "OMG_TEST_REPORT": capture.path,
+        ]
+        let input = Pipe()
+        process.standardInput = input
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        try input.fileHandleForWriting.write(contentsOf: Data(
+            "{\"conversationId\":\"conv-term\",\"terminationReason\":\"TERMINAL_STEP_TYPE\"}".utf8
+        ))
+        try input.fileHandleForWriting.close()
+        process.waitUntilExit()
+        let args = try String(contentsOf: capture, encoding: .utf8)
+            .split(separator: "\n").map(String.init)
+        #expect(args.prefix(4) == ["report", "antigravity", "done", "conv-term"])
+        #expect(!args.contains("--attention"))
+    }
+
+    @Test func claudeAndCodexHooksScopeSubagentsAndIgnoreReentrantStop() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let installer = AgentHookInstaller(homeURL: home)
+        try installer.install(.claude)
+        try installer.install(.codex)
+        let helper = home.appendingPathComponent("mock-omgd")
+        try "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$OMG_TEST_REPORT\"\n"
+            .write(to: helper, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+
+        func hookCmd(at relativePath: String, event: String) throws -> String {
+            let root = try #require(
+                JSONSerialization.jsonObject(with: Data(contentsOf:
+                    home.appendingPathComponent(relativePath)
+                )) as? [String: Any]
+            )
+            let hooks = try #require(root["hooks"] as? [String: Any])
+            let entries = try #require(hooks[event] as? [[String: Any]])
+            let owned = try #require(entries.first { $0[AgentHookInstaller.marker] != nil })
+            let commands = try #require(owned["hooks"] as? [[String: Any]])
+            return try #require(commands.first?["command"] as? String)
+        }
+
+        func runHook(_ command: String, stdin: String) throws -> [String]? {
+            let capture = home.appendingPathComponent("capture-\(UUID().uuidString)")
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/sh")
+            process.arguments = ["-c", command]
+            process.currentDirectoryURL = home
+            process.environment = [
+                "PATH": "/opt/homebrew/bin:/usr/bin:/bin",
+                "OMG_RUNTIME_BIN": helper.path,
+                "OMG_TEST_REPORT": capture.path,
+            ]
+            let input = Pipe()
+            process.standardInput = input
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            try input.fileHandleForWriting.write(contentsOf: Data(stdin.utf8))
+            try input.fileHandleForWriting.close()
+            process.waitUntilExit()
+            guard FileManager.default.fileExists(atPath: capture.path) else { return nil }
+            return try String(contentsOf: capture, encoding: .utf8)
+                .split(separator: "\n").map(String.init)
+        }
+
+        // Claude SubagentStart -> working --id sub-1 --phase background
+        let subStart = try runHook(
+            hookCmd(at: ".claude/settings.json", event: "SubagentStart"),
+            stdin: "{\"session_id\":\"s1\",\"agent_id\":\"sub-1\"}"
+        )
+        #expect(subStart?.prefix(4) == ["report", "claude", "working", "s1"])
+        #expect(subStart?.contains("--id") == true && subStart?.contains("sub-1") == true)
+        #expect(subStart?.contains("--phase") == true && subStart?.contains("background") == true)
+
+        // Claude SubagentStop -> end --id sub-1
+        let subStop = try runHook(
+            hookCmd(at: ".claude/settings.json", event: "SubagentStop"),
+            stdin: "{\"session_id\":\"s1\",\"agent_id\":\"sub-1\"}"
+        )
+        #expect(subStop?.prefix(4) == ["report", "claude", "end", "s1"])
+        #expect(subStop?.contains("--id") == true && subStop?.contains("sub-1") == true)
+
+        // Claude Stop with stop_hook_active == true -> ignored (no report emitted)
+        let reentrantStop = try runHook(
+            hookCmd(at: ".claude/settings.json", event: "Stop"),
+            stdin: "{\"session_id\":\"s1\",\"stop_hook_active\":true}"
+        )
+        #expect(reentrantStop == nil)
+
+        // Codex PreToolUse with parent_tool_use_id -> working --id tool-9 --phase background
+        let codexSub = try runHook(
+            hookCmd(at: ".codex/hooks.json", event: "PreToolUse"),
+            stdin: "{\"session_id\":\"c1\",\"parent_tool_use_id\":\"tool-9\"}"
+        )
+        #expect(codexSub?.prefix(4) == ["report", "codex", "working", "c1"])
+        #expect(codexSub?.contains("--id") == true && codexSub?.contains("tool-9") == true)
+        #expect(codexSub?.contains("--phase") == true && codexSub?.contains("background") == true)
+    }
+
+    @Test func openCodeExtensionTracksBusyChildrenAndEmitsAttentionResolved() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        try AgentHookInstaller(homeURL: home).install(.opencode)
+        let pluginURL = home.appendingPathComponent(".config/opencode/plugin/omg-agent-status.js")
+        var jsSource = try String(contentsOf: pluginURL, encoding: .utf8)
+        jsSource = jsSource
+            .replacingOccurrences(of: #"import \{[^}]+\} from "node:[^"]+";"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: "export const OmgAgentStatus =", with: "globalThis.OmgAgentStatus =")
+
+        let ctx = try #require(JSContext())
+        ctx.evaluateScript("""
+        globalThis.__reports = [];
+        globalThis.process = {
+          pid: 5151,
+          env: { OMG_RUNTIME_BIN: "/mock/omgd" },
+          cwd: () => "/work/repo",
+          once: () => {}
+        };
+        globalThis.spawnSync = (_bin, args) => { globalThis.__reports.push(args); return { status: 0 }; };
+        globalThis.openSync = () => 1;
+        globalThis.writeSync = () => {};
+        globalThis.closeSync = () => {};
+        """)
+        ctx.evaluateScript(jsSource)
+        #expect(ctx.exception == nil, Comment(rawValue: ctx.exception?.toString() ?? ""))
+
+        ctx.evaluateScript("""
+        globalThis.__out = "";
+        (async () => {
+          const plugin = await globalThis.OmgAgentStatus();
+          await plugin.event({ event: { type: "session.status", properties: { sessionID: "root-1", status: { type: "busy" } } } });
+          await plugin.event({ event: { type: "session.created", properties: { info: { id: "child-1", parentID: "root-1" } } } });
+          await plugin.event({ event: { type: "session.status", properties: { sessionID: "child-1", status: { type: "busy" } } } });
+          await plugin.event({ event: { type: "permission.asked", properties: { sessionID: "child-1" } } });
+          await plugin.event({ event: { type: "permission.replied", properties: { sessionID: "child-1" } } });
+          // Root goes idle while child-1 is still busy -> working --phase background (NOT done!)
+          await plugin.event({ event: { type: "session.idle", properties: { sessionID: "root-1" } } });
+          // Last child finishes -> done!
+          await plugin.event({ event: { type: "session.idle", properties: { sessionID: "child-1" } } });
+          globalThis.__out = JSON.stringify(globalThis.__reports);
+        })();
+        """)
+        #expect(ctx.exception == nil, Comment(rawValue: ctx.exception?.toString() ?? ""))
+        let jsonString = try #require(ctx.evaluateScript("globalThis.__out")?.toString())
+        let reports = try #require(JSONSerialization.jsonObject(with: Data(jsonString.utf8)) as? [[String]])
+        #expect(reports.map { $0[2] } == ["working", "needsAttention", "working", "working", "done"])
+        #expect(reports[2].contains("--event") && reports[2].contains("attention_resolved"))
+        #expect(reports[3].contains("--phase") && reports[3].contains("background"))
+    }
+
+    @Test func ompExtensionEmitsAttentionResolvedOnToolResult() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        try AgentHookInstaller(homeURL: home).install(.omp)
+        let pluginURL = home.appendingPathComponent(".omp/agent/extensions/omg-agent-status.ts")
+        let tsSource = try String(contentsOf: pluginURL, encoding: .utf8)
+        #expect(tsSource.contains("omp.on(\"tool_result\""))
+        #expect(tsSource.contains("\"attention_resolved\""))
+        try AgentHookInstaller(homeURL: home).install(.pi)
+        let piURL = home.appendingPathComponent(".pi/agent/extensions/omg-agent-status.ts")
+        let piSource = try String(contentsOf: piURL, encoding: .utf8)
+        #expect(piSource.contains("hadWaiting ? \"attention_resolved\" : undefined"))
     }
 
     private func assertUnrelatedHooksPreserved(at url: URL) throws {

@@ -118,7 +118,7 @@ struct AgentStatusPluginTests {
     @Test func bundledAgentCatalogDefinesHooksAndResume() {
         let expected: [SupportedAgent: (String, String, Int)] = [
             .codex: ("codex", "AgentOpenAI", 7),
-            .claude: ("claude", "AgentClaude", 8),
+            .claude: ("claude", "AgentClaude", 10),
             .pi: ("pi", "AgentPi", 7),
             .qoder: ("qodercli", "AgentQoder", 7),
             .reasonix: ("reasonix", "AgentReasonixGlyph", 8),
@@ -2167,6 +2167,7 @@ struct AgentStatusPluginTests {
             ("context?: any", "context"),
             ("attention?: string", "attention"),
             ("phase?: string", "phase"),
+            ("eventKind?: string", "eventKind"),
             (": number | undefined", ""),
             ("<string>", ""),
             ("(onReply?: () => void)", "(onReply)"),

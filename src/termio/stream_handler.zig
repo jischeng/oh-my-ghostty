@@ -4097,12 +4097,12 @@ test "StreamHandler: terminal.Stream osc_unknown_max_bytes forwards OSC 26 and d
     // without dispatching to surface_mailbox.
     var handler: StreamHandler = undefined;
     handler.surface_mailbox = undefined;
-    try handler.vt(.osc_unknown, .{
+    handler.vt(.osc_unknown, .{
         .content = "26;CodeAgent=Claude;Status=running",
         .truncated = true,
         .terminator = .bel,
     });
-    try handler.vt(.osc_unknown, .{
+    handler.vt(.osc_unknown, .{
         .content = "7400;status=busy",
         .truncated = false,
         .terminator = .bel,

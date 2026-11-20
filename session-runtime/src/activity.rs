@@ -190,12 +190,18 @@ impl Snapshot {
         let mut best_t1_7501: Option<Presentation> = None;
         let mut best_t1_tap: Option<Presentation> = None;
         let mut tap_meta_by_agent: Vec<TapMetadata> = Vec::new();
-        let mut best_t2: Option<Presentation> = None;
-        let mut best_t3: Option<Presentation> = None;
+        let mut tier1_agents: Vec<String> = Vec::new();
+        let mut tier2_agents: Vec<String> = Vec::new();
+        let mut hook_conv_by_agent: Vec<(String, String)> = Vec::new();
+        let mut t2_candidates: Vec<Presentation> = Vec::new();
+        let mut t3_candidates: Vec<Presentation> = Vec::new();
 
         for signal in &self.records {
             if signal.id == TAP {
                 if let Some(tap) = parse_tap(&signal.metadata, inherited_app.as_deref()) {
+                    if !tier1_agents.iter().any(|a| a == &tap.agent) {
+                        tier1_agents.push(tap.agent.clone());
+                    }
                     tap_meta_by_agent.retain(|meta| meta.agent != tap.agent);
                     tap_meta_by_agent.push(TapMetadata {
                         agent: tap.agent.clone(),
@@ -216,16 +222,31 @@ impl Snapshot {
             let Some(item) = parse_presentation(signal, inherited_app.as_deref()) else {
                 continue;
             };
-            let slot = match item.tier {
-                Tier::ProgramStatus => &mut best_t1_7501,
-                Tier::Hook => &mut best_t2,
-                Tier::Fallback => &mut best_t3,
-            };
-            if slot
-                .as_ref()
-                .is_none_or(|prev| presentation_rank(&item) <= presentation_rank(prev))
-            {
-                *slot = Some(item);
+            match item.tier {
+                Tier::ProgramStatus => {
+                    if !tier1_agents.iter().any(|a| a == &item.agent) {
+                        tier1_agents.push(item.agent.clone());
+                    }
+                    if best_t1_7501
+                        .as_ref()
+                        .is_none_or(|prev| presentation_rank(&item) <= presentation_rank(prev))
+                    {
+                        best_t1_7501 = Some(item);
+                    }
+                }
+                Tier::Hook => {
+                    if !tier2_agents.iter().any(|a| a == &item.agent) {
+                        tier2_agents.push(item.agent.clone());
+                    }
+                    if let Some(conv) = item.conversation.as_ref() {
+                        hook_conv_by_agent.retain(|(agent, _)| agent != &item.agent);
+                        hook_conv_by_agent.push((item.agent.clone(), conv.clone()));
+                    }
+                    t2_candidates.push(item);
+                }
+                Tier::Fallback => {
+                    t3_candidates.push(item);
+                }
             }
         }
 
@@ -248,7 +269,7 @@ impl Snapshot {
         }
 
         // Tier 1 arbitration: same-agent OSC 7501 wins on state/attention over OSC 26 TAP.
-        let best_t1 = match (best_t1_7501, best_t1_tap) {
+        let mut best_t1 = match (best_t1_7501, best_t1_tap) {
             (Some(p7501), Some(ptap)) => {
                 if p7501.agent == ptap.agent
                     || presentation_rank(&p7501) <= presentation_rank(&ptap)
@@ -263,18 +284,60 @@ impl Snapshot {
             (None, None) => None,
         };
 
+        // When an agent has an active Tier 1 record, Tier 2 hooks for that agent
+        // are metadata-only (enriching missing `conversation` / resume info).
+        if let Some(t1) = best_t1.as_mut() {
+            if t1.conversation.is_none() {
+                if let Some((_, conv)) = hook_conv_by_agent
+                    .iter()
+                    .find(|(agent, _)| agent == &t1.agent)
+                {
+                    t1.conversation = Some(conv.clone());
+                }
+            }
+        }
+
+        let mut best_t2: Option<Presentation> = None;
+        for item in &t2_candidates {
+            if tier1_agents.iter().any(|a| a == &item.agent) {
+                continue;
+            }
+            if best_t2
+                .as_ref()
+                .is_none_or(|prev| presentation_rank(item) <= presentation_rank(prev))
+            {
+                best_t2 = Some(item.clone());
+            }
+        }
+
+        let mut best_t3: Option<Presentation> = None;
+        for item in &t3_candidates {
+            if tier1_agents.iter().any(|a| a == &item.agent)
+                || tier2_agents.iter().any(|a| a == &item.agent)
+            {
+                continue;
+            }
+            if best_t3
+                .as_ref()
+                .is_none_or(|prev| presentation_rank(item) <= presentation_rank(prev))
+            {
+                best_t3 = Some(item.clone());
+            }
+        }
+
         // Strict authority hierarchy: Tier 1 > Tier 2 > Tier 3.
         // Exception: if Tier 1 only reports generic `working` while Tier 2 Hook
-        // reports active `needsAttention` on the same agent (for CLIs whose
-        // permission prompt comes via Hook rather than OSC 7501 `blocked` / TAP),
-        // surface the Tier 2 `needsAttention`.
+        // reports active `needsAttention` on the same agent whose Tier 1 does NOT
+        // natively emit OSC 7501 `blocked`, surface the Tier 2 `needsAttention`.
         if let Some(t1) = &best_t1 {
             if t1.state != "idle" {
-                if t1.state == "working" {
-                    if let Some(t2) = &best_t2 {
-                        if t2.state == "needsAttention" && t2.agent == t1.agent {
-                            return Some(t2.clone());
-                        }
+                if t1.state == "working" && !crate::agents::native_supports_blocked(&t1.agent) {
+                    if let Some(t2) = t2_candidates
+                        .iter()
+                        .rev()
+                        .find(|t2| t2.state == "needsAttention" && t2.agent == t1.agent)
+                    {
+                        return Some(t2.clone());
                     }
                 }
                 return Some(t1.clone());
@@ -286,9 +349,7 @@ impl Snapshot {
             }
         }
         if let Some(t3) = &best_t3 {
-            let shadowed_by_higher_tier = best_t1.as_ref().is_some_and(|t1| t1.agent == t3.agent)
-                || best_t2.as_ref().is_some_and(|t2| t2.agent == t3.agent);
-            if !shadowed_by_higher_tier && t3.state != "idle" {
+            if t3.state != "idle" {
                 return Some(t3.clone());
             }
         }
@@ -296,6 +357,8 @@ impl Snapshot {
     }
 }
 
+/// Canonical priority lattice (lower rank = higher priority):
+/// `needsAttention (5)` > `working(fg) (4)` > `working(bg) (3)` > `error (2)` > `done (1)` > `idle (0)`.
 fn presentation_rank(p: &Presentation) -> u8 {
     match p.state {
         "needsAttention" => 0,
@@ -563,7 +626,12 @@ fn parse_presentation(signal: &Signal, fallback_app: Option<&str>) -> Option<Pre
     } else {
         None
     };
-    let background = field(&signal.metadata, ';', "omg_phase") == Some("background");
+    let has_context = field(&signal.metadata, ';', "omg_context").is_some_and(|s| !s.is_empty());
+    let background = match field(&signal.metadata, ';', "omg_phase") {
+        Some("background") => true,
+        Some("foreground") => false,
+        _ => has_context,
+    };
     let conversation = field(&signal.metadata, ';', "omg_conversation")
         .map(decode_percent)
         .filter(|s| !s.is_empty());
@@ -1749,7 +1817,14 @@ impl State {
         let in_sync_batch = self.pending.is_some();
 
         let clear = native && field(metadata, ':', "state") == Some("clear");
-        if ended || clear {
+        let child_done = !tier1
+            && !ended
+            && field(metadata, ';', "omg_context").is_some_and(|s| !s.is_empty())
+            && matches!(
+                field(metadata, ';', "omg_state"),
+                Some("done" | "completed")
+            );
+        if ended || clear || child_done {
             let raw_key = if native {
                 field(metadata, ':', "id").unwrap_or("").to_owned()
             } else if tap {
@@ -1779,7 +1854,9 @@ impl State {
                         || !(raw_key.is_empty()
                             || r.key == raw_key
                             || r.key.starts_with(&(raw_key.clone() + "/")))
-                } else if let Some(ctx) = field(metadata, ';', "omg_context") {
+                } else if let Some(ctx) =
+                    field(metadata, ';', "omg_context").filter(|s| !s.is_empty())
+                {
                     if r.key == raw_key {
                         return false;
                     }
@@ -1881,14 +1958,24 @@ impl State {
         }
 
         let new_state = signal_effective_state(&signal);
-        let is_prompt_event =
-            !tier1 && field(&effective_metadata, ';', "omg_event") == Some("prompt");
+        let unlocks_attention = !tier1
+            && matches!(
+                field(&effective_metadata, ';', "omg_event"),
+                Some("prompt" | "attention_resolved")
+            );
+        let incoming_context = (!tier1)
+            .then(|| field(&effective_metadata, ';', "omg_context").filter(|s| !s.is_empty()))
+            .flatten();
         let is_background = if native {
             field(&effective_metadata, ':', "phase") == Some("background")
         } else if tap {
             false
         } else {
-            field(&effective_metadata, ';', "omg_phase") == Some("background")
+            match field(&effective_metadata, ';', "omg_phase") {
+                Some("background") => true,
+                Some("foreground") => false,
+                _ => incoming_context.is_some(),
+            }
         };
 
         let session_leader = self.session_leader;
@@ -1907,7 +1994,6 @@ impl State {
 
         let records = self.pending.as_mut().unwrap_or(&mut self.records);
 
-        let is_root_hook = !tier1 && field(&effective_metadata, ';', "omg_context").is_none();
         let hook_agent = (!tier1)
             .then(|| field(&effective_metadata, ';', "omg_agent"))
             .flatten()
@@ -1918,16 +2004,16 @@ impl State {
 
         // Enforce `needsAttention` lock: prevent out-of-order sibling/tool `working`
         // (or background `working`) on the same Hook record from overwriting an active
-        // `needsAttention` until unlocked by user input, explicit `prompt` event, or
-        // resolved via `done`/`error`/`idle`/`end`.
+        // `needsAttention` until unlocked by user input, explicit `prompt` or
+        // `attention_resolved` event, or resolved via `done`/`error`/`idle`/`end`.
         if !in_sync_batch && new_state == Some("working") {
             if let Some(existing) = records.iter().find(|r| {
                 (r.signal.id == id && r.key == raw_key)
                     || (incoming_pgid_scoped
-                        && is_root_hook
                         && r.signal.id != "omg-program-status"
                         && r.signal.id != TAP
-                        && field(&r.signal.metadata, ';', "omg_context").is_none()
+                        && field(&r.signal.metadata, ';', "omg_context").filter(|s| !s.is_empty())
+                            == incoming_context
                         && field(&r.signal.metadata, ';', "omg_liveness") == Some("pgid")
                         && hook_agent.is_some()
                         && field(&r.signal.metadata, ';', "omg_agent")
@@ -1935,18 +2021,23 @@ impl State {
                             == hook_agent)
             }) {
                 if signal_effective_state(&existing.signal) == Some("needsAttention")
-                    && ((!tier1 && existing.attention_locked && !is_prompt_event) || is_background)
+                    && ((!tier1 && existing.attention_locked && !unlocks_attention)
+                        || (is_background && !unlocks_attention))
                 {
                     return;
                 }
             }
         }
 
-        // Cross-agent & cross-channel new-turn superseding: when a new live foreground
-        // `working` turn begins in this pane, supersede stale prior-turn `done`/`error`
-        // across all records regardless of agent or channel (and for background `working`,
-        // across channels or sibling records of the same agent).
-        if !in_sync_batch && new_state == Some("working") {
+        // New-turn superseding: when a new live foreground `working` turn begins in
+        // this pane, supersede stale prior-turn `done`/`error` across records, EXCEPT:
+        // - Tier 2/3 hooks must NEVER supersede an active Tier 1 (OSC 7501 / TAP)
+        //   record for the same agent (strict Tier 1 channel authority).
+        // - Tier 3 fallback must never supersede a higher-tier record for the same agent.
+        // - Background/sub-work `working` never wipes prior-turn `done`/`error`
+        //   (canonical priority lattice surfaces `working(bg)` above `done`/`error`,
+        //   and removing the child record cleanly restores root `done`).
+        if !in_sync_batch && new_state == Some("working") && !is_background {
             let incoming_agent = if native {
                 field(&effective_metadata, ':', "app").and_then(crate::agents::normalize_id)
             } else if let Some(ref parsed) = parsed_tap {
@@ -1954,26 +2045,26 @@ impl State {
             } else {
                 field(&effective_metadata, ';', "omg_agent").and_then(crate::agents::normalize_id)
             };
+            let incoming_fallback =
+                !tier1 && field(&effective_metadata, ';', "omg_tier") == Some("fallback");
             for r in records.iter_mut() {
-                let should_supersede = if !is_background {
-                    true
-                } else {
-                    let r_tier1 = r.signal.id == "omg-program-status" || r.signal.id == TAP;
-                    let same_agent = incoming_agent.as_deref().is_some_and(|inc| {
-                        let existing = if r.signal.id == "omg-program-status" {
-                            field(&r.signal.metadata, ':', "app")
-                                .and_then(crate::agents::normalize_id)
-                        } else if r.signal.id == TAP {
-                            parse_tap(&r.signal.metadata, None).map(|t| t.agent)
-                        } else {
-                            field(&r.signal.metadata, ';', "omg_agent")
-                                .and_then(crate::agents::normalize_id)
-                        };
-                        existing.as_deref() == Some(inc)
-                    });
-                    r_tier1 != tier1 || same_agent
-                };
-                if should_supersede && acknowledge_signal(&mut r.signal) {
+                let r_tier1 = r.signal.id == "omg-program-status" || r.signal.id == TAP;
+                let r_fallback =
+                    !r_tier1 && field(&r.signal.metadata, ';', "omg_tier") == Some("fallback");
+                let same_agent = incoming_agent.as_deref().is_some_and(|inc| {
+                    let existing = if r.signal.id == "omg-program-status" {
+                        field(&r.signal.metadata, ':', "app").and_then(crate::agents::normalize_id)
+                    } else if r.signal.id == TAP {
+                        parse_tap(&r.signal.metadata, None).map(|t| t.agent)
+                    } else {
+                        field(&r.signal.metadata, ';', "omg_agent")
+                            .and_then(crate::agents::normalize_id)
+                    };
+                    existing.as_deref() == Some(inc)
+                });
+                let blocked_by_authority = (!tier1 && r_tier1 && same_agent)
+                    || (incoming_fallback && !r_fallback && same_agent);
+                if !blocked_by_authority && acknowledge_signal(&mut r.signal) {
                     r.terminal_revision = 0;
                     r.interrupted = false;
                 }
@@ -2042,11 +2133,11 @@ impl State {
             }
             if !in_sync_batch
                 && incoming_pgid_scoped
-                && is_root_hook
                 && r.signal.id != "omg-program-status"
                 && r.signal.id != TAP
                 && r.remote == remote
-                && field(&r.signal.metadata, ';', "omg_context").is_none()
+                && field(&r.signal.metadata, ';', "omg_context").filter(|s| !s.is_empty())
+                    == incoming_context
                 && field(&r.signal.metadata, ';', "omg_liveness") == Some("pgid")
             {
                 let existing_agent = field(&r.signal.metadata, ';', "omg_agent")
@@ -2932,7 +3023,7 @@ mod tests {
     }
 
     #[test]
-    fn new_working_turn_supersedes_stale_done_and_error_across_channels() {
+    fn new_working_turn_supersedes_stale_done_and_error_respecting_tier1_authority() {
         let mut vt = Vt::new(80, 24).unwrap();
         vt.write(b"\x1b]7501;state=error:app=antigravity:id=t1\x07");
         vt.activity_mut().consume_report(
@@ -2950,9 +3041,12 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(vt.activity().presentation().unwrap().state, "error");
+        let pres = vt.activity().presentation().unwrap();
+        assert_eq!(pres.state, "error");
+        assert_eq!(pres.conversation.as_deref(), Some("conv-a"));
 
-        // New Hook turn begins: supersedes prior OSC 7501 `error` AND prior Hook `done`!
+        // Same-agent Tier 2 Hook `working` (even with `--event prompt`) must NOT wipe
+        // active Tier 1 `error` to `idle` (strict Tier 1 channel authority).
         vt.activity_mut().consume_report(
             "antigravity",
             "working",
@@ -2968,10 +3062,40 @@ mod tests {
             None,
             Some("prompt"),
         );
+        assert_eq!(vt.activity().presentation().unwrap().state, "error");
+        assert!(vt.activity().snapshot().records[0]
+            .metadata
+            .contains("state=error"));
+
+        // A new Tier 1 `working` turn DOES supersede prior Tier 1 `error` and Tier 2 `done`.
+        vt.write(b"\x1b]7501;state=working:app=antigravity:id=t2\x07");
         assert_eq!(vt.activity().presentation().unwrap().state, "working");
         assert!(vt.activity().snapshot().records[0]
             .metadata
             .contains("state=idle"));
+
+        // A different agent's Tier 2 foreground `working` turn supersedes another agent's
+        // stale Tier 1 `error` so the new agent surfaces cleanly.
+        vt.write(b"\x1b]7501;state=error:app=antigravity:id=t2\x07");
+        assert_eq!(vt.activity().presentation().unwrap().state, "error");
+        vt.activity_mut().consume_report(
+            "claude",
+            "working",
+            701,
+            true,
+            false,
+            Some("conv-c"),
+            Some("/tmp"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("prompt"),
+        );
+        let claude_pres = vt.activity().presentation().unwrap();
+        assert_eq!(claude_pres.agent, "claude");
+        assert_eq!(claude_pres.state, "working");
     }
 
     #[test]
@@ -3633,5 +3757,321 @@ mod tests {
         assert_eq!(after.agent, "codex");
         assert_eq!(after.state, "working");
         assert_eq!(after.conversation.as_deref(), Some("after-restore"));
+    }
+
+    #[test]
+    fn tier1_authority_blocks_antigravity_worker_hooks_over_done_idle_and_working() {
+        assert!(crate::agents::native_supports_blocked("antigravity"));
+        assert!(crate::agents::native_supports_blocked("agy"));
+        assert!(!crate::agents::native_supports_blocked("claude"));
+
+        let mut vt = Vt::new(80, 24).unwrap();
+
+        // 1) Tier 1 `done` must NOT be wiped to `idle` by same-agent Tier 2 worker hooks,
+        //    while still enriching missing `conversation` metadata.
+        vt.write(b"\x1b]7501;state=done:app=antigravity:id=root\x07");
+        vt.activity_mut().consume_report(
+            "antigravity",
+            "working",
+            810,
+            true,
+            false,
+            Some("conv-swarm"),
+            Some("/tmp"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("prompt"),
+        );
+        let p_done = vt.activity().presentation().unwrap();
+        assert_eq!(p_done.tier, Tier::ProgramStatus);
+        assert_eq!(p_done.agent, "antigravity");
+        assert_eq!(p_done.state, "done");
+        assert_eq!(p_done.conversation.as_deref(), Some("conv-swarm"));
+
+        // 2) Tier 1 `working` for `antigravity` (which natively supports OSC 7501 `blocked`)
+        //    must NOT be overridden by Tier 2 `needsAttention`.
+        vt.write(b"\x1b]7501;state=working:app=antigravity:id=root\x07");
+        vt.activity_mut().consume_report(
+            "antigravity",
+            "needsAttention",
+            810,
+            true,
+            false,
+            Some("conv-swarm"),
+            Some("/tmp"),
+            None,
+            Some("question"),
+            None,
+            None,
+            None,
+            None,
+        );
+        let p_work = vt.activity().presentation().unwrap();
+        assert_eq!(p_work.tier, Tier::ProgramStatus);
+        assert_eq!(p_work.state, "working");
+
+        // 3) Tier 1 `idle` must NOT fall through to resurface same-agent Tier 2 `needsAttention`
+        //    or `working`.
+        vt.write(b"\x1b]7501;state=idle:app=antigravity:id=root\x07");
+        let p_idle = vt.activity().presentation().unwrap();
+        assert_eq!(p_idle.tier, Tier::ProgramStatus);
+        assert_eq!(p_idle.agent, "antigravity");
+        assert_eq!(p_idle.state, "idle");
+
+        // 4) Native OSC 7501 `blocked` still surfaces `needsAttention` authoritatively.
+        vt.write(b"\x1b]7501;state=blocked:app=antigravity:id=root:kind=question\x07");
+        let p_blocked = vt.activity().presentation().unwrap();
+        assert_eq!(p_blocked.tier, Tier::ProgramStatus);
+        assert_eq!(p_blocked.state, "needsAttention");
+        assert_eq!(p_blocked.attention, Some("question"));
+    }
+
+    #[test]
+    fn attention_resolved_event_unlocks_attention_locked_without_keystrokes() {
+        let mut vt = Vt::new(80, 24).unwrap();
+
+        // Root `needsAttention` is locked against unqualified sibling `PostToolUse` `working`.
+        vt.activity_mut().consume_report(
+            "opencode",
+            "needsAttention",
+            910,
+            true,
+            false,
+            Some("sess-1"),
+            Some("/tmp"),
+            None,
+            Some("permission"),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            vt.activity().presentation().unwrap().state,
+            "needsAttention"
+        );
+
+        vt.activity_mut().consume_report(
+            "opencode",
+            "working",
+            910,
+            true,
+            false,
+            Some("sess-1"),
+            Some("/tmp"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            vt.activity().presentation().unwrap().state,
+            "needsAttention"
+        );
+
+        // Explicit `omg_event=attention_resolved` unlocks `attention_locked` without PTY input!
+        vt.activity_mut().consume_report(
+            "opencode",
+            "working",
+            910,
+            true,
+            false,
+            Some("sess-1"),
+            Some("/tmp"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("attention_resolved"),
+        );
+        let p_work = vt.activity().presentation().unwrap();
+        assert_eq!(p_work.state, "working");
+        assert!(!p_work.background);
+    }
+
+    #[test]
+    fn scoped_root_and_child_omg_context_background_reduction() {
+        let mut vt = Vt::new(80, 24).unwrap();
+
+        // Root starts foreground `working`.
+        vt.activity_mut().consume_report(
+            "claude",
+            "working",
+            920,
+            true,
+            false,
+            Some("sess-root"),
+            Some("/tmp"),
+            None,
+            None,
+            Some("foreground"),
+            None,
+            None,
+            Some("prompt"),
+        );
+        // Child subagent `sub-1` starts background `working`.
+        vt.activity_mut().consume_report(
+            "claude",
+            "working",
+            920,
+            true,
+            false,
+            Some("sess-root"),
+            Some("/tmp"),
+            Some("sub-1"),
+            None,
+            Some("background"),
+            None,
+            None,
+            None,
+        );
+        // Root `working(fg)` outranks child `working(bg)`.
+        let p_fg = vt.activity().presentation().unwrap();
+        assert_eq!(p_fg.state, "working");
+        assert!(!p_fg.background);
+
+        // Child `sub-1` requests permission -> `needsAttention` outranks root `working(fg)`.
+        vt.activity_mut().consume_report(
+            "claude",
+            "needsAttention",
+            920,
+            true,
+            false,
+            Some("sess-root"),
+            Some("/tmp"),
+            Some("sub-1"),
+            Some("permission"),
+            Some("background"),
+            None,
+            None,
+            None,
+        );
+        let p_att = vt.activity().presentation().unwrap();
+        assert_eq!(p_att.state, "needsAttention");
+        assert_eq!(p_att.attention, Some("permission"));
+
+        // Unqualified sibling `working` on `sub-1` cannot clear its `needsAttention`.
+        vt.activity_mut().consume_report(
+            "claude",
+            "working",
+            920,
+            true,
+            false,
+            Some("sess-root"),
+            Some("/tmp"),
+            Some("sub-1"),
+            None,
+            Some("background"),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            vt.activity().presentation().unwrap().state,
+            "needsAttention"
+        );
+
+        // `attention_resolved` on `sub-1` unlocks back to `working(bg)`, so root `working(fg)` wins.
+        vt.activity_mut().consume_report(
+            "claude",
+            "working",
+            920,
+            true,
+            false,
+            Some("sess-root"),
+            Some("/tmp"),
+            Some("sub-1"),
+            None,
+            Some("background"),
+            None,
+            None,
+            Some("attention_resolved"),
+        );
+        let p_fg2 = vt.activity().presentation().unwrap();
+        assert_eq!(p_fg2.state, "working");
+        assert!(!p_fg2.background);
+
+        // Second child `sub-2` starts without explicit `--phase` (defaults to background).
+        vt.activity_mut().consume_report(
+            "claude",
+            "working",
+            920,
+            true,
+            false,
+            Some("sess-root"),
+            Some("/tmp"),
+            Some("sub-2"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        // Root finishes turn (`done`), but live children keep pane in `working(bg)`!
+        vt.activity_mut().consume_report(
+            "claude",
+            "done",
+            920,
+            true,
+            false,
+            Some("sess-root"),
+            Some("/tmp"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let p_bg = vt.activity().presentation().unwrap();
+        assert_eq!(p_bg.state, "working");
+        assert!(p_bg.background);
+
+        // Child `sub-2` finishes with `done` -> removes ONLY `sub-2`; `sub-1` still keeps `working(bg)`.
+        vt.activity_mut().consume_report(
+            "claude",
+            "done",
+            920,
+            true,
+            false,
+            Some("sess-root"),
+            Some("/tmp"),
+            Some("sub-2"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let p_bg2 = vt.activity().presentation().unwrap();
+        assert_eq!(p_bg2.state, "working");
+        assert!(p_bg2.background);
+
+        // Child `sub-1` finishes with `end` -> removes ONLY `sub-1`; root `done` now surfaces!
+        vt.activity_mut().consume_report(
+            "claude",
+            "end",
+            920,
+            true,
+            false,
+            None,
+            None,
+            Some("sub-1"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let p_done = vt.activity().presentation().unwrap();
+        assert_eq!(p_done.state, "done");
+        assert!(!p_done.background);
     }
 }

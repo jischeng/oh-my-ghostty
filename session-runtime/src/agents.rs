@@ -14,6 +14,19 @@ pub enum StoreKind {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NativeStatusCapabilities {
+    /// Whether the agent natively emits OSC 7501 `state=blocked`
+    /// (`kind=permission|question`) for attention prompts.
+    pub osc7501_blocked: bool,
+}
+
+impl NativeStatusCapabilities {
+    pub const NONE: Self = Self {
+        osc7501_blocked: false,
+    };
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct AgentSpec {
     pub id: &'static str,
@@ -25,6 +38,7 @@ pub struct AgentSpec {
     pub aliases: &'static [&'static str],
     pub resume_args: &'static [&'static str],
     pub store: Option<StoreKind>,
+    pub native_status: NativeStatusCapabilities,
 }
 
 /// All 18 manifest-backed OMG agents plus `aider`.
@@ -42,6 +56,7 @@ pub const AGENTS: &[AgentSpec] = &[
             ".codex/sessions",
             ".codex/archived_sessions",
         ])),
+        native_status: NativeStatusCapabilities::NONE,
     },
     AgentSpec {
         id: "claude",
@@ -57,6 +72,7 @@ pub const AGENTS: &[AgentSpec] = &[
             suffix: ".jsonl",
             wildcard_prefix: false,
         }),
+        native_status: NativeStatusCapabilities::NONE,
     },
     AgentSpec {
         id: "pi",
@@ -72,6 +88,7 @@ pub const AGENTS: &[AgentSpec] = &[
             suffix: ".jsonl",
             wildcard_prefix: true,
         }),
+        native_status: NativeStatusCapabilities::NONE,
     },
     AgentSpec {
         id: "antigravity",
@@ -87,6 +104,9 @@ pub const AGENTS: &[AgentSpec] = &[
             suffix: ".db",
             wildcard_prefix: false,
         }),
+        native_status: NativeStatusCapabilities {
+            osc7501_blocked: true,
+        },
     },
     AgentSpec {
         id: "opencode",
@@ -98,6 +118,7 @@ pub const AGENTS: &[AgentSpec] = &[
         aliases: &[],
         resume_args: &["--session", "{id}"],
         store: None,
+        native_status: NativeStatusCapabilities::NONE,
     },
     AgentSpec {
         id: "cursor",
@@ -109,6 +130,7 @@ pub const AGENTS: &[AgentSpec] = &[
         aliases: &[],
         resume_args: &[],
         store: None,
+        native_status: NativeStatusCapabilities::NONE,
     },
     AgentSpec {
         id: "copilot",
@@ -120,6 +142,7 @@ pub const AGENTS: &[AgentSpec] = &[
         aliases: &["github-copilot-cli", "gh-copilot"],
         resume_args: &[],
         store: None,
+        native_status: NativeStatusCapabilities::NONE,
     },
     AgentSpec {
         id: "droid",
@@ -131,6 +154,7 @@ pub const AGENTS: &[AgentSpec] = &[
         aliases: &[],
         resume_args: &[],
         store: None,
+        native_status: NativeStatusCapabilities::NONE,
     },
     AgentSpec {
         id: "grok",
@@ -146,6 +170,7 @@ pub const AGENTS: &[AgentSpec] = &[
             suffix: "",
             wildcard_prefix: false,
         }),
+        native_status: NativeStatusCapabilities::NONE,
     },
     AgentSpec {
         id: "qwen",
@@ -161,6 +186,7 @@ pub const AGENTS: &[AgentSpec] = &[
             suffix: ".jsonl",
             wildcard_prefix: false,
         }),
+        native_status: NativeStatusCapabilities::NONE,
     },
     AgentSpec {
         id: "amp",
@@ -172,6 +198,7 @@ pub const AGENTS: &[AgentSpec] = &[
         aliases: &[],
         resume_args: &[],
         store: None,
+        native_status: NativeStatusCapabilities::NONE,
     },
     AgentSpec {
         id: "cline",
@@ -183,6 +210,7 @@ pub const AGENTS: &[AgentSpec] = &[
         aliases: &[],
         resume_args: &[],
         store: None,
+        native_status: NativeStatusCapabilities::NONE,
     },
     AgentSpec {
         id: "kimi",
@@ -194,6 +222,7 @@ pub const AGENTS: &[AgentSpec] = &[
         aliases: &["kimi-code"],
         resume_args: &[],
         store: None,
+        native_status: NativeStatusCapabilities::NONE,
     },
     AgentSpec {
         id: "hermes",
@@ -205,6 +234,7 @@ pub const AGENTS: &[AgentSpec] = &[
         aliases: &[],
         resume_args: &["--resume", "{id}"],
         store: None,
+        native_status: NativeStatusCapabilities::NONE,
     },
     AgentSpec {
         id: "crush",
@@ -216,6 +246,7 @@ pub const AGENTS: &[AgentSpec] = &[
         aliases: &[],
         resume_args: &[],
         store: None,
+        native_status: NativeStatusCapabilities::NONE,
     },
     AgentSpec {
         id: "qoder",
@@ -231,6 +262,7 @@ pub const AGENTS: &[AgentSpec] = &[
             suffix: ".jsonl",
             wildcard_prefix: false,
         }),
+        native_status: NativeStatusCapabilities::NONE,
     },
     AgentSpec {
         id: "reasonix",
@@ -242,6 +274,7 @@ pub const AGENTS: &[AgentSpec] = &[
         aliases: &[],
         resume_args: &["--resume", "{id}"],
         store: None,
+        native_status: NativeStatusCapabilities::NONE,
     },
     AgentSpec {
         id: "omp",
@@ -257,6 +290,7 @@ pub const AGENTS: &[AgentSpec] = &[
             suffix: ".jsonl",
             wildcard_prefix: true,
         }),
+        native_status: NativeStatusCapabilities::NONE,
     },
     AgentSpec {
         id: "aider",
@@ -268,8 +302,15 @@ pub const AGENTS: &[AgentSpec] = &[
         aliases: &["aider-chat"],
         resume_args: &[],
         store: None,
+        native_status: NativeStatusCapabilities::NONE,
     },
 ];
+
+/// Returns whether the resolved agent natively emits OSC 7501 `state=blocked`
+/// attention states.
+pub fn native_supports_blocked(raw: &str) -> bool {
+    resolve(raw).is_some_and(|spec| spec.native_status.osc7501_blocked)
+}
 
 /// Resolves a raw agent identifier, executable name, or alias to its canonical `AgentSpec`.
 pub fn resolve(raw: &str) -> Option<&'static AgentSpec> {

@@ -830,6 +830,7 @@ struct Record {
     attention_locked: bool,
     interrupted: bool,
     saw_active_job: bool,
+    pruned: bool,
     terminal_revision: u64,
 }
 
@@ -2131,6 +2132,9 @@ impl State {
             if r.signal.id == id && r.key == raw_key {
                 return false;
             }
+            if !in_sync_batch && new_state != Some("idle") && r.pruned {
+                return false;
+            }
             if !in_sync_batch
                 && incoming_pgid_scoped
                 && r.signal.id != "omg-program-status"
@@ -2166,6 +2170,7 @@ impl State {
             attention_locked,
             interrupted: false,
             saw_active_job: in_child_fg_now,
+            pruned: false,
             terminal_revision,
         });
         self.revision = next_revision;
@@ -2636,6 +2641,7 @@ impl State {
                                     r.owner = None;
                                     r.verified_session = false;
                                     r.saw_active_job = false;
+                                    r.pruned = true;
                                     changed = true;
                                 }
                             }
@@ -2680,6 +2686,7 @@ impl State {
                         && rewrite_signal_state(&mut r.signal, "idle", None)
                     {
                         r.attention_locked = false;
+                        r.pruned = true;
                         changed = true;
                     }
                     retained.push(r);

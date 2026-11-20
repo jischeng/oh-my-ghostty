@@ -6,8 +6,10 @@ use std::io;
 
 pub const FRAME: u8 = b'G';
 pub const SYNC: &str = "omg-agent-sync";
+pub const TAP: &str = "omg-osc26";
 pub const MAX_RECORDS: usize = 64;
 pub const MAX_SNAPSHOT: usize = 2 * 1024 * 1024;
+const TAP_MAX_BYTES: usize = 4096;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Signal {
@@ -31,6 +33,8 @@ pub struct Presentation {
     pub message: String,
     pub background: bool,
     pub conversation: Option<String>,
+    pub task_progress: Option<String>,
+    pub title: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -135,11 +139,14 @@ impl Snapshot {
         changed
     }
 
-    /// Canonical authoritative reduction across Tier 1 (OSC 7501), Tier 2
-    /// (Socket `omgd report` / OSC 3008 Hooks), and Tier 3 (Fallback).
+    /// Canonical authoritative reduction across Tier 1 (OSC 7501 & OSC 26 TAP),
+    /// Tier 2 (Socket `omgd report` / OSC 3008 Hooks), and Tier 3 (Fallback).
     ///
     /// Priority within a tier:
     /// `needsAttention` > foreground `working` > background `working` > `error` > `done` > `idle`.
+    /// When both OSC 7501 and OSC 26 TAP report for the same agent, OSC 7501
+    /// wins on state/attention while OSC 26 enriches metadata (`conversation`,
+    /// `task_progress`, `title`).
     /// Never maps `error`/`failed` to `needsAttention` or `"Waiting for you"`.
     pub fn presentation(&self) -> Option<Presentation> {
         let mut inherited_app: Option<String> = None;
@@ -148,6 +155,15 @@ impl Snapshot {
                 if let Some(raw_app) = field(&sig.metadata, ':', "app") {
                     if let Some(norm) = crate::agents::normalize_id(raw_app) {
                         inherited_app = Some(norm);
+                    }
+                }
+            }
+        }
+        if inherited_app.is_none() {
+            for sig in &self.records {
+                if sig.id == TAP {
+                    if let Some(tap) = parse_tap(&sig.metadata, None) {
+                        inherited_app = Some(tap.agent);
                     }
                 }
             }
@@ -164,16 +180,38 @@ impl Snapshot {
             }
         }
 
-        let mut best_t1: Option<Presentation> = None;
+        let mut best_t1_7501: Option<Presentation> = None;
+        let mut best_t1_tap: Option<Presentation> = None;
+        let mut tap_meta_by_agent: Vec<(String, Option<String>, Option<String>, Option<String>)> =
+            Vec::new();
         let mut best_t2: Option<Presentation> = None;
         let mut best_t3: Option<Presentation> = None;
 
         for signal in &self.records {
+            if signal.id == TAP {
+                if let Some(tap) = parse_tap(&signal.metadata, inherited_app.as_deref()) {
+                    tap_meta_by_agent.retain(|(agent, _, _, _)| agent != &tap.agent);
+                    tap_meta_by_agent.push((
+                        tap.agent.clone(),
+                        tap.session_id.clone(),
+                        tap.task_progress.clone(),
+                        tap.title.clone(),
+                    ));
+                    let item = tap.into_presentation();
+                    if best_t1_tap
+                        .as_ref()
+                        .is_none_or(|prev| presentation_rank(&item) <= presentation_rank(prev))
+                    {
+                        best_t1_tap = Some(item);
+                    }
+                }
+                continue;
+            }
             let Some(item) = parse_presentation(signal, inherited_app.as_deref()) else {
                 continue;
             };
             let slot = match item.tier {
-                Tier::ProgramStatus => &mut best_t1,
+                Tier::ProgramStatus => &mut best_t1_7501,
                 Tier::Hook => &mut best_t2,
                 Tier::Fallback => &mut best_t3,
             };
@@ -185,10 +223,44 @@ impl Snapshot {
             }
         }
 
+        // Enrich OSC 7501 with same-agent TAP metadata (`SessionId`, `TaskProgress`, `Title`).
+        if let Some(p7501) = best_t1_7501.as_mut() {
+            if let Some((_, session_id, task_progress, title)) = tap_meta_by_agent
+                .iter()
+                .find(|(agent, _, _, _)| agent == &p7501.agent)
+            {
+                if p7501.conversation.is_none() {
+                    p7501.conversation = session_id.clone();
+                }
+                if p7501.task_progress.is_none() {
+                    p7501.task_progress = task_progress.clone();
+                }
+                if p7501.title.is_none() {
+                    p7501.title = title.clone();
+                }
+            }
+        }
+
+        // Tier 1 arbitration: same-agent OSC 7501 wins on state/attention over OSC 26 TAP.
+        let best_t1 = match (best_t1_7501, best_t1_tap) {
+            (Some(p7501), Some(ptap)) => {
+                if p7501.agent == ptap.agent
+                    || presentation_rank(&p7501) <= presentation_rank(&ptap)
+                {
+                    Some(p7501)
+                } else {
+                    Some(ptap)
+                }
+            }
+            (Some(p7501), None) => Some(p7501),
+            (None, Some(ptap)) => Some(ptap),
+            (None, None) => None,
+        };
+
         // Strict authority hierarchy: Tier 1 > Tier 2 > Tier 3.
         // Exception: if Tier 1 only reports generic `working` while Tier 2 Hook
         // reports active `needsAttention` on the same agent (for CLIs whose
-        // permission prompt comes via Hook rather than OSC 7501 `blocked`),
+        // permission prompt comes via Hook rather than OSC 7501 `blocked` / TAP),
         // surface the Tier 2 `needsAttention`.
         if let Some(t1) = &best_t1 {
             if t1.state != "idle" {
@@ -255,7 +327,172 @@ fn decode_base64_utf8(raw: &str) -> Option<String> {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TapPayload {
+    pub agent: String,
+    pub state: &'static str,
+    pub attention: Option<&'static str>,
+    pub session_id: Option<String>,
+    pub task_progress: Option<String>,
+    pub title: Option<String>,
+}
+
+impl TapPayload {
+    fn into_presentation(self) -> Presentation {
+        let message = self
+            .title
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| default_message(self.state, self.attention).to_owned());
+        Presentation {
+            tier: Tier::ProgramStatus,
+            agent: self.agent,
+            state: self.state,
+            attention: self.attention,
+            message,
+            background: false,
+            conversation: self.session_id,
+            task_progress: self.task_progress,
+            title: self.title,
+        }
+    }
+}
+
+fn valid_tap_session_id(raw: &str) -> bool {
+    !raw.is_empty()
+        && raw.len() <= 128
+        && !raw.starts_with('-')
+        && raw
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+}
+
+fn is_printable_tap_text(raw: &str, max_bytes: usize) -> bool {
+    !raw.is_empty()
+        && raw.len() <= max_bytes
+        && raw
+            .chars()
+            .all(|c| !c.is_control() && !('\u{007f}'..='\u{009f}').contains(&c))
+}
+
+fn resolve_tap_agent(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > 64 {
+        return None;
+    }
+    if let Some(spec) = crate::agents::resolve(trimmed) {
+        return Some(spec.id.to_owned());
+    }
+    if let Some(spec) = crate::agents::AGENTS
+        .iter()
+        .find(|spec| spec.display_name.eq_ignore_ascii_case(trimmed))
+    {
+        return Some(spec.id.to_owned());
+    }
+    if trimmed.contains(char::is_whitespace) {
+        let hyphenated = trimmed.split_whitespace().collect::<Vec<_>>().join("-");
+        if let Some(spec) = crate::agents::resolve(&hyphenated) {
+            return Some(spec.id.to_owned());
+        }
+    }
+    crate::agents::normalize_id(trimmed)
+}
+
+/// Parses an OSC 26 (Terminal Agent Protocol / TAP) payload with strict bounds
+/// and validation. `ProjectFolder` is intentionally ignored for FS/cwd authority.
+pub(crate) fn parse_tap(metadata: &str, fallback_app: Option<&str>) -> Option<TapPayload> {
+    if metadata.is_empty()
+        || metadata.len() > TAP_MAX_BYTES
+        || !metadata
+            .chars()
+            .all(|c| !c.is_control() && !('\u{007f}'..='\u{009f}').contains(&c))
+    {
+        return None;
+    }
+
+    let mut code_agent: Option<String> = None;
+    let mut saw_code_agent = false;
+    let mut state_and_attention: Option<(&'static str, Option<&'static str>)> = None;
+    let mut session_id: Option<String> = None;
+    let mut task_progress: Option<String> = None;
+    let mut title: Option<String> = None;
+
+    for part in metadata.split(';') {
+        let trimmed_part = part.trim();
+        if trimmed_part.is_empty() {
+            continue;
+        }
+        let (raw_key, raw_val) = trimmed_part.split_once('=')?;
+        let key = raw_key.trim();
+        let val = raw_val.trim();
+        if key.is_empty() || key.len() > 32 {
+            return None;
+        }
+        if key.eq_ignore_ascii_case("CodeAgent") {
+            saw_code_agent = true;
+            code_agent = Some(resolve_tap_agent(val)?);
+        } else if key.eq_ignore_ascii_case("Status") {
+            let mapped = match val.to_ascii_lowercase().as_str() {
+                "running" => ("working", None),
+                "awaiting-input" => ("needsAttention", Some("question")),
+                "awaiting-approval" => ("needsAttention", Some("permission")),
+                "idle" => ("idle", None),
+                "error" => ("error", None),
+                "done" | "completed" => ("done", None),
+                _ => return None,
+            };
+            state_and_attention = Some(mapped);
+        } else if key.eq_ignore_ascii_case("SessionId") {
+            if val.is_empty() {
+                session_id = None;
+            } else if valid_tap_session_id(val) {
+                session_id = Some(val.to_owned());
+            } else {
+                return None;
+            }
+        } else if key.eq_ignore_ascii_case("TaskProgress") {
+            if val.is_empty() {
+                task_progress = None;
+            } else if is_printable_tap_text(val, 32) {
+                task_progress = Some(val.to_owned());
+            } else {
+                return None;
+            }
+        } else if key.eq_ignore_ascii_case("Title") {
+            if val.is_empty() {
+                title = None;
+            } else if is_printable_tap_text(val, 256) {
+                title = Some(val.to_owned());
+            } else {
+                return None;
+            }
+        } else if key.eq_ignore_ascii_case("ProjectFolder") {
+            // Untrusted terminal output must never establish cwd or FS authority.
+            continue;
+        }
+    }
+
+    let (state, attention) = state_and_attention?;
+    let agent = if saw_code_agent {
+        code_agent?
+    } else {
+        fallback_app.and_then(resolve_tap_agent)?
+    };
+
+    Some(TapPayload {
+        agent,
+        state,
+        attention,
+        session_id,
+        task_progress,
+        title,
+    })
+}
+
 fn parse_presentation(signal: &Signal, fallback_app: Option<&str>) -> Option<Presentation> {
+    if signal.id == TAP {
+        return parse_tap(&signal.metadata, fallback_app).map(TapPayload::into_presentation);
+    }
     let native = signal.id == "omg-program-status";
     if native {
         let agent = field(&signal.metadata, ':', "app")
@@ -291,6 +528,8 @@ fn parse_presentation(signal: &Signal, fallback_app: Option<&str>) -> Option<Pre
             message,
             background,
             conversation: None,
+            task_progress: None,
+            title: None,
         });
     }
     if !signal.id.starts_with("omg-agent-") || signal.id == SYNC {
@@ -334,6 +573,8 @@ fn parse_presentation(signal: &Signal, fallback_app: Option<&str>) -> Option<Pre
         message,
         background,
         conversation,
+        task_progress: None,
+        title: None,
     })
 }
 
@@ -381,6 +622,49 @@ fn rewrite_signal_state(
         signal.metadata = rewritten.join(":");
         return true;
     }
+    if signal.id == TAP {
+        let target_tap_status = match target_state {
+            "working" => "running",
+            "idle" => "idle",
+            "error" => "error",
+            "done" => "done",
+            other => other,
+        };
+        if signal_effective_state(signal) == Some(target_state) && new_message.is_none() {
+            return false;
+        }
+        let mut rewritten = Vec::new();
+        let mut replaced_status = false;
+        for part in signal.metadata.split(';') {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Some((key, _)) = trimmed.split_once('=') else {
+                rewritten.push(trimmed.to_owned());
+                continue;
+            };
+            if key.trim().eq_ignore_ascii_case("Status") {
+                rewritten.push(format!("Status={target_tap_status}"));
+                replaced_status = true;
+            } else if key.trim().eq_ignore_ascii_case("TaskProgress") && target_tap_status == "idle"
+            {
+                // Drop stale progress when acknowledging to idle.
+            } else if key.trim().eq_ignore_ascii_case("Title") && new_message.is_some() {
+                // Replaced below with new_message.
+            } else {
+                rewritten.push(trimmed.to_owned());
+            }
+        }
+        if !replaced_status {
+            rewritten.push(format!("Status={target_tap_status}"));
+        }
+        if let Some(msg) = new_message {
+            rewritten.push(format!("Title={msg}"));
+        }
+        signal.metadata = rewritten.join(";");
+        return true;
+    }
     if signal.id.starts_with("omg-agent-") && signal.id != SYNC {
         if field(&signal.metadata, ';', "omg_state") == Some(target_state) && new_message.is_none()
         {
@@ -417,6 +701,12 @@ fn acknowledge_signal(signal: &mut Signal) -> bool {
         }
         return rewrite_signal_state(signal, "idle", None);
     }
+    if signal.id == TAP {
+        if !matches!(signal_effective_state(signal), Some("done" | "error")) {
+            return false;
+        }
+        return rewrite_signal_state(signal, "idle", None);
+    }
     if signal.id.starts_with("omg-agent-") && signal.id != SYNC {
         if !matches!(
             field(&signal.metadata, ';', "omg_state"),
@@ -439,6 +729,8 @@ fn signal_effective_state(signal: &Signal) -> Option<&'static str> {
             "idle" => Some("idle"),
             _ => None,
         }
+    } else if signal.id == TAP {
+        parse_tap(&signal.metadata, Some("unknown")).map(|t| t.state)
     } else if signal.id.starts_with("omg-agent-") && signal.id != SYNC {
         match field(&signal.metadata, ';', "omg_state")? {
             "working" | "processing" | "active" => Some("working"),
@@ -689,7 +981,9 @@ pub(crate) fn field<'a>(metadata: &'a str, separator: char, key: &str) -> Option
 }
 
 fn valid(signal: &Signal) -> bool {
-    (signal.id.starts_with("omg-agent-") && signal.id != SYNC || signal.id == "omg-program-status")
+    (signal.id.starts_with("omg-agent-") && signal.id != SYNC
+        || signal.id == "omg-program-status"
+        || signal.id == TAP)
         && !signal.id.is_empty()
         && signal.id.len() <= 64
         && signal
@@ -1189,6 +1483,45 @@ fn inherit_native_app(records: &[Record], key: &str, metadata: &str) -> String {
     metadata.to_owned()
 }
 
+fn inherit_tap_agent(records: &[Record], metadata: &str) -> String {
+    let has_code_agent = metadata.split(';').any(|part| {
+        part.trim().split_once('=').is_some_and(|(k, v)| {
+            k.trim().eq_ignore_ascii_case("CodeAgent") && !v.trim().is_empty()
+        })
+    });
+    if has_code_agent {
+        return metadata.to_owned();
+    }
+    let mut unique: Option<String> = None;
+    for r in records {
+        let app = if r.signal.id == "omg-program-status" {
+            field(&r.signal.metadata, ':', "app").and_then(crate::agents::normalize_id)
+        } else if r.signal.id == TAP {
+            parse_tap(&r.signal.metadata, None).map(|t| t.agent)
+        } else if r.signal.id.starts_with("omg-agent-") {
+            field(&r.signal.metadata, ';', "omg_agent").and_then(crate::agents::normalize_id)
+        } else {
+            None
+        };
+        if let Some(app) = app {
+            match &unique {
+                None => unique = Some(app),
+                Some(prev) if prev == &app => {}
+                Some(_) => {
+                    unique = None;
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(app) = unique {
+        if metadata.len() + 11 + app.len() <= TAP_MAX_BYTES {
+            return format!("{metadata};CodeAgent={app}");
+        }
+    }
+    metadata.to_owned()
+}
+
 impl State {
     pub fn revision(&self) -> u64 {
         self.revision
@@ -1405,18 +1738,25 @@ impl State {
         }
 
         let native = id == "omg-program-status";
+        let tap = id == TAP;
+        let tier1 = native || tap;
         let in_sync_batch = self.pending.is_some();
-        let raw_key = if native {
-            field(metadata, ':', "id").unwrap_or("").to_owned()
-        } else if let Some(ctx) = field(metadata, ';', "omg_context").filter(|s| !s.is_empty()) {
-            format!("{id}#{ctx}")
-        } else {
-            id.to_owned()
-        };
 
         let clear = native && field(metadata, ':', "state") == Some("clear");
         if ended || clear {
-            let ended_socket_agent = (!native && explicit_verified_owner.is_some())
+            let raw_key = if native {
+                field(metadata, ':', "id").unwrap_or("").to_owned()
+            } else if tap {
+                parse_tap(metadata, None)
+                    .map(|t| t.agent)
+                    .unwrap_or_default()
+            } else if let Some(ctx) = field(metadata, ';', "omg_context").filter(|s| !s.is_empty())
+            {
+                format!("{id}#{ctx}")
+            } else {
+                id.to_owned()
+            };
+            let ended_socket_agent = (!tier1 && explicit_verified_owner.is_some())
                 .then(|| id.strip_prefix("omg-agent-"))
                 .flatten()
                 .map(|rest| {
@@ -1428,7 +1768,7 @@ impl State {
             let records = self.pending.as_mut().unwrap_or(&mut self.records);
             let before = records.len();
             records.retain(|r| {
-                if native {
+                if native || tap {
                     r.signal.id != id
                         || !(raw_key.is_empty()
                             || r.key == raw_key
@@ -1470,11 +1810,27 @@ impl State {
             return;
         }
 
-        let effective_metadata = if native {
+        let (effective_metadata, raw_key, parsed_tap) = if native {
+            let key = field(metadata, ':', "id").unwrap_or("").to_owned();
             let target_records = self.pending.as_deref().unwrap_or(&self.records);
-            inherit_native_app(target_records, &raw_key, metadata)
+            let meta = inherit_native_app(target_records, &key, metadata);
+            (meta, key, None)
+        } else if tap {
+            let target_records = self.pending.as_deref().unwrap_or(&self.records);
+            let meta = inherit_tap_agent(target_records, metadata);
+            let Some(parsed) = parse_tap(&meta, None) else {
+                return;
+            };
+            let key = parsed.agent.clone();
+            (meta, key, Some(parsed))
         } else {
-            metadata.to_owned()
+            let key =
+                if let Some(ctx) = field(metadata, ';', "omg_context").filter(|s| !s.is_empty()) {
+                    format!("{id}#{ctx}")
+                } else {
+                    id.to_owned()
+                };
+            (metadata.to_owned(), key, None)
         };
 
         let signal = Signal {
@@ -1492,7 +1848,7 @@ impl State {
         {
             return;
         }
-        if !native {
+        if !tier1 {
             let state = field(&effective_metadata, ';', "omg_state");
             if field(&effective_metadata, ';', "type") != Some("app")
                 || field(&effective_metadata, ';', "omg_agent").is_none()
@@ -1520,9 +1876,11 @@ impl State {
 
         let new_state = signal_effective_state(&signal);
         let is_prompt_event =
-            !native && field(&effective_metadata, ';', "omg_event") == Some("prompt");
+            !tier1 && field(&effective_metadata, ';', "omg_event") == Some("prompt");
         let is_background = if native {
             field(&effective_metadata, ':', "phase") == Some("background")
+        } else if tap {
+            false
         } else {
             field(&effective_metadata, ';', "omg_phase") == Some("background")
         };
@@ -1543,12 +1901,12 @@ impl State {
 
         let records = self.pending.as_mut().unwrap_or(&mut self.records);
 
-        let is_root_hook = !native && field(&effective_metadata, ';', "omg_context").is_none();
-        let hook_agent = (!native)
+        let is_root_hook = !tier1 && field(&effective_metadata, ';', "omg_context").is_none();
+        let hook_agent = (!tier1)
             .then(|| field(&effective_metadata, ';', "omg_agent"))
             .flatten()
             .and_then(crate::agents::normalize_id);
-        let incoming_pgid_scoped = !native
+        let incoming_pgid_scoped = !tier1
             && (explicit_verified_owner.is_some_and(|(_, g)| g)
                 || field(&effective_metadata, ';', "omg_liveness") == Some("pgid"));
 
@@ -1562,6 +1920,7 @@ impl State {
                     || (incoming_pgid_scoped
                         && is_root_hook
                         && r.signal.id != "omg-program-status"
+                        && r.signal.id != TAP
                         && field(&r.signal.metadata, ';', "omg_context").is_none()
                         && field(&r.signal.metadata, ';', "omg_liveness") == Some("pgid")
                         && hook_agent.is_some()
@@ -1570,7 +1929,7 @@ impl State {
                             == hook_agent)
             }) {
                 if signal_effective_state(&existing.signal) == Some("needsAttention")
-                    && ((!native && existing.attention_locked && !is_prompt_event) || is_background)
+                    && ((!tier1 && existing.attention_locked && !is_prompt_event) || is_background)
                 {
                     return;
                 }
@@ -1584,6 +1943,8 @@ impl State {
         if !in_sync_batch && new_state == Some("working") {
             let incoming_agent = if native {
                 field(&effective_metadata, ':', "app").and_then(crate::agents::normalize_id)
+            } else if let Some(ref parsed) = parsed_tap {
+                Some(parsed.agent.clone())
             } else {
                 field(&effective_metadata, ';', "omg_agent").and_then(crate::agents::normalize_id)
             };
@@ -1591,18 +1952,20 @@ impl State {
                 let should_supersede = if !is_background {
                     true
                 } else {
-                    let r_native = r.signal.id == "omg-program-status";
+                    let r_tier1 = r.signal.id == "omg-program-status" || r.signal.id == TAP;
                     let same_agent = incoming_agent.as_deref().is_some_and(|inc| {
-                        let existing = if r_native {
+                        let existing = if r.signal.id == "omg-program-status" {
                             field(&r.signal.metadata, ':', "app")
                                 .and_then(crate::agents::normalize_id)
+                        } else if r.signal.id == TAP {
+                            parse_tap(&r.signal.metadata, None).map(|t| t.agent)
                         } else {
                             field(&r.signal.metadata, ';', "omg_agent")
                                 .and_then(crate::agents::normalize_id)
                         };
                         existing.as_deref() == Some(inc)
                     });
-                    r_native != native || same_agent
+                    r_tier1 != tier1 || same_agent
                 };
                 if should_supersede && acknowledge_signal(&mut r.signal) {
                     r.terminal_revision = 0;
@@ -1611,7 +1974,7 @@ impl State {
             }
         }
 
-        let remote = if native {
+        let remote = if tier1 {
             self_remote
         } else {
             field(&effective_metadata, ';', "omg_scope") == Some("remote")
@@ -1620,10 +1983,7 @@ impl State {
             .iter()
             .find(|r| r.signal.id == id && r.key == raw_key)
             .and_then(|r| r.owner);
-        if native
-            && !(local_flag && remote)
-            && field(&effective_metadata, ':', "state") == Some("idle")
-        {
+        if tier1 && !(local_flag && remote) && new_state == Some("idle") {
             if let Some((old_pid, true)) = existing_owner {
                 if foreground != Some(old_pid) && unsafe { libc::kill(-old_pid, 0) != 0 } {
                     records.retain(|r| r.signal.id != id || r.key != raw_key);
@@ -1638,7 +1998,7 @@ impl State {
             } else {
                 Some(explicit)
             }
-        } else if !native && !(local_flag && remote) {
+        } else if !tier1 && !(local_flag && remote) {
             let pid = id
                 .rsplit('-')
                 .next()
@@ -1649,8 +2009,8 @@ impl State {
                 (Some(pid), Some("pgid")) => Some((pid, true)),
                 _ => foreground.filter(|p| *p > 1).map(|p| (p, true)),
             }
-        } else if native && !(local_flag && remote) {
-            match (field(&effective_metadata, ':', "state"), existing_owner) {
+        } else if tier1 && !(local_flag && remote) {
+            match (new_state, existing_owner) {
                 (Some("idle"), Some((old_pid, true))) if foreground != Some(old_pid) => {
                     Some((old_pid, true))
                 }
@@ -1668,7 +2028,7 @@ impl State {
             false
         };
 
-        let attention_locked = !native && new_state == Some("needsAttention");
+        let attention_locked = !tier1 && new_state == Some("needsAttention");
 
         records.retain(|r| {
             if r.signal.id == id && r.key == raw_key {
@@ -1678,6 +2038,7 @@ impl State {
                 && incoming_pgid_scoped
                 && is_root_hook
                 && r.signal.id != "omg-program-status"
+                && r.signal.id != TAP
                 && r.remote == remote
                 && field(&r.signal.metadata, ';', "omg_context").is_none()
                 && field(&r.signal.metadata, ';', "omg_liveness") == Some("pgid")
@@ -3106,5 +3467,164 @@ mod tests {
             rx2.activity().snapshot().presentation().unwrap().state,
             "working"
         );
+    }
+
+    #[test]
+    fn osc26_tap_parsing_bounds_and_validation() {
+        // Valid TAP payload with all fields (ProjectFolder must be ignored for cwd authority).
+        let parsed = parse_tap(
+            "CodeAgent=Claude Code;SessionId=sess_01.a-b;Status=running;TaskProgress=45%;Title=Refactor parser;ProjectFolder=/etc/shadow",
+            None,
+        )
+        .unwrap();
+        assert_eq!(parsed.agent, "claude");
+        assert_eq!(parsed.state, "working");
+        assert_eq!(parsed.attention, None);
+        assert_eq!(parsed.session_id.as_deref(), Some("sess_01.a-b"));
+        assert_eq!(parsed.task_progress.as_deref(), Some("45%"));
+        assert_eq!(parsed.title.as_deref(), Some("Refactor parser"));
+
+        // Status mappings: awaiting-input -> question, awaiting-approval -> permission, idle, error.
+        let awaiting_input = parse_tap("CodeAgent=Codex;Status=awaiting-input", None).unwrap();
+        assert_eq!(awaiting_input.agent, "codex");
+        assert_eq!(awaiting_input.state, "needsAttention");
+        assert_eq!(awaiting_input.attention, Some("question"));
+
+        let awaiting_approval = parse_tap("CodeAgent=agy;Status=awaiting-approval", None).unwrap();
+        assert_eq!(awaiting_approval.agent, "antigravity");
+        assert_eq!(awaiting_approval.state, "needsAttention");
+        assert_eq!(awaiting_approval.attention, Some("permission"));
+
+        assert_eq!(
+            parse_tap("CodeAgent=Cursor Agent;Status=idle", None)
+                .unwrap()
+                .state,
+            "idle"
+        );
+        assert_eq!(
+            parse_tap("CodeAgent=OpenCode;Status=error", None)
+                .unwrap()
+                .state,
+            "error"
+        );
+
+        // Strict SessionId validation: charset [A-Za-z0-9._-], no leading '-', len <= 128.
+        assert!(parse_tap("CodeAgent=Claude;Status=running;SessionId=-flag", None).is_none());
+        assert!(parse_tap("CodeAgent=Claude;Status=running;SessionId=../escape", None).is_none());
+        assert!(parse_tap("CodeAgent=Claude;Status=running;SessionId=bad id", None).is_none());
+        let long_id = "a".repeat(129);
+        assert!(parse_tap(
+            &format!("CodeAgent=Claude;Status=running;SessionId={long_id}"),
+            None
+        )
+        .is_none());
+
+        // Bounds & control characters & unknown status.
+        let huge = format!("CodeAgent=Claude;Status=running;Title={}", "x".repeat(4100));
+        assert!(parse_tap(&huge, None).is_none());
+        assert!(parse_tap("CodeAgent=Claude;Status=running;Title=bad\x07bell", None).is_none());
+        assert!(parse_tap("CodeAgent=Claude;Status=bogus", None).is_none());
+        assert!(parse_tap("CodeAgent=Claude", None).is_none());
+    }
+
+    #[test]
+    fn osc26_tap_tier1_arbitration_with_osc7501_and_tier2_hooks() {
+        // 1) Same-agent OSC 7501 + OSC 26: OSC 7501 wins on state/attention,
+        //    OSC 26 enriches metadata (SessionId -> conversation, TaskProgress, Title).
+        let mut vt = Vt::new(80, 24).unwrap();
+        vt.write(b"\x1b]26;CodeAgent=Claude;SessionId=conv-42;Status=awaiting-approval;TaskProgress=60%;Title=Review diff;ProjectFolder=/tmp/untrusted\x07");
+        vt.write(b"\x1b]7501;state=working:app=claude\x07");
+        let snap = vt.activity().snapshot();
+        assert!(snap.remote_cwd.is_none());
+        let pres = snap.presentation().unwrap();
+        assert_eq!(pres.tier, Tier::ProgramStatus);
+        assert_eq!(pres.agent, "claude");
+        assert_eq!(pres.state, "working");
+        assert_eq!(pres.attention, None);
+        assert_eq!(pres.conversation.as_deref(), Some("conv-42"));
+        assert_eq!(pres.task_progress.as_deref(), Some("60%"));
+        assert_eq!(pres.title.as_deref(), Some("Review diff"));
+
+        // 2) TAP-only agent drives Tier 1 and respects Tier 2 needsAttention
+        //    surfacing over generic Tier 1 working on the same agent.
+        let mut tap_only = Vt::new(80, 24).unwrap();
+        tap_only.write(
+            b"\x1b]26;CodeAgent=Codex;SessionId=cx-7;Status=running;Title=Running tests\x07",
+        );
+        let p1 = tap_only.activity().presentation().unwrap();
+        assert_eq!(p1.tier, Tier::ProgramStatus);
+        assert_eq!(p1.agent, "codex");
+        assert_eq!(p1.state, "working");
+        assert_eq!(p1.conversation.as_deref(), Some("cx-7"));
+        assert_eq!(p1.message, "Running tests");
+
+        // Tier 2 Hook `needsAttention` on same agent surfaces over generic Tier 1 `working`.
+        tap_only.write(b"\x1b]3008;start=omg-agent-codex-101;type=app;omg_agent=codex;omg_state=needsAttention;omg_attention=permission\x07");
+        let p2 = tap_only.activity().presentation().unwrap();
+        assert_eq!(p2.tier, Tier::Hook);
+        assert_eq!(p2.state, "needsAttention");
+        assert_eq!(p2.attention, Some("permission"));
+
+        // Tier 1 TAP `awaiting-input` takes back authority over Tier 2.
+        tap_only.write(b"\x1b]26;CodeAgent=Codex;SessionId=cx-7;Status=awaiting-input\x07");
+        let p3 = tap_only.activity().presentation().unwrap();
+        assert_eq!(p3.tier, Tier::ProgramStatus);
+        assert_eq!(p3.state, "needsAttention");
+        assert_eq!(p3.attention, Some("question"));
+
+        // Tier 1 TAP `error` is acknowledged to `idle`.
+        tap_only.write(b"\x1b]26;CodeAgent=Codex;Status=error\x07");
+        assert_eq!(tap_only.activity().presentation().unwrap().state, "error");
+        let mut ack_snap = tap_only.activity().snapshot();
+        assert!(ack_snap.acknowledge());
+        assert_eq!(ack_snap.presentation().unwrap().state, "idle");
+    }
+
+    #[test]
+    fn osc26_tap_vt_bounds_and_sync_snapshot_replay() {
+        let mut source = Vt::new(80, 24).unwrap();
+        // Oversized OSC 26 (> 4096 bytes) and non-26 unknown OSCs must be ignored.
+        let oversized = format!(
+            "\x1b]26;CodeAgent=Claude;Status=running;Title={}\x07",
+            "z".repeat(4200)
+        );
+        source.write(oversized.as_bytes());
+        source.write(b"\x1b]7400;status=busy\x07");
+        source.write(b"\x1b]88;cmd=claude\x07");
+        assert!(source.activity().presentation().is_none());
+
+        // Valid OSC 26 syncs via `omg-agent-sync` and survives Snapshot JSON round-trip.
+        source.write(b"\x1b]26;CodeAgent=Claude;SessionId=sess_sync_1;Status=awaiting-approval;TaskProgress=80%;Title=Approve tool\x07");
+        let snap = source.activity().snapshot();
+        let json = serde_json::to_vec(&snap).unwrap();
+        let decoded = Snapshot::decode(&json).unwrap();
+        let decoded_pres = decoded.presentation().unwrap();
+        assert_eq!(decoded_pres.agent, "claude");
+        assert_eq!(decoded_pres.state, "needsAttention");
+        assert_eq!(decoded_pres.attention, Some("permission"));
+        assert_eq!(decoded_pres.conversation.as_deref(), Some("sess_sync_1"));
+        assert_eq!(decoded_pres.task_progress.as_deref(), Some("80%"));
+
+        // Replay over inline `omg-agent-sync` into a fresh VT receiver.
+        let sync_bytes = snap.inline_bytes_with_mode("restore");
+        let mut receiver = Vt::new(80, 24).unwrap();
+        receiver.write(&sync_bytes);
+        let replayed = receiver.activity().presentation().unwrap();
+        assert_eq!(replayed.tier, Tier::ProgramStatus);
+        assert_eq!(replayed.agent, "claude");
+        assert_eq!(replayed.state, "needsAttention");
+        assert_eq!(replayed.attention, Some("permission"));
+        assert_eq!(replayed.conversation.as_deref(), Some("sess_sync_1"));
+        assert_eq!(replayed.title.as_deref(), Some("Approve tool"));
+
+        // Also verify `omg_vt_restore` preserves the unknown_sequence callback.
+        let vt_snapshot = source.snapshot().unwrap();
+        let mut restored = Vt::new(80, 24).unwrap();
+        restored.restore(&vt_snapshot).unwrap();
+        restored.write(b"\x1b]26;CodeAgent=Codex;Status=running;SessionId=after-restore\x07");
+        let after = restored.activity().presentation().unwrap();
+        assert_eq!(after.agent, "codex");
+        assert_eq!(after.state, "working");
+        assert_eq!(after.conversation.as_deref(), Some("after-restore"));
     }
 }

@@ -117,6 +117,11 @@ pub const StreamHandler = struct {
     /// Coalesces non-resize TUI two-phase blank wipes (`Ctrl+O`) inside DEC 2026.
     tui_wipe_hold: TuiWipeHoldState = .{},
 
+    /// Maximum byte budget for unknown OSC sequences forwarded via `osc_unknown`
+    /// (used for OSC 26 / TAP). Sequences exceeding this limit arrive with
+    /// `truncated = true` and are dropped.
+    pub const osc_unknown_max_bytes: usize = 4096;
+
     /// Maximum duration an unbroken active DEC 2026 frame can remain frozen
     /// while PTY output continues arriving.
     pub const sync_active_max_ms: u64 = 15_000;
@@ -517,11 +522,12 @@ pub const StreamHandler = struct {
                 }),
             },
 
+            .osc_unknown => try self.oscUnknown(value),
+
             // Unimplemented
             .title_push,
             .title_pop,
             .kitty_dnd,
-            .osc_unknown,
             => {},
         }
     }
@@ -1699,6 +1705,31 @@ pub const StreamHandler = struct {
         return true;
     }
 
+    /// Extract a bounded OSC 26 (Terminal Agent Protocol / TAP) payload from
+    /// an unknown OSC sequence. Truncated, oversized, empty, or non-OSC-26
+    /// sequences are dropped.
+    fn osc26Payload(unknown: terminal.osc.Command.Unknown) ?[]const u8 {
+        if (unknown.truncated) return null;
+        if (unknown.content.len > osc_unknown_max_bytes) return null;
+        if (!std.mem.startsWith(u8, unknown.content, "26;")) return null;
+        const payload = unknown.content["26;".len..];
+        if (payload.len == 0) return null;
+        return payload;
+    }
+
+    fn oscUnknown(
+        self: *StreamHandler,
+        unknown: terminal.osc.Command.Unknown,
+    ) !void {
+        if (osc26Payload(unknown)) |payload| {
+            try self.contextSignal(.{
+                .action = .start,
+                .id = "omg-osc26",
+                .metadata = payload,
+            });
+        }
+    }
+
     fn contextSignal(
         self: *StreamHandler,
         signal: terminal.osc.context_signal.Command,
@@ -1706,7 +1737,10 @@ pub const StreamHandler = struct {
         if (self.queueProgramStatusQueryReply(signal)) return;
         switch (signal.action) {
             .start => {
-                if (std.mem.indexOf(u8, signal.metadata, "type=remote") != null) {
+                if (!std.mem.eql(u8, signal.id, "omg-osc26") and
+                    !std.mem.eql(u8, signal.id, "omg-program-status") and
+                    std.mem.indexOf(u8, signal.metadata, "type=remote") != null)
+                {
                     self.in_remote_ssh_context = true;
                 }
             },
@@ -3950,4 +3984,126 @@ test "tmux active_window notification is handled" {
     try handler.dcsCommand(&pane);
     try testing.expect(!handler.termio_messaged);
     try testing.expect(mailbox.spsc.queue.pop(global.io()) == null);
+}
+
+test "StreamHandler: osc26Payload filters OSC 26, truncation, and unknown OSCs" {
+    const testing = std.testing;
+
+    try testing.expectEqualStrings(
+        "CodeAgent=Claude;Status=running",
+        StreamHandler.osc26Payload(.{
+            .content = "26;CodeAgent=Claude;Status=running",
+            .truncated = false,
+            .terminator = .bel,
+        }).?,
+    );
+
+    // Truncated OSC 26 payloads must be dropped.
+    try testing.expect(StreamHandler.osc26Payload(.{
+        .content = "26;CodeAgent=Claude;Status=running",
+        .truncated = true,
+        .terminator = .bel,
+    }) == null);
+
+    // Empty OSC 26 payloads must be dropped.
+    try testing.expect(StreamHandler.osc26Payload(.{
+        .content = "26;",
+        .truncated = false,
+        .terminator = .bel,
+    }) == null);
+
+    // Non-matching unknown OSC sequences (including prefix traps) are ignored.
+    try testing.expect(StreamHandler.osc26Payload(.{
+        .content = "260;CodeAgent=Claude;Status=running",
+        .truncated = false,
+        .terminator = .bel,
+    }) == null);
+    try testing.expect(StreamHandler.osc26Payload(.{
+        .content = "88;cmd=claude",
+        .truncated = false,
+        .terminator = .st,
+    }) == null);
+    try testing.expect(StreamHandler.osc26Payload(.{
+        .content = "7400;status=busy",
+        .truncated = false,
+        .terminator = .bel,
+    }) == null);
+}
+
+test "StreamHandler: terminal.Stream osc_unknown_max_bytes forwards OSC 26 and drops oversized/other" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const Recorder = struct {
+        forwarded: std.ArrayList([]u8) = .empty,
+        alloc: Allocator,
+
+        pub fn deinit(self: *@This()) void {
+            for (self.forwarded.items) |item| self.alloc.free(item);
+            self.forwarded.deinit(self.alloc);
+        }
+
+        pub fn vt(
+            self: *@This(),
+            comptime action: terminal.StreamAction.Tag,
+            value: terminal.StreamAction.Value(action),
+        ) !void {
+            switch (action) {
+                .osc_unknown => {
+                    if (StreamHandler.osc26Payload(value)) |payload| {
+                        try self.forwarded.append(self.alloc, try self.alloc.dupe(u8, payload));
+                    }
+                },
+                else => {},
+            }
+        }
+    };
+
+    var stream: terminal.Stream(Recorder) = .init(.{
+        .allocator = alloc,
+        .handler = .{ .alloc = alloc },
+        .osc_unknown_max_bytes = StreamHandler.osc_unknown_max_bytes,
+    });
+    defer stream.deinit();
+
+    // Valid BEL and ST terminated OSC 26 sequences are forwarded.
+    stream.nextSlice("\x1b]26;CodeAgent=Claude;Status=running;SessionId=sess_1\x07");
+    stream.nextSlice("\x1b]26;CodeAgent=Codex;Status=idle\x1b\\");
+
+    // Non-OSC-26 unknown sequence is ignored.
+    stream.nextSlice("\x1b]7400;status=busy\x07");
+
+    // Oversized (> 4096 bytes) OSC 26 sequence is marked truncated and dropped.
+    const oversized_len = StreamHandler.osc_unknown_max_bytes + 32;
+    const oversized = try alloc.alloc(u8, oversized_len);
+    defer alloc.free(oversized);
+    @memset(oversized, 'a');
+    stream.nextSlice("\x1b]26;CodeAgent=Claude;Status=running;Title=");
+    stream.nextSlice(oversized);
+    stream.nextSlice("\x07");
+
+    try testing.expectEqual(@as(usize, 2), stream.handler.forwarded.items.len);
+    try testing.expectEqualStrings(
+        "CodeAgent=Claude;Status=running;SessionId=sess_1",
+        stream.handler.forwarded.items[0],
+    );
+    try testing.expectEqualStrings(
+        "CodeAgent=Codex;Status=idle",
+        stream.handler.forwarded.items[1],
+    );
+
+    // StreamHandler.vt(.osc_unknown, ...) ignores truncated and non-26 payloads
+    // without dispatching to surface_mailbox.
+    var handler: StreamHandler = undefined;
+    handler.surface_mailbox = undefined;
+    try handler.vt(.osc_unknown, .{
+        .content = "26;CodeAgent=Claude;Status=running",
+        .truncated = true,
+        .terminator = .bel,
+    });
+    try handler.vt(.osc_unknown, .{
+        .content = "7400;status=busy",
+        .truncated = false,
+        .terminator = .bel,
+    });
 }

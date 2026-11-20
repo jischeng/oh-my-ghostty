@@ -1668,7 +1668,7 @@ the pane's active Agent); this does not authorize commands, infer a conversation
 ID, or inspect a shared server's TTY. Multi-record status snapshots aggregate by
 strict priority (`needsAttention` > foreground `working` > background `working`
 > `error` > `done` > `idle`) instead of last-record order. Authority follows a
-strict three-tier hierarchy: Tier 1 (`OSC 7501`) > Tier 2 (`OMG_RUNTIME_BIN
+strict three-tier hierarchy: Tier 1 (`OSC 7501` and `OSC 26` TAP) > Tier 2 (`OMG_RUNTIME_BIN
 report` socket / `OSC 3008` Hooks) > Tier 3 (title/screen detector fallback,
 tagged `omg_tier=fallback`). When Tier 1 reports generic `working` while Tier 2
 reports an explicit `needsAttention` prompt for the same Agent, Tier 2
@@ -1714,6 +1714,38 @@ exact-source-digest compatibility entry in the runtime builder. Bidirectional
 old/new VT snapshot tests cover text, colors, alternate screens, split UTF-8,
 CSI, and partial OSC 7501. Unlisted source digests still receive a new epoch;
 the pinned-session compatibility guard is unchanged.
+
+#### OSC 26 (Terminal Agent Protocol / TAP)
+
+OMG also supports **OSC 26 (TAP)** as a **Tier 1 peer** alongside OSC 7501,
+routed with zero `osc.zig` / `libghostty-vt` ABI churn through Ghostty's
+`osc_unknown` (`osc_unknown_max_bytes = 4096`) and
+`GHOSTTY_TERMINAL_OPT_UNKNOWN_SEQUENCE` hooks. Matching `"26;"` payloads are
+forwarded over the existing per-Surface context bridge as `omg-osc26` (and
+synced across detach/SSH reconnects via `omg-agent-sync` snapshots in
+`session-runtime` / `omgd`, while live non-query OSC 26 sequences pass through
+verbatim to attached viewers).
+
+- **Fields & Status Mapping:** Parses `CodeAgent`, `SessionId`, `Status`,
+  `TaskProgress`, `Title`, and `ProjectFolder` (`CodeAgent` resolves via OMG's
+  `SupportedAgent` / `agents.rs` aliases). `Status` maps `running` → `working`,
+  `awaiting-input` → `needsAttention` (`question`), `awaiting-approval` →
+  `needsAttention` (`permission`), `idle` → `idle`, `error` → `error`, and
+  `done`/`completed` → `done`.
+- **Tier 1 Arbitration:**
+  - *Same-agent (OSC 7501 + OSC 26):* **OSC 7501 wins on state and attention**;
+    OSC 26 enriches metadata (`SessionId` → `conversation`, `TaskProgress`,
+    `Title`).
+  - *TAP-only agents (no OSC 7501):* OSC 26 drives Tier 1 state directly under
+    the canonical **Tier 1 > Tier 2 > Tier 3** hierarchy, including Tier 2
+    `needsAttention` surfacing over generic Tier 1 `working` on the same Agent,
+    and terminal-state acknowledgement (`done`/`error` → `idle`).
+- **Validation & Security Boundaries:** Terminal output is never trusted
+  authority. Payloads are bounded to `<= 4096` UTF-8 bytes (truncated sequences
+  and control characters are dropped); `SessionId` must match
+  `[A-Za-z0-9._-]` with length `<= 128` and no leading `-`; `ProjectFolder` is
+  explicitly ignored for filesystem or working-directory (`cwd`) authority;
+  local panes retain foreground process-group (FG PGID) liveness checks.
 
 Managed inline SSH viewers also publish `cwd` when attaching or changing terminal
 input modes. Updates for the pane's live runtime connection ID are metadata, not

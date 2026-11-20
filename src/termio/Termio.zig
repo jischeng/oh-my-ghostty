@@ -352,6 +352,7 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
         .terminal_stream = .init(.{
             .allocator = alloc,
             .handler = handler,
+            .osc_unknown_max_bytes = StreamHandler.osc_unknown_max_bytes,
         }),
         .thread_enter_state = thread_enter_state,
     };

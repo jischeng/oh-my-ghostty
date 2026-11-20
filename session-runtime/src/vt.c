@@ -110,6 +110,8 @@ typedef struct {
     bool has_cursor;
     GhosttyColorRgb cursor;
 } Vt;
+static const size_t OMG_VT_UNKNOWN_MAX_BYTES = 4096;
+
 static void context_signal(GhosttyTerminal terminal, void *context, bool ended,
                            GhosttyString id, GhosttyString metadata) {
     (void)terminal;
@@ -117,10 +119,37 @@ static void context_signal(GhosttyTerminal terminal, void *context, bool ended,
     if (vt->signal) vt->signal(vt->signal_context, ended,
         (const uint8_t *)id.ptr, id.len, (const uint8_t *)metadata.ptr, metadata.len);
 }
+static void unknown_sequence(GhosttyTerminal terminal, void *context,
+                             const GhosttyTerminalUnknownSequence *sequence) {
+    (void)terminal;
+    Vt *vt = context;
+    if (!vt || !vt->signal || !sequence) return;
+    if (sequence->tag != GHOSTTY_TERMINAL_UNKNOWN_SEQUENCE_OSC) return;
+    const GhosttyTerminalUnknownOscSequence *osc = &sequence->value.osc;
+    if (osc->truncated || !osc->content.ptr || osc->content.len <= 3) return;
+    if (osc->content.len > OMG_VT_UNKNOWN_MAX_BYTES) return;
+    if (memcmp(osc->content.ptr, "26;", 3) != 0) return;
+    static const uint8_t id[] = "omg-osc26";
+    vt->signal(vt->signal_context, false, id, sizeof(id) - 1,
+               (const uint8_t *)osc->content.ptr + 3, osc->content.len - 3);
+}
 int omg_vt_context(Vt *vt, Context callback, void *context) {
     vt->signal = callback;
     vt->signal_context = context;
-    return ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_CONTEXT_SIGNAL, (const void *)context_signal);
+    int result = ghostty_terminal_set(
+        vt->terminal, GHOSTTY_TERMINAL_OPT_CONTEXT_SIGNAL, (const void *)context_signal);
+    if (!result) {
+        size_t unknown_max_bytes = callback ? OMG_VT_UNKNOWN_MAX_BYTES : 0;
+        result = ghostty_terminal_set(
+            vt->terminal, GHOSTTY_TERMINAL_OPT_UNKNOWN_MAX_BYTES, &unknown_max_bytes);
+    }
+    if (!result) {
+        result = ghostty_terminal_set(
+            vt->terminal,
+            GHOSTTY_TERMINAL_OPT_UNKNOWN_SEQUENCE,
+            callback ? (const void *)unknown_sequence : NULL);
+    }
+    return result;
 }
 static void reply(GhosttyTerminal terminal, void *context, const uint8_t *bytes, size_t len) {
     (void)terminal;
@@ -230,6 +259,17 @@ static int apply_vt_options(Vt *vt) {
     if (!result && vt->signal) {
         result = ghostty_terminal_set(
             vt->terminal, GHOSTTY_TERMINAL_OPT_CONTEXT_SIGNAL, (const void *)context_signal);
+        if (!result) {
+            size_t unknown_max_bytes = OMG_VT_UNKNOWN_MAX_BYTES;
+            result = ghostty_terminal_set(
+                vt->terminal, GHOSTTY_TERMINAL_OPT_UNKNOWN_MAX_BYTES, &unknown_max_bytes);
+        }
+        if (!result) {
+            result = ghostty_terminal_set(
+                vt->terminal,
+                GHOSTTY_TERMINAL_OPT_UNKNOWN_SEQUENCE,
+                (const void *)unknown_sequence);
+        }
     }
     return result;
 }

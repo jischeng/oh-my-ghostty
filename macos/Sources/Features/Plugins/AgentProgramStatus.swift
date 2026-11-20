@@ -40,9 +40,15 @@ struct AcknowledgedAgentStatus: Codable, Equatable, Sendable {
     }
 }
 
-/// OSC 7501 belongs to the terminal client, including clients whose Agent runs
-/// in a shared server. It therefore needs neither a Hook PID nor a daemon TTY.
+/// OSC 7501 and OSC 26 (TAP) belong to the terminal client, including clients
+/// whose Agent runs in a shared server. They therefore need neither a Hook PID
+/// nor a daemon TTY.
 struct AgentProgramStatus {
+    enum Source: Equatable, Sendable {
+        case osc7501
+        case tap
+    }
+
     struct Record {
         let id: String
         let agent: SupportedAgent?
@@ -52,31 +58,107 @@ struct AgentProgramStatus {
         let message: String?
         let progress: Double?
         var acknowledged = false
+        let source: Source
+        let sessionID: String?
+        let taskProgress: String?
+        let title: String?
+
+        init(
+            id: String,
+            agent: SupportedAgent?,
+            state: TabActivityState,
+            phase: TabActivityPhase?,
+            attention: TabAttentionKind?,
+            message: String?,
+            progress: Double?,
+            acknowledged: Bool = false,
+            source: Source = .osc7501,
+            sessionID: String? = nil,
+            taskProgress: String? = nil,
+            title: String? = nil
+        ) {
+            self.id = id
+            self.agent = agent
+            self.state = state
+            self.phase = phase
+            self.attention = attention
+            self.message = message
+            self.progress = progress
+            self.acknowledged = acknowledged
+            self.source = source
+            self.sessionID = sessionID
+            self.taskProgress = taskProgress
+            self.title = title
+        }
 
         var effectiveState: TabActivityState {
             acknowledged ? .idle : state
         }
 
         var activity: TabActivity? {
+            activity(enrichedBy: nil)
+        }
+
+        func activity(enrichedBy tap: Record?) -> TabActivity? {
             guard let agent else { return nil }
+            let resolvedMessage: String? = if acknowledged {
+                nil
+            } else {
+                message ?? tap?.title
+            }
+            let resolvedDetail: String? = if acknowledged {
+                nil
+            } else if let tapTitle = tap?.title, tapTitle != resolvedMessage {
+                tapTitle
+            } else {
+                tap?.taskProgress ?? taskProgress
+            }
+            let resolvedProgress: Double? = if acknowledged {
+                nil
+            } else if effectiveState == .working || effectiveState == .needsAttention {
+                progress ?? tap?.progress
+            } else {
+                nil
+            }
             return .init(
                 source: agent.rawValue,
                 state: effectiveState,
                 phase: acknowledged ? nil : phase,
                 attentionKind: acknowledged ? nil : attention,
                 label: agent.displayName,
-                message: acknowledged ? nil : message,
-                detail: nil,
-                progress: acknowledged ? nil : progress,
+                message: resolvedMessage,
+                detail: resolvedDetail,
+                progress: resolvedProgress,
                 icon: agent.icon
             )
         }
     }
 
-    private(set) var records: [Record] = []
+    var records: [Record] = []
     var isRemote = false
     var foregroundProcessGroup: Int?
-    var activity: TabActivity? { selectedRecord?.activity }
+    var activity: TabActivity? {
+        guard let selected = selectedRecord else { return nil }
+        let enrichment = selected.source == .osc7501
+            ? latestTAPRecord(for: selected.agent)
+            : nil
+        return selected.activity(enrichedBy: enrichment)
+    }
+
+    var activeSessionID: String? {
+        guard let selected = selectedRecord else { return nil }
+        return selected.sessionID ?? latestTAPRecord(for: selected.agent)?.sessionID
+    }
+
+    var activeTaskProgress: String? {
+        guard let selected = selectedRecord else { return nil }
+        return selected.taskProgress ?? latestTAPRecord(for: selected.agent)?.taskProgress
+    }
+
+    var activeTAPTitle: String? {
+        guard let selected = selectedRecord else { return nil }
+        return selected.title ?? latestTAPRecord(for: selected.agent)?.title
+    }
 
     /// Core validates the full protocol. Retain bounded validation here too:
     /// OSC 3008 shares the bridge and terminal text is never trusted authority.
@@ -204,14 +286,28 @@ struct AgentProgramStatus {
         return fallback
     }
 
+    private func latestTAPRecord(for agent: SupportedAgent?) -> Record? {
+        guard let agent else { return nil }
+        return records.reversed().first { $0.source == .tap && $0.agent == agent }
+    }
+
     private var selectedRecord: Record? {
+        let osc7501Agents = Set(records.compactMap { $0.source == .osc7501 ? $0.agent : nil })
         var best: Record?
         for record in records where record.agent != nil {
+            // Same-agent arbitration: OSC 7501 wins on state/attention over OSC 26 TAP.
+            if record.source == .tap, let agent = record.agent, osc7501Agents.contains(agent) {
+                continue
+            }
             guard let existing = best else {
                 best = record
                 continue
             }
-            if Self.priority(record) >= Self.priority(existing) {
+            let nextPriority = Self.priority(record)
+            let existingPriority = Self.priority(existing)
+            if nextPriority > existingPriority ||
+                (nextPriority == existingPriority &&
+                    !(existing.source == .osc7501 && record.source == .tap)) {
                 best = record
             }
         }
@@ -228,7 +324,7 @@ struct AgentProgramStatus {
         }
     }
 
-    private func inheritedAgent(
+    func inheritedAgent(
         for id: String,
         fallback: SupportedAgent?
     ) -> SupportedAgent? {

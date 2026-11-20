@@ -1103,8 +1103,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         for surface: Ghostty.SurfaceView
     ) {
         if consumeAgentRuntimeSnapshot(signal, for: surface) { return }
-        if signal.id == "omg-program-status" {
-            consumeProgramStatus(signal.metadata, for: surface)
+        if signal.id == "omg-program-status" || signal.id == "omg-osc26" {
+            consumeProgramStatus(signal.metadata, isTAP: signal.id == "omg-osc26", for: surface)
             return
         }
         if SessionRuntimeHandoff.shared.accept(signal, source: surface, controller: self) { return }
@@ -2245,6 +2245,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                             item.metadata,
                             fallbackAgent: soleHookAgent ?? detectedAgentInstances[id]?.agent
                         )
+                    } else if item.id == "omg-osc26" {
+                        _ = status.consumeTAP(
+                            item.metadata,
+                            fallbackAgent: soleHookAgent ?? detectedAgentInstances[id]?.agent
+                        )
                     } else {
                         _ = reducer.consume(item)
                         registerTypedAgentHookSignal(item, for: id)
@@ -2286,7 +2291,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return true
         }
         guard var pending = agentRuntimeSnapshots[id] else { return false }
-        guard signal.id.hasPrefix("omg-agent-") || signal.id == "omg-program-status" else {
+        guard signal.id.hasPrefix("omg-agent-") ||
+            signal.id == "omg-program-status" ||
+            signal.id == "omg-osc26" else {
             let isPrompt = signal.id.hasPrefix("omg-ssh-") &&
                 surface.runtimeInlineSession?.connectionID != signal.id &&
                 signal.metadata.split(separator: ";").contains {
@@ -2308,12 +2315,19 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         return true
     }
 
-    private func consumeProgramStatus(_ body: String, for surface: Ghostty.SurfaceView) {
+    private func consumeProgramStatus(
+        _ body: String,
+        isTAP: Bool = false,
+        for surface: Ghostty.SurfaceView
+    ) {
         guard AgentStatusPlugin.isEnabled else { return }
         var status = agentProgramStatuses[surface.id] ?? AgentProgramStatus()
         let previousFG = status.foregroundProcessGroup
         let previousProgramState = status.activity?.state
-        guard status.consume(body, fallbackAgent: fallbackAgent(for: surface.id)) else { return }
+        let accepted = isTAP
+            ? status.consumeTAP(body, fallbackAgent: fallbackAgent(for: surface.id))
+            : status.consume(body, fallbackAgent: fallbackAgent(for: surface.id))
+        guard accepted else { return }
         agentTier3TitleIdleWorkItems.removeValue(forKey: surface.id)?.cancel()
         var acknowledgedReducer: AcknowledgedAgentStatus.ReducerRecord?
         let nextProgramActivity = status.activity

@@ -333,6 +333,15 @@ pub fn rebuildFromSemanticPages(
         var text_buf: std.ArrayList(u8) = .empty;
         defer text_buf.deinit(alloc);
         var overflow = false;
+        // The live path anchors a command at its `OSC 133;B`. A snapshot only
+        // keeps cell marks, and text printed while the cursor was still in
+        // input state carries the same mark: a job notice at an idle prompt,
+        // or a banner written after a restore. Such a run starts on a row of
+        // its own, so only input that begins at a prompt is a command. A
+        // prompt whose last line is empty looks the same in cells and is not
+        // rebuilt either; the host still shows its saved record, read-only.
+        var row_has_prompt_cell = false;
+        var unanchored_run = false;
 
         const commitCurrent = struct {
             fn call(
@@ -372,6 +381,11 @@ pub fn rebuildFromSemanticPages(
         while (it.next()) |pin| {
             const rac = pin.rowAndCell();
 
+            if (pin.x == 0) {
+                row_has_prompt_cell = false;
+                if (rac.row.semantic_prompt == .prompt) unanchored_run = false;
+            }
+
             if (current_start != null and pin.x == 0 and !rac.row.wrap_continuation) {
                 if (rac.row.semantic_prompt == .prompt) {
                     try commitCurrent(
@@ -403,6 +417,11 @@ pub fn rebuildFromSemanticPages(
             switch (rac.cell.semantic_content) {
                 .input => {
                     if (current_start == null) {
+                        if (unanchored_run) continue;
+                        if (rac.row.semantic_prompt != .prompt and !row_has_prompt_cell) {
+                            unanchored_run = true;
+                            continue;
+                        }
                         current_start = pin;
                         pending_end = null;
                         text_buf.clearRetainingCapacity();
@@ -435,6 +454,8 @@ pub fn rebuildFromSemanticPages(
                     current_last_input = pin;
                 },
                 .prompt => {
+                    row_has_prompt_cell = true;
+                    unanchored_run = false;
                     if (current_start != null) {
                         if (rac.row.semantic_prompt == .prompt_continuation) {
                             pending_end = null;
@@ -456,6 +477,7 @@ pub fn rebuildFromSemanticPages(
                     }
                 },
                 .output => {
+                    if (rac.cell.hasText()) unanchored_run = false;
                     if (current_start != null) {
                         if (rac.cell.hasText()) {
                             try commitCurrent(
@@ -940,4 +962,69 @@ test "OMG command history rebuilds executed commands and active input from VT sn
     restored_stream.nextSlice("atus\x1b]133;C\x07\r\nOn branch main\r\n");
     try std.testing.expectEqual(@as(usize, 3), restored_screen.omg_command_history.entries.items.len);
     try std.testing.expectEqualStrings("git status", restored_screen.omg_command_history.entries.items[2].text);
+}
+
+test "OMG command history rebuild ignores input-marked text that does not begin at a prompt" {
+    const Terminal = @import("Terminal.zig");
+    const snapshot = @import("snapshot/main.zig");
+    const alloc = std.testing.allocator;
+
+    var origin = try Terminal.init(std.testing.io, alloc, .{ .cols = 60, .rows = 24 });
+    defer origin.deinit(alloc);
+    var stream = origin.vtStream();
+    defer stream.deinit();
+
+    stream.nextSlice("\x1b]133;A\x07$ \x1b]133;B\x07pwd\x1b]133;C\x07\r\n/home/test\r\n");
+    // An idle prompt, then the shell reports a finished background job. The
+    // notice is printed while the cursor is still in input state.
+    stream.nextSlice("\x1b]133;A\x07$ \x1b]133;B\x07");
+    stream.nextSlice("\r\n[3]  + 2845666 done       { command -v tool &> /dev/null && tool \r\nupgrade }\r\n");
+    stream.nextSlice("\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07\r\nREADME.md\r\n");
+    // A second prompt line that carries its own prompt text still anchors
+    // the input that follows it.
+    stream.nextSlice("\x1b]133;A\x07~/project\r\n> \x1b]133;B\x07make\x1b]133;C\x07\r\nok\r\n");
+    // A restore leaves the last prompt in input state; the banner and the
+    // new shell's greeting are written before any new prompt marker.
+    stream.nextSlice("\x1b]133;A\x07$ \x1b]133;B\x07");
+    stream.nextSlice("\r\n  ------  Session resurrected after system restart  ------\r\n");
+    stream.nextSlice("Last login: Sat Nov 21 08:21:03 on ttys001\r\n");
+    stream.nextSlice("\x1b]133;A\x07$ \x1b]133;B\x07echo hi\x1b]133;C\x07\r\nhi\r\n");
+    stream.nextSlice("\x1b]133;A\x07$ \x1b]133;B\x07git st");
+
+    // The live path is anchored by the markers themselves.
+    const live = origin.screens.active.omg_command_history.entries.items;
+    try std.testing.expectEqual(@as(usize, 4), live.len);
+
+    var encoded: std.Io.Writer.Allocating = .init(alloc);
+    defer encoded.deinit();
+    try snapshot.encode(alloc, &encoded.writer, &origin, .{ .continuation = .ground });
+    var reader: std.Io.Reader = .fixed(encoded.written());
+    var decoded_state = try snapshot.decodeExact(alloc, std.testing.io, &reader, .{ .max_continuation_bytes = 0 });
+    defer decoded_state.deinit(alloc);
+    var restored = decoded_state.toOwned();
+    defer restored.deinit(alloc);
+
+    const screen = restored.screens.get(.primary).?;
+    try screen.omg_command_history.rebuildFromSemanticPages(
+        screen.alloc,
+        &screen.pages,
+        screen.cursor.page_pin.*,
+        screen.cursor.semantic_content,
+        null,
+        1700000999,
+    );
+
+    const entries = screen.omg_command_history.entries.items;
+    try std.testing.expectEqual(@as(usize, 4), entries.len);
+    try std.testing.expectEqualStrings("pwd", entries[0].text);
+    try std.testing.expectEqualStrings("ls", entries[1].text);
+    try std.testing.expectEqualStrings("make", entries[2].text);
+    try std.testing.expectEqualStrings("echo hi", entries[3].text);
+
+    // The unsubmitted input at the live prompt is still the active input.
+    var restored_stream = restored.vtStream();
+    defer restored_stream.deinit();
+    restored_stream.nextSlice("atus\x1b]133;C\x07\r\nOn branch main\r\n");
+    try std.testing.expectEqual(@as(usize, 5), screen.omg_command_history.entries.items.len);
+    try std.testing.expectEqualStrings("git status", screen.omg_command_history.entries.items[4].text);
 }

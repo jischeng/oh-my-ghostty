@@ -434,6 +434,74 @@ struct TerminalHistoryServiceTests {
         #expect(!FileManager.default.fileExists(atPath: fileURL.path))
     }
 
+    @Test func runtimeReconcileSurvivesRowsPresentOnOnlyOneSide() {
+        let pane = UUID()
+        let epoch = UUID()
+        let restoredAt = Date(timeIntervalSince1970: 9_000)
+        func live(_ text: String, _ id: UInt64, timestamp: Date? = nil) -> InspectorHistoryItem {
+            .init(id: "live-\(id)", kind: .command, text: text, timestamp: timestamp ?? restoredAt,
+                  location: .command(surfaceID: pane, executionID: id, epoch: epoch))
+        }
+        func saved(_ text: String, _ second: TimeInterval, exit: Int16? = 0,
+                   source: String = "Local") -> ShellScrollbackRestoreStore.SavedCommand {
+            .init(text: text, timestamp: Date(timeIntervalSince1970: second), sourceLabel: source,
+                  occurrenceID: "saved-\(text)-\(Int(second))", exitCode: exit, duration: 1_500)
+        }
+        let record = [
+            saved("exit", 600, source: "SSH · cloud"),
+            saved("──────  Session resurrected after system restart · 2026-11-21 08:21:03  ──────", 550),
+            saved("ssh cloud", 500),
+            saved("[3]  + 2845666 done       { command -v tool }", 450),
+            saved("false", 400, exit: 1),
+            saved("sleep 2", 300),
+            saved("echo hello", 100),
+        ]
+        // The terminal no longer rebuilds the job notice, and `echo hello`
+        // has scrolled out; one command was typed after reattaching.
+        let rebuilt = [
+            live("pwd", 9, timestamp: Date(timeIntervalSince1970: 9_100)),
+            live("exit", 5), live("ssh cloud", 4), live("false", 3), live("sleep 2", 2),
+        ]
+        let result = SessionRuntimeHistoryStore.reconcile(liveNewestFirst: rebuilt, with: record, surfaceID: pane)
+
+        #expect(result.map(\.text) == [
+            "pwd", "exit", "ssh cloud", "false", "sleep 2",
+            "[3]  + 2845666 done       { command -v tool }", "echo hello",
+        ])
+        // Every rebuilt row gets its own time, outcome and source back.
+        #expect(result[0].timestamp == Date(timeIntervalSince1970: 9_100))
+        #expect(result[1...4].map(\.timestamp) == [600, 500, 400, 300].map(Date.init(timeIntervalSince1970:)))
+        #expect(result[1].sourceLabel == "SSH · cloud")
+        #expect(result[3].exitCode == 1)
+        #expect(result[4].duration == 1_500)
+        #expect(result[1...4].allSatisfy { $0.location.isAvailable })
+        // Saved rows the terminal no longer shows stay once, read-only; the
+        // runtime's own banner was never a command and is dropped.
+        #expect(result[5...].allSatisfy { $0.location == .unavailable(.expired) })
+        #expect(!result.contains { $0.text.contains("Session resurrected") })
+        #expect(Set(result.map(\.id)).count == result.count)
+
+        // Saving and reconciling again is stable.
+        let again = SessionRuntimeHistoryStore.reconcile(
+            liveNewestFirst: rebuilt, with: result.map(ShellScrollbackRestoreStore.SavedCommand.init),
+            surfaceID: pane)
+        #expect(again.map(\.text) == result.map(\.text))
+        #expect(again.map(\.timestamp) == result.map(\.timestamp))
+    }
+
+    @Test func runtimeAlignmentPrefersOldLiveRowsAndNewSavedRows() {
+        func pairs(_ live: [String], _ saved: [String]) -> [[Int]] {
+            SessionRuntimeHistoryStore.alignment(live, saved).map { [$0.live, $0.saved] }
+        }
+        // A repeat typed after reattaching is not one of the saved repeats.
+        #expect(pairs(["ll", "ll", "ll", "ll"], ["ll", "ll", "ll"]) == [[1, 0], [2, 1], [3, 2]])
+        // A new command does not borrow a scrolled-out command's record.
+        #expect(pairs(["ll", "pwd"], ["pwd", "ll"]) == [[1, 0]])
+        #expect(pairs(["a", "b", "c"], ["a", "x", "b", "c"]) == [[0, 0], [1, 2], [2, 3]])
+        #expect(pairs([], ["a"]).isEmpty)
+        #expect(pairs(["a"], ["b"]).isEmpty)
+    }
+
     @Test func commandOutputActionsExtractCopyAndOpenOSC133OutputInEditor() async throws {
         let tempRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("omg-cmd-out-\(UUID().uuidString)", isDirectory: true)

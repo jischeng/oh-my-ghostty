@@ -137,64 +137,88 @@ enum SessionRuntimeHistoryStore {
         try? FileManager.default.removeItem(at: target)
     }
 
+    /// The runtime's own restore banner. Earlier builds rebuilt it from a
+    /// snapshot as if it were a command and then saved it; it never was one.
+    static let restoreBannerMarker = "Session resurrected after system restart · "
+
     /// Reconciles VT-reconstructed live `OSC 133` commands (newest-first) against
-    /// persisted runtime command metadata so original timestamps/labels survive
-    /// reattach and older scrolled-out commands remain visible as archived entries.
+    /// persisted runtime command metadata so original timestamps, outcomes and
+    /// labels survive reattach and older scrolled-out commands remain visible as
+    /// archived entries.
+    ///
+    /// Rows are aligned in order rather than required to match as one unbroken
+    /// run: a single row present on only one side (a command the terminal no
+    /// longer shows, or one typed since the last save) must not discard every
+    /// other row's metadata and list the saved rows a second time.
     static func reconcile(
         liveNewestFirst: [InspectorHistoryItem],
         with savedNewestFirst: [ShellScrollbackRestoreStore.SavedCommand],
         surfaceID: UUID
     ) -> [InspectorHistoryItem] {
-        guard !savedNewestFirst.isEmpty else { return liveNewestFirst }
+        let saved = savedNewestFirst.filter { !$0.text.contains(restoreBannerMarker) }
+        guard !saved.isEmpty else { return liveNewestFirst }
         if liveNewestFirst.isEmpty {
-            return archivedItems(from: savedNewestFirst, startIndex: 0, surfaceID: surfaceID)
+            return archivedItems(from: saved, startIndex: 0, surfaceID: surfaceID)
         }
 
-        // Find the longest suffix of `liveNewestFirst` (the reconstructed commands
-        // predating any newly executed post-attach commands) matching a prefix of `savedNewestFirst`.
-        var matchedCount = 0
-        var matchedLiveOffset = liveNewestFirst.count
-        for offset in 0..<liveNewestFirst.count {
-            let candidateCount = liveNewestFirst.count - offset
-            guard candidateCount <= savedNewestFirst.count else { continue }
-            let liveSlice = liveNewestFirst[offset...]
-            let savedSlice = savedNewestFirst.prefix(candidateCount)
-            if zip(liveSlice, savedSlice).allSatisfy({ $0.text == $1.text }) {
-                matchedCount = candidateCount
-                matchedLiveOffset = offset
-                break
-            }
-        }
-
+        let pairs = alignment(liveNewestFirst.map(\.text), saved.map(\.text))
         var result = liveNewestFirst
-        if matchedCount > 0 {
-            for idx in 0..<matchedCount {
-                let item = result[matchedLiveOffset + idx]
-                let saved = savedNewestFirst[idx]
-                result[matchedLiveOffset + idx] = InspectorHistoryItem(
-                    id: item.id,
-                    kind: item.kind,
-                    text: item.text,
-                    timestamp: saved.timestamp ?? item.timestamp,
-                    exitCode: item.exitCode ?? saved.exitCode,
-                    duration: item.duration ?? saved.duration,
-                    promptIndex: item.promptIndex,
-                    location: item.location,
-                    sourceLabel: saved.sourceLabel ?? item.sourceLabel,
-                    replayKey: item.replayKey ?? saved.occurrenceID
-                )
-            }
+        var matchedSaved = Set<Int>()
+        for (liveIndex, savedIndex) in pairs {
+            let item = result[liveIndex]
+            let record = saved[savedIndex]
+            matchedSaved.insert(savedIndex)
+            result[liveIndex] = InspectorHistoryItem(
+                id: item.id,
+                kind: item.kind,
+                text: item.text,
+                timestamp: record.timestamp ?? item.timestamp,
+                exitCode: item.exitCode ?? record.exitCode,
+                duration: item.duration ?? record.duration,
+                promptIndex: item.promptIndex,
+                location: item.location,
+                sourceLabel: record.sourceLabel ?? item.sourceLabel,
+                replayKey: item.replayKey ?? record.occurrenceID
+            )
         }
 
-        let remainingSaved = Array(savedNewestFirst.dropFirst(matchedCount))
         let seenIDs = Set(result.compactMap { $0.replayKey ?? $0.id })
-        let archived = archivedItems(
-            from: remainingSaved,
-            startIndex: matchedCount,
-            surfaceID: surfaceID
-        ).filter { !seenIDs.contains($0.id) }
+        let archived = saved.indices.filter { !matchedSaved.contains($0) }.map { index in
+            archivedItems(from: [saved[index]], startIndex: index, surfaceID: surfaceID)[0]
+        }.filter { !seenIDs.contains($0.id) }
 
         return Array((result + archived).prefix(maxCommands))
+    }
+
+    /// Longest in-order pairing of equal texts. Among equally long pairings it
+    /// keeps the oldest live rows and the newest saved rows, which is where a
+    /// reattached terminal and its saved record overlap: commands typed since
+    /// the save lead the live list, and scrolled-out ones trail the saved list.
+    static func alignment(_ live: [String], _ saved: [String]) -> [(live: Int, saved: Int)] {
+        guard !live.isEmpty, !saved.isEmpty else { return [] }
+        var lengths = Array(repeating: Array(repeating: 0, count: saved.count + 1), count: live.count + 1)
+        for i in 1...live.count {
+            for j in 1...saved.count {
+                lengths[i][j] = live[i - 1] == saved[j - 1]
+                    ? lengths[i - 1][j - 1] + 1
+                    : max(lengths[i - 1][j], lengths[i][j - 1])
+            }
+        }
+        var pairs: [(live: Int, saved: Int)] = []
+        var i = live.count
+        var j = saved.count
+        while i > 0, j > 0 {
+            if live[i - 1] == saved[j - 1] {
+                pairs.append((i - 1, j - 1))
+                i -= 1
+                j -= 1
+            } else if lengths[i][j - 1] >= lengths[i - 1][j] {
+                j -= 1
+            } else {
+                i -= 1
+            }
+        }
+        return pairs.reversed()
     }
 
     @MainActor

@@ -2405,6 +2405,18 @@ pruned, overwritten, or oversized records are never represented as exact
 anchors. The command history remains bounded to 100 entries after replay and
 subsequent activity.
 
+A reattached runtime session has no command anchors, only the snapshot's cell
+marks, so the core rebuilds its history from them. Text printed while a prompt
+was idle carries the same input mark as a command (a shell's finished-job
+notice, or the runtime's own restore banner), so only input that begins at a
+prompt is rebuilt as a command. A prompt whose final line is empty is
+indistinguishable in cells and is not rebuilt; its commands remain visible from
+the saved record, read-only. The host then pairs rebuilt rows with the saved
+runtime record in order, by text, to restore each row's time, exit status,
+duration and source. A row present on only one side (a command the terminal no
+longer shows, or one typed since the last save) leaves the other pairings
+intact; unpaired saved rows are listed once as read-only entries.
+
 The retained (currently disabled in Info) Agent history reader is owned by
 `PaneAgentHistoryService`, not the port-forwarding service. While disabled,
 Info creates no Agent transcript subscriptions and never starts its polling or

@@ -1485,5 +1485,9 @@
   "Unstaging hunk…": {
     "en": "Unstaging hunk…",
     "zh-Hans": "正在取消暂存区块…"
-  }
+  },
+  "Add AI Models": { "en": "Add AI Models", "zh-Hans": "添加 AI 模型" },
+  "Loading models…": { "en": "Loading models…", "zh-Hans": "正在加载模型…" },
+  "No matching models.": { "en": "No matching models.", "zh-Hans": "没有匹配的模型。" },
+  "{0} selected": { "en": "{0} selected", "zh-Hans": "已选 {0} 个" }
 }

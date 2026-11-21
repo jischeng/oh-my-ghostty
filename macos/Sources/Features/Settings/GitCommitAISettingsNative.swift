@@ -276,8 +276,8 @@ enum GitCommitAISettingsPanel {
                     agent: agent, models: models, to: settings.gitCommitAIRoutes
                 )
             },
-            title: GitL10n.text("Add Agent Models…"),
-            size: NSSize(width: 520, height: 620),
+            title: GitL10n.text("Add AI Models"),
+            size: NSSize(width: 540, height: 620),
             from: parent
         )
     }
@@ -465,8 +465,12 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
     private let updateButton = NSButton()
     private let updateStatus = NSTextField(wrappingLabelWithString: "")
     private let errorField = NSTextField(wrappingLabelWithString: "")
-    private let helpButton = NSButton()
     private let helpField = NSTextField(wrappingLabelWithString: "")
+    private let placeholderIcon = NSImageView(image: NSImage(systemSymbolName: "exclamationmark.triangle",
+                                                             accessibilityDescription: nil) ?? NSImage())
+    private let placeholderField = NSTextField(wrappingLabelWithString: "")
+    private let retryButton = NSButton()
+    private let selectionField = NSTextField(labelWithString: "")
     private let addButton = NSButton()
     private var agent = GitCommitAgent.claude
     private var query = ""
@@ -489,8 +493,15 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
 
     override func loadView() {
         let root = OMGNativeSurfaceView()
-        let title = NSTextField(labelWithString: GitL10n.text("Add Agent Models…"))
-        title.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+        let title = NSTextField(labelWithString: GitL10n.text("Add AI Models"))
+        title.font = .systemFont(ofSize: 15, weight: .semibold)
+        helpField.stringValue = GitL10n.text(
+            "Models run through local ACP, including for SSH repositories. Selected services receive the changes. Sessions expire after 30 days."
+        )
+        helpField.textColor = .secondaryLabelColor
+        helpField.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        helpField.maximumNumberOfLines = 0
+
         agentPicker.removeAllItems()
         for value in GitCommitAgent.allCases {
             agentPicker.addItem(withTitle: value.title)
@@ -499,47 +510,32 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
         agentPicker.target = self
         agentPicker.action = #selector(agentChanged)
         agentPicker.setAccessibilityLabel(GitL10n.text("Agent"))
-
-        let top = NSStackView(views: [
-            NSTextField(labelWithString: GitL10n.text("Agent")), agentPicker, spinner
-        ])
-        top.orientation = .horizontal
-        top.spacing = 8
-        spinner.style = .spinning
-        spinner.controlSize = .small
-        spinner.isDisplayedWhenStopped = false
-
-        let listHeader = NSStackView(views: [
-            NSTextField(labelWithString: GitL10n.text("Available models")),
-            NSView(),
-            updateButton,
-            reloadButton
-        ])
-        listHeader.orientation = .horizontal
-        listHeader.alignment = .centerY
-        listHeader.spacing = 8
-        updateButton.target = self
-        updateButton.action = #selector(confirmUpdate)
-        updateButton.bezelStyle = .rounded
-        updateButton.isHidden = true
-        reloadButton.target = self
-        reloadButton.action = #selector(reload)
-        reloadButton.bezelStyle = .rounded
-        reloadButton.title = GitL10n.text("Reload")
-        reloadButton.setAccessibilityIdentifier("git.commit-ai.models.reload")
-
         searchField.placeholderString = GitL10n.text("Search models…")
         searchField.delegate = self
         searchField.sendsSearchStringImmediately = true
         searchField.setAccessibilityLabel(GitL10n.text("Search models…"))
         searchField.setAccessibilityIdentifier("git.commit-ai.models.search")
+        reloadButton.target = self
+        reloadButton.action = #selector(reload)
+        reloadButton.bezelStyle = .rounded
+        reloadButton.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: GitL10n.text("Reload"))
+        reloadButton.imagePosition = .imageOnly
+        reloadButton.toolTip = GitL10n.text("Reload")
+        reloadButton.setAccessibilityLabel(GitL10n.text("Reload"))
+        reloadButton.setAccessibilityIdentifier("git.commit-ai.models.reload")
+        // One toolbar row: which Agent, filter its models, refresh the list.
+        let toolbar = NSStackView(views: [agentPicker, searchField, reloadButton])
+        toolbar.orientation = .horizontal
+        toolbar.spacing = 8
 
         let column = NSTableColumn(identifier: .init("model"))
         column.resizingMask = .autoresizingMask
         modelTable.addTableColumn(column)
         modelTable.headerView = nil
-        modelTable.rowHeight = 28
+        modelTable.rowHeight = 30
         modelTable.intercellSpacing = .zero
+        modelTable.style = .plain
+        modelTable.backgroundColor = .clear
         modelTable.selectionHighlightStyle = .none
         modelTable.dataSource = self
         modelTable.delegate = self
@@ -547,24 +543,60 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
         tableScroll.documentView = modelTable
         tableScroll.hasVerticalScroller = true
         tableScroll.autohidesScrollers = true
-        tableScroll.borderType = .bezelBorder
+        tableScroll.scrollerStyle = .overlay
+        tableScroll.borderType = .noBorder
+        tableScroll.drawsBackground = false
+
+        // Loading, failure and empty results are reported where the models
+        // would be, instead of leaving a blank box above a detached message.
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isDisplayedWhenStopped = false
+        placeholderIcon.contentTintColor = .systemOrange
+        placeholderIcon.symbolConfiguration = .init(pointSize: 22, weight: .regular)
+        placeholderField.alignment = .center
+        placeholderField.textColor = .secondaryLabelColor
+        placeholderField.maximumNumberOfLines = 6
+        retryButton.title = GitL10n.text("Retry")
+        retryButton.bezelStyle = .rounded
+        retryButton.target = self
+        retryButton.action = #selector(reload)
+        let placeholder = NSStackView(views: [spinner, placeholderIcon, placeholderField, retryButton])
+        placeholder.orientation = .vertical
+        placeholder.alignment = .centerX
+        placeholder.spacing = 10
+        placeholder.translatesAutoresizingMaskIntoConstraints = false
+        let listBody = NSView()
         tableScroll.translatesAutoresizingMaskIntoConstraints = false
+        listBody.addSubview(tableScroll)
+        listBody.addSubview(placeholder)
+        let list = NSBox()
+        list.boxType = .custom
+        list.cornerRadius = 8
+        list.borderWidth = 1
+        list.borderColor = NSColor.labelColor.withAlphaComponent(0.14)
+        list.fillColor = NSColor.labelColor.withAlphaComponent(0.05)
+        list.contentViewMargins = .zero
+        list.contentView = listBody
+        list.translatesAutoresizingMaskIntoConstraints = false
 
         updateStatus.textColor = .secondaryLabelColor
+        updateStatus.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         updateStatus.maximumNumberOfLines = 2
+        updateButton.target = self
+        updateButton.action = #selector(confirmUpdate)
+        updateButton.bezelStyle = .rounded
+        updateButton.controlSize = .small
+        updateButton.isHidden = true
+        let update = NSStackView(views: [updateStatus, updateButton])
+        update.orientation = .horizontal
+        update.spacing = 8
         errorField.textColor = .systemRed
+        errorField.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         errorField.maximumNumberOfLines = 3
-        helpButton.title = GitL10n.text("About AI generation")
-        helpButton.bezelStyle = .disclosure
-        helpButton.target = self
-        helpButton.action = #selector(toggleHelp)
-        helpField.stringValue = GitL10n.text(
-            "Models run through local ACP, including for SSH repositories. Selected services receive the changes. Sessions expire after 30 days."
-        )
-        helpField.textColor = .secondaryLabelColor
-        helpField.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        helpField.maximumNumberOfLines = 0
-        helpField.isHidden = true
+
+        selectionField.textColor = .secondaryLabelColor
+        selectionField.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         let cancelButton = NSButton(title: GitL10n.text("Cancel"), target: self, action: #selector(cancel))
         cancelButton.bezelStyle = .rounded
         cancelButton.keyEquivalent = "\u{1b}"
@@ -575,36 +607,67 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
         addButton.action = #selector(addSelected)
         addButton.keyEquivalent = "\r"
         addButton.setAccessibilityIdentifier("git.commit-ai.models.add")
-        let actions = NSStackView(views: [NSView(), cancelButton, addButton])
+        let actions = NSStackView(views: [selectionField, NSView(), cancelButton, addButton])
         actions.orientation = .horizontal
         actions.spacing = 8
         actions.translatesAutoresizingMaskIntoConstraints = false
-        let stack = NSStackView(views: [title, top, listHeader, searchField, tableScroll,
-                                       updateStatus, errorField, helpButton, helpField, actions])
+        let stack = NSStackView(views: [title, helpField, toolbar, list, update, errorField, actions])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 10
+        stack.setCustomSpacing(4, after: title)
+        stack.setCustomSpacing(14, after: helpField)
+        stack.setCustomSpacing(14, after: errorField)
         stack.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 18),
-            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
-            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 16),
-            stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14),
-            top.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            agentPicker.widthAnchor.constraint(greaterThanOrEqualToConstant: 240),
-            listHeader.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            searchField.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            tableScroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            tableScroll.heightAnchor.constraint(equalToConstant: 300),
-            updateStatus.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            errorField.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            helpButton.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
+            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 18),
+            stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
             helpField.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            toolbar.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            agentPicker.widthAnchor.constraint(equalToConstant: 170),
+            reloadButton.widthAnchor.constraint(equalToConstant: 34),
+            list.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            list.heightAnchor.constraint(equalToConstant: 300),
+            tableScroll.leadingAnchor.constraint(equalTo: listBody.leadingAnchor),
+            tableScroll.trailingAnchor.constraint(equalTo: listBody.trailingAnchor),
+            tableScroll.topAnchor.constraint(equalTo: listBody.topAnchor, constant: 4),
+            tableScroll.bottomAnchor.constraint(equalTo: listBody.bottomAnchor, constant: -4),
+            placeholder.centerXAnchor.constraint(equalTo: listBody.centerXAnchor),
+            placeholder.centerYAnchor.constraint(equalTo: listBody.centerYAnchor),
+            placeholder.widthAnchor.constraint(lessThanOrEqualTo: listBody.widthAnchor, constant: -48),
+            update.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            errorField.widthAnchor.constraint(equalTo: stack.widthAnchor),
             actions.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
         view = root
         updateButtons()
+    }
+
+    /// Chooses what the list area shows and hides rows that have nothing to say.
+    private func refreshPlaceholder() {
+        let failure = errorField.stringValue
+        let noResults = !models.isEmpty && visibleModels.isEmpty
+        let message: String
+        if models.isEmpty, loading {
+            message = GitL10n.text("Loading models…")
+        } else if models.isEmpty {
+            message = failure
+        } else {
+            message = noResults ? GitL10n.text("No matching models.") : ""
+        }
+        let failed = models.isEmpty && !loading && !failure.isEmpty
+        placeholderField.stringValue = message
+        placeholderField.isHidden = message.isEmpty
+        placeholderIcon.isHidden = !failed
+        retryButton.isHidden = !failed
+        tableScroll.isHidden = models.isEmpty || noResults
+        // With no list to keep, the failure is already shown in the list area.
+        errorField.isHidden = failure.isEmpty || models.isEmpty
+        updateStatus.isHidden = updateStatus.stringValue.isEmpty
+        selectionField.stringValue = selected.isEmpty ? "" : GitL10n.format("{0} selected", String(selected.count))
     }
 
     override func viewDidAppear() {
@@ -646,6 +709,7 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
         guard notification.object as? NSSearchField === searchField else { return }
         query = searchField.stringValue
         modelTable.reloadData()
+        refreshPlaceholder()
     }
 
     @objc private func toggleModel(_ sender: NSButton) {
@@ -787,6 +851,7 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
 
     private func updateButtons() {
         guard isViewLoaded else { return }
+        refreshPlaceholder()
         agentPicker.isEnabled = !updating
         searchField.isEnabled = !updating
         modelTable.isEnabled = !updating
@@ -801,17 +866,6 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
             updateButton.isHidden = true
             updateButton.isEnabled = false
         }
-    }
-
-    @objc private func toggleHelp() {
-        helpField.isHidden.toggle()
-        helpButton.image = NSImage(
-            systemSymbolName: helpField.isHidden ? "chevron.right" : "chevron.down",
-            accessibilityDescription: nil
-        )
-        view.needsLayout = true
-        view.layoutSubtreeIfNeeded()
-        preferredContentSize = view.fittingSize
     }
 
     @objc private func cancel() {
@@ -838,8 +892,8 @@ private final class GitCommitAIModelCell: NSTableCellView {
         checkbox.font = .systemFont(ofSize: NSFont.systemFontSize)
         addSubview(checkbox)
         NSLayoutConstraint.activate([
-            checkbox.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 5),
-            checkbox.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -5),
+            checkbox.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            checkbox.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             checkbox.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }

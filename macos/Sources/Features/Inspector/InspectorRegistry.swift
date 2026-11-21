@@ -204,7 +204,7 @@ enum InspectorPaneActionKind: Equatable, Sendable {
     case selectAgentHistorySession(id: String)
     case clearAgentHistorySelection
     case resumeAgentHistorySession(id: String)
-    case forkAgentHistorySession(id: String)
+    case forkAgentHistorySession(id: String, placement: AgentHistoryForkPlacement = .newTab)
     case jumpToHistoryItem(InspectorHistoryItem)
     case gitAction(InspectorGitAction)
 }

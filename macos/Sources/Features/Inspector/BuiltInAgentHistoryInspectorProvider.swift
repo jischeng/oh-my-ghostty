@@ -16,7 +16,9 @@ final class BuiltInAgentHistoryInspectorProvider {
     typealias RemoteSessionLoader = (AgentHistoryRemoteAccess) async -> [AgentHistorySession]
     typealias TranscriptLoader = (AgentHistorySession) async -> AgentHistoryTranscript
     typealias SessionResumer = @MainActor (AgentHistorySession, InspectorPaneContext) -> Void
-    typealias SessionForker = @MainActor (AgentHistorySession, InspectorPaneContext) -> Void
+    typealias SessionForker = @MainActor (
+        AgentHistorySession, AgentHistoryForkPlacement, InspectorPaneContext
+    ) -> Void
 
     private struct TabState {
         var hostKey: String = "local"
@@ -180,11 +182,12 @@ final class BuiltInAgentHistoryInspectorProvider {
             }
             sessionResumer(session, action.context)
             publishPresentedContexts()
-        case .forkAgentHistorySession(let id):
-            guard let session = sessionsByHost[hostKey]?.first(where: { $0.id == id }) else {
+        case .forkAgentHistorySession(let id, let placement):
+            guard let session = sessionsByHost[hostKey]?.first(where: { $0.id == id }),
+                  session.supportsFork else {
                 return
             }
-            sessionForker(session, action.context)
+            sessionForker(session, placement, action.context)
             publishPresentedContexts()
         default:
             break
@@ -393,22 +396,7 @@ final class BuiltInAgentHistoryInspectorProvider {
               let executablePath = Bundle.main.executablePath else { return }
 
         if let remoteHost = session.remoteHost {
-            let replay: SSHReplayDescriptor? = switch context.session.state {
-            case .local:
-                nil
-            case .sshConnecting(let ssh), .sshReady(let ssh, _):
-                ssh.replay ?? SSHReplayStore.load(connectionID: ssh.connectionID)
-            }
-            guard let activeReplay = replay ?? (SSHPlugin.configuration(alias: remoteHost).map {
-                SSHReplayDescriptor(
-                    version: 1,
-                    ssh: "/usr/bin/ssh",
-                    forwardEnv: true,
-                    terminfo: true,
-                    cache: true,
-                    args: [$0.alias]
-                )
-            }) else { return }
+            guard let activeReplay = replayDescriptor(for: remoteHost, context: context) else { return }
 
             let workingDirectory = session.workingDirectory ?? context.workingDirectory
             let descriptor = AgentResumeDescriptor(
@@ -465,58 +453,103 @@ final class BuiltInAgentHistoryInspectorProvider {
         controller.adoptAgentResumeDescriptor(descriptor, for: surface, title: session.title)
     }
 
+    /// The SSH invocation that reaches `remoteHost`: the Inspector pane's own
+    /// connection when it has one, otherwise a plain `ssh <alias>`.
+    private static func replayDescriptor(
+        for remoteHost: String,
+        context: InspectorPaneContext
+    ) -> SSHReplayDescriptor? {
+        let replay: SSHReplayDescriptor? = switch context.session.state {
+        case .local:
+            nil
+        case .sshConnecting(let ssh), .sshReady(let ssh, _):
+            ssh.replay ?? SSHReplayStore.load(connectionID: ssh.connectionID)
+        }
+        return replay ?? SSHPlugin.configuration(alias: remoteHost).map {
+            SSHReplayDescriptor(
+                version: 1,
+                ssh: "/usr/bin/ssh",
+                forwardEnv: true,
+                terminfo: true,
+                cache: true,
+                args: [$0.alias]
+            )
+        }
+    }
+
+    /// Starts the Agent's native fork of `session`. The fork gets a new
+    /// conversation ID from the Agent, so no resume descriptor is adopted
+    /// here; the Agent's own hooks identify the new pane.
     private static func fork(
         _ session: AgentHistorySession,
+        placement: AgentHistoryForkPlacement,
         context: InspectorPaneContext
     ) {
-        guard session.remoteHost == nil,
-              FileManager.default.fileExists(atPath: session.sourcePath),
-              let appDelegate = NSApp.delegate as? AppDelegate else { return }
-        let workingDirectory = session.workingDirectory ?? context.workingDirectory
-        guard let command = forkCommand(for: session) else {
-            resume(session, context: context)
-            return
+        guard let appDelegate = NSApp.delegate as? AppDelegate,
+              let executablePath = Bundle.main.executablePath else { return }
+        var configuration = Ghostty.SurfaceConfiguration()
+        if let remoteHost = session.remoteHost {
+            guard let replay = replayDescriptor(for: remoteHost, context: context),
+                  let command = remoteForkCommand(
+                      for: session,
+                      replay: replay,
+                      executablePath: executablePath,
+                      fallbackWorkingDirectory: context.workingDirectory
+                  ) else { return }
+            configuration.workingDirectory = context.session.local.workingDirectory
+            configuration.command = TerminalController.replaySurvivalCommand(command)
+        } else {
+            guard FileManager.default.fileExists(atPath: session.sourcePath),
+                  let command = forkCommand(for: session) else { return }
+            configuration.workingDirectory = session.workingDirectory ?? context.workingDirectory
+            configuration.command = TerminalController.replaySurvivalCommand(command)
         }
 
-        var configuration = Ghostty.SurfaceConfiguration()
-        configuration.workingDirectory = workingDirectory
-        configuration.command = TerminalController.replaySurvivalCommand(command)
-        let parent = TerminalController.all.first(where: {
-            $0.tabSessionID == context.tabID
-        })?.window ?? TerminalController.preferredParent?.window
+        let host = TerminalController.all.first(where: { $0.tabSessionID == context.tabID })
+        if placement != .newTab, let host,
+           let source = host.surfaceTree.first(where: { $0.id == context.surfaceID })
+               ?? host.focusedSurface ?? host.surfaceTree.first {
+            _ = host.newDirectorySplit(
+                at: source,
+                direction: placement == .splitRight ? .right : .down,
+                configuration: configuration
+            )
+            return
+        }
         _ = TerminalController.newTab(
             appDelegate.ghostty,
-            from: parent,
+            from: host?.window ?? TerminalController.preferredParent?.window,
             withBaseConfig: configuration
         )
     }
 
+    /// The local native fork, run in the user's login shell so the Agent CLI
+    /// resolves from its normal PATH. nil when the manifest declares no fork.
     nonisolated static func forkCommand(for session: AgentHistorySession) -> String? {
-        let agent = session.agent
-        let definition = agent.definition
-        let id = session.conversationID.rawValue
-        var argv: [String] = [definition.command]
-
-        switch agent {
-        case .pi:
-            argv.append(contentsOf: ["--fork", id])
-        case .claude:
-            argv.append(contentsOf: ["--resume", id, "--fork-session"])
-        case .codex:
-            argv = [definition.command, "fork", id]
-        case .qoder:
-            argv.append(contentsOf: ["--resume", id, "--fork-session"])
-        case .omp:
-            argv.append(contentsOf: ["--resume=\(id)"])
-        case .qwen:
-            argv.append(contentsOf: ["--resume", id])
-        default:
-            return nil
-        }
-
+        guard let arguments = session.forkArguments else { return nil }
+        let argv = [session.agent.definition.command] + arguments
+        guard argv.allSatisfy({ !$0.isEmpty && !$0.contains("\0") }) else { return nil }
         let invocation = argv.map(shellQuote).joined(separator: " ")
         let shell = "\"${SHELL:-/bin/zsh}\""
         return "\(shell) -l -i -c \(shellQuote(invocation)); exec \(shell) -l"
+    }
+
+    /// The `+ssh` replay that forks `session` on its remote host. `+ssh` owns
+    /// the per-agent fork dialect and refuses agents without one.
+    nonisolated static func remoteForkCommand(
+        for session: AgentHistorySession,
+        replay: SSHReplayDescriptor,
+        executablePath: String,
+        fallbackWorkingDirectory: String? = nil
+    ) -> String? {
+        guard session.supportsFork else { return nil }
+        return replay.command(
+            executablePath: executablePath,
+            remoteWorkingDirectory: session.workingDirectory ?? fallbackWorkingDirectory,
+            remoteAgent: session.agent,
+            conversationID: session.conversationID,
+            forkConversation: true
+        )
     }
 
     nonisolated private static func shellQuote(_ value: String) -> String {

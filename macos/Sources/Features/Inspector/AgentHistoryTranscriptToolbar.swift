@@ -13,6 +13,7 @@ struct AgentHistoryTranscriptToolbar: NSViewControllerRepresentable {
     let onEscape: () -> Void
     let onBack: () -> Void
     let onResume: () -> Void
+    var onFork: (AgentHistoryForkPlacement) -> Void = { _ in }
 
     func makeNSViewController(context: Context) -> AgentHistoryTranscriptToolbarController {
         AgentHistoryTranscriptToolbarController()
@@ -32,6 +33,7 @@ final class AgentHistoryTranscriptToolbarController: NSViewController, NSSearchF
     private let agentIcon = NSImageView()
     private let agentName = NSTextField(labelWithString: "")
     private let findButton = NSButton()
+    private let forkButton = NSButton()
     private let resumeButton = NSButton()
     private let searchField = AgentHistoryTranscriptSearchField()
     private let matchLabel = NSTextField(labelWithString: "")
@@ -42,6 +44,7 @@ final class AgentHistoryTranscriptToolbarController: NSViewController, NSSearchF
     var searchFieldForTesting: AgentHistoryTranscriptSearchField { searchField }
     var backButtonForTesting: NSButton { backButton }
     var findButtonForTesting: NSButton { findButton }
+    var forkButtonForTesting: NSButton { forkButton }
     var resumeButtonForTesting: NSButton { resumeButton }
 
     override func loadView() {
@@ -66,6 +69,10 @@ final class AgentHistoryTranscriptToolbarController: NSViewController, NSSearchF
         findButton.bezelStyle = .accessoryBar
         findButton.target = self
         findButton.action = #selector(toggleSearch)
+        forkButton.image = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: nil)
+        forkButton.bezelStyle = .accessoryBar
+        forkButton.target = self
+        forkButton.action = #selector(showForkMenu)
         resumeButton.bezelStyle = .rounded
         resumeButton.controlSize = .small
         resumeButton.target = self
@@ -75,11 +82,13 @@ final class AgentHistoryTranscriptToolbarController: NSViewController, NSSearchF
         header.addArrangedSubview(agentName)
         header.addArrangedSubview(NSView())
         header.addArrangedSubview(findButton)
+        header.addArrangedSubview(forkButton)
         header.addArrangedSubview(resumeButton)
         agentIcon.widthAnchor.constraint(equalToConstant: 18).isActive = true
         agentIcon.heightAnchor.constraint(equalToConstant: 18).isActive = true
         backButton.widthAnchor.constraint(equalToConstant: 24).isActive = true
         findButton.widthAnchor.constraint(equalToConstant: 24).isActive = true
+        forkButton.widthAnchor.constraint(equalToConstant: 24).isActive = true
         searchRow.orientation = .horizontal
         searchRow.alignment = .centerY
         searchRow.spacing = 7
@@ -115,6 +124,9 @@ final class AgentHistoryTranscriptToolbarController: NSViewController, NSSearchF
         agentIcon.contentTintColor = agentIcon.image?.isTemplate == true ? .labelColor : nil
         agentName.stringValue = next.session.agent.displayName
         resumeButton.title = next.session.isActive ? next.strings.openLive : next.strings.resume
+        forkButton.isHidden = !next.session.supportsFork
+        forkButton.toolTip = next.strings.fork
+        forkButton.setAccessibilityLabel(next.strings.fork)
         backButton.toolTip = next.strings.back
         backButton.setAccessibilityLabel(next.strings.back)
         findButton.toolTip = "⌘F"
@@ -190,6 +202,30 @@ final class AgentHistoryTranscriptToolbarController: NSViewController, NSSearchF
     @objc private func toggleSearch() { snapshot?.onToggleSearch() }
     @objc private func back() { snapshot?.onBack() }
     @objc private func resume() { snapshot?.onResume() }
+
+    /// One item per placement, tagged with its index in `allCases`.
+    func forkMenu() -> NSMenu? {
+        guard let snapshot, snapshot.session.supportsFork else { return nil }
+        let menu = NSMenu()
+        for (index, placement) in AgentHistoryForkPlacement.allCases.enumerated() {
+            let item = NSMenuItem(title: snapshot.strings.forkTitle(placement),
+                                  action: #selector(fork(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    @objc private func showForkMenu() {
+        forkMenu()?.popUp(positioning: nil, at: NSPoint(x: 0, y: forkButton.bounds.maxY + 4), in: forkButton)
+    }
+
+    @objc private func fork(_ sender: NSMenuItem) {
+        let placements = AgentHistoryForkPlacement.allCases
+        guard placements.indices.contains(sender.tag) else { return }
+        snapshot?.onFork(placements[sender.tag])
+    }
 }
 
 final class AgentHistoryTranscriptSearchField: NSSearchField {

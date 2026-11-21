@@ -169,6 +169,40 @@ struct InspectorAgentHistoryListTests {
         #expect(replacement.isEmpty)
     }
 
+    @Test func menuOffersEveryForkPlacementOnlyForAgentsWithNativeFork() throws {
+        let controller = InspectorAgentHistoryListController()
+        let forkable = try session(1)
+        var remote = try session(2)
+        remote.remoteHost = "cloud"
+        let plain = AgentHistorySession(
+            agent: .opencode, conversationID: try #require(AgentConversationID("session-3")),
+            title: "Session 3", workingDirectory: "/tmp/project", updatedAt: Date(),
+            sourcePath: "/tmp/3.jsonl", isActive: false
+        )
+        var actions: [InspectorPaneActionKind] = []
+        controller.update(InspectorAgentHistoryList(
+            rows: [.session(forkable, snippet: nil), .session(remote, snippet: nil), .session(plain, snippet: nil)],
+            query: "", strings: .init(language: .english),
+            select: { _ in }, toggleGroup: { _ in }, loadMore: {}, perform: { actions.append($0) }
+        ))
+        let forkTitles = ["Fork in New Tab", "Fork in Split Right", "Fork in Split Down"]
+        // Local and SSH sessions fork alike.
+        for (row, entry) in [(0, forkable), (1, remote)] {
+            actions.removeAll()
+            let menu = try #require(controller.menu(for: row))
+            let forks = menu.items.filter { forkTitles.contains($0.title) }
+            #expect(forks.map(\.title) == forkTitles)
+            for item in forks {
+                #expect(NSApp.sendAction(try #require(item.action), to: item.target, from: item))
+            }
+            #expect(actions == AgentHistoryForkPlacement.allCases.map {
+                .forkAgentHistorySession(id: entry.id, placement: $0)
+            })
+        }
+        let plainMenu = try #require(controller.menu(for: 2))
+        #expect(plainMenu.items.allSatisfy { !forkTitles.contains($0.title) })
+    }
+
     @Test func groupedInsertAndFilterPreserveSelectedSessionAndViewportAnchor() throws {
         let controller = InspectorAgentHistoryListController()
         let sessions = try (0..<100).map { try session($0) }

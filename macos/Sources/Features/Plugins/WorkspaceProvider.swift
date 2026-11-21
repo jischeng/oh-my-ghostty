@@ -645,7 +645,8 @@ struct SSHReplayDescriptor: Codable, Equatable, Sendable {
         executablePath: String,
         remoteWorkingDirectory: String? = nil,
         remoteAgent: SupportedAgent? = nil,
-        conversationID: AgentConversationID? = nil
+        conversationID: AgentConversationID? = nil,
+        forkConversation: Bool = false
     ) -> String? {
         guard version == 1,
               !ssh.isEmpty,
@@ -675,8 +676,11 @@ struct SSHReplayDescriptor: Codable, Equatable, Sendable {
             argv.append("--remote-agent=\(remoteAgent.rawValue)")
             if let conversationID {
                 argv.append("--remote-agent-session=\(conversationID.rawValue)")
+                if forkConversation { argv.append("--remote-agent-fork") }
+            } else if forkConversation {
+                return nil
             }
-        } else if conversationID != nil {
+        } else if conversationID != nil || forkConversation {
             return nil
         }
         argv.append("--")

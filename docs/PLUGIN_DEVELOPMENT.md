@@ -1904,6 +1904,19 @@ ID is absent (the Agent exited back to a remote shell), the restore command
 reconnects `+ssh` without `--remote-agent` so the pane lands in the remote
 shell instead of spawning a fresh Agent session.
 
+A manifest's optional `resume.forkArguments` is the Agent's own fork
+invocation, with `{id}` for the source conversation: `claude --resume <id>
+--fork-session`, `codex fork <id>`, `pi --fork <id>`, and `qodercli --resume
+<id> --fork-session`. Only CLIs whose fork was verified declare it; an Agent
+without `forkArguments` has no fork action, and a fork is never replaced by a
+plain resume. A local fork runs through the same login-shell and survival
+wrappers as a restore. A remote fork replays the SSH argv with
+`--remote-agent`, `--remote-agent-session`, and the typed `--remote-agent-fork`
+flag; `+ssh` holds the matching per-agent fork dialect, requires a session ID,
+and exits with an error for an agent that has none. A fork starts a new
+conversation, so the host adopts no `AgentResumeDescriptor` for the source ID;
+the Agent's hooks identify the new pane.
+
 Each Surface also persists an `SSHResumeDescriptor` (validated SSH replay argv,
 last ready remote cwd, and pre-SSH local cwd) whenever an `omg +ssh` connection
 is active, independent of any Agent session. On restore, panes without a
@@ -2555,7 +2568,13 @@ repository identity consistent when the focused terminal enters a subdirectory.
 Agent-history resume accepts only a host-discovered,
 `AgentConversationID`-validated local session whose manifest declares
 allowlisted resume arguments; it focuses a matching live Surface or creates a
-new typed resume tab. Agent-history metadata uses a versioned mtime cache and
+new typed resume tab. Agent-history fork
+(`forkAgentHistorySession(id:placement:)`) is offered only when the session's
+manifest declares `forkArguments`, for local and SSH sessions alike, and opens
+the Agent's native fork in a new tab or in a split to the right of or below the
+Inspector's Pane. The session context menu, the transcript toolbar, and the
+per-message fork button all follow that same availability. Agent-history
+metadata uses a versioned mtime cache and
 bounded configurable count. The default time range is the last three calendar
 months. Local and SSH discovery skip older file timestamps before reading or
 decompressing transcript headers; local enumeration still checks file metadata.

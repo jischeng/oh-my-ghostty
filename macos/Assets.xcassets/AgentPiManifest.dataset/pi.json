@@ -11,6 +11,7 @@
   "resume": {
     "createArguments": ["--session-id", "{id}"],
     "resumeArguments": ["--session-id", "{id}"],
+    "forkArguments": ["--fork", "{id}"],
     "store": {
       "root": "~/.pi/agent/sessions",
       "entryPattern": "*_{id}.jsonl"

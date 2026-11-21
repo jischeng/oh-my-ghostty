@@ -29,6 +29,23 @@ struct AgentHistorySession: Identifiable, Equatable, Codable, Sendable {
                 ? value : Ghostty.Shell.quote(value)
         }.joined(separator: " ")
     }
+
+    /// The manifest's native fork arguments for this conversation; nil when
+    /// the Agent declares none. Fork never falls back to a plain resume.
+    var forkArguments: [String]? {
+        guard let arguments = agent.definition.resume.forkArguments,
+              arguments.contains(where: { $0.contains("{id}") }) else { return nil }
+        return arguments.map { $0.replacingOccurrences(of: "{id}", with: conversationID.rawValue) }
+    }
+
+    var supportsFork: Bool { forkArguments != nil }
+}
+
+/// Where a forked conversation opens, relative to the Inspector's tab.
+enum AgentHistoryForkPlacement: String, CaseIterable, Equatable, Sendable {
+    case newTab
+    case splitRight
+    case splitDown
 }
 
 enum AgentHistoryMessageRole: String, Equatable, Sendable {

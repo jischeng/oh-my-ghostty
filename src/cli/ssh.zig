@@ -45,6 +45,15 @@ const RemoteAgent = enum {
     fn parse(value: []const u8) ?RemoteAgent {
         return std.meta.stringToEnum(RemoteAgent, value);
     }
+
+    /// Agents with a verified native fork invocation. Keep in step with the
+    /// `forkArguments` of the macOS agent manifests.
+    fn supportsFork(self: RemoteAgent) bool {
+        return switch (self) {
+            .codex, .claude, .pi, .qoder => true,
+            else => false,
+        };
+    }
 };
 
 const usage =
@@ -61,6 +70,7 @@ const usage =
     \\                        Start an allowlisted agent after connecting.
     \\  --remote-agent-session=<id>
     \\                        Resume that agent's validated conversation ID.
+    \\  --remote-agent-fork   Fork that conversation instead of resuming it.
     \\  --verbose             Print +ssh status lines to stderr.
     \\  --help                Show full help.
     \\
@@ -96,6 +106,10 @@ pub const Options = struct {
 
     /// Optional validated conversation ID for the restored remote agent.
     @"remote-agent-session": ?[]const u8 = null,
+
+    /// Fork `remote-agent-session` with the agent's native fork command
+    /// instead of resuming it.
+    @"remote-agent-fork": bool = false,
 
     /// When true, print verbose output to stderr.
     verbose: bool = false,
@@ -242,6 +256,10 @@ pub const Options = struct {
 ///     `--remote-agent-session=<id>`: Restore an allowlisted agent session.
 ///     These options never accept arbitrary remote commands.
 ///
+///   * `--remote-agent-fork`: Fork the `--remote-agent-session` conversation
+///     with the agent's own fork command instead of resuming it. Only agents
+///     with a verified native fork accept it.
+///
 ///   * `--verbose`: Print +ssh status lines to stderr, and surface
 ///     remote stderr during the terminfo install.
 ///
@@ -386,6 +404,16 @@ fn runInner(
             return 2;
         }
     }
+    if (opts.@"remote-agent-fork") {
+        if (opts.@"remote-agent-session" == null) {
+            try stderr.writeAll("Error: --remote-agent-fork requires --remote-agent-session.\n");
+            return 2;
+        }
+        if (!remote_agent.?.supportsFork()) {
+            try stderr.writeAll("Error: this agent has no native fork command.\n");
+            return 2;
+        }
+    }
 
     const session: struct {
         term: []const u8,
@@ -474,6 +502,7 @@ fn runInner(
             opts.@"remote-working-directory",
             remote_agent,
             opts.@"remote-agent-session",
+            opts.@"remote-agent-fork",
             forward_osc7501,
         ) orelse break :lifecycle null;
         const local_cwd = std.Io.Dir.cwd().realPathFileAlloc(
@@ -882,6 +911,7 @@ fn remoteShellCommand(
         remote_working_directory,
         remote_agent,
         remote_agent_session,
+        false,
         null,
     );
 }
@@ -893,6 +923,7 @@ fn remoteShellCommandWithEnv(
     remote_working_directory: ?[]const u8,
     remote_agent: ?RemoteAgent,
     remote_agent_session: ?[]const u8,
+    remote_agent_fork: bool,
     forward_osc7501: ?[]const u8,
 ) ?[]const u8 {
     const fish = remoteFishCommand(
@@ -902,6 +933,7 @@ fn remoteShellCommandWithEnv(
         remote_working_directory,
         remote_agent,
         remote_agent_session,
+        remote_agent_fork,
     ) orelse return null;
     defer alloc.free(fish);
     const bash = remoteStartupFileCommand(
@@ -912,6 +944,7 @@ fn remoteShellCommandWithEnv(
         remote_working_directory,
         remote_agent,
         remote_agent_session,
+        remote_agent_fork,
     ) orelse return null;
     defer alloc.free(bash);
     const zsh = remoteStartupFileCommand(
@@ -922,6 +955,7 @@ fn remoteShellCommandWithEnv(
         remote_working_directory,
         remote_agent,
         remote_agent_session,
+        remote_agent_fork,
     ) orelse return null;
     defer alloc.free(zsh);
 
@@ -989,6 +1023,7 @@ fn remoteFishCommand(
     remote_working_directory: ?[]const u8,
     remote_agent: ?RemoteAgent,
     remote_agent_session: ?[]const u8,
+    remote_agent_fork: bool,
 ) ?[]const u8 {
     var fish_command: std.Io.Writer.Allocating = .init(alloc);
     defer fish_command.deinit();
@@ -1020,6 +1055,7 @@ fn remoteFishCommand(
             &fish_command.writer,
             agent,
             remote_agent_session,
+            remote_agent_fork,
             .fish,
         ) catch return null;
     }
@@ -1065,22 +1101,36 @@ fn writeRemoteAgentInvocation(
     writer: *std.Io.Writer,
     agent: RemoteAgent,
     session_id: ?[]const u8,
+    fork: bool,
     quote_style: RemoteQuoteStyle,
 ) !void {
     try writer.writeAll(agent.commandName());
-    if (session_id) |session| {
+    const session = session_id orelse {
+        if (fork) return error.UnsupportedAgentFork;
+        return;
+    };
+    if (fork) {
+        // The agent's own fork command; never a plain resume in disguise.
         switch (agent) {
-            .codex => try writer.writeAll(" resume "),
-            .claude, .grok, .hermes, .qoder, .qwen, .reasonix => try writer.writeAll(" --resume "),
-            .pi => try writer.writeAll(" --session-id "),
-            .omp => try writer.writeAll(" --resume="),
-            .opencode => try writer.writeAll(" --session "),
-            .amp, .antigravity, .cline, .copilot, .crush, .cursor, .droid, .kimi => return error.UnsupportedAgentResume,
+            .codex => try writer.writeAll(" fork "),
+            .pi => try writer.writeAll(" --fork "),
+            .claude, .qoder => try writer.writeAll(" --resume "),
+            else => return error.UnsupportedAgentFork,
         }
-        switch (quote_style) {
-            .fish => try writer.print("\"{s}\"", .{session}),
-            .shell => try writeShellSingleQuoted(writer, session),
-        }
+    } else switch (agent) {
+        .codex => try writer.writeAll(" resume "),
+        .claude, .grok, .hermes, .qoder, .qwen, .reasonix => try writer.writeAll(" --resume "),
+        .pi => try writer.writeAll(" --session-id "),
+        .omp => try writer.writeAll(" --resume="),
+        .opencode => try writer.writeAll(" --session "),
+        .amp, .antigravity, .cline, .copilot, .crush, .cursor, .droid, .kimi => return error.UnsupportedAgentResume,
+    }
+    switch (quote_style) {
+        .fish => try writer.print("\"{s}\"", .{session}),
+        .shell => try writeShellSingleQuoted(writer, session),
+    }
+    if (fork and (agent == .claude or agent == .qoder)) {
+        try writer.writeAll(" --fork-session");
     }
 }
 
@@ -1120,6 +1170,7 @@ fn remoteStartupFileCommand(
     remote_working_directory: ?[]const u8,
     remote_agent: ?RemoteAgent,
     remote_agent_session: ?[]const u8,
+    remote_agent_fork: bool,
 ) ?[]const u8 {
     var startup: std.Io.Writer.Allocating = .init(alloc);
     defer startup.deinit();
@@ -1205,6 +1256,7 @@ fn remoteStartupFileCommand(
             &startup.writer,
             agent,
             remote_agent_session,
+            remote_agent_fork,
             .shell,
         ) catch return null;
         startup.writer.writeByte('\n') catch return null;
@@ -1383,6 +1435,71 @@ test "remoteAgentWrappers" {
     }
 }
 
+test "remote agent fork uses each native fork command" {
+    const testing = std.testing;
+    const cases = [_]struct { agent: RemoteAgent, fish: []const u8, shell: []const u8 }{
+        .{ .agent = .codex, .fish = "codex fork \"id-1\"", .shell = "codex fork 'id-1'" },
+        .{ .agent = .pi, .fish = "pi --fork \"id-1\"", .shell = "pi --fork 'id-1'" },
+        .{
+            .agent = .claude,
+            .fish = "claude --resume \"id-1\" --fork-session",
+            .shell = "claude --resume 'id-1' --fork-session",
+        },
+        .{
+            .agent = .qoder,
+            .fish = "qodercli --resume \"id-1\" --fork-session",
+            .shell = "qodercli --resume 'id-1' --fork-session",
+        },
+    };
+    for (cases) |case| {
+        try testing.expect(case.agent.supportsFork());
+        inline for (.{ RemoteQuoteStyle.fish, RemoteQuoteStyle.shell }) |style| {
+            var output: std.Io.Writer.Allocating = .init(testing.allocator);
+            defer output.deinit();
+            try writeRemoteAgentInvocation(&output.writer, case.agent, "id-1", true, style);
+            try testing.expectEqualStrings(
+                if (style == .fish) case.fish else case.shell,
+                output.written(),
+            );
+        }
+    }
+
+    // An agent without a native fork is refused, never resumed instead.
+    inline for (std.meta.tags(RemoteAgent)) |agent| {
+        if (!agent.supportsFork()) {
+            var output: std.Io.Writer.Allocating = .init(testing.allocator);
+            defer output.deinit();
+            try testing.expectError(
+                error.UnsupportedAgentFork,
+                writeRemoteAgentInvocation(&output.writer, agent, "id-1", true, .shell),
+            );
+        }
+    }
+    var no_session: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer no_session.deinit();
+    try testing.expectError(
+        error.UnsupportedAgentFork,
+        writeRemoteAgentInvocation(&no_session.writer, .codex, null, true, .shell),
+    );
+
+    // The fork runs after the remote cwd report, like a resume.
+    const fish_command = remoteFishCommand(
+        testing.allocator,
+        "cloud",
+        "omg-ssh-fork",
+        "/srv/app",
+        .claude,
+        "id-1",
+        true,
+    ).?;
+    defer testing.allocator.free(fish_command);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        fish_command,
+        "__omg_report_pwd; claude --resume \"id-1\" --fork-session",
+    ) != null);
+}
+
 test remoteShellCommand {
     const testing = std.testing;
     try testing.expect(sshDestinationLabel("user@cloud").?.len == "cloud".len);
@@ -1395,6 +1512,7 @@ test remoteShellCommand {
         "/home/user/project's code",
         .codex,
         "019f-session_1",
+        false,
     ).?;
     defer testing.allocator.free(bash_command);
     try testing.expect(std.mem.indexOf(u8, bash_command, "__OMG_BASHRC__") != null);
@@ -1419,6 +1537,7 @@ test remoteShellCommand {
         null,
         null,
         null,
+        false,
     ).?;
     defer testing.allocator.free(zsh_command);
     try testing.expect(std.mem.indexOf(u8, zsh_command, "__OMG_ZSHRC__") != null);
@@ -1462,6 +1581,7 @@ test remoteShellCommand {
         "/home/user/project's code",
         .codex,
         "019f-session_1",
+        false,
     ).?;
     defer testing.allocator.free(cwd_command);
     try testing.expect(std.mem.indexOf(u8, cwd_command, "cd --") != null);
@@ -1496,6 +1616,7 @@ test remoteShellCommand {
         null,
         null,
         null,
+        false,
         "on",
     ).?;
     defer testing.allocator.free(enabled_osc_command);
@@ -1510,6 +1631,7 @@ test remoteShellCommand {
         null,
         null,
         null,
+        false,
         "off",
     ).?;
     defer testing.allocator.free(explicit_off_command);

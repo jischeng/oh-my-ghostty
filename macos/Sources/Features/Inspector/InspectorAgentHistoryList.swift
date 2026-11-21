@@ -210,11 +210,17 @@ final class InspectorAgentHistoryListController: NSViewController, NSTableViewDa
         resume.target = self
         resume.representedObject = MenuAction(action: .resumeAgentHistorySession(id: session.id), perform: snapshot.perform)
         menu.addItem(resume)
-        if session.remoteHost == nil {
-            let fork = NSMenuItem(title: snapshot.strings.forkSession, action: #selector(forkSession(_:)), keyEquivalent: "")
-            fork.target = self
-            fork.representedObject = MenuAction(action: .forkAgentHistorySession(id: session.id), perform: snapshot.perform)
-            menu.addItem(fork)
+        if session.supportsFork {
+            for placement in AgentHistoryForkPlacement.allCases {
+                let fork = NSMenuItem(title: snapshot.strings.forkTitle(placement),
+                                      action: #selector(forkSession(_:)), keyEquivalent: "")
+                fork.target = self
+                fork.representedObject = MenuAction(
+                    action: .forkAgentHistorySession(id: session.id, placement: placement),
+                    perform: snapshot.perform
+                )
+                menu.addItem(fork)
+            }
         }
         if let command = session.resumeCommand {
             let copy = NSMenuItem(title: snapshot.strings.copyResumeCommand,

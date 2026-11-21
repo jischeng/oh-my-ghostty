@@ -228,6 +228,9 @@ struct AgentDefinition: Codable, Equatable, Sendable {
 
         let createArguments: [String]?
         let resumeArguments: [String]
+        /// The Agent's own fork invocation, with `{id}` for the source
+        /// conversation. nil when the CLI has no verified native fork.
+        let forkArguments: [String]?
         let store: Store?
         let discover: Discovery?
         let commandDiscovery: CommandDiscovery?
@@ -340,6 +343,7 @@ struct AgentDefinition: Codable, Equatable, Sendable {
             resume: .init(
                 createArguments: nil,
                 resumeArguments: [],
+                forkArguments: nil,
                 store: nil,
                 discover: nil,
                 commandDiscovery: nil,

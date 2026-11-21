@@ -455,7 +455,8 @@ struct InspectorAgentHistoryView: View {
                     closeTranscriptSearch()
                     perform(.clearAgentHistorySelection)
                 },
-                onResume: { perform(.resumeAgentHistorySession(id: session.id)) }
+                onResume: { perform(.resumeAgentHistorySession(id: session.id)) },
+                onFork: { perform(.forkAgentHistorySession(id: session.id, placement: $0)) }
             )
             .frame(height: isTranscriptSearchVisible ? 72 : 38)
 
@@ -511,9 +512,9 @@ struct InspectorAgentHistoryView: View {
                         agentName: session.agent.displayName,
                         strings: strings,
                         highlightText: needle,
-                        onFork: {
-                            perform(.forkAgentHistorySession(id: session.id))
-                        },
+                        onFork: session.supportsFork
+                            ? { perform(.forkAgentHistorySession(id: session.id)) }
+                            : nil,
                         onFind: toggleTranscriptSearch
                     )
 

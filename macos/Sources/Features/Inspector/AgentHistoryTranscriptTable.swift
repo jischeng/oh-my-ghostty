@@ -9,7 +9,8 @@ struct AgentHistoryTranscriptTable: NSViewRepresentable {
     let agentName: String
     let strings: AgentHistoryStrings
     let highlightText: String
-    let onFork: () -> Void
+    /// nil when the session's Agent has no native fork; hides the action.
+    let onFork: (() -> Void)?
     var onFind: () -> Void = {}
 
     func makeCoordinator() -> Coordinator {
@@ -72,7 +73,7 @@ struct AgentHistoryTranscriptTable: NSViewRepresentable {
         private var agentName = "Agent"
         private var strings = AgentHistoryStrings()
         private var highlightText = ""
-        private var onFork: () -> Void = {}
+        private var onFork: (() -> Void)?
         private var lastWidth: CGFloat = 0
 
         func update(
@@ -80,12 +81,13 @@ struct AgentHistoryTranscriptTable: NSViewRepresentable {
             agentName: String,
             strings: AgentHistoryStrings,
             highlightText: String,
-            onFork: @escaping () -> Void
+            onFork: (() -> Void)?
         ) {
             let contentChanged = self.messages != messages ||
                 self.agentName != agentName ||
                 self.strings != strings ||
-                self.highlightText != highlightText
+                self.highlightText != highlightText ||
+                (self.onFork == nil) != (onFork == nil)
             self.messages = messages
             self.agentName = agentName
             self.strings = strings
@@ -246,7 +248,7 @@ private final class AgentHistoryTranscriptCell: NSTableCellView {
         agentName: String,
         strings: AgentHistoryStrings,
         highlightText: String,
-        onFork: @escaping () -> Void
+        onFork: (() -> Void)?
     ) {
         self.message = message
         self.onFork = onFork
@@ -259,7 +261,7 @@ private final class AgentHistoryTranscriptCell: NSTableCellView {
         ).cgColor
         copyButton.configure(symbol: "doc.on.doc", value: message.text, tooltip: strings.copyMessage)
         forkButton.toolTip = strings.forkSession
-        forkButton.isHidden = message.role != .assistant
+        forkButton.isHidden = message.role != .assistant || onFork == nil
         messageField.attributedStringValue = Self.attributedText(
             message.text,
             highlight: highlightText

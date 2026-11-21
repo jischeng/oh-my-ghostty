@@ -52,6 +52,17 @@ struct AgentHistoryStrings: Equatable, Sendable {
     var copyResumeCommand: String { t("Copy Resume Command", "复制恢复命令") }
     var copied: String { t("Copied", "已复制") }
     var forkSession: String { t("Fork in New Tab", "分叉到新标签页") }
+    var fork: String { t("Fork", "分叉") }
+    var forkSplitRight: String { t("Fork in Split Right", "分叉到右侧分屏") }
+    var forkSplitDown: String { t("Fork in Split Down", "分叉到下方分屏") }
+
+    func forkTitle(_ placement: AgentHistoryForkPlacement) -> String {
+        switch placement {
+        case .newTab: forkSession
+        case .splitRight: forkSplitRight
+        case .splitDown: forkSplitDown
+        }
+    }
     var noSessions: String { t("No Agent Sessions", "暂无 Agent 会话") }
     var noSessionsMessage: String {
         t(

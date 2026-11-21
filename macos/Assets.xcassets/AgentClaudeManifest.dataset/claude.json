@@ -22,6 +22,11 @@
       "--resume",
       "{id}"
     ],
+    "forkArguments": [
+      "--resume",
+      "{id}",
+      "--fork-session"
+    ],
     "store": {
       "root": "~/.claude/projects",
       "entryPattern": "{id}.jsonl"

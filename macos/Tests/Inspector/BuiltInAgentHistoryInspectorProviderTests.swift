@@ -644,7 +644,7 @@ struct AgentHistoryInspectorTests {
                 .init(sessionID: session.id, messages: [], wasTruncated: false)
             },
             sessionResumer: { _, _ in },
-            sessionForker: { _, _ in }
+            sessionForker: { _, _, _ in }
         )
 
         try provider.register()
@@ -782,14 +782,24 @@ struct AgentHistoryInspectorTests {
             wasTruncated: false
         )
         var resumedIDs: [String] = []
-        var forkedIDs: [String] = []
+        var forks: [String] = []
+        // OpenCode declares no native fork, so its fork action is refused.
+        let unforkable = AgentHistorySession(
+            agent: .opencode,
+            conversationID: try #require(AgentConversationID("session-43")),
+            title: "No native fork",
+            workingDirectory: "/Users/test/project",
+            updatedAt: Date(timeIntervalSince1970: 41),
+            sourcePath: "/tmp/session-43.jsonl",
+            isActive: false
+        )
         let registry = InspectorRegistry()
         let provider = BuiltInAgentHistoryInspectorProvider(
             registry: registry,
-            sessionLoader: { [session] },
+            sessionLoader: { [session, unforkable] },
             transcriptLoader: { _ in transcript },
             sessionResumer: { session, _ in resumedIDs.append(session.id) },
-            sessionForker: { session, _ in forkedIDs.append(session.id) }
+            sessionForker: { session, placement, _ in forks.append("\(session.id)@\(placement.rawValue)") }
         )
         try provider.register()
         let context = InspectorPaneContext(
@@ -808,13 +818,13 @@ struct AgentHistoryInspectorTests {
             if case .agentHistory(let value) = registry.content(
                 for: BuiltInAgentHistoryInspectorProvider.paneID,
                 context: context
-            ), value.sessions.count == 1 {
+            ), value.sessions.count == 2 {
                 content = value
                 break
             }
             await Task.yield()
         }
-        #expect(content?.sessions.map(\.id) == [session.id])
+        #expect(content?.sessions.map(\.id) == [session.id, unforkable.id])
 
         registry.performAction(
             paneID: BuiltInAgentHistoryInspectorProvider.paneID,
@@ -852,7 +862,21 @@ struct AgentHistoryInspectorTests {
                 kind: .forkAgentHistorySession(id: session.id)
             )
         )
-        #expect(forkedIDs == [session.id])
+        registry.performAction(
+            paneID: BuiltInAgentHistoryInspectorProvider.paneID,
+            action: .init(
+                context: context,
+                kind: .forkAgentHistorySession(id: session.id, placement: .splitDown)
+            )
+        )
+        registry.performAction(
+            paneID: BuiltInAgentHistoryInspectorProvider.paneID,
+            action: .init(
+                context: context,
+                kind: .forkAgentHistorySession(id: unforkable.id, placement: .splitRight)
+            )
+        )
+        #expect(forks == ["\(session.id)@newTab", "\(session.id)@splitDown"])
 
         registry.performAction(
             paneID: BuiltInAgentHistoryInspectorProvider.paneID,
@@ -869,46 +893,56 @@ struct AgentHistoryInspectorTests {
         #expect(cleared.transcript == nil)
     }
 
-    @Test func forkCommandsMatchSupportedAgentDialects() throws {
-        let claudeSession = AgentHistorySession(
-            agent: .claude,
-            conversationID: try #require(AgentConversationID("claude-123")),
-            title: "Claude session",
-            workingDirectory: "/tmp/claude",
-            updatedAt: Date(),
-            sourcePath: "/tmp/c.jsonl",
-            isActive: false
-        )
-        let piSession = AgentHistorySession(
-            agent: .pi,
-            conversationID: try #require(AgentConversationID("pi-123")),
-            title: "Pi session",
-            workingDirectory: "/tmp/pi",
-            updatedAt: Date(),
-            sourcePath: "/tmp/p.jsonl",
-            isActive: false
-        )
-        let codexSession = AgentHistorySession(
-            agent: .codex,
-            conversationID: try #require(AgentConversationID("codex-123")),
-            title: "Codex session",
-            workingDirectory: "/tmp/codex",
-            updatedAt: Date(),
-            sourcePath: "/tmp/cx.jsonl",
-            isActive: false
-        )
+    @Test func forkCommandsComeFromManifestForkArguments() throws {
+        func session(_ agent: SupportedAgent, remoteHost: String? = nil) throws -> AgentHistorySession {
+            AgentHistorySession(
+                agent: agent,
+                conversationID: try #require(AgentConversationID("id-123")),
+                title: "Session",
+                workingDirectory: "/srv/app",
+                updatedAt: Date(),
+                sourcePath: "/tmp/\(agent.rawValue).jsonl",
+                remoteHost: remoteHost,
+                isActive: false
+            )
+        }
+        let login = "\"${SHELL:-/bin/zsh}\""
+        let expected: [SupportedAgent: String] = [
+            .claude: "'claude' '--resume' 'id-123' '--fork-session'",
+            .codex: "'codex' 'fork' 'id-123'",
+            .pi: "'pi' '--fork' 'id-123'",
+            .qoder: "'qodercli' '--resume' 'id-123' '--fork-session'",
+        ]
+        for agent in SupportedAgent.allCases {
+            let entry = try session(agent)
+            guard let invocation = expected[agent] else {
+                // No pseudo-fork: an Agent without a native fork offers none.
+                #expect(!entry.supportsFork)
+                #expect(BuiltInAgentHistoryInspectorProvider.forkCommand(for: entry) == nil)
+                continue
+            }
+            #expect(entry.supportsFork)
+            let quoted = "'" + invocation.replacingOccurrences(of: "'", with: "'\\''") + "'"
+            #expect(BuiltInAgentHistoryInspectorProvider.forkCommand(for: entry) ==
+                "\(login) -l -i -c \(quoted); exec \(login) -l")
+        }
 
-        let claudeCmd = try #require(BuiltInAgentHistoryInspectorProvider.forkCommand(for: claudeSession))
-        #expect(claudeCmd.contains("--fork-session"))
-        #expect(claudeCmd.contains("claude-123"))
-
-        let piCmd = try #require(BuiltInAgentHistoryInspectorProvider.forkCommand(for: piSession))
-        #expect(piCmd.contains("--fork"))
-        #expect(piCmd.contains("pi-123"))
-
-        let codexCmd = try #require(BuiltInAgentHistoryInspectorProvider.forkCommand(for: codexSession))
-        #expect(codexCmd.contains("fork"))
-        #expect(codexCmd.contains("codex-123"))
+        // A remote fork replays the SSH connection and lets +ssh run the
+        // native fork in the session's remote directory.
+        let replay = SSHReplayDescriptor(version: 1, ssh: "/usr/bin/ssh", forwardEnv: true,
+                                         terminfo: true, cache: true, args: ["cloud"])
+        let remote = try session(.claude, remoteHost: "cloud")
+        #expect(BuiltInAgentHistoryInspectorProvider.remoteForkCommand(
+            for: remote, replay: replay, executablePath: "/Apps/OMG"
+        ) == "'/Apps/OMG' '+ssh' '--forward-env=true' '--terminfo=true' '--cache=true' '--ssh=/usr/bin/ssh' " +
+            "'--remote-working-directory=/srv/app' '--remote-agent=claude' '--remote-agent-session=id-123' " +
+            "'--remote-agent-fork' '--' 'cloud'")
+        #expect(BuiltInAgentHistoryInspectorProvider.remoteForkCommand(
+            for: try session(.opencode, remoteHost: "cloud"), replay: replay, executablePath: "/Apps/OMG"
+        ) == nil)
+        // A fork always names the conversation it forks.
+        #expect(replay.command(executablePath: "/Apps/OMG", remoteAgent: .claude, forkConversation: true) == nil)
+        #expect(replay.command(executablePath: "/Apps/OMG", forkConversation: true) == nil)
     }
 
     @Test func filtersMeaninglessPasteAndTemporaryPathLines() {

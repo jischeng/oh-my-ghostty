@@ -158,6 +158,7 @@ struct AgentHistoryNativeToolbarTests {
         var resumeCount = 0
         var toggleCount = 0
         var escapeCount = 0
+        var forks: [AgentHistoryForkPlacement] = []
         var latestQuery = ""
         let prior = NSButton(title: "Prior", target: nil, action: nil)
         prior.frame = NSRect(x: 0, y: 130, width: 80, height: 24)
@@ -176,12 +177,21 @@ struct AgentHistoryNativeToolbarTests {
                 session: session, strings: .init(language: .english), query: latestQuery,
                 isSearchVisible: visible, focusRequestID: requestID, matchCount: 0,
                 onQueryChange: { latestQuery = $0 }, onToggleSearch: { toggleCount += 1 },
-                onEscape: { escapeCount += 1 }, onBack: { backCount += 1 }, onResume: { resumeCount += 1 }
+                onEscape: { escapeCount += 1 }, onBack: { backCount += 1 }, onResume: { resumeCount += 1 },
+                onFork: { forks.append($0) }
             ))
             controller.view.layoutSubtreeIfNeeded()
         }
 
         update(visible: false, requestID: 0)
+        // Claude has a native fork: one menu item per placement.
+        #expect(!controller.forkButtonForTesting.isHidden)
+        let forkMenu = try #require(controller.forkMenu())
+        #expect(forkMenu.items.map(\.title) == ["Fork in New Tab", "Fork in Split Right", "Fork in Split Down"])
+        for item in forkMenu.items {
+            #expect(NSApp.sendAction(try #require(item.action), to: item.target, from: item))
+        }
+        #expect(forks == [.newTab, .splitRight, .splitDown])
         update(visible: true, requestID: 1)
         try await Task.sleep(for: .milliseconds(30))
         let editor = try #require(controller.searchFieldForTesting.currentEditor() as? NSTextView)
@@ -211,6 +221,17 @@ struct AgentHistoryNativeToolbarTests {
 
         update(visible: false, requestID: 1)
         #expect(window.firstResponder === prior)
+
+        // An Agent without a native fork gets no fork entry at all.
+        controller.update(AgentHistoryTranscriptToolbar(
+            session: AgentHistorySession(agent: .opencode, conversationID: AgentConversationID("plain")!,
+                                         title: "plain", workingDirectory: "/repo", updatedAt: Date(),
+                                         sourcePath: "/tmp/plain.jsonl", isActive: false),
+            strings: .init(language: .english), query: "", isSearchVisible: false, focusRequestID: 1,
+            matchCount: 0, onQueryChange: { _ in }, onToggleSearch: {}, onEscape: {}, onBack: {}, onResume: {}
+        ))
+        #expect(controller.forkButtonForTesting.isHidden)
+        #expect(controller.forkMenu() == nil)
     }
 
     private func toolbarSnapshot(

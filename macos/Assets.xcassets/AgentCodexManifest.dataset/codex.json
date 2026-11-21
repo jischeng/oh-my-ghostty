@@ -17,6 +17,10 @@
       "resume",
       "{id}"
     ],
+    "forkArguments": [
+      "fork",
+      "{id}"
+    ],
     "discover": {
       "root": "~/.codex/sessions",
       "additionalRoots": ["~/.codex/archived_sessions"],

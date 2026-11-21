@@ -203,6 +203,31 @@ final class SettingsNestedScrollView: NSScrollView {
     }
 }
 
+/// Small outlined capsule for status words such as "BETA".
+final class SettingsBadge: NSView {
+    var text = "" { didSet { invalidateIntrinsicContentSize(); needsDisplay = true } }
+    var emphasized = false { didSet { needsDisplay = true } }
+    private var attributes: [NSAttributedString.Key: Any] {
+        [.font: NSFont.systemFont(ofSize: 9, weight: .semibold), .kern: 0.4,
+         .foregroundColor: emphasized ? NSColor.alternateSelectedControlTextColor : NSColor.secondaryLabelColor]
+    }
+    override var intrinsicContentSize: NSSize {
+        let size = (text as NSString).size(withAttributes: attributes)
+        return NSSize(width: ceil(size.width) + 10, height: 15)
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        let color = emphasized ? NSColor.alternateSelectedControlTextColor : NSColor.secondaryLabelColor
+        let outline = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 4, yRadius: 4)
+        color.withAlphaComponent(0.12).setFill()
+        outline.fill()
+        color.withAlphaComponent(0.45).setStroke()
+        outline.stroke()
+        let size = (text as NSString).size(withAttributes: attributes)
+        (text as NSString).draw(at: NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2),
+                                withAttributes: attributes)
+    }
+}
+
 /// Hosts a navigation row and shows that the whole row is clickable.
 final class SettingsLinkRowView: NSView {
     private var hovering = false { didSet { needsDisplay = true } }

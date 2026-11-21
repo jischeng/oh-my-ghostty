@@ -15,7 +15,10 @@ private final class NativeSettingsNavigationCell: NSTableCellView {
         updateColors()
     }
 
+    let badge = SettingsBadge()
+
     func updateColors() {
+        badge.emphasized = backgroundStyle == .emphasized
         label.textColor = backgroundStyle == .emphasized ? .alternateSelectedControlTextColor : .labelColor
         icon.contentTintColor = backgroundStyle == .emphasized ? .alternateSelectedControlTextColor : .secondaryLabelColor
     }
@@ -184,6 +187,11 @@ final class NativeSettingsController: NSViewController, NSTableViewDataSource, N
         label.font = .systemFont(ofSize: 13)
         cell.updateColors()
         let stack = NSStackView(views: [icon, label])
+        if tab == .plugins {
+            cell.badge.text = "BETA"
+            stack.addArrangedSubview(cell.badge)
+            stack.setCustomSpacing(6, after: label)
+        }
         stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
         cell.addSubview(stack)

@@ -13,6 +13,8 @@ struct GitCommitAIRoutesTable: NSViewRepresentable {
         Self.makeNativeView(coordinator: context.coordinator)
     }
 
+    static let rowHeight: CGFloat = 48
+
     static func makeNativeView(coordinator: Coordinator) -> NSScrollView {
         let scrollView = SettingsNestedScrollView()
         scrollView.drawsBackground = false
@@ -21,12 +23,12 @@ struct GitCommitAIRoutesTable: NSViewRepresentable {
 
         let table = NSTableView()
         table.headerView = nil
-        table.rowHeight = 40
+        table.rowHeight = rowHeight
         table.intercellSpacing = .zero
         table.usesAlternatingRowBackgroundColors = false
         table.backgroundColor = .clear
         table.style = .plain
-        table.gridStyleMask = .solidHorizontalGridLineMask
+        table.selectionHighlightStyle = .none
         table.allowsMultipleSelection = false
         table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         table.draggingDestinationFeedbackStyle = .gap
@@ -70,7 +72,7 @@ struct GitCommitAIRoutesTable: NSViewRepresentable {
                 owner: self
             ) as? GitCommitAIRouteCell ?? GitCommitAIRouteCell()
             cell.identifier = .init("git.commit-ai.route-cell")
-            cell.configure(route: route, settings: settings)
+            cell.configure(route: route, index: row, settings: settings)
             return cell
         }
 
@@ -140,35 +142,54 @@ struct GitCommitAIRoutesTable: NSViewRepresentable {
 
 @MainActor
 private final class GitCommitAIRouteCell: NSTableCellView {
-    private let reorderIcon = NSImageView()
-    private let titleField = NSTextField(labelWithString: "")
+    private let orderField = NSTextField(labelWithString: "")
+    private let iconView = NSImageView()
+    private let agentField = NSTextField(labelWithString: "")
+    private let modelField = NSTextField(labelWithString: "")
     private let upButton = NSButton()
     private let downButton = NSButton()
     private let removeButton = NSButton()
     private weak var settings: OhMyGhosttySettings?
     private var routeID: UUID?
+    private var showsDivider = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
 
-        reorderIcon.image = NSImage(systemSymbolName: "line.3.horizontal", accessibilityDescription: nil)
-        reorderIcon.contentTintColor = .secondaryLabelColor
-        reorderIcon.setAccessibilityLabel(GitL10n.text("Reorder model"))
-        titleField.lineBreakMode = .byTruncatingTail
-        titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        titleField.setContentHuggingPriority(.init(1), for: .horizontal)
+        // The position number doubles as the priority: models are tried in this order.
+        orderField.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        orderField.textColor = .tertiaryLabelColor
+        orderField.alignment = .center
+        orderField.setAccessibilityLabel(GitL10n.text("Reorder model"))
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        agentField.font = .systemFont(ofSize: 13)
+        agentField.lineBreakMode = .byTruncatingTail
+        modelField.font = .systemFont(ofSize: 11)
+        modelField.textColor = .secondaryLabelColor
+        modelField.lineBreakMode = .byTruncatingMiddle
+        let labels = NSStackView(views: [agentField, modelField])
+        labels.orientation = .vertical
+        labels.alignment = .leading
+        labels.spacing = 2
+        labels.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         configure(upButton, symbol: "arrow.up", label: GitL10n.text("Move up"), action: #selector(moveRouteUp))
         configure(downButton, symbol: "arrow.down", label: GitL10n.text("Move down"), action: #selector(moveRouteDown))
         configure(removeButton, symbol: "minus.circle", label: GitL10n.text("Remove model"), action: #selector(removeRoute))
-        let row = NSStackView(views: [reorderIcon, titleField, upButton, downButton, removeButton])
+        // Pushes the actions to the trailing edge whatever the label widths.
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        spacer.setContentCompressionResistancePriority(.init(1), for: .horizontal)
+        let row = NSStackView(views: [orderField, iconView, labels, spacer, upButton, downButton, removeButton])
         row.orientation = .horizontal
         row.alignment = .centerY
-        row.spacing = 7
+        row.spacing = 8
+        row.setCustomSpacing(12, after: iconView)
         row.translatesAutoresizingMaskIntoConstraints = false
         addSubview(row)
         NSLayoutConstraint.activate([
-            reorderIcon.widthAnchor.constraint(equalToConstant: 15),
-            titleField.widthAnchor.constraint(greaterThanOrEqualToConstant: 80),
+            orderField.widthAnchor.constraint(equalToConstant: 14),
+            iconView.widthAnchor.constraint(equalToConstant: 22),
+            iconView.heightAnchor.constraint(equalToConstant: 22),
             upButton.widthAnchor.constraint(equalToConstant: 24),
             downButton.widthAnchor.constraint(equalToConstant: 24),
             removeButton.widthAnchor.constraint(equalToConstant: 24),
@@ -180,14 +201,30 @@ private final class GitCommitAIRouteCell: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func configure(route: GitCommitAIRoute, settings: OhMyGhosttySettings) {
+    func configure(route: GitCommitAIRoute, index: Int, settings: OhMyGhosttySettings) {
         self.routeID = route.id
         self.settings = settings
-        titleField.stringValue = route.title
+        orderField.stringValue = "\(index + 1)"
+        iconView.image = SupportedAgent(rawValue: route.agent.rawValue).flatMap { NSImage(named: $0.assetName) }
+            ?? NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)
+        agentField.stringValue = route.agent.title
+        modelField.stringValue = route.model
+        setAccessibilityLabel(route.title)
+        showsDivider = index > 0
+        needsDisplay = true
         let routes = settings.gitCommitAIRoutes
         guard let index = routes.firstIndex(where: { $0.id == route.id }) else { return }
         upButton.isEnabled = index > routes.startIndex
         downButton.isEnabled = routes.index(after: index) < routes.endIndex
+    }
+
+    /// Hairline between rows only, inset like the form's own rows, so nothing
+    /// is drawn along the rounded bottom edge of the enclosing group.
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard showsDivider else { return }
+        NSColor.separatorColor.setFill()
+        NSRect(x: 16, y: isFlipped ? 0 : bounds.maxY - 1, width: bounds.width - 16, height: 1).fill()
     }
 
     private func configure(_ button: NSButton, symbol: String, label: String, action: Selector) {

@@ -58,7 +58,7 @@ extension NativeSettingsController {
             let update: ([GitCommitAIRoute]) -> Void = { [weak coordinator, weak routes, weak divider] list in
                 divider?.isHidden = list.isEmpty
                 coordinator?.tableView?.reloadData()
-                height?.constant = CGFloat(list.count) * 40
+                height?.constant = CGFloat(list.count) * GitCommitAIRoutesTable.rowHeight
                 routes?.isHidden = list.isEmpty
                 models?.setSubtitle(list.isEmpty
                     ? copy.t("No models yet. Add one to generate commit messages with AI.", "尚未添加模型。添加后即可用 AI 生成提交信息。")

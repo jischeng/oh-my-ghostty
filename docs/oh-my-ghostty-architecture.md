@@ -197,6 +197,8 @@ QuickInput 以聚焦 terminal 区域底部 dock 呈现，默认快捷键为 `⌘
 
 OMG 不另造第二个 CLI binary。现有 app executable `omg` 是统一 CLI 入口，Ghostty upstream actions 继续使用 `+ssh` 等兼容形式。后续面向用户的 `omg pane split`、`omg config get/set` 应建立在经过认证的 app IPC 上；在此之前，SSH split replay 是宿主内部 launch handoff，不是可由插件调用的 Terminal Control API。
 
+本地控制面的第一层已落地：app 在 channel 隔离的 `<Application Support>/<OMG channel>/control/v1.sock` 监听 Unix stream socket（目录 `0700`、socket `0600`、`getpeereid` 校验同 UID，JSON-RPC 2.0 按行分帧、单帧上限 1 MiB），目前只提供 `editor.open` 与 `viewer.open`。`omg +edit` / `omg +view` 是它的客户端，由 app executable 在 AppKit 启动前处理并退出，不经过 `omgd`；每个 Surface 向 shell 导出 `OMG_PANE_ID`（Surface UUID），使 CLI 能把文件打开到调用方所在 Pane 的内置编辑器，`--wait` 在文档关闭后才返回，可作为 `$EDITOR`。该 socket 不提供终端输入、屏幕读取或 Pane 枚举，也不是插件加载器；SSH Pane 内的远端 `omg` 尚不支持这两个动作。协议细节见 `docs/PLUGIN_DEVELOPMENT.md` 的 “Local control socket”。
+
 剪贴板粘贴在没有文本/文件内容但包含图片时，会先把图片写成 `NSTemporaryDirectory()/omg-paste/omg-paste-<uuid>.png`；本地 Pane 把 shell-escaped 本机绝对路径作为文本粘贴。ready SSH Pane 则由 Host 使用该 Pane 保存的 exact OpenSSH destination 启动独立 `/usr/bin/sftp`，把 PNG 上传为远端 `/tmp/omg-paste-<uuid>.png`、强制 mode 0600，并仅在上传成功后粘贴远端 shell-escaped 路径；失败时保留原有本机路径回退，QuickInput 同时显示失败状态。普通 terminal paste 与 QuickInput 共用这条解析路径，不向插件开放 filesystem/network/clipboard 能力。独立 SFTP 会复用用户的 OpenSSH config、agent、ProxyJump 等配置，但不共享当前 Pane 的 TCP connection。局部目录强制 mode 0700、PNG 强制 mode 0600，并拒绝 symlink/非目录重定向；每次写入只清理超过 7 天的 regular PNG 文件。有文本/文件内容时行为不变，不会触发图片回退。
 
 ## 7. 权限模型

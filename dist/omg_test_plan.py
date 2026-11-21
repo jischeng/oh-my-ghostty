@@ -99,6 +99,11 @@ MODULES = {
         ("macos/Tests/QuickInput/*.swift",),
         ("agents",),
     ),
+    "control": Module(
+        ("macos/Sources/Features/Control/**",),
+        ("macos/Tests/Control/*.swift",),
+        ("editor",),
+    ),
     "update": Module(
         ("macos/Sources/Features/Update/**", "macos/Sources/Features/About/**"),
         ("macos/Tests/Update/*.swift", "macos/Tests/Helpers/OhMyGhosttyVersionTests.swift"),

@@ -361,6 +361,7 @@ class AppDelegate: NSObject,
         SessionRuntimeCloseQueue.shared.start()
         MobileDeviceProvisioner.shared.startAutoRefreshMonitor()
         if !OMGApplicationEnvironment.isRunningTests {
+            OMGControlService.shared.start()
             let supportURL = OMGApplicationEnvironment.applicationSupportURL()
             DispatchQueue.global(qos: .utility).async {
                 SSHReplayStore.pruneExpired(applicationSupportURL: supportURL)
@@ -629,6 +630,7 @@ class AppDelegate: NSObject,
             TerminalWorkspaceCoordinator.shared.commitTermination()
             TerminalWorkspaceSessionStore.shared.capture()
             SessionRuntimeConnections.shared.shutdown()
+            OMGControlService.shared.stop()
             TerminalWorkspaceCoordinator.shared.savePresentation()
             TerminalWorkspaceStore.shared.flush()
             TerminalWorkspaceSessionStore.shared.flush()

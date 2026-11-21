@@ -670,6 +670,7 @@ extension Ghostty {
                 }
             }
             SessionRuntimeHandoff.shared.configure(&surface_cfg, pane: self.id)
+            OMGControlService.configure(&surface_cfg, pane: self.id)
             runtimeInlineSession = SessionRuntimeHandoff.shared.restoredInlineSession(
                 for: runtimeDescriptor, pane: self.id
             )

@@ -17,7 +17,9 @@ A directory, manifest, or executable copied beside OMG will not be loaded.
 `PluginInstallationManager` maintains the on-disk Application Support `Plugins/`
 and `PluginData/` boundaries for built-in official entries, while external
 third-party packages are neither downloaded nor launched at runtime yet. There
-is no public SDK, socket listener, or hot reload command.
+is no public SDK, plugin socket listener, or hot reload command. The local
+control socket described under "Local control socket" serves the `omg +edit` /
+`omg +view` CLI; it is not a plugin loader and launches nothing.
 
 ## Native Session Runtime lifecycle
 
@@ -1977,9 +1979,57 @@ event bridge publishes them:
 - foreground process changed;
 - focus changed.
 
-The planned public status CLI and authenticated app IPC are not implemented.
+The planned public status CLI and authenticated plugin IPC are not implemented.
 `OH_MY_GHOSTTY_SESSION` remains the stable Tab identity for the future process
 plugin path; the built-in hook bridge is correlated directly by Surface.
+
+### Local control socket (Internal)
+
+The app listens on a channel-isolated Unix stream socket,
+`<Application Support>/<OMG channel>/control/v1.sock`, so Release and each Dev
+channel answer only their own panes. When the home directory makes that path
+longer than `sun_path` allows, both ends use
+`/tmp/omg-control-<uid>-<channel>/v1.sock` instead. The directory must be owned
+by the user with mode `0700` (a directory created by someone else is refused
+and the listener does not start), the socket is `0600`, and a peer whose
+`getpeereid` UID differs from the app's is dropped before any byte is read. A
+socket left behind by a crash is replaced; one that still answers belongs to a
+running instance and is left alone. The listener is not started under tests.
+
+The wire format is JSON-RPC 2.0, one object per line, with a 1 MiB frame limit;
+a longer frame closes the connection. A request needs an `id`. Methods:
+
+- `editor.open` with params `path`, `cwd`, and optional `pane`, `tab`,
+  `destination`, `wait`. `path` may end in `:line[:column]` and resolves against
+  the absolute `cwd`; it is always a path on this Mac. `destination` is
+  `current`, `tab`, `right`, `down`, `left`, or `up`; without it the user's
+  editor open-destination setting applies. A missing file is created empty.
+  The result is `{"status":"opened","path":...}`, or `"external"` when the file
+  went to its default application. With `wait`, the reply is held until the
+  document is closed (`"status":"closed"`), the pane or tab holding it closes,
+  or the client disconnects; an externally opened file is answered at once.
+- `viewer.open` takes the same params without `wait`, never creates a file, and
+  also accepts an http(s) URL, which goes through the `UntrustedURL` policy to
+  the default browser. Markdown opens in its preview; other text opens in the
+  editor and is editable (a read-only viewer mode does not exist yet).
+
+Errors use JSON-RPC codes `-32700`, `-32600`, `-32601`, `-32602`, and `-32000`
+for a valid request OMG could not carry out. Opens run one at a time. The
+control plane offers no terminal input, screen reading, or pane listing.
+
+Every Surface exports `OMG_PANE_ID` (its Surface UUID) to its shell. The server
+resolves the target pane from `pane`, then the tab named by `tab`
+(`OH_MY_GHOSTTY_SESSION`), then the frontmost terminal window; an unknown ID is
+ignored, never an error. A Quick Terminal caller borrows a normal window, as
+path clicks there do. Opened files keep the editor's workspace trust rules.
+
+`omg +edit` and `omg +view` are the client. The app executable handles them
+before AppKit starts: it connects to the socket of the pane's
+`OH_MY_GHOSTTY_CHANNEL` (outside a pane, its own channel), checks the peer UID,
+sends one request per file, and exits `0`, `1` on an error from OMG, `2` on a
+usage error, or `69` when no app is listening. `EDITOR="omg +edit --wait"`
+works for `git commit`. An argument starting with `+` cannot be a path, and the
+remote `omg` of an SSH pane does not provide these actions.
 
 ## Workspace and SSH provider (Experimental)
 

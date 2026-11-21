@@ -15,6 +15,8 @@ const ssh = @import("ssh.zig");
 const sessions = @import("sessions.zig");
 const mobile = @import("mobile.zig");
 const doctor = @import("doctor.zig");
+const edit = @import("edit.zig");
+const view = @import("view.zig");
 const ssh_cache = @import("ssh_cache.zig");
 const edit_config = @import("edit_config.zig");
 const show_config = @import("show_config.zig");
@@ -64,6 +66,12 @@ pub const Action = enum {
 
     /// Inspect OMG permissions, session runtime, SSH mux, backups, and portable settings.
     doctor,
+
+    /// Open files in the OMG editor of the calling pane.
+    edit,
+
+    /// View files or links from the calling pane.
+    view,
 
     /// Manage SSH terminfo cache for automatic remote host setup
     @"ssh-cache",
@@ -176,6 +184,8 @@ pub const Action = enum {
             .sessions => try sessions.run(alloc),
             .mobile => try mobile.run(alloc),
             .doctor => try doctor.run(alloc),
+            .edit => try edit.run(alloc),
+            .view => try view.run(alloc),
             .@"edit-config" => try edit_config.run(alloc),
             .@"show-config" => try show_config.run(alloc),
             .@"explain-config" => try explain_config.run(alloc),
@@ -222,6 +232,8 @@ pub const Action = enum {
                 .sessions => sessions.Options,
                 .mobile => mobile.Options,
                 .doctor => doctor.Options,
+                .edit => edit.Options,
+                .view => view.Options,
                 .@"edit-config" => edit_config.Options,
                 .@"show-config" => show_config.Options,
                 .@"explain-config" => explain_config.Options,
@@ -280,10 +292,28 @@ test "parse action doctor" {
     try testing.expect((try actionpkg.detectIter(Action, &iter)) == Action.doctor);
 }
 
+test "parse action edit and view" {
+    const testing = std.testing;
+    var edit_iter = try std.process.Args.IteratorGeneral(.{}).init(
+        testing.allocator,
+        "+edit --wait README.md:12",
+    );
+    defer edit_iter.deinit();
+    try testing.expect((try actionpkg.detectIter(Action, &edit_iter)) == Action.edit);
+    var view_iter = try std.process.Args.IteratorGeneral(.{}).init(
+        testing.allocator,
+        "+view --split right README.md",
+    );
+    defer view_iter.deinit();
+    try testing.expect((try actionpkg.detectIter(Action, &view_iter)) == Action.view);
+}
+
 test {
     _ = sessions;
     _ = mobile;
     _ = doctor;
+    _ = edit;
+    _ = view;
 }
 
 test "parse action version" {

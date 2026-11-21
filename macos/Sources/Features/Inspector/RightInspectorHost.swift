@@ -219,12 +219,13 @@ extension TerminalWindow {
         inspectorTitlebarPresentation.setWidth(
             TerminalTitlebarMetrics.inspectorCollapsedWidth
         )
-        let inspectorWidths = state.$inspectorWidth
-            .merge(with: state.inspectorWidthChanges)
-            .removeDuplicates()
-        let layoutChanges = Publishers.CombineLatest3(
+        // The committed width arrives as a value because `@Published` emits
+        // before the property changes; live drag widths only signal a change
+        // and are read from the state, which already holds them.
+        let layoutChanges = Publishers.CombineLatest4(
             state.$isInspectorVisible,
-            inspectorWidths,
+            state.$inspectorWidth,
+            state.inspectorWidthChanges.map { _ in () }.prepend(()),
             state.$sidebarWidth
         )
         let resizeChanges = NotificationCenter.default.publisher(
@@ -239,8 +240,11 @@ extension TerminalWindow {
         )
         .sink { [weak self, weak controller, weak state] layout, _ in
             guard let self, let controller else { return }
-            let (isVisible, publishedWidth, sidebarWidth) = layout
-            let inspectorWidth = state?.effectiveInspectorWidth ?? publishedWidth
+            let (isVisible, committedWidth, _, sidebarWidth) = layout
+            // Reading the committed width back from the state here returned
+            // the previous value, which left a restored pane's titlebar too
+            // narrow and pushed the selected pane into the overflow menu.
+            let inspectorWidth = state?.liveInspectorWidth ?? committedWidth
             let totalWidth = self.contentLayoutRect.width
             let leadingWidth = controller.supportsSidebar
                 ? sidebarWidth + TerminalShellStyle.dividerWidth

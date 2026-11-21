@@ -2133,7 +2133,17 @@ the pane whenever the focused Pane reports a directory: it shows the path
 (tilde-abbreviated locally, with the SSH alias for a remote directory) and
 offers Copy Path, plus Reveal in Finder and Open in an installed editor for
 local directories only. These rows act on the host directly and add no pane
-action, wire message, or capability. A pane with an Agent descriptor or
+action, wire message, or capability. The offered applications are detected
+from a built-in editor list until the user edits them from the section's
+menu (add an application, remove one, or return to detection); the choice is
+stored as ordered bundle paths in `info.openInApplications`, at most eight,
+where an absent key means detection and an empty list offers none. When the
+pane runs an Agent conversation that belongs to its current host, an Agent
+section follows with the Agent's name and Copy Conversation ID. For a local
+conversation the transcript file is located once in the background (and
+retried while it does not exist yet), after which Copy Transcript Path and
+Reveal in Finder appear; a remote conversation is never read for this. The
+section adds no polling and reads no transcript content. A pane with an Agent descriptor or
 activity (including `done`/`error`) continues to show that Surface's Shell
 command history in Info; only Agent Prompt rows are suppressed. Its Shell jump
 anchors remain available, and SSH port-forwarding controls remain visible.

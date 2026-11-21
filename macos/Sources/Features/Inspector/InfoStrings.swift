@@ -28,6 +28,17 @@ struct InfoStrings: Equatable, Sendable {
     func openIn(_ application: String) -> String {
         t("Open in \(application)", "在 \(application) 中打开")
     }
+    var chooseApplications: String { t("Choose Applications", "选择应用") }
+    var addApplication: String { t("Add Application…", "添加应用…") }
+    var addApplicationPrompt: String { t("Add", "添加") }
+    var removeApplicationMenu: String { t("Remove", "移除") }
+    func removeApplication(_ application: String) -> String {
+        t("Remove \(application)", "移除 \(application)")
+    }
+    var detectApplications: String { t("Detect Installed Editors", "恢复自动检测") }
+    var agentTitle: String { t("Agent", "Agent") }
+    var copyConversationID: String { t("Copy Conversation ID", "复制会话 ID") }
+    var copySessionPath: String { t("Copy Transcript Path", "复制会话文件路径") }
     var portsTitle: String { t("Ports", "端口") }
     var remoteTargetColumn: String { t("Remote Target", "远端目标") }
     var forwardedAddressColumn: String { t("Forwarded Address", "转发地址") }

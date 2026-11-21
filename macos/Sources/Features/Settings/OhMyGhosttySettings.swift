@@ -1095,6 +1095,13 @@ final class OhMyGhosttySettings: ObservableObject {
     var gitHistoryScope: String? {
         didSet { persistOptional("git.historyScope", gitHistoryScope) }
     }
+    /// Applications offered for a pane's working directory in Info, as
+    /// application bundle paths in display order. Nil detects installed
+    /// editors automatically; an empty list offers none.
+    @Published var infoOpenInApplications: [String]? {
+        didSet { persistOptional("info.openInApplications", infoOpenInApplications) }
+    }
+    static let infoOpenInApplicationLimit = 8
     /// Git auto-fetch interval in minutes.
     /// 0 means disabled. Typical values: 1, 2, 5, 10, 15, 30, 60.
     @Published var gitAutoFetchInterval: Int = 5 {
@@ -1549,6 +1556,7 @@ final class OhMyGhosttySettings: ObservableObject {
             gitCommitAIPrompt = chosen["git.commitAI.prompt"] as? String ?? ""
             gitCommitAIRoutes = GitCommitAIRoute.decode(chosen["git.commitAI.routes"])
             gitHistoryScope = optionalStringValue("git.historyScope")
+            infoOpenInApplications = Self.validatedApplicationPaths(chosen["info.openInApplications"])
             gitAutoFetchInterval = Int(numberValue("git.autoFetchInterval", fallback: 5, range: 0...1440).rounded())
             agentHistoryLimit = numberValue(
                 "agents.historyLimit",
@@ -1588,6 +1596,19 @@ final class OhMyGhosttySettings: ObservableObject {
     where Value.RawValue == String {
         guard let raw = chosen[key] as? String else { return nil }
         return Value(rawValue: raw)
+    }
+
+    /// Keeps absolute `.app` bundle paths only, without duplicates.
+    static func validatedApplicationPaths(_ value: Any?) -> [String]? {
+        guard let raw = value as? [Any] else { return nil }
+        var paths: [String] = []
+        for case let path as String in raw
+        where path.hasPrefix("/") && path.hasSuffix(".app") && path.utf8.count <= 1_024
+            && !path.contains("\0") && !paths.contains(path) {
+            paths.append(path)
+            if paths.count == infoOpenInApplicationLimit { break }
+        }
+        return paths
     }
 
     private func optionalStringValue(_ key: String) -> String? {

@@ -19,6 +19,69 @@ struct BuiltInInfoInspectorProviderTests {
         }
     }
 
+    @Test func agentSectionLocatesALocalTranscriptOnceAndNeverReadsARemoteOne() async throws {
+        actor Resolver {
+            var calls: [String] = []
+            var path: String?
+            func set(_ value: String?) { path = value }
+            func resolve(_ agent: SupportedAgent, _ id: AgentConversationID) -> String? {
+                calls.append("\(agent.rawValue):\(id.rawValue)")
+                return path
+            }
+        }
+        let resolver = Resolver()
+        let provider = BuiltInInfoInspectorProvider(
+            registry: InspectorRegistry(),
+            persistenceURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),
+            agentSessionRetryInterval: .milliseconds(300),
+            agentSessionResolver: { await resolver.resolve($0, $1) }
+        )
+        let id = try #require(AgentConversationID("conversation-1"))
+        var session = PaneSessionContext(workingDirectory: "/tmp", terminalTitle: "shell")
+        let local = AgentResumeDescriptor(agent: .pi, conversationID: id, scope: .local, workingDirectory: "/tmp")
+        let remote = AgentResumeDescriptor(
+            agent: .pi, conversationID: id, scope: .remote, workingDirectory: "/tmp",
+            sshReplay: .init(version: 1, ssh: "/usr/bin/ssh", forwardEnv: false, terminfo: false,
+                             cache: false, args: ["host-A"]))
+
+        #expect(provider.agentInfo(descriptor: nil, session: session) == nil)
+        // No conversation yet: nothing to copy or reveal.
+        #expect(provider.agentInfo(
+            descriptor: .init(agent: .pi, scope: .local, workingDirectory: "/tmp"), session: session) == nil)
+        // A remote descriptor does not belong to a local pane.
+        #expect(provider.agentInfo(descriptor: remote, session: session) == nil)
+
+        // The transcript is not on disk yet; the conversation is still shown.
+        let pending = try #require(provider.agentInfo(descriptor: local, session: session))
+        #expect(pending == .init(agent: .pi, conversationID: "conversation-1", sessionPath: nil, remoteHost: nil))
+        #expect(pending.actions == [.copyConversationID])
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(provider.agentInfo(descriptor: local, session: session)?.sessionPath == nil)
+        #expect(await resolver.calls == ["pi:conversation-1"])
+
+        // After the retry interval it is looked up again, then cached.
+        await resolver.set("/tmp/conversation-1.jsonl")
+        try await Task.sleep(for: .milliseconds(400))
+        _ = provider.agentInfo(descriptor: local, session: session)
+        try await Task.sleep(for: .milliseconds(100))
+        let resolved = try #require(provider.agentInfo(descriptor: local, session: session))
+        #expect(resolved.sessionPath == "/tmp/conversation-1.jsonl")
+        #expect(resolved.actions == [.copyConversationID, .copySessionPath("/tmp/conversation-1.jsonl"),
+                                     .revealSession("/tmp/conversation-1.jsonl")])
+        _ = provider.agentInfo(descriptor: local, session: session)
+        #expect(await resolver.calls.count == 2)
+
+        // On its SSH host the conversation is shown without a local file.
+        session.apply(.init(action: .start, id: "omg-ssh-1", metadata: "type=remote;targethost=host-A;cwd=/tmp"),
+                      currentWorkingDirectory: "/tmp", currentTerminalTitle: "remote")
+        #expect(provider.agentInfo(descriptor: local, session: session) == nil)
+        let onHost = try #require(provider.agentInfo(descriptor: remote, session: session))
+        #expect(onHost.sessionPath == nil)
+        #expect(onHost.remoteHost == "host-A")
+        #expect(onHost.actions == [.copyConversationID])
+        #expect(await resolver.calls.count == 2)
+    }
+
     @Test func forwardsOncePerAliasAndRestoresPersistedIntent() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("omg-ssh-forward-test-\(UUID().uuidString)")

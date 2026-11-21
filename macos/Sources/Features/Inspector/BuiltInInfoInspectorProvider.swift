@@ -1,5 +1,5 @@
 import AppKit
-import Darwin
+import Combine
 import Foundation
 import OSLog
 
@@ -8,110 +8,6 @@ extension Notification.Name {
     static let terminalPaneSessionContextsDidChange = Notification.Name(
         "com.oh-my-ghostty.terminal-pane-session-contexts-did-change"
     )
-}
-
-enum InspectorPortForwardStatus: Equatable, Sendable {
-    case starting
-    case active
-    case failed(String)
-}
-
-struct InspectorPortForwardItem: Identifiable, Equatable, Sendable {
-    let id: String
-    let remoteHost: String
-    let remotePort: Int
-    let localPort: Int?
-    let processName: String?
-    let status: InspectorPortForwardStatus
-}
-
-struct InspectorPortForwardList: Equatable, Sendable {
-    let hostAlias: String
-    let items: [InspectorPortForwardItem]
-    var canCreate = true
-}
-
-struct PortForwardTarget: Equatable, Sendable {
-    static let loopbackHost = "127.0.0.1"
-
-    let host: String
-    let port: Int
-
-    var isLoopback: Bool {
-        ["127.0.0.1", "localhost", "::1"].contains(host.lowercased())
-    }
-
-    var sshHost: String { host.contains(":") ? "[\(host)]" : host }
-    var displayValue: String {
-        host == Self.loopbackHost ? String(port) : "\(sshHost):\(port)"
-    }
-
-    static func parse(_ input: String) -> Self? {
-        let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let port = Int(value), validPort(port) {
-            return .init(host: loopbackHost, port: port)
-        }
-
-        let host: String
-        let portText: String
-        if value.hasPrefix("["), let closing = value.lastIndex(of: "]"),
-           value.index(after: closing) < value.endIndex,
-           value[value.index(after: closing)] == ":" {
-            host = String(value[value.index(after: value.startIndex)..<closing])
-            portText = String(value[value.index(closing, offsetBy: 2)...])
-        } else if let separator = value.lastIndex(of: ":"),
-                  !value[..<separator].contains(":") {
-            host = String(value[..<separator])
-            portText = String(value[value.index(after: separator)...])
-        } else {
-            return nil
-        }
-        guard validHost(host), let port = Int(portText), validPort(port) else {
-            return nil
-        }
-        return .init(host: host, port: port)
-    }
-
-    private static func validPort(_ port: Int) -> Bool {
-        (1...65_535).contains(port)
-    }
-
-    private static func validHost(_ host: String) -> Bool {
-        guard !host.isEmpty, host.count <= 253 else { return false }
-        let allowed = CharacterSet.alphanumerics.union(
-            CharacterSet(charactersIn: ".-_:%")
-        )
-        return host.unicodeScalars.allSatisfy(allowed.contains)
-    }
-}
-
-struct InspectorInfoContent: Equatable, Sendable {
-    /// Reserved for a future machine-status summary. Nil keeps the section hidden.
-    let status: InspectorField?
-    let fields: [InspectorField]
-    let portForwards: InspectorPortForwardList
-    let historyItems: [InspectorHistoryItem]
-    let isAgentSession: Bool
-    let agentName: String?
-    let historyState: PaneAgentHistoryService.State
-
-    init(
-        status: InspectorField? = nil,
-        fields: [InspectorField] = [],
-        portForwards: InspectorPortForwardList = .init(hostAlias: "", items: []),
-        historyItems: [InspectorHistoryItem] = [],
-        isAgentSession: Bool = false,
-        agentName: String? = nil,
-        historyState: PaneAgentHistoryService.State = .ready
-    ) {
-        self.status = status
-        self.fields = fields
-        self.portForwards = portForwards
-        self.historyItems = historyItems
-        self.isAgentSession = isAgentSession
-        self.agentName = agentName
-        self.historyState = historyState
-    }
 }
 
 @MainActor
@@ -183,6 +79,20 @@ final class BuiltInInfoInspectorProvider {
 
     typealias URLOpener = (URL) -> Void
     typealias AddressCopier = (String) -> Void
+    /// Locates a local conversation's transcript file, or nil if none exists yet.
+    typealias AgentSessionResolver = @Sendable (SupportedAgent, AgentConversationID) async -> String?
+
+    private struct AgentSessionKey: Hashable {
+        let agent: SupportedAgent
+        let conversationID: AgentConversationID
+    }
+
+    private enum AgentSessionLookup {
+        case pending
+        case resolved(String)
+        /// Not found at this time; a new conversation may not be on disk yet.
+        case missing(ContinuousClock.Instant)
+    }
 
     private struct RuntimeForward {
         let desired: DesiredForward
@@ -217,6 +127,10 @@ final class BuiltInInfoInspectorProvider {
     // subscribe or publish transcript-only rows in the Info navigation UI.
     private let agentHistory = PaneAgentHistoryService()
     private static let agentHistoryNavigationEnabled = false
+    private let agentSessionResolver: AgentSessionResolver
+    private let agentSessionRetryInterval: Duration
+    private var agentSessions: [AgentSessionKey: AgentSessionLookup] = [:]
+    private var agentDescriptorObservers: [UUID: AnyCancellable] = [:]
 
     init(
         registry: InspectorRegistry,
@@ -228,7 +142,11 @@ final class BuiltInInfoInspectorProvider {
         processRefreshInterval: Duration = .seconds(30),
         openURL: @escaping URLOpener = { NSWorkspace.shared.open($0) },
         copyAddress: @escaping AddressCopier = BuiltInInfoInspectorProvider.copyToPasteboard,
-        historyService: TerminalHistoryService? = nil
+        historyService: TerminalHistoryService? = nil,
+        agentSessionRetryInterval: Duration = .seconds(15),
+        agentSessionResolver: @escaping AgentSessionResolver = { agent, conversationID in
+            await AgentHistoryStore.session(agent: agent, conversationID: conversationID)?.sourcePath
+        }
     ) {
         let support = OMGApplicationEnvironment.applicationSupportURL()
         let resolvedPersistenceURL = persistenceURL ?? support.appendingPathComponent("Info/port-forwards.json")
@@ -252,6 +170,8 @@ final class BuiltInInfoInspectorProvider {
         self.copyAddress = copyAddress
         self.desiredForwards = Self.loadDesiredForwards(from: resolvedPersistenceURL)
         self.historyService = historyService ?? .shared
+        self.agentSessionResolver = agentSessionResolver
+        self.agentSessionRetryInterval = agentSessionRetryInterval
 
         notificationObservers.append(NotificationCenter.default.addObserver(
             forName: .terminalHistoryDidChange, object: nil, queue: .main
@@ -325,6 +245,7 @@ final class BuiltInInfoInspectorProvider {
         } else {
             shutdown()
             presentedContexts.removeAll()
+            agentDescriptorObservers.removeAll()
             registry.unregister(source: .coreFeature(Self.featureID))
             isRegistered = false
         }
@@ -417,10 +338,12 @@ final class BuiltInInfoInspectorProvider {
         case .appeared(let context):
             presentedContexts[context.tabID] = context
             agentHistory.retain(surfaces: Set(presentedContexts.values.compactMap(\.surfaceID)))
+            observeAgentDescriptors(for: context)
             publish(context)
             reconcilePaneForwards()
         case .disappeared(let context):
             presentedContexts.removeValue(forKey: context.tabID)
+            agentDescriptorObservers.removeValue(forKey: context.tabID)
             agentHistory.retain(surfaces: Set(presentedContexts.values.compactMap(\.surfaceID)))
             reconcilePaneForwards()
         }
@@ -694,6 +617,82 @@ final class BuiltInInfoInspectorProvider {
         return .init(items: historyService.commands(for: surfaceID))
     }
 
+    /// An Agent attaches its conversation after the pane is already visible,
+    /// without any terminal history or connection event to republish on.
+    private func observeAgentDescriptors(for context: InspectorPaneContext) {
+        guard let surfaceID = context.surfaceID,
+              let controller = TerminalController.all.first(where: { controller in
+                  controller.surfaceTree.contains { $0.id == surfaceID }
+              }) else {
+            agentDescriptorObservers.removeValue(forKey: context.tabID)
+            return
+        }
+        let tabID = context.tabID
+        agentDescriptorObservers[tabID] = controller.$agentResumeDescriptors
+            .dropFirst()
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.isRegistered,
+                          let context = self.presentedContexts[tabID] else { return }
+                    self.publish(context)
+                }
+            }
+    }
+
+    private func currentAgent(
+        for context: InspectorPaneContext,
+        session: PaneSessionContext
+    ) -> InspectorInfoAgent? {
+        guard let surfaceID = context.surfaceID else { return nil }
+        for controller in TerminalController.all {
+            guard let view = controller.surfaceTree.first(where: { $0.id == surfaceID }) else { continue }
+            return agentInfo(descriptor: controller.agentResumeDescriptor(for: view), session: session)
+        }
+        return nil
+    }
+
+    /// Presents a conversation only while it belongs to the pane's current
+    /// host; a descriptor from before a connection handoff is not this pane's.
+    func agentInfo(descriptor: AgentResumeDescriptor?, session: PaneSessionContext) -> InspectorInfoAgent? {
+        guard let descriptor,
+              let binding = PaneAgentHistoryService.Binding.current(descriptor: descriptor, session: session)
+        else { return nil }
+        return .init(
+            agent: binding.agent,
+            conversationID: binding.conversationID.rawValue,
+            // Only a local transcript is a file the user can open here.
+            sessionPath: binding.remoteHost == nil
+                ? agentSessionPath(agent: binding.agent, conversationID: binding.conversationID) : nil,
+            remoteHost: binding.remoteHost
+        )
+    }
+
+    /// Returns the cached transcript path, locating it once in the background.
+    private func agentSessionPath(agent: SupportedAgent, conversationID: AgentConversationID) -> String? {
+        let key = AgentSessionKey(agent: agent, conversationID: conversationID)
+        switch agentSessions[key] {
+        case .resolved(let path):
+            return path
+        case .pending:
+            return nil
+        case .missing(let at) where ContinuousClock.now - at < agentSessionRetryInterval:
+            return nil
+        case .missing, nil:
+            break
+        }
+        agentSessions[key] = .pending
+        let resolver = agentSessionResolver
+        Task { [weak self] in
+            let path = await resolver(agent, conversationID)
+            guard let self else { return }
+            agentSessions[key] = path.map(AgentSessionLookup.resolved) ?? .missing(.now)
+            if path != nil { publishPresentedContexts() }
+        }
+        return nil
+    }
+
     private func publish(_ context: InspectorPaneContext) {
         let historyInfo = currentHistory(for: context)
         let session = context.surfaceID.flatMap { surfaceID in
@@ -702,24 +701,20 @@ final class BuiltInInfoInspectorProvider {
                 return controller.paneSessionContext(for: view)
             }.first
         } ?? context.session
-        let content: InspectorPaneContent
-
-        switch session.state {
+        let forwards: InspectorPortForwardList = switch session.state {
         case .local:
-            content = .info(.init(historyItems: historyInfo.items, isAgentSession: historyInfo.isAgent,
-                                 agentName: historyInfo.agentName, historyState: historyInfo.state))
+            .init(hostAlias: "", items: [])
         case .sshConnecting(let ssh):
-            content = .info(.init(
-                portForwards: .init(hostAlias: ssh.alias, items: [], canCreate: false),
-                historyItems: historyInfo.items, isAgentSession: historyInfo.isAgent,
-                agentName: historyInfo.agentName, historyState: historyInfo.state
-            ))
+            .init(hostAlias: ssh.alias, items: [], canCreate: false)
         case .sshReady(let ssh, _):
-            let forwards = self.content(for: Self.forwardingIdentity(for: ssh), alias: ssh.alias)
-            content = .info(.init(portForwards: forwards, historyItems: historyInfo.items,
-                                 isAgentSession: historyInfo.isAgent, agentName: historyInfo.agentName,
-                                 historyState: historyInfo.state))
+            self.content(for: Self.forwardingIdentity(for: ssh), alias: ssh.alias)
         }
+        let content = InspectorPaneContent.info(.init(
+            portForwards: forwards, historyItems: historyInfo.items,
+            agent: currentAgent(for: context, session: session),
+            isAgentSession: historyInfo.isAgent, agentName: historyInfo.agentName,
+            historyState: historyInfo.state
+        ))
         do {
             try registry.updateCoreContent(
                 paneID: Self.paneID,
@@ -772,7 +767,7 @@ final class BuiltInInfoInspectorProvider {
         return PortForwardTarget.parse("\(host):\(forward.remotePort)") != nil
     }
 
-    nonisolated private static func validPort(_ port: Int) -> Bool {
+    nonisolated static func validPort(_ port: Int) -> Bool {
         (1...65_535).contains(port)
     }
 
@@ -828,293 +823,6 @@ final class BuiltInInfoInspectorProvider {
         where desired.serverID.hasPrefix(Self.paneIdentityPrefix) && runtimeForwards[desired.id] == nil {
             guard let alias = live[desired.serverID] else { continue }
             startRuntimeForward(desired, alias: alias)
-        }
-    }
-
-    nonisolated private static func launchProcess(
-        alias: String,
-        remoteHost: String,
-        remotePort: Int,
-        localPort: Int,
-        termination: @escaping (Int32, String) -> Void
-    ) throws -> () -> Void {
-        let errorURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("omg-ssh-forward-\(UUID().uuidString).err")
-        guard FileManager.default.createFile(
-            atPath: errorURL.path,
-            contents: nil,
-            attributes: [.posixPermissions: 0o600]
-        ), let errorHandle = try? FileHandle(forWritingTo: errorURL) else {
-            throw CocoaError(.fileWriteUnknown)
-        }
-
-        let process = Process()
-        let forwardHost = PortForwardTarget(
-            host: remoteHost,
-            port: remotePort
-        ).sshHost
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = [
-            "-c",
-            Self.monitorScript,
-            "omg-ssh-port-forward",
-            String(ProcessInfo.processInfo.processIdentifier),
-            "-N",
-            "-o", "BatchMode=yes",
-            "-o", "ConnectTimeout=10",
-            "-o", "ConnectionAttempts=1",
-            "-o", "ExitOnForwardFailure=yes",
-            "-o", "ServerAliveInterval=30",
-            "-o", "ServerAliveCountMax=3",
-            "-L", "127.0.0.1:\(localPort):\(forwardHost):\(remotePort)",
-            alias,
-        ]
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = errorHandle
-        process.terminationHandler = { process in
-            try? errorHandle.close()
-            let data = (try? Data(contentsOf: errorURL)) ?? Data()
-            try? FileManager.default.removeItem(at: errorURL)
-            let output = String(
-                bytes: data.prefix(16_384),
-                encoding: .utf8
-            ) ?? ""
-            termination(process.terminationStatus, output)
-        }
-        do {
-            try process.run()
-        } catch {
-            try? errorHandle.close()
-            try? FileManager.default.removeItem(at: errorURL)
-            throw error
-        }
-        return {
-            if process.isRunning { process.terminate() }
-        }
-    }
-
-    nonisolated private static let monitorScript = """
-    parent_pid="$1"
-    shift
-    /usr/bin/ssh "$@" &
-    ssh_pid=$!
-    cleanup() {
-      /bin/kill "$ssh_pid" 2>/dev/null || true
-      wait "$ssh_pid" 2>/dev/null || true
-    }
-    trap cleanup EXIT HUP INT TERM
-    while /bin/kill -0 "$parent_pid" 2>/dev/null && /bin/kill -0 "$ssh_pid" 2>/dev/null; do
-      /bin/sleep 1
-    done
-    if ! /bin/kill -0 "$parent_pid" 2>/dev/null; then
-      /bin/kill "$ssh_pid" 2>/dev/null || true
-    fi
-    wait "$ssh_pid"
-    status=$?
-    trap - EXIT HUP INT TERM
-    exit "$status"
-    """
-
-    nonisolated private static func waitUntilForwardReady(
-        localPort: Int
-    ) async -> Bool {
-        for _ in 0..<100 {
-            if !canBind(port: localPort) { return true }
-            try? await Task.sleep(for: .milliseconds(100))
-            if Task.isCancelled { return false }
-        }
-        return false
-    }
-
-    private static func failureDescription(_ error: Error) -> String {
-        if let posix = error as? POSIXError {
-            return InfoStrings.current.allocatePortFailed(posix.localizedDescription)
-        }
-        return error.localizedDescription
-    }
-
-    private static func sshFailureDescription(
-        status: Int32,
-        errorOutput: String,
-        localPort: Int
-    ) -> String {
-        let strings = InfoStrings.current
-        let lower = errorOutput.lowercased()
-        if lower.contains("address already in use") || lower.contains("cannot listen to port") {
-            return strings.localPortInUse(localPort)
-        }
-        if lower.contains("permission denied") {
-            return strings.authenticationFailed
-        }
-        if lower.contains("host key verification failed") {
-            return strings.hostKeyFailed
-        }
-        if lower.contains("could not resolve hostname") {
-            return strings.resolveHostFailed
-        }
-        if lower.contains("connection refused") {
-            return strings.connectionRefused
-        }
-        if lower.contains("connection timed out") || lower.contains("operation timed out") {
-            return strings.connectionTimedOut
-        }
-        let message = errorOutput
-            .split(whereSeparator: \.isNewline)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .last { !$0.isEmpty }
-            .map { String($0.prefix(240)) }
-        return message ?? strings.sshExited(status: status)
-    }
-
-    nonisolated private static func resolveRemoteProcesses(alias: String, ports: [Int]) async throws -> [Int: String] {
-        let command = "exec /bin/sh -c \(shellQuote(remoteProcessCommand(ports: ports)))"
-        let result = try await GitProcessRunner().run(
-            executablePath: "/usr/bin/ssh",
-            arguments: ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                        "-o", "ConnectionAttempts=1", "--", alias, command],
-            workingDirectory: "/", maxOutputBytes: 64 * 1024, timeout: 6
-        )
-        guard result.exitCode == 0 else { throw ProcessProbeError.unavailable }
-        return try parseRemoteProcessOutput(result.stdout, ports: ports)
-    }
-
-    nonisolated static func parseRemoteProcessOutput(_ data: Data, ports: [Int]) throws -> [Int: String] {
-        guard data.count <= 64 * 1024, let text = String(data: data, encoding: .utf8) else {
-            throw ProcessProbeError.invalidOutput
-        }
-        var lines = text.components(separatedBy: "\n")
-        if lines.last == "" { lines.removeLast() }
-        guard lines.popLast() == "OMG_PROCESS_PROBE_V1" else { throw ProcessProbeError.invalidOutput }
-        let requested = Set(ports)
-        var seen: Set<Int> = []
-        var names: [Int: String] = [:]
-        for line in lines {
-            let fields = line.components(separatedBy: "\t")
-            guard fields.count == 2, let port = Int(fields[0]), requested.contains(port),
-                  seen.insert(port).inserted, fields[1].count <= 128,
-                  !fields[1].unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
-                throw ProcessProbeError.invalidOutput
-            }
-            if !fields[1].isEmpty { names[port] = fields[1] }
-        }
-        guard seen == requested else { throw ProcessProbeError.invalidOutput }
-        return names
-    }
-
-    nonisolated static func remoteProcessCommand(ports: [Int]) -> String {
-        // Only validated integer ports enter the remote shell. lsof/ss each
-        // scan listeners once per batch; fuser is the per-port last resort.
-        let ports = Array(Set(ports.filter(validPort))).sorted().map(String.init).joined(separator: " ")
-        return """
-        export LC_ALL=C
-        tool=''
-        snapshot=''
-        if command -v lsof >/dev/null 2>&1; then
-          tool=lsof
-          snapshot=$(lsof -nP -iTCP -sTCP:LISTEN -Fpcn 2>/dev/null | awk '
-            /^p/ { pid=substr($0,2) }
-            /^c/ { name=substr($0,2) }
-            /^n/ { endpoint=substr($0,2); sub(/^.*:/,"",endpoint); print endpoint " " pid " " name }
-          ')
-        elif command -v ss >/dev/null 2>&1; then
-          tool=ss
-          snapshot=$(ss -H -ltnp 2>/dev/null) || exit 69
-        elif command -v fuser >/dev/null 2>&1; then
-          tool=fuser
-        else
-          exit 69
-        fi
-        for port in \(ports); do
-          pid=''
-          fallback=''
-          if [ "$tool" = lsof ]; then
-            row=$(printf '%s\\n' "$snapshot" | awk -v port="$port" '$1 == port { print; exit }')
-            pid=$(printf '%s' "$row" | awk '{print $2}')
-            fallback=$(printf '%s' "$row" | cut -d ' ' -f 3-)
-          elif [ "$tool" = ss ]; then
-            socket=$(printf '%s\\n' "$snapshot" | awk -v port="$port" '$4 ~ (":" port "$") { print; exit }')
-            pid=$(printf '%s' "$socket" | sed -n 's/.*pid=\\([0-9]*\\).*/\\1/p')
-            fallback=$(printf '%s' "$socket" | sed -n 's/.*users:(("\\([^"]*\\)".*/\\1/p')
-          else
-            pid=$(fuser "$port/tcp" 2>/dev/null | awk '{print $1}')
-          fi
-          name="$fallback"
-          if [ -n "$pid" ] && command -v ps >/dev/null 2>&1; then
-            args=$(ps -p "$pid" -o args= 2>/dev/null | head -n 1)
-            executable=${args%% *}
-            [ -z "$executable" ] || name=${executable##*/}
-          fi
-          printf '%s\\t%s\\n' "$port" "$name"
-        done
-        printf 'OMG_PROCESS_PROBE_V1\\n'
-        """
-    }
-
-    nonisolated private static func shellQuote(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
-
-    nonisolated private static func copyToPasteboard(_ value: String) {
-        DispatchQueue.main.async {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(value, forType: .string)
-        }
-    }
-
-    nonisolated private static func allocateLocalPort(preferredPort: Int) throws -> Int {
-        if validPort(preferredPort), canBind(port: preferredPort) {
-            return preferredPort
-        }
-        let descriptor = Darwin.socket(AF_INET, SOCK_STREAM, 0)
-        guard descriptor >= 0 else { throw POSIXError(.ENFILE) }
-        defer { Darwin.close(descriptor) }
-
-        var address = sockaddr_in()
-        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        address.sin_family = sa_family_t(AF_INET)
-        address.sin_port = 0
-        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
-        let bindResult = withUnsafePointer(to: &address) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-        guard bindResult == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EADDRINUSE) }
-
-        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
-        let nameResult = withUnsafeMutablePointer(to: &address) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.getsockname(descriptor, $0, &length)
-            }
-        }
-        guard nameResult == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EINVAL) }
-        return Int(UInt16(bigEndian: address.sin_port))
-    }
-
-    nonisolated private static func canBind(port: Int) -> Bool {
-        let descriptor = Darwin.socket(AF_INET, SOCK_STREAM, 0)
-        guard descriptor >= 0 else { return false }
-        defer { Darwin.close(descriptor) }
-        var reuseAddress: Int32 = 1
-        _ = withUnsafePointer(to: &reuseAddress) {
-            Darwin.setsockopt(
-                descriptor,
-                SOL_SOCKET,
-                SO_REUSEADDR,
-                $0,
-                socklen_t(MemoryLayout<Int32>.size)
-            )
-        }
-        var address = sockaddr_in()
-        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        address.sin_family = sa_family_t(AF_INET)
-        address.sin_port = UInt16(port).bigEndian
-        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
-        return withUnsafePointer(to: &address) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
-            }
         }
     }
 }

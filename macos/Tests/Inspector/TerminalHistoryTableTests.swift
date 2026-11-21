@@ -286,6 +286,38 @@ struct TerminalHistoryTableTests {
         #expect(InfoExternalApp.installed { _ in nil }.isEmpty)
     }
 
+    @Test func chosenApplicationsReplaceDetectionAndEditsStartFromWhatIsShown() {
+        let zed = InfoExternalApp(id: "dev.zed.Zed", name: "Zed", url: URL(fileURLWithPath: "/Applications/Zed.app"))
+        let detected = { [zed] }
+        // Nil detects; an explicit list, even an empty one, is authoritative.
+        #expect(InfoExternalApp.resolve(configured: nil, exists: { _ in true }, detected: detected) == [zed])
+        #expect(InfoExternalApp.resolve(configured: [], exists: { _ in true }, detected: detected).isEmpty)
+        let chosen = InfoExternalApp.resolve(
+            configured: ["/Applications/Nova.app", "/Volumes/Gone/Fleet.app"],
+            exists: { $0 == "/Applications/Nova.app" }, detected: detected)
+        #expect(chosen.map(\.name) == ["Nova"])
+        #expect(chosen.map(\.url.path) == ["/Applications/Nova.app"])
+
+        // The first edit keeps the detected applications instead of dropping them.
+        #expect(InfoExternalApp.adding("/Applications/Nova.app", to: nil, shown: [zed], limit: 8)
+            == ["/Applications/Zed.app", "/Applications/Nova.app"])
+        #expect(InfoExternalApp.adding("/Applications/Zed.app", to: ["/Applications/Zed.app"], shown: [zed], limit: 8)
+            == ["/Applications/Zed.app"])
+        #expect(InfoExternalApp.adding("/Applications/C.app", to: ["/Applications/A.app", "/Applications/B.app"],
+                                       shown: [], limit: 2) == ["/Applications/B.app", "/Applications/C.app"])
+        #expect(InfoExternalApp.removing(zed, from: nil, shown: [zed]).isEmpty)
+        #expect(InfoExternalApp.removing(zed, from: ["/Applications/Zed.app", "/Applications/Nova.app"], shown: [zed])
+            == ["/Applications/Nova.app"])
+
+        // Only absolute application bundle paths survive a hand-edited setting.
+        #expect(OhMyGhosttySettings.validatedApplicationPaths(nil) == nil)
+        #expect(OhMyGhosttySettings.validatedApplicationPaths("Zed") == nil)
+        #expect(OhMyGhosttySettings.validatedApplicationPaths(
+            ["/Applications/Zed.app", "Zed.app", 7, "/Applications/Zed.app", "/tmp/not-an-app"])
+            == ["/Applications/Zed.app"])
+        #expect(OhMyGhosttySettings.validatedApplicationPaths([String]()) == [])
+    }
+
     @Test func workingDirectoryOffersLocalActionsAndOnlyCopyForRemote() async throws {
         let zed = InfoExternalApp(id: "dev.zed.Zed", name: "Zed",
                                   url: URL(fileURLWithPath: "/Applications/Zed.app"))
@@ -309,8 +341,10 @@ struct TerminalHistoryTableTests {
             InspectorHistoryItem(id: "row-\($0)", kind: .command, text: ["ll", "git status", "ssh cloud", "make test"][$0],
                                  timestamp: Date(timeIntervalSince1970: 1_790_079_600 - Double($0 * 90)))
         }
+        let agent = InspectorInfoAgent(agent: .pi, conversationID: "0199-conversation",
+                                       sessionPath: "/tmp/0199-conversation.jsonl", remoteHost: nil)
         for (name, directory, info) in [
-            ("local", local, InspectorInfoContent()),
+            ("local", local, InspectorInfoContent(agent: agent)),
             ("remote", remote, InspectorInfoContent(portForwards: forwards, historyItems: history)),
         ] {
             let host = NSHostingView(rootView: InspectorInfoView(

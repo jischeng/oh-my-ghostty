@@ -93,16 +93,73 @@ struct InfoExternalApp: Identifiable, Equatable {
         }
         return apps
     }
+
+    init(id: String, name: String, url: URL) {
+        self.id = id
+        self.name = name
+        self.url = url
+    }
+
+    /// An application the user chose by its bundle path.
+    init(path: String) {
+        let url = URL(fileURLWithPath: path, isDirectory: true)
+        self.init(id: path, name: url.deletingPathExtension().lastPathComponent, url: url)
+    }
+
+    /// The user's list when they have customized it, otherwise the detected
+    /// editors. A chosen application that is no longer installed is skipped,
+    /// but stays in the setting in case its volume is only unmounted.
+    static func resolve(
+        configured: [String]?,
+        exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
+        detected: () -> [Self] = { installed() }
+    ) -> [Self] {
+        guard let configured else { return detected() }
+        return configured.filter(exists).map(Self.init(path:))
+    }
+
+    /// The setting value after adding `path`; a first edit starts from the
+    /// applications currently shown so nothing disappears.
+    static func adding(_ path: String, to configured: [String]?, shown: [Self], limit: Int) -> [String] {
+        var paths = configured ?? shown.map(\.url.path)
+        guard !paths.contains(path) else { return paths }
+        paths.append(path)
+        return Array(paths.suffix(limit))
+    }
+
+    static func removing(_ app: Self, from configured: [String]?, shown: [Self]) -> [String] {
+        (configured ?? shown.map(\.url.path)).filter { $0 != app.url.path }
+    }
 }
 
-/// Side effects of the working-directory rows, injectable for tests.
+/// Side effects of the working-directory and Agent rows, injectable for tests.
 struct InfoDirectoryActions {
     var copy: @MainActor (String) -> Void = { CopyFeedback.copy($0) }
     var reveal: @MainActor (URL) -> Void = { NSWorkspace.shared.open($0) }
+    var revealFile: @MainActor (URL) -> Void = { NSWorkspace.shared.activateFileViewerSelecting([$0]) }
     var open: @MainActor (URL, InfoExternalApp) -> Void = { url, app in
         NSWorkspace.shared.open([url], withApplicationAt: app.url, configuration: .init())
     }
-    var installedApps: @MainActor () -> [InfoExternalApp] = { InfoExternalApp.installed() }
+    /// Applications currently offered: the user's list, or detected editors.
+    var installedApps: @MainActor () -> [InfoExternalApp] = {
+        InfoExternalApp.resolve(configured: OhMyGhosttySettings.shared.infoOpenInApplications)
+    }
+    var configuredApps: @MainActor () -> [String]? = { OhMyGhosttySettings.shared.infoOpenInApplications }
+    var setConfiguredApps: @MainActor ([String]?) -> Void = {
+        OhMyGhosttySettings.shared.infoOpenInApplications = $0
+    }
+    /// Asks the user for an application bundle; nil when cancelled.
+    var chooseApplication: @MainActor (InfoStrings) -> URL? = { strings in
+        let panel = NSOpenPanel()
+        panel.title = strings.addApplication
+        panel.prompt = strings.addApplicationPrompt
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        panel.allowedContentTypes = [.applicationBundle]
+        panel.canChooseDirectories = false
+        panel.treatsFilePackagesAsDirectories = false
+        panel.allowsMultipleSelection = false
+        return panel.runModal() == .OK ? panel.url : nil
+    }
 }
 
 // MARK: - Layout
@@ -246,6 +303,33 @@ private struct InfoActionRow: View {
     }
 }
 
+/// A copy row that confirms in place, like every other OMG copy control.
+private struct InfoCopyRow: View {
+    let title: String
+    let value: String
+    let copy: @MainActor (String) -> Void
+    @State private var copied = false
+    @State private var reset: Task<Void, Never>?
+
+    var body: some View {
+        InfoActionRow(
+            icon: .symbol(copied ? "checkmark" : "doc.on.doc"),
+            title: copied ? CopyFeedback.confirmationText() : title,
+            tint: copied ? .green : .secondary
+        ) {
+            copy(value)
+            reset?.cancel()
+            copied = true
+            reset = Task { @MainActor in
+                try? await Task.sleep(for: .seconds(CopyFeedback.duration))
+                guard !Task.isCancelled else { return }
+                copied = false
+            }
+        }
+        .onDisappear { reset?.cancel() }
+    }
+}
+
 private struct InspectorHoverIconButton: View {
     let systemImage: String
     let help: String
@@ -350,6 +434,11 @@ struct InspectorInfoView: View {
                 InfoSectionDivider(color: dividerColor)
             }
 
+            if let agent = info.agent {
+                InspectorAgentSectionView(agent: agent, actions: directoryActions)
+                InfoSectionDivider(color: dividerColor)
+            }
+
             if !info.portForwards.hostAlias.isEmpty {
                 InspectorPortForwardListView(forwards: info.portForwards, perform: perform)
                     .frame(height: InfoHistoryLayout.portHeight(
@@ -378,8 +467,6 @@ private struct InspectorWorkingDirectoryView: View {
     let actions: InfoDirectoryActions
     @ObservedObject private var settings = OhMyGhosttySettings.shared
     @State private var apps: [InfoExternalApp] = []
-    @State private var copied = false
-    @State private var copyReset: Task<Void, Never>?
 
     private var strings: InfoStrings { .init(language: settings.language) }
 
@@ -393,6 +480,8 @@ private struct InspectorWorkingDirectoryView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .padding(.trailing, InspectorContentMetrics.leadingInset - InfoLayout.rowOuterInset - 2)
+                } else {
+                    applicationsMenu
                 }
             }
 
@@ -409,14 +498,7 @@ private struct InspectorWorkingDirectoryView: View {
             ForEach(rows.indices, id: \.self) { index in
                 switch rows[index] {
                 case .copyPath:
-                    InfoActionRow(
-                        icon: .symbol(copied ? "checkmark" : "doc.on.doc"),
-                        title: copied ? CopyFeedback.confirmationText() : strings.copyPath,
-                        tint: copied ? .green : .secondary
-                    ) {
-                        actions.copy(directory.path)
-                        flashCopied()
-                    }
+                    InfoCopyRow(title: strings.copyPath, value: directory.path, copy: actions.copy)
                 case .revealInFinder:
                     InfoActionRow(icon: .symbol("folder"), title: strings.revealInFinder) {
                         withLocalDirectory(actions.reveal)
@@ -428,17 +510,67 @@ private struct InspectorWorkingDirectoryView: View {
                     ) {
                         withLocalDirectory { actions.open($0, app) }
                     }
+                    .contextMenu {
+                        Button(strings.removeApplication(app.name)) { remove(app) }
+                    }
                 }
             }
         }
         .padding(.bottom, InfoLayout.sectionBottomInset)
-        .onAppear { apps = actions.installedApps() }
+        .onAppear(perform: reloadApps)
+        .onChange(of: settings.infoOpenInApplications) { _ in reloadApps() }
         // Editors installed or removed while OMG was in the background.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            let next = actions.installedApps()
-            if next != apps { apps = next }
+            reloadApps()
         }
-        .onDisappear { copyReset?.cancel() }
+    }
+
+    /// Lets the user choose which applications the section offers.
+    private var applicationsMenu: some View {
+        Menu {
+            Button(strings.addApplication) { add() }
+            if !apps.isEmpty {
+                Menu(strings.removeApplicationMenu) {
+                    ForEach(apps) { app in
+                        Button(app.name) { remove(app) }
+                    }
+                }
+            }
+            if actions.configuredApps() != nil {
+                Divider()
+                Button(strings.detectApplications) { actions.setConfiguredApps(nil) }
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 22, height: 22)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(strings.chooseApplications)
+        .accessibilityLabel(strings.chooseApplications)
+    }
+
+    private func reloadApps() {
+        let next = actions.installedApps()
+        if next != apps { apps = next }
+    }
+
+    private func add() {
+        guard let url = actions.chooseApplication(strings) else { return }
+        actions.setConfiguredApps(InfoExternalApp.adding(
+            url.path, to: actions.configuredApps(), shown: apps,
+            limit: OhMyGhosttySettings.infoOpenInApplicationLimit
+        ))
+        reloadApps()
+    }
+
+    private func remove(_ app: InfoExternalApp) {
+        actions.setConfiguredApps(InfoExternalApp.removing(app, from: actions.configuredApps(), shown: apps))
+        reloadApps()
     }
 
     /// The shell may have removed its own directory since it was reported.
@@ -451,15 +583,73 @@ private struct InspectorWorkingDirectoryView: View {
         }
         body(URL(fileURLWithPath: directory.path, isDirectory: true))
     }
+}
 
-    private func flashCopied() {
-        copyReset?.cancel()
-        copied = true
-        copyReset = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(CopyFeedback.duration))
-            guard !Task.isCancelled else { return }
-            copied = false
+/// The Agent conversation running in the pane and its transcript on disk.
+private struct InspectorAgentSectionView: View {
+    let agent: InspectorInfoAgent
+    let actions: InfoDirectoryActions
+    @ObservedObject private var settings = OhMyGhosttySettings.shared
+
+    private var strings: InfoStrings { .init(language: settings.language) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            InfoSectionHeader(title: strings.agentTitle) {
+                HStack(spacing: 5) {
+                    if let icon = NSImage(named: agent.agent.assetName) {
+                        Image(nsImage: icon)
+                            .resizable()
+                            .interpolation(.high)
+                            .scaledToFit()
+                            .frame(width: 14, height: 14)
+                    }
+                    Text(agent.agent.displayName)
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                    if let host = agent.remoteHost {
+                        Text(host)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                .padding(.trailing, InspectorContentMetrics.leadingInset - InfoLayout.rowOuterInset - 2)
+            }
+
+            ForEach(agent.actions, id: \.self) { action in
+                switch action {
+                case .copyConversationID:
+                    InfoCopyRow(title: strings.copyConversationID, value: agent.conversationID,
+                                copy: actions.copy)
+                case .copySessionPath(let path):
+                    InfoCopyRow(title: strings.copySessionPath, value: path, copy: actions.copy)
+                        .help(path)
+                case .revealSession(let path):
+                    InfoActionRow(icon: .symbol("folder"), title: strings.revealInFinder) {
+                        guard FileManager.default.fileExists(atPath: path) else {
+                            NSSound.beep()
+                            return
+                        }
+                        actions.revealFile(URL(fileURLWithPath: path))
+                    }
+                }
+            }
         }
+        .padding(.bottom, InfoLayout.sectionBottomInset)
+    }
+}
+
+extension InspectorInfoAgent {
+    enum Action: Hashable {
+        case copyConversationID
+        case copySessionPath(String)
+        case revealSession(String)
+    }
+
+    /// The transcript rows appear once the local file has been located.
+    var actions: [Action] {
+        [.copyConversationID] + (sessionPath.map { [.copySessionPath($0), .revealSession($0)] } ?? [])
     }
 }
 

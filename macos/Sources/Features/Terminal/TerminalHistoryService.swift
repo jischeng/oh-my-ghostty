@@ -128,6 +128,7 @@ final class TerminalHistoryService {
 
     private static func expired(_ item: InspectorHistoryItem) -> InspectorHistoryItem {
         .init(id: item.id, kind: item.kind, text: item.text, timestamp: item.timestamp,
+              exitCode: item.exitCode, duration: item.duration,
               location: .unavailable(.expired), sourceLabel: item.sourceLabel, replayKey: item.replayKey)
     }
 
@@ -187,13 +188,16 @@ final class TerminalHistoryService {
         _ surface: ghostty_surface_t, surfaceID: UUID, epoch: UUID, sourceLabel: String
     ) -> [InspectorHistoryItem] {
         let snapshot = CommandSnapshot(surfaceID: surfaceID, epoch: epoch, sourceLabel: sourceLabel)
-        ghostty_surface_omg_commands(surface, Unmanaged.passUnretained(snapshot).toOpaque()) { context, id, text, timestamp, replayKey in
+        ghostty_surface_omg_commands(surface, Unmanaged.passUnretained(snapshot).toOpaque()) { context, id, text, timestamp, replayKey, exitCode, durationMS in
             guard let context else { return }
             let snapshot = Unmanaged<CommandSnapshot>.fromOpaque(context).takeUnretainedValue()
             snapshot.items.append(.init(
                 id: "command:\(snapshot.surfaceID):\(snapshot.epoch):\(id)",
                 kind: .command, text: String(cString: text),
                 timestamp: Date(timeIntervalSince1970: TimeInterval(timestamp)),
+                // Negative values mean the core has no reported outcome yet.
+                exitCode: exitCode >= 0 ? Int16(clamping: exitCode) : nil,
+                duration: durationMS >= 0 ? UInt64(durationMS) : nil,
                 location: .command(surfaceID: snapshot.surfaceID, executionID: id,
                                    epoch: snapshot.epoch), sourceLabel: snapshot.sourceLabel,
                 replayKey: replayKey.map { String(cString: $0) }
@@ -302,6 +306,8 @@ final class TerminalHistoryService {
                   owner == surfaceID, coreIDs.insert(id).inserted else { return nil }
             verified.append(.init(id: occurrenceID, kind: .command,
                 text: command.text, timestamp: command.timestamp,
+                exitCode: item.exitCode ?? command.exitCode,
+                duration: item.duration ?? command.duration,
                 location: item.location, sourceLabel: command.sourceLabel,
                 replayKey: occurrenceID))
         }
@@ -329,6 +335,7 @@ final class TerminalHistoryService {
             return .init(
                 id: command.occurrenceID ?? "archived:\(surfaceID.uuidString):\(index)",
                 kind: .command, text: command.text, timestamp: command.timestamp,
+                exitCode: command.exitCode, duration: command.duration,
                 location: .unavailable(.expired), sourceLabel: command.sourceLabel
             )
         }
@@ -349,8 +356,9 @@ final class TerminalHistoryService {
             let item = items[offset + index]
             result[offset + index] = .init(
                 id: item.id, kind: item.kind, text: item.text,
-                timestamp: saved[index].timestamp, exitCode: item.exitCode,
-                duration: item.duration, promptIndex: item.promptIndex,
+                timestamp: saved[index].timestamp,
+                exitCode: item.exitCode ?? saved[index].exitCode,
+                duration: item.duration ?? saved[index].duration, promptIndex: item.promptIndex,
                 location: item.location, sourceLabel: item.sourceLabel,
                 replayKey: item.replayKey
             )

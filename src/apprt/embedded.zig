@@ -1974,7 +1974,7 @@ pub const CAPI = struct {
     export fn ghostty_surface_omg_commands(
         surface: *Surface,
         userdata: ?*anyopaque,
-        callback: *const fn (?*anyopaque, u64, [*:0]const u8, i64, ?[*:0]const u8) callconv(.c) void,
+        callback: *const fn (?*anyopaque, u64, [*:0]const u8, i64, ?[*:0]const u8, i32, i64) callconv(.c) void,
     ) void {
         const core = &surface.core_surface;
         core.renderer_state.mutex.lockUncancelable(global.io());
@@ -1984,7 +1984,17 @@ pub const CAPI = struct {
         // Jumping still requires an active primary screen below.
         const screen = core.renderer_state.terminal.screens.get(.primary) orelse return;
         for (screen.omg_command_history.entries.items) |entry| {
-            if (entry.isValid()) callback(userdata, entry.id, entry.text.ptr, entry.timestamp, if (entry.replay_key) |key| key.ptr else null);
+            if (!entry.isValid()) continue;
+            // Negative outcome values mean "not reported" to the host.
+            callback(
+                userdata,
+                entry.id,
+                entry.text.ptr,
+                entry.timestamp,
+                if (entry.replay_key) |key| key.ptr else null,
+                if (entry.exit_code) |code| code else -1,
+                if (entry.duration_ms) |ms| std.math.cast(i64, ms) orelse std.math.maxInt(i64) else -1,
+            );
         }
     }
 

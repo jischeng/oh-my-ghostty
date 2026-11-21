@@ -144,6 +144,11 @@ struct InfoStrings: Equatable, Sendable {
           "已保存的命令，终端锚点已不可用。单击选中后按 ⌘C 复制。")
     }
     var unknownHistoryDate: String { t("Date unavailable", "日期未知") }
+    func exitCode(_ code: Int16) -> String { t("exit \(code)", "退出码 \(code)") }
+    func commandDuration(milliseconds: UInt64) -> String {
+        let seconds = String(format: "%.3f", Double(milliseconds) / 1_000)
+        return t("took \(seconds)s", "耗时 \(seconds) 秒")
+    }
     var historyLoading: String { t("Loading prompts…", "正在读取提问…") }
     var historyUnavailable: String {
         t("Session history unavailable. Retrying automatically…", "暂时无法读取会话记录，正在自动重试…")

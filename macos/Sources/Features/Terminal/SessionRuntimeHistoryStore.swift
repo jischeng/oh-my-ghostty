@@ -62,14 +62,8 @@ enum SessionRuntimeHistoryStore {
         if commands.isEmpty, let previousCommands = existing?.commands, !previousCommands.isEmpty {
             savedCommands = Array(previousCommands.prefix(maxCommands))
         } else {
-            savedCommands = Array(commands.prefix(maxCommands)).map { item in
-                ShellScrollbackRestoreStore.SavedCommand(
-                    text: item.text,
-                    timestamp: item.timestamp,
-                    sourceLabel: item.sourceLabel,
-                    occurrenceID: item.replayKey ?? item.id
-                )
-            }
+            savedCommands = Array(commands.prefix(maxCommands))
+                .map(ShellScrollbackRestoreStore.SavedCommand.init)
         }
 
         var directories = existing?.directories ?? []
@@ -182,8 +176,8 @@ enum SessionRuntimeHistoryStore {
                     kind: item.kind,
                     text: item.text,
                     timestamp: saved.timestamp ?? item.timestamp,
-                    exitCode: item.exitCode,
-                    duration: item.duration,
+                    exitCode: item.exitCode ?? saved.exitCode,
+                    duration: item.duration ?? saved.duration,
                     promptIndex: item.promptIndex,
                     location: item.location,
                     sourceLabel: saved.sourceLabel ?? item.sourceLabel,
@@ -236,6 +230,8 @@ enum SessionRuntimeHistoryStore {
                 kind: .command,
                 text: command.text,
                 timestamp: command.timestamp,
+                exitCode: command.exitCode,
+                duration: command.duration,
                 location: .unavailable(.expired),
                 sourceLabel: command.sourceLabel
             )

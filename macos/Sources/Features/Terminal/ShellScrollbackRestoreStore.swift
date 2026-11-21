@@ -41,13 +41,26 @@ enum ShellScrollbackRestoreStore {
         let sourceLabel: String?
         /// Host-owned occurrence identity, never a text-search key.
         let occurrenceID: String?
+        /// Outcome reported by the shell; absent in archives written before
+        /// it was recorded, and for commands that never reported one.
+        let exitCode: Int16?
+        /// Milliseconds between command start and end.
+        let duration: UInt64?
 
         init(text: String, timestamp: Date?, sourceLabel: String? = nil,
-             occurrenceID: String? = nil) {
+             occurrenceID: String? = nil, exitCode: Int16? = nil, duration: UInt64? = nil) {
             self.text = text
             self.timestamp = timestamp
             self.sourceLabel = sourceLabel
             self.occurrenceID = occurrenceID
+            self.exitCode = exitCode
+            self.duration = duration
+        }
+
+        init(_ item: InspectorHistoryItem) {
+            self.init(text: item.text, timestamp: item.timestamp, sourceLabel: item.sourceLabel,
+                      occurrenceID: item.replayKey ?? item.id,
+                      exitCode: item.exitCode, duration: item.duration)
         }
     }
 
@@ -168,20 +181,14 @@ enum ShellScrollbackRestoreStore {
             .prefix(100 - liveCommands.count)).sorted {
                 ($0.timestamp ?? .distantPast) > ($1.timestamp ?? .distantPast)
             }
-        let saved = retained.map { item in
-            SavedCommand(text: item.text, timestamp: item.timestamp, sourceLabel: item.sourceLabel,
-                         occurrenceID: item.replayKey ?? item.id)
-        }
+        let saved = retained.map(SavedCommand.init)
         // Export order comes from core execution IDs, never timestamps or
         // text. It includes the still-valid local and remote historical Pins.
         let replay = liveCommands.sorted { lhs, rhs in
             if case .command(_, let first, _) = lhs.location,
                case .command(_, let second, _) = rhs.location { return first < second }
             return false
-        }.map { item in
-            SavedCommand(text: item.text, timestamp: item.timestamp,
-                         sourceLabel: item.sourceLabel, occurrenceID: item.replayKey ?? item.id)
-        }
+        }.map(SavedCommand.init)
         let archive = CommandArchive(version: 4, surfaceID: surfaceID, commands: saved,
                                      allowsAnchorReconciliation: false,
                                      replayCommands: replay)

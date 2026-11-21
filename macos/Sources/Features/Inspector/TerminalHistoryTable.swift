@@ -122,6 +122,9 @@ struct TerminalHistoryTable: NSViewRepresentable {
         static let dateHeight: CGFloat = 14
         static let rowSpacing = verticalInset * 2 + textDateGap + dateHeight
         static let previewHeight: CGFloat = 72
+        static func failureMarker(in bounds: NSRect) -> NSRect {
+            NSRect(x: 4, y: verticalInset, width: 2, height: max(0, bounds.height - 2 * verticalInset))
+        }
         static func font(for kind: InspectorHistoryItemKind) -> NSFont {
             kind == .command ? .monospacedSystemFont(ofSize: 12, weight: .regular) : .systemFont(ofSize: 12)
         }
@@ -136,6 +139,51 @@ struct TerminalHistoryTable: NSViewRepresentable {
         }
     }
 
+    /// Compact row metadata. The full timestamp stays available on hover.
+    enum Format {
+        /// Today shows the time only; older rows add as much date as needed.
+        static func timestamp(_ date: Date, now: Date = Date(), calendar: Calendar = .current) -> String {
+            let formatter = DateFormatter()
+            formatter.calendar = calendar
+            formatter.timeZone = calendar.timeZone
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            if calendar.isDate(date, inSameDayAs: now) {
+                formatter.dateFormat = "HH:mm"
+            } else if calendar.component(.year, from: date) == calendar.component(.year, from: now) {
+                formatter.dateFormat = "MM-dd HH:mm"
+            } else {
+                formatter.dateFormat = "yyyy-MM-dd HH:mm"
+            }
+            return formatter.string(from: date)
+        }
+
+        static func fullTimestamp(_ date: Date, calendar: Calendar = .current) -> String {
+            let formatter = DateFormatter()
+            formatter.calendar = calendar
+            formatter.timeZone = calendar.timeZone
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+            return formatter.string(from: date)
+        }
+
+        /// Sub-second commands are the norm, so only slower ones show a duration.
+        static func duration(milliseconds: UInt64?) -> String? {
+            guard let milliseconds, milliseconds >= 1_000 else { return nil }
+            let seconds = milliseconds / 1_000
+            if seconds < 60 {
+                return String(format: "%.1fs", Double(milliseconds) / 1_000)
+            }
+            if seconds < 3_600 {
+                return "\(seconds / 60)m \(seconds % 60)s"
+            }
+            return "\(seconds / 3_600)h \(seconds % 3_600 / 60)m"
+        }
+
+        static func failed(_ item: InspectorHistoryItem) -> Bool {
+            item.exitCode.map { $0 != 0 } ?? false
+        }
+    }
+
     @MainActor
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         var items: [InspectorHistoryItem] = []
@@ -147,11 +195,8 @@ struct TerminalHistoryTable: NSViewRepresentable {
         private var width: CGFloat = 300
         private var heights: [String: CGFloat] = [:]
         private var strings = InfoStrings()
-        private let formatter: DateFormatter = {
-            let value = DateFormatter()
-            value.dateFormat = "yyyy-MM-dd HH:mm:ss"
-            return value
-        }()
+        var now: () -> Date = Date.init
+        var calendar = Calendar.current
 
         func contextMenu(forRow row: Int) -> NSMenu? {
             guard items.indices.contains(row) else { return nil }
@@ -320,11 +365,39 @@ struct TerminalHistoryTable: NSViewRepresentable {
             cell.text.font = Metrics.font(for: item.kind)
             let archived: Bool
             if case .unavailable(.expired) = item.location { archived = true } else { archived = false }
-            let date = item.timestamp.map(formatter.string(from:)) ?? strings.unknownHistoryDate
-            let origin = item.sourceLabel.map { "  ·  \($0)" } ?? ""
-            cell.date.stringValue = "\(date)\(origin)" +
-                (archived ? "  ·  \(strings.archivedCommandLabel)" : "")
-            cell.date.toolTip = cell.date.stringValue
+            let failed = Format.failed(item)
+            let separator = "  ·  "
+            var segments: [(String, NSColor)] = []
+            if failed, let code = item.exitCode {
+                segments.append((strings.exitCode(code), .systemRed))
+            }
+            segments.append((
+                item.timestamp.map { Format.timestamp($0, now: now(), calendar: calendar) }
+                    ?? strings.unknownHistoryDate,
+                .secondaryLabelColor
+            ))
+            if let duration = Format.duration(milliseconds: item.duration) {
+                segments.append((duration, .secondaryLabelColor))
+            }
+            if let origin = item.sourceLabel { segments.append((origin, .secondaryLabelColor)) }
+            if archived { segments.append((strings.archivedCommandLabel, .secondaryLabelColor)) }
+            let meta = NSMutableAttributedString()
+            for (index, segment) in segments.enumerated() {
+                if index > 0 {
+                    meta.append(.init(string: separator, attributes: [.foregroundColor: NSColor.tertiaryLabelColor]))
+                }
+                meta.append(.init(string: segment.0, attributes: [.foregroundColor: segment.1]))
+            }
+            meta.addAttribute(.font, value: HistoryCell.metaFont, range: NSRange(location: 0, length: meta.length))
+            cell.date.attributedStringValue = meta
+            cell.date.toolTip = [
+                item.timestamp.map { Format.fullTimestamp($0, calendar: calendar) },
+                item.exitCode.map(strings.exitCode),
+                item.duration.map { strings.commandDuration(milliseconds: $0) },
+                item.sourceLabel,
+                archived ? strings.archivedCommandLabel : nil,
+            ].compactMap { $0 }.joined(separator: separator)
+            cell.failed = failed
             cell.jump.isEnabled = Self.canJump(item)
             let help = archived ? strings.archivedCommandHelp
                 : (Self.canJump(item) ? strings.clickToJump : strings.noTerminalAnchor)
@@ -343,6 +416,11 @@ struct TerminalHistoryTable: NSViewRepresentable {
         let text = NSTextField(wrappingLabelWithString: "")
         let date = NSTextField(labelWithString: "")
         let jump = NSButton(title: "", target: nil, action: nil)
+        static let metaFont = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        /// Failed commands carry a red edge so they stand out while scanning.
+        var failed = false {
+            didSet { if failed != oldValue { needsDisplay = true } }
+        }
         private var hovered = false
         private var tracking: NSTrackingArea?
         override var isFlipped: Bool { true }
@@ -356,7 +434,7 @@ struct TerminalHistoryTable: NSViewRepresentable {
             text.font = Metrics.font(for: .agentPrompt)
             text.lineBreakMode = .byWordWrapping
             text.maximumNumberOfLines = 4
-            date.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+            date.font = Self.metaFont
             date.textColor = .secondaryLabelColor
             date.lineBreakMode = .byTruncatingTail
             jump.image = NSImage(systemSymbolName: "arrow.up.right", accessibilityDescription: nil)
@@ -383,6 +461,10 @@ struct TerminalHistoryTable: NSViewRepresentable {
             NSColor.separatorColor.withAlphaComponent(0.25).setFill()
             NSRect(x: Metrics.inset, y: bounds.height - 0.5,
                    width: max(0, bounds.width - 2 * Metrics.inset), height: 0.5).fill()
+            if failed {
+                NSColor.systemRed.withAlphaComponent(0.85).setFill()
+                NSBezierPath(roundedRect: Metrics.failureMarker(in: bounds), xRadius: 1, yRadius: 1).fill()
+            }
         }
         override func layout() {
             super.layout()

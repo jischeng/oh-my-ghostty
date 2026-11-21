@@ -2139,8 +2139,13 @@ command history in Info; only Agent Prompt rows are suppressed. Its Shell jump
 anchors remain available, and SSH port-forwarding controls remain visible.
 Info does not poll the Agent transcript or present unanchored prompts as
 navigable entries. The separate Agent History Inspector,
-Agent status, and resume actions are unaffected. Shell history timestamps
-include date and time. Single click selects an entry; Cmd+C copies its full command. The native table sizes its
+Agent status, and resume actions are unaffected. Shell history rows show a
+compact timestamp (time only today, month-day earlier this year, and the year
+otherwise); the full date and time stay in the row's tooltip. A command whose
+shell reported a non-zero `OSC 133;D` exit status carries a red edge and its
+exit code; a duration appears once a command took at least one second. A
+command that is still running, or whose shell reported no status, is never
+shown as failed. Single click selects an entry; Cmd+C copies its full command. The native table sizes its
 scrolling document to the inspector width and computes row heights from wrapped
 text. Prompts show up to four preview lines without expand/collapse controls.
 The table explicitly uses AppKit's plain style to avoid automatic sidebar insets.
@@ -2267,8 +2272,12 @@ rendered input cells and anchors its actual first cell rather than Starship's
 late prompt decoration. It never searches the scrollback or matches another
 execution. If the option is absent, invalid or not verifiable against cells,
 the core falls back to the semantic B/C input region; each execution retains
-its own tracked Pin. The host copies a snapshot through the internal
-`ghostty_surface_omg_commands` API and navigates with
+its own tracked Pin. `OSC 133;D` records the exit status and elapsed time on
+the execution that the preceding `C` started, and on no other: an empty
+submission or a repeated `D` leaves earlier records unchanged. The host
+copies a snapshot through the internal `ghostty_surface_omg_commands` API,
+whose callback reports the exit status and duration in milliseconds as
+negative values while they are unknown, and navigates with
 `ghostty_surface_omg_jump_command`; callbacks must not reenter terminal APIs.
 Snapshots enumerate primary-screen command records even while an alternate
 screen is visible, so a temporary TUI does not erase their origin metadata;

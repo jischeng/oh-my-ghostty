@@ -2914,7 +2914,7 @@ pub fn semanticPrompt(
                 screen.cursor.page_pin.*,
                 screen.cursor.pending_wrap,
                 reported,
-                std.Io.Clock.real.now(self.io()).toSeconds(),
+                std.Io.Clock.real.now(self.io()).toMilliseconds(),
             );
             // "End of input, and start of output."
             self.screens.active.cursorSetSemanticContent(.output);
@@ -2941,6 +2941,11 @@ pub fn semanticPrompt(
             // its reasonable at this point to reset our semantic content
             // state but the spec doesn't really say what to do.
             self.screens.active.cursorSetSemanticContent(.output);
+            // OMG: record the outcome on the execution that just ended.
+            self.screens.active.omg_command_history.complete(
+                if (cmd.readOption(.exit_code)) |raw| std.math.cast(u8, raw) orelse 1 else null,
+                std.Io.Clock.real.now(self.io()).toMilliseconds(),
+            );
         },
     }
 }

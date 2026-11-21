@@ -234,7 +234,9 @@ struct InspectorHistoryItem: Identifiable, Equatable, Sendable {
     let kind: InspectorHistoryItemKind
     let text: String
     let timestamp: Date?
+    /// Exit status reported by the shell; nil while running or unreported.
     let exitCode: Int16?
+    /// Milliseconds between command start and end; nil while running.
     let duration: UInt64?
     let promptIndex: Int?
     let location: HistoryLocation

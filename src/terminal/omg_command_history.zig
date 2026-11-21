@@ -15,6 +15,11 @@ pub const Entry = struct {
     /// Owner-validated occurrence ID from a restored VT snapshot.
     replay_key: ?[:0]const u8 = null,
     timestamp: i64,
+    /// Exit status reported by `OSC 133;D`; null while running, or when the
+    /// shell ended the command without reporting one.
+    exit_code: ?u8 = null,
+    /// Wall time between `OSC 133;C` and `OSC 133;D`; null while running.
+    duration_ms: ?u64 = null,
     superseded: bool = false,
 
     pub fn isValid(self: Entry) bool {
@@ -26,7 +31,14 @@ pub const Entry = struct {
 entries: std.ArrayList(Entry) = .empty,
 input: ?*PageList.Pin = null,
 input_key: ?[:0]const u8 = null,
+/// The entry whose output is in progress, awaiting `OSC 133;D`.
+running: ?Running = null,
 next_id: u64 = 1,
+
+pub const Running = struct {
+    id: u64,
+    started_ms: i64,
+};
 
 pub fn deinit(self: *Self, alloc: Allocator, pages: *PageList) void {
     if (self.input) |pin| pages.untrackPin(pin);
@@ -72,7 +84,11 @@ pub fn begin(self: *Self, alloc: Allocator, pages: *PageList, cursor: PageList.P
     self.input_key = replay_key;
 }
 
-pub fn finish(self: *Self, alloc: Allocator, pages: *PageList, cursor: PageList.Pin, pending_wrap: bool, reported_text: ?[]const u8, timestamp: i64) !void {
+pub fn finish(self: *Self, alloc: Allocator, pages: *PageList, cursor: PageList.Pin, pending_wrap: bool, reported_text: ?[]const u8, now_ms: i64) !void {
+    // A later `D` must never complete an earlier execution, including when
+    // this input turns out to be empty or unrecordable.
+    self.running = null;
+    const timestamp = @divFloor(now_ms, std.time.ms_per_s);
     const start = self.input orelse return;
     self.input = null;
     var replay_key = self.input_key;
@@ -174,6 +190,7 @@ pub fn finish(self: *Self, alloc: Allocator, pages: *PageList, cursor: PageList.
         .timestamp = timestamp,
     });
     replay_key = null; // Ownership transferred to the recorded entry.
+    self.running = .{ .id = self.next_id, .started_ms = now_ms };
     self.next_id += 1;
     if (self.entries.items.len > 100) {
         const old = self.entries.orderedRemove(0);
@@ -181,6 +198,20 @@ pub fn finish(self: *Self, alloc: Allocator, pages: *PageList, cursor: PageList.
         pages.untrackPin(old.end_pin);
         alloc.free(old.text);
         if (old.replay_key) |key| alloc.free(key);
+    }
+}
+
+/// Records the outcome of the execution started by the last `finish`.
+/// A `D` without a preceding recorded command (an empty prompt, a redraw,
+/// or a second `D`) changes nothing.
+pub fn complete(self: *Self, exit_code: ?u8, now_ms: i64) void {
+    const running = self.running orelse return;
+    self.running = null;
+    for (self.entries.items) |*entry| {
+        if (entry.id != running.id) continue;
+        entry.exit_code = exit_code;
+        entry.duration_ms = @intCast(@max(0, now_ms - running.started_ms));
+        return;
     }
 }
 
@@ -528,6 +559,8 @@ pub fn rebuildFromSemanticPages(
                 .text = copy,
                 .replay_key = replay_copy,
                 .timestamp = prev_entry.timestamp,
+                .exit_code = prev_entry.exit_code,
+                .duration_ms = prev_entry.duration_ms,
             });
         } else {
             const id = self.next_id;
@@ -545,6 +578,15 @@ pub fn rebuildFromSemanticPages(
 
     if (active_input_pin) |pin| {
         self.input = try pages.trackPin(pin);
+    }
+
+    // A restore in the middle of a command keeps waiting for its `D`.
+    if (previous) |prev| {
+        if (prev.running) |running| {
+            for (self.entries.items) |entry| {
+                if (entry.id == running.id) self.running = running;
+            }
+        }
     }
 }
 
@@ -578,6 +620,72 @@ test "OMG command history preserves repeated executions and resets IDs" {
     screen.reset();
     try std.testing.expectEqual(@as(usize, 0), screen.omg_command_history.entries.items.len);
     try std.testing.expectEqual(next, screen.omg_command_history.next_id);
+}
+
+test "OMG command history records exit status and duration for its own execution only" {
+    const Terminal = @import("Terminal.zig");
+    const alloc = std.testing.allocator;
+    var t = try Terminal.init(std.testing.io, alloc, .{ .cols = 40, .rows = 12 });
+    defer t.deinit(alloc);
+    const history = &t.screens.active.omg_command_history;
+
+    // A `D` before any command is ignored.
+    history.complete(7, 1_000);
+    try std.testing.expectEqual(@as(usize, 0), history.entries.items.len);
+
+    try t.semanticPrompt(.init(.fresh_line_new_prompt));
+    try t.printString("$ ");
+    try t.semanticPrompt(.init(.end_prompt_start_input));
+    try t.printString("false");
+    try t.semanticPrompt(.init(.end_input_start_output));
+    try t.linefeed();
+    t.carriageReturn();
+    try std.testing.expect(history.running != null);
+    try std.testing.expectEqual(@as(?u8, null), history.entries.items[0].exit_code);
+    try std.testing.expectEqual(@as(?u64, null), history.entries.items[0].duration_ms);
+
+    const started = history.running.?.started_ms;
+    history.complete(1, started + 2_500);
+    try std.testing.expectEqual(@as(?u8, 1), history.entries.items[0].exit_code);
+    try std.testing.expectEqual(@as(?u64, 2_500), history.entries.items[0].duration_ms);
+
+    // A repeated `D`, as after an empty prompt, never rewrites the outcome.
+    history.complete(0, started + 9_000);
+    try std.testing.expectEqual(@as(?u8, 1), history.entries.items[0].exit_code);
+    try std.testing.expectEqual(@as(?u64, 2_500), history.entries.items[0].duration_ms);
+
+    // An empty submission clears the pending execution instead of letting
+    // its `D` complete the previous command.
+    try t.semanticPrompt(.init(.fresh_line_new_prompt));
+    try t.printString("$ ");
+    try t.semanticPrompt(.init(.end_prompt_start_input));
+    try t.printString("true");
+    try t.semanticPrompt(.init(.end_input_start_output));
+    try t.linefeed();
+    t.carriageReturn();
+    try t.semanticPrompt(.init(.fresh_line_new_prompt));
+    try t.printString("$ ");
+    try t.semanticPrompt(.init(.end_prompt_start_input));
+    try t.semanticPrompt(.init(.end_input_start_output));
+    try std.testing.expectEqual(@as(?Running, null), history.running);
+    history.complete(3, started + 20_000);
+    try std.testing.expectEqual(@as(usize, 2), history.entries.items.len);
+    try std.testing.expectEqual(@as(?u8, null), history.entries.items[1].exit_code);
+
+    // The terminal completes the running command from `OSC 133;D`, and a
+    // clock that moves backwards never produces a negative duration.
+    try t.semanticPrompt(.init(.fresh_line_new_prompt));
+    try t.printString("$ ");
+    try t.semanticPrompt(.init(.end_prompt_start_input));
+    try t.printString("sleep 1");
+    try t.semanticPrompt(.init(.end_input_start_output));
+    try t.linefeed();
+    t.carriageReturn();
+    history.running.?.started_ms += 60_000;
+    try t.semanticPrompt(.init(.end_command));
+    try std.testing.expectEqual(@as(?Running, null), history.running);
+    try std.testing.expectEqual(@as(?u8, null), history.entries.items[2].exit_code);
+    try std.testing.expectEqual(@as(?u64, 0), history.entries.items[2].duration_ms);
 }
 
 test "OMG command history trusts a bounded Fish command line over a late prompt redraw" {

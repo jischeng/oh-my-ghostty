@@ -1322,10 +1322,12 @@ GHOSTTY_API bool ghostty_surface_read_text(ghostty_surface_t,
 GHOSTTY_API void ghostty_surface_free_text(ghostty_surface_t, ghostty_text_s*);
 // OMG host-only API. Callback strings are borrowed; callbacks must not reenter.
 // Returned replay key, when present, is borrowed for this callback only.
+// The trailing exit status and duration in milliseconds are negative when the
+// command is still running or its shell did not report them.
 GHOSTTY_API void ghostty_surface_omg_commands(
     ghostty_surface_t,
     void* GHOSTTY_NULLABLE,
-    void (*)(void* GHOSTTY_NULLABLE, uint64_t, const char*, int64_t, const char* GHOSTTY_NULLABLE));
+    void (*)(void* GHOSTTY_NULLABLE, uint64_t, const char*, int64_t, const char* GHOSTTY_NULLABLE, int32_t, int64_t));
 // On success returns the exact anchored viewport row and top grid padding in points.
 GHOSTTY_API bool ghostty_surface_omg_jump_command(ghostty_surface_t, uint64_t, uint32_t*, double*);
 // Extracts the plain-text output of command `id` (`0` = latest valid command).

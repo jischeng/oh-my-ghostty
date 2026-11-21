@@ -331,6 +331,67 @@ struct TerminalHistoryTableTests {
         }
     }
 
+    @Test func timestampsShortenWithRecencyAndKeepTheFullValueForHover() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try #require(TimeZone(identifier: "Asia/Shanghai"))
+        func date(_ year: Int, _ month: Int, _ day: Int, _ hour: Int, _ minute: Int) throws -> Date {
+            try #require(calendar.date(from: .init(year: year, month: month, day: day,
+                                                   hour: hour, minute: minute, second: 7)))
+        }
+        let now = try date(2026, 11, 21, 16, 8)
+        typealias Format = TerminalHistoryTable.Format
+        #expect(Format.timestamp(try date(2026, 11, 21, 9, 5), now: now, calendar: calendar) == "09:05")
+        #expect(Format.timestamp(try date(2026, 11, 20, 23, 59), now: now, calendar: calendar) == "11-20 23:59")
+        #expect(Format.timestamp(try date(2025, 12, 31, 8, 0), now: now, calendar: calendar) == "2025-12-31 08:00")
+        #expect(Format.fullTimestamp(try date(2026, 11, 21, 9, 5), calendar: calendar) == "2026-11-21 09:05:07")
+    }
+
+    @Test func durationsAppearOnlyForCommandsThatTookNoticeableTime() {
+        typealias Format = TerminalHistoryTable.Format
+        #expect(Format.duration(milliseconds: nil) == nil)
+        #expect(Format.duration(milliseconds: 999) == nil)
+        #expect(Format.duration(milliseconds: 1_000) == "1.0s")
+        #expect(Format.duration(milliseconds: 3_240) == "3.2s")
+        #expect(Format.duration(milliseconds: 125_000) == "2m 5s")
+        #expect(Format.duration(milliseconds: 3_780_000) == "1h 3m")
+    }
+
+    @Test func failedCommandsAreMarkedAndSuccessfulOnesStayQuiet() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try #require(TimeZone(identifier: "Asia/Shanghai"))
+        let now = try #require(calendar.date(from: .init(year: 2026, month: 11, day: 21, hour: 16)))
+        let ran = try #require(calendar.date(from: .init(year: 2026, month: 11, day: 21, hour: 9, minute: 5)))
+        let coordinator = TerminalHistoryTable.Coordinator()
+        coordinator.now = { now }
+        coordinator.calendar = calendar
+        let table = NSTableView()
+        table.addTableColumn(NSTableColumn(identifier: .init("history")))
+        coordinator.table = table
+        coordinator.update(items: [
+            .init(id: "failed", kind: .command, text: "make test", timestamp: ran,
+                  exitCode: 2, duration: 3_240, sourceLabel: "Local"),
+            .init(id: "passed", kind: .command, text: "ll", timestamp: ran, exitCode: 0, duration: 12),
+            .init(id: "running", kind: .command, text: "sleep 60", timestamp: ran),
+        ], strings: .init(language: .english))
+        func cell(_ row: Int) throws -> TerminalHistoryTable.HistoryCell {
+            try #require(coordinator.tableView(table, viewFor: table.tableColumns.first, row: row)
+                as? TerminalHistoryTable.HistoryCell)
+        }
+        let failed = try cell(0)
+        #expect(failed.failed)
+        #expect(failed.date.stringValue == "exit 2  ·  09:05  ·  3.2s  ·  Local")
+        #expect(failed.date.toolTip == "2026-11-21 09:05:00  ·  exit 2  ·  took 3.240s  ·  Local")
+        let color = failed.date.attributedStringValue.attribute(.foregroundColor, at: 0, effectiveRange: nil)
+        #expect(color as? NSColor == .systemRed)
+        let passed = try cell(1)
+        #expect(!passed.failed)
+        #expect(passed.date.stringValue == "09:05")
+        // A command without a reported outcome is never shown as failed.
+        let running = try cell(2)
+        #expect(!running.failed)
+        #expect(running.date.stringValue == "09:05")
+    }
+
     @Test func labelFramesStayWithinRow() {
         let cell = TerminalHistoryTable.HistoryCell(frame: NSRect(x: 0, y: 0, width: 260, height: 116))
         cell.layout()

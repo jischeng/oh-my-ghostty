@@ -154,6 +154,35 @@ struct TerminalHistoryServiceTests {
         #expect(verified[0].timestamp == oldDate)
     }
 
+    @Test func savedCommandsKeepTheirOutcomeAndOlderArchivesStillDecode() throws {
+        let pane = UUID()
+        let item = InspectorHistoryItem(id: "failed", kind: .command, text: "make test",
+                                        timestamp: Date(timeIntervalSince1970: 1_000),
+                                        exitCode: 2, duration: 3_240, sourceLabel: "Local")
+        let saved = ShellScrollbackRestoreStore.SavedCommand(item)
+        #expect(saved.occurrenceID == "failed")
+        let decoded = try JSONDecoder().decode(
+            ShellScrollbackRestoreStore.SavedCommand.self, from: JSONEncoder().encode(saved))
+        #expect(decoded == saved)
+        let archived = TerminalHistoryService.presentingHistory(in: [], from: [decoded], surfaceID: pane)
+        #expect(archived.map(\.exitCode) == [2])
+        #expect(archived.map(\.duration) == [3_240])
+
+        // An archive written before outcomes were recorded has neither key.
+        let legacy = try JSONDecoder().decode(
+            ShellScrollbackRestoreStore.SavedCommand.self,
+            from: Data(#"{"text":"ll","sourceLabel":"Local"}"#.utf8))
+        #expect(legacy.exitCode == nil)
+        #expect(legacy.duration == nil)
+
+        // A live row keeps its own outcome and falls back to the saved one.
+        let live = InspectorHistoryItem(id: "anchor", kind: .command, text: "make test",
+            location: .command(surfaceID: pane, executionID: 1, epoch: UUID()), sourceLabel: "Local")
+        let restored = TerminalHistoryService.restoringTimestamps(in: [live], from: [saved])
+        #expect(restored.map(\.exitCode) == [2])
+        #expect(restored.map(\.duration) == [3_240])
+    }
+
     @Test func sshSnapshotNeverMatchesAnIdenticalLocalCommandAsTheOldRemoteExecution() {
         let id = UUID()
         let old = Date(timeIntervalSince1970: 1_000)

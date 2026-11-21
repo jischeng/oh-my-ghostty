@@ -28,6 +28,11 @@ final class NativeAgentSettingsList: NSViewController, NSTableViewDataSource, NS
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        // Row height is the whole pitch, so embedders can size the list to its rows.
+        table.intercellSpacing = .zero
+        table.style = .plain
+        table.gridStyleMask = .solidHorizontalGridLineMask
         table.headerView = nil
         table.backgroundColor = .clear
         table.rowHeight = 48

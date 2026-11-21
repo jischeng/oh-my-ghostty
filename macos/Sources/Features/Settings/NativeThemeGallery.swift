@@ -149,6 +149,8 @@ final class NativeThemeGallery: NSViewController, NSCollectionViewDataSource, NS
     private let apply = SettingsActionButton("") {}
     private var token: AnyCancellable?
     private(set) var previewedTheme: String?
+    /// Room for three full rows plus a partial fourth, so the grid reads as scrollable.
+    static let height: CGFloat = 600
     var strings: SettingsStrings { .init(language: settings.language) }
 
     init(settings: OhMyGhosttySettings) {
@@ -186,11 +188,16 @@ final class NativeThemeGallery: NSViewController, NSCollectionViewDataSource, NS
         collection.delegate = self
         collection.register(SettingsThemeItem.self, forItemWithIdentifier: .init("theme"))
         collection.setAccessibilityIdentifier("settings.theme.gallery")
-        let scroll = NSScrollView()
+        let doubleClick = NSClickGestureRecognizer(target: self, action: #selector(applyDoubleClicked))
+        doubleClick.numberOfClicksRequired = 2
+        doubleClick.delaysPrimaryMouseButtonEvents = false
+        collection.addGestureRecognizer(doubleClick)
+        let scroll = SettingsNestedScrollView()
         scroll.drawsBackground = false
         scroll.documentView = collection
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
         apply.title = strings.t("Use theme", "使用此主题")
         apply.setAccessibilityIdentifier("settings.theme.apply")
         apply.invoke = { [weak self] in self?.applyPreview() }
@@ -216,7 +223,7 @@ final class NativeThemeGallery: NSViewController, NSCollectionViewDataSource, NS
             header.widthAnchor.constraint(equalTo: stack.widthAnchor),
             search.widthAnchor.constraint(equalToConstant: 180),
             scroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            scroll.heightAnchor.constraint(equalToConstant: 185),
+            scroll.heightAnchor.constraint(equalToConstant: 316),
             preview.widthAnchor.constraint(equalTo: stack.widthAnchor),
             preview.heightAnchor.constraint(equalToConstant: 160),
             footer.widthAnchor.constraint(equalTo: stack.widthAnchor)
@@ -254,6 +261,7 @@ final class NativeThemeGallery: NSViewController, NSCollectionViewDataSource, NS
         previewedTheme = name
         refreshPreview()
     }
+    @objc private func applyDoubleClicked() { applyPreview() }
     func applyPreview() {
         guard let name = previewedTheme, sample(name) != nil else { return }
         if scope.selectedSegment == 0 { settings.lightThemeOverride = name } else { settings.darkThemeOverride = name }
@@ -274,7 +282,10 @@ final class NativeThemeGallery: NSViewController, NSCollectionViewDataSource, NS
         preview.opacity = settings.backgroundOpacityOverride ?? 1
         preview.cursorStyle = settings.cursorStyleOverride ?? .block
         caption.stringValue = (previewedTheme ?? strings.t("Terminal default", "终端默认")) +
-            (previewedTheme == current ? strings.t(" · Current", " · 当前使用") : strings.t(" · Preview", " · 预览"))
+            (previewedTheme == current ? strings.t(" · Current", " · 当前使用")
+                : strings.t(" · Preview — double-click or Use theme to apply", " · 预览中，双击或点“使用此主题”应用"))
         apply.isEnabled = previewedTheme != nil && previewedTheme != current && previewedTheme.flatMap(sample) != nil
+        // A pending preview is the page's one primary action.
+        apply.bezelColor = apply.isEnabled ? .controlAccentColor : nil
     }
 }

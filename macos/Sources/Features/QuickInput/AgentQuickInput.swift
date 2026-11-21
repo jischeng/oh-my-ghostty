@@ -936,8 +936,17 @@ final class ShortcutRecorderButton: NSButton {
 
     @objc private func beginRecording() {
         isRecording = true
-        title = "Press shortcut…"
+        title = SettingsStrings(language: OhMyGhosttySettings.shared.language).t("Press shortcut…", "请按下快捷键…")
         window?.makeFirstResponder(self)
+    }
+
+    override func resignFirstResponder() -> Bool {
+        // Clicking elsewhere cancels, instead of leaving a stale "Press shortcut…".
+        if isRecording {
+            isRecording = false
+            updateShortcut(currentStorageValue)
+        }
+        return super.resignFirstResponder()
     }
 
     override func keyDown(with event: NSEvent) {

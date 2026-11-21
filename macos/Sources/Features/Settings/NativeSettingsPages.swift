@@ -42,20 +42,34 @@ extension NativeSettingsController {
             picker(form, strings.gitAutoFetchLabel, \.gitAutoFetchInterval,
                    Array(Set([0, 1, 2, 5, 10, 15, 30, 60, settings.gitAutoFetchInterval])).sorted().map { ($0, strings.gitAutoFetchIntervalTitle($0)) })
             form.section(text("Commit messages", "提交信息"))
-            form.row(text("AI models", "AI 模型"), subtitle: text("Try in priority order", "按优先级尝试"), control:
-                SettingsActionButton(text("Configure…", "配置…")) { [weak self] in
+            let models = form.row(text("AI models", "AI 模型"), control:
+                SettingsActionButton(text("Add Models…", "添加模型…")) { [weak self] in
                     guard let self else { return }
                     GitCommitAISettingsPanel.presentAddModels(settings: self.settings, from: self.view.window)
                 })
             let coordinator = GitCommitAIRoutesTable.Coordinator(settings: settings)
             let routes = GitCommitAIRoutesTable.makeNativeView(coordinator: coordinator)
+            routes.hasVerticalScroller = false
             form.retained.append(coordinator)
-            form.embed(routes, height: 210)
-            let token = settings.$gitCommitAIRoutes.receive(on: RunLoop.main).sink { [weak coordinator] _ in
+            // The list grows with its rows; the page is the only scroll area.
+            let height = form.embed(routes, height: 0)
+            let copy = strings
+            let divider = form.embedSeparator
+            let update: ([GitCommitAIRoute]) -> Void = { [weak coordinator, weak routes, weak divider] list in
+                divider?.isHidden = list.isEmpty
                 coordinator?.tableView?.reloadData()
+                height?.constant = CGFloat(list.count) * 40
+                routes?.isHidden = list.isEmpty
+                models?.setSubtitle(list.isEmpty
+                    ? copy.t("No models yet. Add one to generate commit messages with AI.", "尚未添加模型。添加后即可用 AI 生成提交信息。")
+                    : copy.t("Tried from top to bottom. Drag or use the arrows to reorder.", "按从上到下的顺序尝试，可拖动或用箭头调整。"))
             }
+            update(settings.gitCommitAIRoutes)
+            let token = settings.$gitCommitAIRoutes.receive(on: RunLoop.main).sink { update($0) }
             form.retained.append(token)
-            form.row(text("Commit style", "提交风格"), control: SettingsActionButton(text("Edit…", "编辑…")) { [weak self] in
+            form.row(text("Commit style", "提交风格"),
+                     subtitle: text("Custom instructions for generated messages.", "自定义生成提交信息时使用的提示词。"),
+                     control: SettingsActionButton(text("Edit…", "编辑…")) { [weak self] in
                 guard let self else { return }; GitCommitAISettingsPanel.presentPrompt(settings: self.settings, from: self.view.window)
             })
         case .ssh: remoteHosts(form)
@@ -64,21 +78,30 @@ extension NativeSettingsController {
         case .plugins: plugins(form)
         case .advanced:
             form.section(strings.settingsLocationsSection)
-            form.row(strings.settingsFileLabel, control: SettingsActionButton(strings.openFileButton) { [weak settings] in
-                settings?.ensureFileExists(); NSWorkspace.shared.open(OhMyGhosttySettings.fileURL)
-            })
-            form.row(strings.ghosttySection, control: SettingsActionButton(strings.openFileButton) {
+            let files = NSStackView(views: [
+                SettingsActionButton(strings.revealButton) { [weak settings] in
+                    settings?.ensureFileExists()
+                    NSWorkspace.shared.activateFileViewerSelecting([OhMyGhosttySettings.fileURL])
+                },
+                SettingsActionButton(strings.openFileButton) { [weak settings] in
+                    settings?.ensureFileExists(); NSWorkspace.shared.open(OhMyGhosttySettings.fileURL)
+                }
+            ])
+            form.row(strings.settingsFileLabel,
+                     subtitle: (OhMyGhosttySettings.fileURL.path as NSString).abbreviatingWithTildeInPath, control: files)
+            form.row(text("Ghostty Config", "Ghostty 配置文件"),
+                     subtitle: text("Terminal defaults that OMG settings build on.", "终端默认配置，OMG 设置在其之上生效。"),
+                     control: SettingsActionButton(strings.openFileButton) {
                 (NSApp.delegate as? AppDelegate)?.ghostty.openConfig()
             })
-            form.row(strings.reloadButton, control: SettingsActionButton(strings.reloadButton) { [weak self] in
+            form.row(text("Reload OMG Settings", "重新加载 OMG 设置"),
+                     subtitle: text("Apply edits made to the settings file by hand.", "应用对设置文件的手动修改。"),
+                     control: SettingsActionButton(strings.reloadButton) { [weak self] in
                 self?.settings.reloadFromDisk(); self?.select(.advanced)
-            })
-            form.row(strings.revealButton, control: SettingsActionButton(strings.revealButton) { [weak settings] in
-                settings?.ensureFileExists()
-                NSWorkspace.shared.activateFileViewerSelecting([OhMyGhosttySettings.fileURL])
             })
             form.note(strings.precedenceLabel + " · " + strings.precedenceValue)
             if let error = settings.lastError { form.note(error) }
+            buildOMGDoctorSection(form, doctor: doctor)
         }
     }
 
@@ -128,8 +151,8 @@ extension NativeSettingsController {
         more(form, text("Session options", "会话选项")) { [weak self] page in
             guard let self else { return }
             page.section(self.text("Retention", "保留"))
-            self.number(page, self.text("Disconnected lifetime (hours)", "断开后保留时长（小时）"), \.runtimeDetachedHours, range: 0...8760)
-            page.note(self.text("0 means no time limit.", "0 表示不限时长。"))
+            self.number(page, self.text("Disconnected lifetime (hours)", "断开后保留时长（小时）"), \.runtimeDetachedHours, range: 0...8760,
+                        help: self.text("0 means no time limit.", "0 表示不限时长。"))
             let formatter = ISO8601DateFormatter()
             let date = SettingsDatePicker(value: formatter.date(from: self.settings.runtimeExpiration) ?? Date().addingTimeInterval(86_400)) { [weak settings = self.settings] in settings?.runtimeExpiration = formatter.string(from: $0)
             }
@@ -159,7 +182,7 @@ extension NativeSettingsController {
         ])
         let gallery = NativeThemeGallery(settings: settings)
         form.addChild(gallery)
-        form.embed(gallery.view, height: 470)
+        form.embed(gallery.view, height: NativeThemeGallery.height)
         form.section(strings.fontSection)
         picker(form, strings.fontFamilyLabel, \.fontFamilyOverride,
                [(nil, text("Default", "默认"))] + Array(Set(NSFontManager.shared.availableFontFamilies +
@@ -169,12 +192,14 @@ extension NativeSettingsController {
             let value = self.settings.effectiveAppearance(using: self.inheritedConfig).fontSize
             return value.inheritedValue ?? value.defaultValue
         }, range: 6...72, step: 0.5)
+        core("window-inherit-font-size", in: form)
+        form.section(strings.cursorSection)
+        picker(form, strings.cursorStyleLabel, \.cursorStyleOverride,
+               [(nil, text("Default", "默认"))] + OhMyGhosttyCursorStyle.allCases.map { (Optional($0), strings.cursorTitle($0)) })
+        core("cursor-style-blink", in: form)
         form.section(strings.transparencySection)
         picker(form, strings.backgroundBlurLabel, \.backgroundBlurOverride,
                [(nil, text("Default", "默认"))] + OhMyGhosttyBackgroundBlur.allCases.map { (Optional($0), strings.blurTitle($0)) })
-        core(.cursor, in: form)
-        picker(form, strings.cursorStyleLabel, \.cursorStyleOverride,
-               [(nil, text("Default", "默认"))] + OhMyGhosttyCursorStyle.allCases.map { (Optional($0), strings.cursorTitle($0)) })
         form.section(strings.focusedSplitBorderSection)
         toggle(form, strings.focusedSplitBorderLabel, \.focusedSplitBorder)
         picker(form, text("Marker position", "标记线位置"), \.focusedSplitBorderPosition, [
@@ -200,10 +225,12 @@ extension NativeSettingsController {
             "Background opacity also affects sidebars. Unfocused opacity controls native split dimming; 100% disables dimming.",
             "背景不透明度也影响侧栏等界面。非聚焦不透明度控制原生分屏淡化，100% 表示不淡化。"
         ))
-        form.row(strings.resetAppearanceButton, control: SettingsActionButton(text("Reset", "重置")) { [weak self] in
+        form.section(text("Reset", "重置"))
+        form.row(strings.resetAppearanceButton,
+                 subtitle: text("Uses terminal defaults until you choose a value.", "未自定义的选项沿用终端配置。"),
+                 control: SettingsActionButton(text("Reset", "重置")) { [weak self] in
             self?.settings.resetAppearance(); self?.select(.appearance)
         })
-        form.note(text("Uses terminal defaults until you choose a value.", "未自定义的选项沿用终端配置。"))
     }
 
     private var inheritedConfig: Ghostty.Config {
@@ -299,6 +326,7 @@ extension NativeSettingsController {
             refresh()
             page.refreshers.append(refresh)
         }
+        form.section(text("Reset", "重置"))
         form.row(strings.resetEditorButton, control: SettingsActionButton(text("Reset", "重置")) { [weak self] in
             guard let self else { return }
             self.settings.editorFileOpenDestination = .currentPane
@@ -369,7 +397,9 @@ extension NativeSettingsController {
     }
 
     private func keyboard(_ form: NativeSettingsForm) {
-        form.section(strings.quickInputShortcutLabel)
+        form.section(strings.quickInputSection,
+                     caption: text("Click a shortcut, then press the new key combination. Press Esc to cancel.",
+                                   "点击快捷键后按下新的组合键即可修改，按 Esc 取消。"))
         shortcut(form, strings.quickInputShortcutLabel, value: settings.quickInputShortcut,
                  fallback: OMGKeyboardShortcut.defaultQuickInput.storageValue) { [weak settings] in settings?.quickInputShortcut = $0 }
         form.section(strings.rightSidebarShortcutsSection)
@@ -389,7 +419,10 @@ extension NativeSettingsController {
                 }
             }
         }
-        form.row(strings.keybindingsSection, control: SettingsActionButton(strings.openFileButton) { (NSApp.delegate as? AppDelegate)?.ghostty.openConfig() })
+        form.section(text("Terminal", "终端"))
+        form.row(strings.keybindingsSection,
+                 subtitle: text("Terminal keybindings are defined in the Ghostty config file.", "终端快捷键在 Ghostty 配置文件中定义。"),
+                 control: SettingsActionButton(strings.openFileButton) { (NSApp.delegate as? AppDelegate)?.ghostty.openConfig() })
     }
 
     private func shortcut(_ form: NativeSettingsForm, _ title: String, value: String, fallback: String? = nil, workspaceSlot: Int? = nil,

@@ -220,12 +220,12 @@ struct OMGDoctorTests {
             settings.language = language
             let controller = NativeSettingsController(
                 settings: settings,
-                initialSelection: .plugins,
+                initialSelection: .advanced,
                 registry: registry,
                 agents: agents
             )
             _ = controller.view
-            controller.select(.plugins)
+            controller.select(.advanced)
             controller.view.layoutSubtreeIfNeeded()
 
             let form = try #require(controller.children.compactMap { $0 as? NativeSettingsForm }.first)
@@ -291,13 +291,13 @@ struct OMGDoctorTests {
 
         let controller = NativeSettingsController(
             settings: settings,
-            initialSelection: .plugins,
+            initialSelection: .advanced,
             registry: registry,
             agents: agents,
             doctor: doctor
         )
         _ = controller.view
-        controller.select(.plugins)
+        controller.select(.advanced)
         controller.searchField.stringValue = "doctor"
         let initialForm = try #require(controller.children.compactMap { $0 as? NativeSettingsForm }.first)
         let initialFormID = ObjectIdentifier(initialForm)

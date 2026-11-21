@@ -313,8 +313,9 @@ extension NativeSettingsController {
         list.onSelect = { [weak self] in self?.showAgent($0, target: target) }
         form.addChild(list)
         _ = list.view
-        let height = form.embed(list.view, height: CGFloat(max(1, min(6, list.displayedCount))) * 48)
-        list.onCountChange = { [weak height] count in height?.constant = CGFloat(max(1, min(6, count))) * 48 }
+        // Show every Agent; the page scrolls, not a nested list.
+        let height = form.embed(list.view, height: CGFloat(max(1, list.displayedCount)) * 48)
+        list.onCountChange = { [weak height] count in height?.constant = CGFloat(max(1, count)) * 48 }
         form.link(text("Other Agents", "其他 Agent")) { [weak self] in
             self?.showOtherAgents(target, push: true)
         }
@@ -345,7 +346,8 @@ extension NativeSettingsController {
             let list = NativeAgentSettingsList(target: target, manager: self.agents, strings: self.strings, includeUnavailable: true)
             list.onSelect = { [weak self] in self?.showAgent($0, target: target) }
             page.addChild(list)
-            page.embed(list.view, height: 420)
+            _ = list.view
+            page.embed(list.view, height: CGFloat(max(1, list.displayedCount)) * 48)
         }
         if push {
             self.push(title, route: route, previous: { [weak self] in self?.refreshAgents(target) }, build: build)

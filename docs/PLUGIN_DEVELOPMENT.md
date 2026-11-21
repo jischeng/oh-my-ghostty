@@ -2760,11 +2760,11 @@ separate `PluginData/<id>` directory; unverified GitHub tarball downloads are
 intentionally retired until signed package distribution and process supervision
 exist. Disabled state is stored in `Plugins/disabled.json`.
 
-Settings → Plugins exposes the official catalog alongside **OMG Doctor**
-(Accessibility/TCC global keybind health, local `omgd` runtime and SSH
-multiplexer health, Agent dotfile `.omg.bak` backup audit, and live
-WebView/LSP/surface memory reclamation, also reachable via the `OMG Doctor`
-Command Palette action and `omg +doctor`). The SSH official entry installs the
+Settings → Plugins exposes the official catalog. **OMG Doctor** lives under
+Settings → Advanced (Accessibility/TCC global keybind health, local `omgd`
+runtime and SSH multiplexer health, Agent dotfile `.omg.bak` backup audit, and
+live WebView/LSP/surface memory reclamation, also reachable via the
+`OMG Doctor` Command Palette action and `omg +doctor`). The SSH official entry installs the
 in-tree provider marker and enables the generic workspace provider; it does not
 download private keys or a remote helper. External installed packages remain
 inert. There is no signature/ownership verification, semver host compatibility

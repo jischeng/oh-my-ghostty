@@ -48,8 +48,6 @@ private final class DoctorActionOrBadgeControl: NSView {
 
 extension NativeSettingsController {
     func plugins(_ form: NativeSettingsForm) {
-        buildOMGDoctorSection(form, doctor: doctor)
-
         let manager = PluginInstallationManager.shared
         form.section(strings.officialPluginsSection)
         let official = PluginInstallationManager.officialPlugins
@@ -110,7 +108,7 @@ extension NativeSettingsController {
         }
     }
 
-    private func buildOMGDoctorSection(_ form: NativeSettingsForm, doctor: OMGDoctorService) {
+    func buildOMGDoctorSection(_ form: NativeSettingsForm, doctor: OMGDoctorService) {
         let initialReport = doctor.report
         let currentStrings = strings
         form.section(currentStrings.doctorSection)
@@ -336,6 +334,6 @@ extension NativeSettingsController {
         strings: SettingsStrings
     ) {
         badge.stringValue = status == .healthy ? strings.doctorStatusHealthy : strings.doctorStatusAttention
-        badge.textColor = status == .healthy ? .secondaryLabelColor : .systemOrange
+        badge.textColor = status == .healthy ? .systemGreen : .systemOrange
     }
 }

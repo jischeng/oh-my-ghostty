@@ -130,7 +130,7 @@ struct TerminalCommandPaletteView: View {
             leadingIcon: "stethoscope",
             action: openDoctor ?? {
                 Task { @MainActor in
-                    SettingsNavigation.open(.plugins)
+                    SettingsNavigation.open(.advanced)
                 }
             }
         )

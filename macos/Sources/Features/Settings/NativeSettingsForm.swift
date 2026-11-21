@@ -120,7 +120,7 @@ final class SettingsSlider: NSStackView {
         slider.target = self
         slider.action = #selector(changed)
         label.stringValue = "\(Int(value * 100))%"
-        slider.widthAnchor.constraint(equalToConstant: 120).isActive = true
+        slider.widthAnchor.constraint(equalToConstant: 180).isActive = true
         label.widthAnchor.constraint(equalToConstant: 42).isActive = true
         label.alignment = .right
         addArrangedSubview(slider)
@@ -155,6 +155,43 @@ final class SettingsDatePicker: NSDatePicker {
 
 final class NativeSettingsFlippedView: NSView {
     override var isFlipped: Bool { true }
+}
+
+/// A scroll area nested in a settings page. Once it reaches an edge, the wheel
+/// moves the page instead of leaving the pointer stuck over the inner list.
+final class SettingsNestedScrollView: NSScrollView {
+    override func scrollWheel(with event: NSEvent) {
+        let visible = contentView.bounds
+        let height = documentView?.frame.height ?? 0
+        let flipped = documentView?.isFlipped ?? true
+        let towardStart = flipped ? event.scrollingDeltaY > 0 : event.scrollingDeltaY < 0
+        let atStart = visible.minY <= 0
+        let atEnd = visible.maxY >= height - 0.5
+        if event.scrollingDeltaY != 0, towardStart ? atStart : atEnd {
+            nextResponder?.scrollWheel(with: event)
+        } else {
+            super.scrollWheel(with: event)
+        }
+    }
+}
+
+/// Hosts a navigation row and shows that the whole row is clickable.
+final class SettingsLinkRowView: NSView {
+    private var hovering = false { didSet { needsDisplay = true } }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                                       owner: self))
+    }
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+    override func draw(_ dirtyRect: NSRect) {
+        guard hovering else { return }
+        NSColor.labelColor.withAlphaComponent(0.06).setFill()
+        bounds.fill()
+    }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
 }
 
 struct NativeSettingsRow {
@@ -193,6 +230,8 @@ final class NativeSettingsForm: NSViewController {
     private var anchors: [String: NSView] = [:]
     private var boxes: [NSBox] = []
     private var palette: OMGThemePalette?
+    /// Divider above the most recent `embed`, for callers that hide an empty embed.
+    private(set) var embedSeparator: NSView?
 
     func applyPalette(_ palette: OMGThemePalette) {
         self.palette = palette
@@ -207,6 +246,8 @@ final class NativeSettingsForm: NSViewController {
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.drawsBackground = false
+        // Overlay scrollers keep every page's column width identical.
+        scroll.scrollerStyle = .overlay
         let document = NativeSettingsFlippedView()
         document.translatesAutoresizingMaskIntoConstraints = false
         stack.orientation = .vertical
@@ -216,10 +257,15 @@ final class NativeSettingsForm: NSViewController {
         document.addSubview(stack)
         scroll.documentView = document
         view = scroll
+        // Fill the window up to a readable width instead of stretching rows on wide windows.
+        let fill = stack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -28)
+        fill.priority = .defaultHigh
         NSLayoutConstraint.activate([
             document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
             stack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 28),
-            stack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -28),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: document.trailingAnchor, constant: -28),
+            fill,
+            stack.widthAnchor.constraint(lessThanOrEqualToConstant: 880),
             stack.topAnchor.constraint(equalTo: document.topAnchor, constant: 24),
             stack.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -28)
         ])
@@ -275,6 +321,8 @@ final class NativeSettingsForm: NSViewController {
     @discardableResult
     func row(_ title: String, subtitle: String? = nil, control: NSView, help: String? = nil) -> NativeSettingsRow? {
         guard let group else { return nil }
+        // Explanations stay visible in the row; a tooltip alone is undiscoverable.
+        let subtitle = subtitle ?? help
         rowTitles.append(title)
         controls.append(control)
         var divider: NSView?
@@ -348,7 +396,7 @@ final class NativeSettingsForm: NSViewController {
         // Keep the hit target outside NSStackView's arranged layout.
         group.removeArrangedSubview(row.view)
         row.view.removeFromSuperview()
-        let container = NSView()
+        let container = SettingsLinkRowView()
         container.translatesAutoresizingMaskIntoConstraints = false
         row.view.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(row.view)
@@ -380,6 +428,15 @@ final class NativeSettingsForm: NSViewController {
     @discardableResult
     func embed(_ child: NSView, height: CGFloat) -> NSLayoutConstraint? {
         guard let group else { return nil }
+        embedSeparator = nil
+        if rowCount > 0 {
+            let separator = NSBox()
+            separator.boxType = .separator
+            group.addArrangedSubview(separator)
+            separator.widthAnchor.constraint(equalTo: group.widthAnchor).isActive = true
+            embedSeparator = separator
+        }
+        rowCount += 1
         group.addArrangedSubview(child)
         child.translatesAutoresizingMaskIntoConstraints = false
         child.widthAnchor.constraint(equalTo: group.widthAnchor).isActive = true

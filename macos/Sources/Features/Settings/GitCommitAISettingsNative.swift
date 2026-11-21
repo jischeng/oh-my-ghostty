@@ -24,6 +24,9 @@ struct GitCommitAIRoutesTable: NSViewRepresentable {
         table.rowHeight = 40
         table.intercellSpacing = .zero
         table.usesAlternatingRowBackgroundColors = false
+        table.backgroundColor = .clear
+        table.style = .plain
+        table.gridStyleMask = .solidHorizontalGridLineMask
         table.allowsMultipleSelection = false
         table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         table.draggingDestinationFeedbackStyle = .gap
@@ -153,6 +156,7 @@ private final class GitCommitAIRouteCell: NSTableCellView {
         reorderIcon.setAccessibilityLabel(GitL10n.text("Reorder model"))
         titleField.lineBreakMode = .byTruncatingTail
         titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        titleField.setContentHuggingPriority(.init(1), for: .horizontal)
         configure(upButton, symbol: "arrow.up", label: GitL10n.text("Move up"), action: #selector(moveRouteUp))
         configure(downButton, symbol: "arrow.down", label: GitL10n.text("Move down"), action: #selector(moveRouteDown))
         configure(removeButton, symbol: "minus.circle", label: GitL10n.text("Remove model"), action: #selector(removeRoute))
@@ -168,8 +172,8 @@ private final class GitCommitAIRouteCell: NSTableCellView {
             upButton.widthAnchor.constraint(equalToConstant: 24),
             downButton.widthAnchor.constraint(equalToConstant: 24),
             removeButton.widthAnchor.constraint(equalToConstant: 24),
-            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             row.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
@@ -255,6 +259,8 @@ enum GitCommitAISettingsPanel {
         panel.titlebarAppearsTransparent = true
         panel.isOpaque = true
         panel.contentViewController = controller
+        // The content view otherwise shrinks the sheet to its narrowest fitting width.
+        controller.view.widthAnchor.constraint(equalToConstant: size.width).isActive = true
         (controller.view as? OMGNativeSurfaceView)?.bindTheme(to: parent)
         parent.beginSheet(panel) { _ in controller.sheetEnded() }
     }
@@ -533,12 +539,11 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
             stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 16),
             stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14),
             top.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            agentPicker.widthAnchor.constraint(equalToConstant: 300),
+            agentPicker.widthAnchor.constraint(greaterThanOrEqualToConstant: 240),
             listHeader.widthAnchor.constraint(equalTo: stack.widthAnchor),
             searchField.widthAnchor.constraint(equalTo: stack.widthAnchor),
             tableScroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            tableScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 160),
-            tableScroll.heightAnchor.constraint(lessThanOrEqualToConstant: 260),
+            tableScroll.heightAnchor.constraint(equalToConstant: 300),
             updateStatus.widthAnchor.constraint(equalTo: stack.widthAnchor),
             errorField.widthAnchor.constraint(equalTo: stack.widthAnchor),
             helpButton.widthAnchor.constraint(equalTo: stack.widthAnchor),

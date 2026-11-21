@@ -15,7 +15,7 @@ struct CoreSetting: Identifiable, Sendable {
             case .mouse: strings.t("Mouse & Focus", "鼠标与焦点")
             case .keyboard: strings.t("Terminal Keyboard", "终端键盘")
             case .notifications: strings.t("Terminal Notifications", "终端通知")
-            case .cursor: strings.t("Cursor & Font Inheritance", "光标与字体继承")
+            case .cursor: strings.t("Cursor", "光标")
             }
         }
 

@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import GhosttyKit
 
 private final class NativeSettingsNavigationCell: NSTableCellView {
     let label = NSTextField(labelWithString: "")
@@ -326,10 +327,10 @@ final class NativeSettingsController: NSViewController, NSTableViewDataSource, N
         }
     }
     func number(_ form: NativeSettingsForm, _ title: String, _ key: ReferenceWritableKeyPath<OhMyGhosttySettings, Double>,
-                range: ClosedRange<Double>, step: Double = 1) {
+                range: ClosedRange<Double>, step: Double = 1, help: String? = nil) {
         let control = SettingsNumberField(value: settings[keyPath: key], range: range, step: step) { [weak settings] in settings?[keyPath: key] = $0
         }
-        form.row(title, control: control)
+        form.row(title, control: control, help: help)
         form.refreshers.append { [weak settings, weak control] in
             guard let settings, let control, control.field.currentEditor() == nil else { return }
             control.field.doubleValue = settings[keyPath: key]
@@ -338,14 +339,27 @@ final class NativeSettingsController: NSViewController, NSTableViewDataSource, N
     }
     func core(_ group: CoreSetting.Group, in form: NativeSettingsForm) {
         form.section(group.title(strings))
-        for field in CoreSetting.all where field.group == group {
-            let values = [""] + field.values
-            form.row(field.title(strings), control: SettingsPopup(
-                titles: [text("Default", "默认")] + field.values.map { field.valueTitle($0, strings: strings) },
-                selected: values.firstIndex(of: settings.coreOverrides[field.key] ?? "") ?? 0) { [weak settings] index in
-                    _ = settings?.setCoreOverride(field.key, value: values[index])
-                }, help: field.help(strings))
-        }
+        for field in CoreSetting.all where field.group == group { core(field, in: form) }
+    }
+    func core(_ key: String, in form: NativeSettingsForm) {
+        if let field = CoreSetting.find(key) { core(field, in: form) }
+    }
+    private func core(_ field: CoreSetting, in form: NativeSettingsForm) {
+        let values = [""] + field.values
+        form.row(field.title(strings), control: SettingsPopup(
+            titles: [inheritedTitle(field)] + field.values.map { field.valueTitle($0, strings: strings) },
+            selected: values.firstIndex(of: settings.coreOverrides[field.key] ?? "") ?? 0) { [weak settings] index in
+                _ = settings?.setCoreOverride(field.key, value: values[index])
+            }, help: field.help(strings))
+    }
+    /// "Default" alone hides what the terminal config currently resolves to.
+    private func inheritedTitle(_ field: CoreSetting) -> String {
+        let base = text("Default", "默认")
+        guard field.values == ["true", "false"],
+              let config = (NSApp.delegate as? AppDelegate)?.ghostty.inheritedConfig.config else { return base }
+        var value = false
+        guard ghostty_config_get(config, &value, field.key, UInt(field.key.utf8.count)) else { return base }
+        return base + text(value ? " (On)" : " (Off)", value ? "（开启）" : "（关闭）")
     }
     func more(_ form: NativeSettingsForm, _ title: String, build: @escaping (NativeSettingsForm) -> Void) {
         let tab = selection

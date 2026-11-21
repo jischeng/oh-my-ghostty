@@ -221,7 +221,114 @@ struct TerminalHistoryTableTests {
     @Test func emptyPortsStayCompactAndPopulatedPortsAreBounded() {
         #expect(InfoHistoryLayout.portHeight(count: 0) == 64)
         #expect(InfoHistoryLayout.portHeight(count: 1) > 64)
+        #expect(InfoHistoryLayout.portHeight(count: 1, detailCount: 1) > InfoHistoryLayout.portHeight(count: 1))
         #expect(InfoHistoryLayout.portHeight(count: 100) <= 180)
+    }
+
+    @Test func remoteTargetColumnHugsItsWidestValueWithinBounds() {
+        let short = InfoHistoryLayout.targetColumnWidth(["80"])
+        let port = InfoHistoryLayout.targetColumnWidth(["80", "42149"])
+        #expect(short >= 36)
+        #expect(port > short)
+        #expect(InfoHistoryLayout.targetColumnWidth(["database.internal.example.com:5432"]) == 120)
+        #expect(InfoHistoryLayout.targetColumnWidth([]) == 36)
+    }
+
+    @Test func workingDirectoryFollowsThePaneSession() {
+        func context(_ session: PaneSessionContext) -> InspectorPaneContext {
+            .init(tabID: UUID(), surfaceID: UUID(), title: "shell",
+                  workingDirectory: session.workingDirectory, workspace: nil, session: session)
+        }
+        let home = NSHomeDirectory()
+        let local = InfoWorkingDirectory.resolve(
+            context(.init(workingDirectory: home + "/code", terminalTitle: "shell")))
+        #expect(local == .init(path: home + "/code", host: nil))
+        #expect(local?.displayPath == "~/code")
+        #expect(InfoWorkingDirectory.resolve(
+            context(.init(workingDirectory: nil, terminalTitle: "shell"))) == nil)
+        #expect(InfoWorkingDirectory.resolve(
+            context(.init(workingDirectory: "relative", terminalTitle: "shell"))) == nil)
+
+        var connecting = PaneSessionContext(workingDirectory: "/tmp", terminalTitle: "shell")
+        connecting.apply(.init(action: .start, id: "omg-ssh-1", metadata: "type=remote;targethost=cloud"),
+                         currentWorkingDirectory: "/tmp", currentTerminalTitle: "shell")
+        #expect(InfoWorkingDirectory.resolve(context(connecting)) == nil)
+
+        var ready = PaneSessionContext(workingDirectory: "/tmp", terminalTitle: "shell")
+        ready.apply(.init(action: .start, id: "omg-ssh-2",
+                          metadata: "type=remote;targethost=cloud;serverid=server-1;cwd=/home/test"),
+                    currentWorkingDirectory: "/tmp", currentTerminalTitle: "shell")
+        let remote = InfoWorkingDirectory.resolve(context(ready))
+        #expect(remote == .init(path: "/home/test", host: "cloud"))
+        // A remote home is not this Mac's home, so it is never abbreviated.
+        #expect(InfoWorkingDirectory(path: home, host: "cloud").displayPath == home)
+    }
+
+    @Test func externalAppsKeepCandidateOrderAndRespectTheLimit() {
+        let installed = ["com.apple.dt.Xcode", "dev.zed.Zed", "com.jetbrains.intellij",
+                         "com.jetbrains.intellij.ce", "com.sublimetext.4"]
+        let apps = InfoExternalApp.installed(limit: 3) { bundleID in
+            guard installed.contains(bundleID) else { return nil }
+            let name = bundleID.hasPrefix("com.jetbrains.intellij") ? "IntelliJ IDEA" : bundleID
+            return URL(fileURLWithPath: "/Applications/\(name).app")
+        }
+        // Ultimate and Community share a display name; only the first is offered.
+        #expect(apps.map(\.id) == ["dev.zed.Zed", "com.apple.dt.Xcode", "com.jetbrains.intellij"])
+        #expect(apps.last?.name == "IntelliJ IDEA")
+        #expect(InfoExternalApp.installed { _ in nil }.isEmpty)
+    }
+
+    @Test func workingDirectoryOffersLocalActionsAndOnlyCopyForRemote() async throws {
+        let zed = InfoExternalApp(id: "dev.zed.Zed", name: "Zed",
+                                  url: URL(fileURLWithPath: "/Applications/Zed.app"))
+        let local = InfoWorkingDirectory(path: NSHomeDirectory() + "/code/test/oh-my-ghostty", host: nil)
+        let remote = InfoWorkingDirectory(path: "/home/test/mapping-platform", host: "cloud")
+        #expect(local.actions(apps: [zed]) == [.copyPath, .revealInFinder, .open(zed)])
+        // Finder and local editors cannot reach a directory on an SSH host.
+        #expect(remote.actions(apps: [zed]) == [.copyPath])
+
+        var actions = InfoDirectoryActions()
+        actions.installedApps = { [zed] }
+        let forwards = InspectorPortForwardList(hostAlias: "cloud", items: [
+            .init(id: "a", remoteHost: "127.0.0.1", remotePort: 42149, localPort: 42149,
+                  processName: "python3", status: .active),
+            .init(id: "b", remoteHost: "127.0.0.1", remotePort: 8080, localPort: nil,
+                  processName: nil, status: .starting),
+            .init(id: "c", remoteHost: "db.internal", remotePort: 5432, localPort: 5432,
+                  processName: nil, status: .failed("SSH connection was refused.")),
+        ])
+        let history = (0..<4).map {
+            InspectorHistoryItem(id: "row-\($0)", kind: .command, text: ["ll", "git status", "ssh cloud", "make test"][$0],
+                                 timestamp: Date(timeIntervalSince1970: 1_790_079_600 - Double($0 * 90)))
+        }
+        for (name, directory, info) in [
+            ("local", local, InspectorInfoContent()),
+            ("remote", remote, InspectorInfoContent(portForwards: forwards, historyItems: history)),
+        ] {
+            let host = NSHostingView(rootView: InspectorInfoView(
+                info: info, directory: directory, directoryActions: actions,
+                dividerColor: .gray.opacity(0.2), perform: { _ in })
+                .background(Color(nsColor: .windowBackgroundColor)))
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 520),
+                                  styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            defer { window.close() }
+            window.contentView = host
+            host.frame = NSRect(x: 0, y: 0, width: 300, height: 520)
+            host.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(150))
+            host.layoutSubtreeIfNeeded()
+            // Sections stack from the top, so history keeps the remaining room.
+            #expect(host.fittingSize.width <= 300)
+            #expect((findScroll(in: host) != nil) == !info.historyItems.isEmpty)
+            // Opt-in visual artifact, with no filesystem writes in normal test runs.
+            if let path = ProcessInfo.processInfo.environment["OMG_INFO_SNAPSHOT"],
+               let image = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                host.cacheDisplay(in: host.bounds, to: image)
+                try image.representation(using: .png, properties: [:])?
+                    .write(to: URL(fileURLWithPath: "\(path)-\(name).png"))
+            }
+        }
     }
 
     @Test func labelFramesStayWithinRow() {

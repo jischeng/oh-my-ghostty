@@ -22,6 +22,12 @@ struct InfoStrings: Equatable, Sendable {
     }
 
     var infoTitle: String { t("Info", "信息") }
+    var workingDirectoryTitle: String { t("Working Directory", "工作目录") }
+    var copyPath: String { t("Copy Path", "复制路径") }
+    var revealInFinder: String { t("Reveal in Finder", "在访达中显示") }
+    func openIn(_ application: String) -> String {
+        t("Open in \(application)", "在 \(application) 中打开")
+    }
     var portsTitle: String { t("Ports", "端口") }
     var remoteTargetColumn: String { t("Remote Target", "远端目标") }
     var forwardedAddressColumn: String { t("Forwarded Address", "转发地址") }

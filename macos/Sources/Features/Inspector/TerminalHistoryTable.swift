@@ -116,7 +116,7 @@ struct TerminalHistoryTable: NSViewRepresentable {
     }
 
     enum Metrics {
-        static let inset: CGFloat = 8
+        static let inset = InspectorContentMetrics.leadingInset
         static let verticalInset: CGFloat = 8
         static let textDateGap: CGFloat = 6
         static let dateHeight: CGFloat = 14

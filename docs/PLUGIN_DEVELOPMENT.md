@@ -2126,8 +2126,14 @@ localized titles use ownership-checked core registry APIs.
 Info is a host-rendered surface with
 optional machine-status and typed machine/session sections (both currently
 hidden), a Shell-only command timeline with exact jump-to-position actions, and
-the SSH port-forwarding section. The forwarding header uses the antenna/radio-tower
-symbol and reports its active port count. A pane with an Agent descriptor or
+the SSH port-forwarding section. Sections share one text-only header style; a
+count badge appears only when the count is non-zero, and the forwarding header
+reports its active port count. A host-rendered Working Directory section leads
+the pane whenever the focused Pane reports a directory: it shows the path
+(tilde-abbreviated locally, with the SSH alias for a remote directory) and
+offers Copy Path, plus Reveal in Finder and Open in an installed editor for
+local directories only. These rows act on the host directly and add no pane
+action, wire message, or capability. A pane with an Agent descriptor or
 activity (including `done`/`error`) continues to show that Surface's Shell
 command history in Info; only Agent Prompt rows are suppressed. Its Shell jump
 anchors remain available, and SSH port-forwarding controls remain visible.
@@ -2138,7 +2144,7 @@ include date and time. Single click selects an entry; Cmd+C copies its full comm
 scrolling document to the inspector width and computes row heights from wrapped
 text. Prompts show up to four preview lines without expand/collapse controls.
 The table explicitly uses AppKit's plain style to avoid automatic sidebar insets.
-Horizontal padding is eight points with a faint row separator. Shell rows use a
+Horizontal padding is twelve points, matching the section headers, with a faint row separator. Shell rows use a
 monospaced font; prompts use the system font. Preview height is measured using
 the same wrapping NSTextField cell and four-line limit as rendering, plus 36
 points for metadata and spacing (eight points above and below, six between text

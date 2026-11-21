@@ -70,6 +70,16 @@ struct InfoExternalApp: Identifiable, Equatable {
     ]
     static let displayLimit = 4
 
+    /// Icons are stable per bundle, so each is read from disk once.
+    @MainActor private static var icons: [URL: NSImage] = [:]
+
+    @MainActor var icon: NSImage {
+        if let cached = Self.icons[url] { return cached }
+        let image = NSWorkspace.shared.icon(forFile: url.path)
+        Self.icons[url] = image
+        return image
+    }
+
     static func installed(
         limit: Int = displayLimit,
         locate: (String) -> URL? = { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) }
@@ -109,10 +119,19 @@ enum InfoLayout {
 }
 
 enum InfoHistoryLayout {
-    static func portHeight(count: Int, detailCount: Int = 0) -> CGFloat {
+    static let minimumPortLimit: CGFloat = 180
+
+    /// Ports take the height their rows need, so a typical list never scrolls
+    /// inside the pane; `limit` keeps a long list from displacing history.
+    static func portHeight(count: Int, detailCount: Int = 0, limit: CGFloat = minimumPortLimit) -> CGFloat {
         guard count > 0 else { return 64 }
         let rows = CGFloat(count) * InfoLayout.rowHeight + CGFloat(detailCount) * InfoLayout.detailHeight
-        return min(180, InfoLayout.headerHeight + rows + InfoLayout.sectionBottomInset + 2)
+        return min(limit, InfoLayout.headerHeight + rows + InfoLayout.sectionBottomInset + 2)
+    }
+
+    /// Up to half of the pane, and never less than the fixed minimum.
+    static func portLimit(paneHeight: CGFloat) -> CGFloat {
+        max(minimumPortLimit, floor(paneHeight * 0.5))
     }
 
     /// The remote-target column hugs its widest value so short ports do not
@@ -286,6 +305,12 @@ struct InspectorInfoView: View {
     }
 
     var body: some View {
+        GeometryReader { proxy in
+            sections(paneHeight: proxy.size.height)
+        }
+    }
+
+    private func sections(paneHeight: CGFloat) -> some View {
         VStack(spacing: 0) {
             if info.status != nil || !info.fields.isEmpty {
                 if let status = info.status {
@@ -329,7 +354,8 @@ struct InspectorInfoView: View {
                 InspectorPortForwardListView(forwards: info.portForwards, perform: perform)
                     .frame(height: InfoHistoryLayout.portHeight(
                         count: info.portForwards.items.count,
-                        detailCount: info.portForwards.items.count(where: InspectorPortForwardListView.hasDetail)
+                        detailCount: info.portForwards.items.count(where: InspectorPortForwardListView.hasDetail),
+                        limit: InfoHistoryLayout.portLimit(paneHeight: paneHeight)
                     ))
                 InfoSectionDivider(color: dividerColor)
             }
@@ -397,7 +423,7 @@ private struct InspectorWorkingDirectoryView: View {
                     }
                 case .open(let app):
                     InfoActionRow(
-                        icon: .image(NSWorkspace.shared.icon(forFile: app.url.path)),
+                        icon: .image(app.icon),
                         title: strings.openIn(app.name)
                     ) {
                         withLocalDirectory { actions.open($0, app) }
@@ -407,6 +433,11 @@ private struct InspectorWorkingDirectoryView: View {
         }
         .padding(.bottom, InfoLayout.sectionBottomInset)
         .onAppear { apps = actions.installedApps() }
+        // Editors installed or removed while OMG was in the background.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            let next = actions.installedApps()
+            if next != apps { apps = next }
+        }
         .onDisappear { copyReset?.cancel() }
     }
 

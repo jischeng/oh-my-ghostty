@@ -223,6 +223,14 @@ struct TerminalHistoryTableTests {
         #expect(InfoHistoryLayout.portHeight(count: 1) > 64)
         #expect(InfoHistoryLayout.portHeight(count: 1, detailCount: 1) > InfoHistoryLayout.portHeight(count: 1))
         #expect(InfoHistoryLayout.portHeight(count: 100) <= 180)
+        // Eight ports fit a tall pane without an inner scroll area, and a
+        // long list still leaves at least half of the pane to history.
+        let tall = InfoHistoryLayout.portLimit(paneHeight: 900)
+        #expect(tall == 450)
+        #expect(InfoHistoryLayout.portHeight(count: 8, limit: tall) > 180)
+        #expect(InfoHistoryLayout.portHeight(count: 8, limit: tall) < tall)
+        #expect(InfoHistoryLayout.portHeight(count: 100, limit: tall) == tall)
+        #expect(InfoHistoryLayout.portLimit(paneHeight: 200) == 180)
     }
 
     @Test func remoteTargetColumnHugsItsWidestValueWithinBounds() {

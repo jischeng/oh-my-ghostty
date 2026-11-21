@@ -445,11 +445,11 @@ extension NativeSettingsController {
             }
         }
         func family(_ label: String, range: String, options: [Modifiers], defaultTitle: String? = nil,
-                    current: @escaping () -> Modifiers?, apply: @escaping (Modifiers?) -> Void) {
-            // A leading nil entry is either the inherited default or a hand-edited mix.
-            let leading: [Modifiers?] = defaultTitle != nil || current() == nil ? [nil] : []
+                    mixed: Bool = false, current: @escaping () -> Modifiers?, apply: @escaping (Modifiers?) -> Void) {
+            // A leading nil entry is the inherited Ghostty default.
+            let leading: [Modifiers?] = defaultTitle != nil ? [nil] : []
             let all = leading + options.map(Optional.init)
-            let titles = all.map { $0.map(title) ?? defaultTitle ?? text("Custom", "自定义") }
+            let titles = all.map { $0.map(title) ?? defaultTitle ?? "" }
             let selected = defaultTitle != nil && settings.tabNumberModifiers == nil ? 0 : all.firstIndex(of: current()) ?? 0
             let popup = SettingsPopup(titles: titles, selected: selected) { index in
                 guard all.indices.contains(index), all[index] != nil || defaultTitle != nil else { return }
@@ -458,13 +458,17 @@ extension NativeSettingsController {
             }
             form.row(label, subtitle: range, control: popup)
             families.append(.init(options: all, current: current, popup: popup))
+            // Families are always one "modifier + number" pattern; per-digit
+            // values from older versions collapse to the shown choice.
+            if mixed, let shown = all[selected] { apply(shown) }
         }
         family(text("Left Sidebar Tabs", "左侧标签页"), range: text("Tabs 1–9", "标签页 1–9"),
                options: Modifiers.allCases.filter { $0 != .command },
                defaultTitle: title(.command) + text(" (Ghostty default)", "（Ghostty 默认）"),
                current: { settings.tabNumberModifiers ?? .command }, apply: { settings.tabNumberModifiers = $0 })
         family(text("Right Sidebar Panels", "右侧面板"), range: text("Panels 1–4", "面板 1–4"), options: Modifiers.allCases,
-               current: { Modifiers.shared(by: (1...4).map { settings.inspectorPanelShortcut(slot: $0) }) },
+               mixed: Modifiers.shared(by: (1...4).map { settings.inspectorPanelShortcut(slot: $0) }) == nil,
+               current: { Modifiers.shared(by: (1...4).map { settings.inspectorPanelShortcut(slot: $0) }) ?? .option },
                apply: { value in
                    guard let value else { return }
                    for slot in 1...4 { settings.setInspectorPanelShortcut(slot: slot, value: value.shortcut(digit: slot)) }
@@ -472,7 +476,8 @@ extension NativeSettingsController {
         // Workspace shortcuts are matched only for Command chords.
         family(text("Workspaces", "工作区"), range: text("Workspaces 1–9", "工作区 1–9"),
                options: Modifiers.allCases.filter { $0.flags.contains(.command) },
-               current: { Modifiers.shared(by: (1...9).map { store.shortcut(slot: $0) }) },
+               mixed: Modifiers.shared(by: (1...9).map { store.shortcut(slot: $0) }) == nil,
+               current: { Modifiers.shared(by: (1...9).map { store.shortcut(slot: $0) }) ?? .controlCommand },
                apply: { value in
                    guard let value else { return }
                    for slot in 1...9 { store.setShortcut(slot: slot, value: value.shortcut(digit: slot)) }

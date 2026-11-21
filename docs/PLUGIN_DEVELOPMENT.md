@@ -929,7 +929,8 @@ These require compiling code into OMG and are not ABI/API-stable:
 - `MockAgentStatusAdapter`;
 - `AgentContextSignalReducer` and `AgentHookInstaller`;
 - `BuiltInFilesInspectorProvider`;
-- `BuiltInInfoInspectorProvider` and its host-owned Info/port-forward lifecycle.
+- `BuiltInInfoInspectorProvider` and the host-owned `SSHPortForwardService` it
+  presents: persisted forward intent, the `ssh -L` processes and listener probes.
 
 ### Not yet supported
 
@@ -2398,7 +2399,7 @@ anchors. The command history remains bounded to 100 entries after replay and
 subsequent activity.
 
 The retained (currently disabled in Info) Agent history reader is owned by
-`PaneAgentHistoryService`, not the SSH forwarding provider. While disabled,
+`PaneAgentHistoryService`, not the port-forwarding service. While disabled,
 Info creates no Agent transcript subscriptions and never starts its polling or
 remote reads. If re-enabled after reliable anchor support, subscriptions are
 keyed by Surface and a binding containing agent, conversation, remote target

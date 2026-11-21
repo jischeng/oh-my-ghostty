@@ -3,9 +3,9 @@ import Darwin
 import Foundation
 
 /// The SSH subprocess, remote listener probe and local-socket helpers behind
-/// port forwarding. They hold no provider state; the provider injects them as
-/// defaults so tests can replace each one.
-extension BuiltInInfoInspectorProvider {
+/// port forwarding. They hold no service state; they are the defaults a test
+/// can replace one by one.
+extension SSHPortForwardService {
     nonisolated static func launchProcess(
         alias: String,
         remoteHost: String,

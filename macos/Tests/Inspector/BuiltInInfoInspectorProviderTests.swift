@@ -465,18 +465,18 @@ struct BuiltInInfoInspectorProviderTests {
         let ports = [8080, 8081, 8082]
         let result = try await GitProcessRunner().run(
             executablePath: "/bin/sh",
-            arguments: ["-c", BuiltInInfoInspectorProvider.remoteProcessCommand(ports: ports)],
+            arguments: ["-c", SSHPortForwardService.remoteProcessCommand(ports: ports)],
             workingDirectory: root.path, environment: environment, maxOutputBytes: 64 * 1024, timeout: 6
         )
         #expect(result.exitCode == 0)
-        #expect(try BuiltInInfoInspectorProvider.parseRemoteProcessOutput(result.stdout, ports: ports) ==
+        #expect(try SSHPortForwardService.parseRemoteProcessOutput(result.stdout, ports: ports) ==
                 [8080: "node", 8081: "node"])
         #expect(try String(contentsOf: log, encoding: .utf8) == "scan\n")
     }
 
     @Test func batchOutputRequiresCompleteBoundedPortRecords() throws {
         let ports = [8080, 8081]
-        let names = try BuiltInInfoInspectorProvider.parseRemoteProcessOutput(
+        let names = try SSHPortForwardService.parseRemoteProcessOutput(
             Data("8080\tnode\n8081\t\nOMG_PROCESS_PROBE_V1\n".utf8), ports: ports
         )
         #expect(names == [8080: "node"])
@@ -489,10 +489,10 @@ struct BuiltInInfoInspectorProviderTests {
             "8080\t" + String(repeating: "x", count: 129) + "\n8081\t\nOMG_PROCESS_PROBE_V1\n"
         ] {
             #expect(throws: BuiltInInfoInspectorProvider.ProcessProbeError.self) {
-                try BuiltInInfoInspectorProvider.parseRemoteProcessOutput(Data(invalid.utf8), ports: ports)
+                try SSHPortForwardService.parseRemoteProcessOutput(Data(invalid.utf8), ports: ports)
             }
         }
-        let command = BuiltInInfoInspectorProvider.remoteProcessCommand(ports: [8081, -1, 8080, 8080, 65536])
+        let command = SSHPortForwardService.remoteProcessCommand(ports: [8081, -1, 8080, 8080, 65536])
         #expect(command.contains("for port in 8080 8081; do"))
         #expect(command.components(separatedBy: "lsof -nP").count == 2)
         #expect(command.components(separatedBy: "ss -H").count == 2)

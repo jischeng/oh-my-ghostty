@@ -119,6 +119,8 @@ struct AgentHistoryInspectorTests {
             ["type": "session_meta", "payload": ["id": conversationID.rawValue, "cwd": "/repo"]],
             ["type": "response_item", "payload": ["type": "message", "role": "user",
                                                   "content": [["type": "input_text", "text": "Archived question"]]]],
+            ["type": "response_item", "payload": ["type": "message", "role": "assistant", "phase": "final_answer",
+                                                  "content": [["type": "output_text", "text": "Reply with zstd-only-needle"]]]],
         ], to: plain)
         guard let zstd else {
             // The archived-session reader shells out to zstd; report the skip.
@@ -142,6 +144,14 @@ struct AgentHistoryInspectorTests {
         #expect(session.conversationID == conversationID)
         #expect(session.title == "Archived question")
         #expect(session.workingDirectory == "/repo")
+        // Full-text search and the transcript read the decompressed records,
+        // not the archive's compressed bytes.
+        var unindexed = session
+        unindexed.previewSnippet = nil
+        let matches = await AgentHistoryStore.search(sessions: [unindexed], query: "ZSTD-only-needle")
+        #expect(matches[session.id]?.contains("zstd-only-needle") == true)
+        let transcript = await AgentHistoryStore.transcript(for: session)
+        #expect(transcript.messages.map(\.text) == ["Archived question", "Reply with zstd-only-needle"])
         // Codex keeps compressed rollouts beside the live store.
         #expect(SupportedAgent.codex.definition.resume.discover?.additionalRoots?
             .contains("~/.codex/archived_sessions") == true)

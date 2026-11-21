@@ -681,14 +681,14 @@ enum AgentHistoryStore {
 
     nonisolated private static func parseTranscript(for session: AgentHistorySession) -> AgentHistoryTranscript {
         let url = URL(fileURLWithPath: session.sourcePath)
-        guard let handle = try? FileHandle(forReadingFrom: url) else {
+        guard let reader = TranscriptByteReader(url: url) else {
             return .init(sessionID: session.id, messages: [], wasTruncated: false)
         }
-        defer { try? handle.close() }
+        defer { reader.close() }
         var bytesRead = 0
         return parseTranscript(session: session) {
             let count = min(64 * 1_024, max(1, maximumTranscriptBytes - bytesRead))
-            let data = try? handle.read(upToCount: count)
+            let data = reader.read(upToCount: count)
             bytesRead += data?.count ?? 0
             return data
         }
@@ -1013,9 +1013,47 @@ enum AgentHistoryStore {
         query: String,
         agent: SupportedAgent
     ) -> String? {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
-        defer { try? handle.close() }
-        return firstTranscriptMatch(query: query, agent: agent) { try? handle.read(upToCount: 64 * 1_024) }
+        guard let reader = TranscriptByteReader(url: url) else { return nil }
+        defer { reader.close() }
+        return firstTranscriptMatch(query: query, agent: agent) { reader.read(upToCount: 64 * 1_024) }
+    }
+
+    /// Reads transcript bytes in chunks. A `.zst` archive is streamed through
+    /// zstd, so a reader that stops early never decompresses the remainder.
+    private final class TranscriptByteReader {
+        private let handle: FileHandle
+        private let process: Process?
+
+        init?(url: URL) {
+            guard url.lastPathComponent.lowercased().hasSuffix(".zst") else {
+                guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+                self.handle = handle
+                process = nil
+                return
+            }
+            guard let executable = AgentHistoryStore.zstdExecutable else { return nil }
+            let process = Process()
+            process.executableURL = executable
+            process.arguments = ["--decompress", "--stdout", "--quiet", url.path]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = FileHandle.nullDevice
+            process.standardInput = FileHandle.nullDevice
+            guard (try? process.run()) != nil else { return nil }
+            handle = pipe.fileHandleForReading
+            self.process = process
+        }
+
+        func read(upToCount count: Int) -> Data? {
+            try? handle.read(upToCount: count)
+        }
+
+        func close() {
+            try? handle.close()
+            guard let process else { return }
+            if process.isRunning { process.terminate() }
+            process.waitUntilExit()
+        }
     }
 
     nonisolated static func firstTranscriptMatch(

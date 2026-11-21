@@ -321,6 +321,8 @@ private struct InspectorTitlebarControls: View {
     @ObservedObject var layoutState: VerticalTabWindowLayoutState
     @ObservedObject var presentation: InspectorTitlebarPresentation
     @ObservedObject var registry: InspectorRegistry
+    // Tooltips follow the live language and shortcut settings.
+    @ObservedObject private var settings = OhMyGhosttySettings.shared
     let toggleInspector: () -> Void
 
     private var selectedPaneID: String? {
@@ -377,7 +379,7 @@ private struct InspectorTitlebarControls: View {
 
             TerminalTitlebarIconButton(
                 systemName: "sidebar.right",
-                help: inspectorVisible ? "Hide Inspector · ⌘⇧B" : "Show Inspector · ⌘⇧B",
+                help: ChromeStrings.current.toggleInspector(visible: inspectorVisible),
                 action: toggleInspector
             )
             .frame(width: TerminalTitlebarMetrics.inspectorCollapsedWidth)
@@ -675,8 +677,8 @@ private struct InspectorPluginOverflowMenu: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .onHover { hovered = $0 }
-        .help("More Inspector Plugins")
-        .accessibilityLabel("More Inspector Plugins")
+        .help(ChromeStrings.current.morePanes)
+        .accessibilityLabel(ChromeStrings.current.morePanes)
     }
 }
 

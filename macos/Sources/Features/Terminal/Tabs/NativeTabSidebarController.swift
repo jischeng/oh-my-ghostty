@@ -66,7 +66,7 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
         header.translatesAutoresizingMaskIntoConstraints = false
         backgroundButton.target = self
         backgroundButton.action = #selector(toggleBackgroundPopover)
-        optionsButton.configure(title: "", symbol: "ellipsis", help: "Organize Tabs",
+        optionsButton.configure(title: "", symbol: "ellipsis", help: ChromeStrings.current.organizeTabs,
                                 enabled: true, style: .plain, identifier: "tabs.organize")
         list = NativeTabOutlineController(outlineConfiguration())
         addChild(list)

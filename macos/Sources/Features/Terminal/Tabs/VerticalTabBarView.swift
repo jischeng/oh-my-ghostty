@@ -766,7 +766,7 @@ final class GhosttyTabOrganizationModel: ObservableObject {
         guard !path.isEmpty else {
             let identity = GhosttyTabGroupIdentity(
                 id: "project:other",
-                title: "Other",
+                title: ChromeStrings.current.otherProjects,
                 icon: .systemSymbol("folder")
             )
             projectCache[path] = identity

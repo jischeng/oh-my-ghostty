@@ -104,6 +104,8 @@ final class VerticalTabsTerminalWindow: TransparentTitlebarTerminalWindow {
 
 private struct VerticalTabsTitlebarControls: View {
     @ObservedObject var layoutState: VerticalTabWindowLayoutState
+    // Tooltips follow the live language and shortcut settings.
+    @ObservedObject private var settings = OhMyGhosttySettings.shared
     let toggleSidebar: () -> Void
     let newTab: () -> Void
 
@@ -111,12 +113,12 @@ private struct VerticalTabsTitlebarControls: View {
         HStack(spacing: TerminalTitlebarControlStyle.itemSpacing) {
             TerminalTitlebarIconButton(
                 systemName: "sidebar.left",
-                help: layoutState.isSidebarVisible ? "Hide Tabs · ⌘B" : "Show Tabs · ⌘B",
+                help: ChromeStrings.current.toggleSidebar(visible: layoutState.isSidebarVisible),
                 action: toggleSidebar
             )
             TerminalTitlebarIconButton(
                 systemName: "plus",
-                help: "New Tab",
+                help: ChromeStrings.current.newTab,
                 action: newTab
             )
             Spacer(minLength: 0)

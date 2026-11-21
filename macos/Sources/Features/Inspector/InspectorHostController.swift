@@ -112,7 +112,7 @@ final class InspectorHostController: NSViewController {
         }
         if !arrangement.overflowIDs.isEmpty {
             let more = NativeOptionsControl()
-            more.configure(title: "", symbol: "ellipsis", help: "More panes", enabled: true, style: .plain, identifier: nil)
+            more.configure(title: "", symbol: "ellipsis", help: ChromeStrings.current.morePanes, enabled: true, style: .plain, identifier: nil)
             more.entries = arrangement.overflowIDs.compactMap { id in
                 guard let item = registry.descriptor(id: id) else { return nil }
                 return .action(item.title, symbol: item.systemImage, checked: id == selected) { [weak self] in

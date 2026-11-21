@@ -46,10 +46,10 @@ final class TerminalTabChromeController {
             button.widthAnchor.constraint(equalToConstant: 24).isActive = true
             button.heightAnchor.constraint(equalToConstant: 24).isActive = true
         }
-        sidebar.configure(title: "", symbol: "sidebar.left", help: "Show/Hide Tabs", enabled: true,
+        sidebar.configure(title: "", symbol: "sidebar.left", help: ChromeStrings.current.toggleSidebar, enabled: true,
                           style: .plain, identifier: "tabs.toggle")
         sidebar.onPress = { [weak controller] in controller?.toggleSidebar(nil) }
-        newTab.configure(title: "", symbol: "plus", help: "New Tab", enabled: true,
+        newTab.configure(title: "", symbol: "plus", help: ChromeStrings.current.newTab, enabled: true,
                          style: .plain, identifier: "tabs.new")
         newTab.onPress = { [weak controller] in controller?.newVerticalTab() }
         icon.translatesAutoresizingMaskIntoConstraints = false

@@ -233,6 +233,27 @@ struct TerminalHistoryTableTests {
         #expect(InfoHistoryLayout.portLimit(paneHeight: 200) == 180)
     }
 
+    @Test func chromeTooltipsAreLocalizedAndShowTheConfiguredShortcut() {
+        let english = ChromeStrings(language: .english)
+        let chinese = ChromeStrings(language: .simplifiedChinese)
+        #expect(english.toggleInspector(visible: true) == "Hide Right Sidebar · ⇧⌘B")
+        #expect(chinese.toggleInspector(visible: true) == "隐藏右侧边栏 · ⇧⌘B")
+        #expect(chinese.toggleInspector(visible: false) == "显示右侧边栏 · ⇧⌘B")
+        #expect(chinese.toggleSidebar(visible: false) == "显示侧边栏 · ⌘B")
+        #expect(chinese.newTab == "新建标签页")
+        #expect(chinese.organizeTabs == "整理标签页")
+        #expect(chinese.morePanes == "更多面板")
+
+        // A rebound shortcut is shown; an invalid one is omitted, not guessed.
+        let rebound = ChromeStrings(
+            language: .simplifiedChinese,
+            sidebarShortcut: "not a shortcut",
+            inspectorShortcut: OMGKeyboardShortcut(key: "i", modifiers: [.command, .option]).storageValue
+        )
+        #expect(rebound.toggleInspector(visible: true) == "隐藏右侧边栏 · ⌥⌘I")
+        #expect(rebound.toggleSidebar(visible: true) == "隐藏侧边栏")
+    }
+
     @Test func remoteTargetColumnHugsItsWidestValueWithinBounds() {
         let short = InfoHistoryLayout.targetColumnWidth(["80"])
         let port = InfoHistoryLayout.targetColumnWidth(["80", "42149"])

@@ -2237,6 +2237,8 @@ extension Ghostty {
             item.setImageIfDesired(systemSymbolName: "pencil.line")
             item = menu.addItem(withTitle: "Change Terminal Title...", action: #selector(changeTitle(_:)), keyEquivalent: "")
 
+            // OMG: follow the in-app language without changing the titles above.
+            SettingsMenuLocalizer.applyCurrent(to: menu)
             return menu
         }
 

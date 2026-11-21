@@ -55,6 +55,28 @@ struct ChromeStrings: Equatable, Sendable {
     var newTab: String { t("New Tab", "新建标签页") }
     var organizeTabs: String { t("Organize Tabs", "整理标签页") }
     var morePanes: String { t("More Panes", "更多面板") }
+    var resetZoom: String { t("Reset Zoom", "还原缩放") }
+    var resetSplitZoom: String { t("Reset Split Zoom", "还原分屏缩放") }
+
+    // Tab sidebar menus
+    var renameTab: String { t("Rename Tab…", "重命名标签页…") }
+    var moveTabToNewWindow: String { t("Move Tab to New Window", "将标签页移到新窗口") }
+    var closeOtherTabs: String { t("Close Other Tabs", "关闭其他标签页") }
+    var closeTab: String { t("Close Tab", "关闭标签页") }
+    var groupHeader: String { t("GROUP", "分组") }
+    var orderHeader: String { t("ORDER", "排序") }
+    func groupingTitle(_ mode: GhosttyTabGroupingMode) -> String { settings.groupingTitle(mode) }
+    func orderingTitle(_ mode: GhosttyTabOrderingMode) -> String { settings.orderingTitle(mode) }
+
+    // Tab groups
     /// Tab group for panes whose directory belongs to no project.
     var otherProjects: String { t("Other", "其他") }
+    var today: String { t("Today", "今天") }
+    var yesterday: String { t("Yesterday", "昨天") }
+    var older: String { t("Older", "更早") }
+
+    // Accessibility
+    var tabs: String { t("Tabs", "标签页") }
+    var rightSidebar: String { t("Right Sidebar", "右侧边栏") }
+    var selected: String { t("Selected", "已选中") }
 }

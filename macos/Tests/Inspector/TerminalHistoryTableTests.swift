@@ -243,6 +243,19 @@ struct TerminalHistoryTableTests {
         #expect(chinese.newTab == "新建标签页")
         #expect(chinese.organizeTabs == "整理标签页")
         #expect(chinese.morePanes == "更多面板")
+        #expect(chinese.resetZoom == "还原缩放")
+        #expect(chinese.renameTab == "重命名标签页…")
+        #expect(chinese.closeOtherTabs == "关闭其他标签页")
+        #expect(chinese.groupHeader == "分组")
+        #expect(chinese.groupingTitle(.project) == "按项目")
+        #expect(chinese.orderingTitle(.recentlyUsed) == "最近使用")
+        #expect([chinese.today, chinese.yesterday, chinese.older, chinese.otherProjects]
+            == ["今天", "昨天", "更早", "其他"])
+        #expect([english.today, english.yesterday, english.older, english.otherProjects]
+            == ["Today", "Yesterday", "Older", "Other"])
+        #expect(chinese.tabs == "标签页")
+        #expect(chinese.rightSidebar == "右侧边栏")
+        #expect(english.closeTab == "Close Tab")
 
         // A rebound shortcut is shown; an invalid one is omitted, not guessed.
         let rebound = ChromeStrings(

@@ -87,6 +87,13 @@ enum SettingsMenuLocalizer {
 
         ("Help", "帮助"),
         ("OMG Help", "OMG 帮助"),
+
+        // Terminal and native tab context menus
+        ("Close Split", "关闭分屏"),
+        ("Reset Terminal", "重置终端"),
+        ("Toggle Terminal Inspector", "切换终端检查器"),
+        ("Close Tabs to the Right", "关闭右侧标签页"),
+        ("Rename Tab...", "重命名标签页…"),
     ]
 
     private static let englishByTitle: [String: String] = {
@@ -101,6 +108,11 @@ enum SettingsMenuLocalizer {
     private static let chineseByEnglish = Dictionary(
         uniqueKeysWithValues: titlePairs.map { ($0.english, $0.chinese) }
     )
+
+    /// Translates a context menu that upstream code builds in English.
+    @MainActor static func applyCurrent(to menu: NSMenu?) {
+        apply(to: menu, strings: SettingsStrings(language: OhMyGhosttySettings.shared.language))
+    }
 
     static func apply(to menu: NSMenu?, strings: SettingsStrings) {
         guard let menu else { return }

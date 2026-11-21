@@ -70,4 +70,23 @@ struct SettingsMenuLocalizerTests {
         #expect(root.items[2].title == "Window")
         #expect(root.items[2].submenu?.items[0].title == "Browse Sessions…")
     }
+
+    @Test func translatesTerminalAndTabContextMenusBuiltInEnglish() {
+        let menu = NSMenu()
+        for title in ["Copy", "Split Right", "Close Split", "Reset Terminal", "Toggle Terminal Inspector",
+                      "Change Tab Title...", "Close Tabs to the Right", "Rename Tab...", "cloud · mapping-platform"] {
+            menu.addItem(withTitle: title, action: nil, keyEquivalent: "")
+        }
+        SettingsMenuLocalizer.apply(to: menu, strings: SettingsStrings(language: .simplifiedChinese))
+        #expect(menu.items.map(\.title) == [
+            "复制", "向右分屏", "关闭分屏", "重置终端", "切换终端检查器",
+            "修改标签页标题…", "关闭右侧标签页", "重命名标签页…", "cloud · mapping-platform",
+        ])
+        // A reused menu is translated back from either language.
+        SettingsMenuLocalizer.apply(to: menu, strings: SettingsStrings(language: .english))
+        #expect(menu.items.map(\.title) == [
+            "Copy", "Split Right", "Close Split", "Reset Terminal", "Toggle Terminal Inspector",
+            "Change Tab Title...", "Close Tabs to the Right", "Rename Tab...", "cloud · mapping-platform",
+        ])
+    }
 }

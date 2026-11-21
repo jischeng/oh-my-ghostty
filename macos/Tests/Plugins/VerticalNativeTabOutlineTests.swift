@@ -125,7 +125,7 @@ struct VerticalNativeTabOutlineTests {
         let owner = try #require(outline.trackingAreas.first { $0.owner is NativeTableHover }?.owner as? NativeTableHover)
         let rows = try (0..<2).map { try #require(outline.rowView(atRow: $0, makeIfNecessary: true) as? NativeHoverRowView) }
         func closeButton(in view: NSView) -> NativeActionControl? {
-            if let button = view as? NativeActionControl, button.accessibilityLabel() == "Close Tab" { return button }
+            if let button = view as? NativeActionControl, button.accessibilityLabel() == ChromeStrings.current.closeTab { return button }
             return view.subviews.lazy.compactMap(closeButton).first
         }
         let buttons = try (0..<2).map { index in

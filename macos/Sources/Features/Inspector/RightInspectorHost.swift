@@ -411,7 +411,7 @@ private struct InspectorTitlebarPaneButton: View {
             help: descriptor.title,
             action: select
         )
-        .accessibilityValue(selected ? "Selected" : "")
+        .accessibilityValue(selected ? ChromeStrings.current.selected : "")
     }
 }
 

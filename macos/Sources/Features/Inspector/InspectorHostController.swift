@@ -61,7 +61,7 @@ final class InspectorHostController: NSViewController {
     override func loadView() {
         let root = InspectorAttachmentView()
         root.attachmentChanged = { [weak self] in self?.scheduleRefresh() }
-        root.setAccessibilityLabel("Inspector")
+        root.setAccessibilityLabel(ChromeStrings.current.rightSidebar)
         root.wantsLayer = true
         deck.autoresizingMask = [.width, .height]
         deck.frame = root.bounds
@@ -105,7 +105,7 @@ final class InspectorHostController: NSViewController {
             let button = NativeActionControl()
             button.configure(title: id == selected ? item.title : "", symbol: item.systemImage, help: item.title,
                              enabled: true, style: id == selected ? .bordered : .plain, identifier: "inspector.select.\(id)")
-            button.setAccessibilityValue(id == selected ? "selected" : "")
+            button.setAccessibilityValue(id == selected ? ChromeStrings.current.selected : "")
             button.onPress = { [weak self] in self?.layoutState.selectInspectorPane(id) }
             button.heightAnchor.constraint(equalToConstant: 26).isActive = true
             navigation.addArrangedSubview(button)

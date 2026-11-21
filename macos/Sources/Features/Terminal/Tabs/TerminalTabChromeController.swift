@@ -46,11 +46,8 @@ final class TerminalTabChromeController {
             button.widthAnchor.constraint(equalToConstant: 24).isActive = true
             button.heightAnchor.constraint(equalToConstant: 24).isActive = true
         }
-        sidebar.configure(title: "", symbol: "sidebar.left", help: ChromeStrings.current.toggleSidebar, enabled: true,
-                          style: .plain, identifier: "tabs.toggle")
+        localizeControls()
         sidebar.onPress = { [weak controller] in controller?.toggleSidebar(nil) }
-        newTab.configure(title: "", symbol: "plus", help: ChromeStrings.current.newTab, enabled: true,
-                         style: .plain, identifier: "tabs.new")
         newTab.onPress = { [weak controller] in controller?.newVerticalTab() }
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.widthAnchor.constraint(equalToConstant: 26).isActive = true
@@ -90,7 +87,21 @@ final class TerminalTabChromeController {
             .sink { [weak self] _ in self?.schedule() }.store(in: &subscriptions)
         NotificationCenter.default.publisher(for: NSWindow.willCloseNotification, object: window)
             .sink { [weak self] _ in self?.stop() }.store(in: &subscriptions)
+        // The object announces a change before applying it, so read the
+        // language and shortcuts on the next turn.
+        OhMyGhosttySettings.shared.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.localizeControls() }.store(in: &subscriptions)
         refresh()
+    }
+
+    /// Tooltips follow the live language and shortcut settings.
+    private func localizeControls() {
+        let strings = ChromeStrings.current
+        sidebar.configure(title: "", symbol: "sidebar.left", help: strings.toggleSidebar, enabled: true,
+                          style: .plain, identifier: "tabs.toggle")
+        newTab.configure(title: "", symbol: "plus", help: strings.newTab, enabled: true,
+                         style: .plain, identifier: "tabs.new")
     }
 
     func schedule() {

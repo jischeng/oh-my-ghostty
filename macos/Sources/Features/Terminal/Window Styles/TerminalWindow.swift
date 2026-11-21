@@ -397,7 +397,7 @@ class TerminalWindow: NSWindow {
         button.action = #selector(TerminalController.splitZoom(_:))
         button.isBordered = false
         button.allowsExpansionToolTips = true
-        button.toolTip = "Reset Zoom"
+        button.toolTip = ChromeStrings.current.resetZoom
         button.contentTintColor = isMainWindow ? .controlAccentColor : .secondaryLabelColor
         button.state = .on
         button.image = NSImage(named: "ResetZoom")
@@ -814,7 +814,7 @@ extension TerminalWindow {
                             .foregroundColor(viewModel.isMainWindow ? .accentColor : .secondary)
                     }
                     .buttonStyle(.plain)
-                    .help("Reset Split Zoom")
+                    .help(ChromeStrings.current.resetSplitZoom)
                     .frame(width: 20, height: 20)
                     Spacer()
                 }
@@ -901,6 +901,8 @@ extension TerminalWindow {
         }
 
         appendTabModifierSection(to: menu, target: targetController)
+        // OMG: follow the in-app language without changing the titles above.
+        SettingsMenuLocalizer.applyCurrent(to: menu)
     }
 
     private func isTabContextMenu(_ menu: NSMenu) -> Bool {

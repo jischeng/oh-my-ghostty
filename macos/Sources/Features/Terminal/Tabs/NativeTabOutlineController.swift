@@ -119,7 +119,7 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
         outline.registerForDraggedTypes([Self.tabType, .ghosttySurfaceId])
         outline.contextMenu = { [weak self] row in self?.menu(for: row) }
         outline.setDraggingSourceOperationMask(.move, forLocal: true)
-        outline.setAccessibilityLabel("Tabs")
+        outline.setAccessibilityLabel(ChromeStrings.current.tabs)
         scroll.documentView = outline
         view = scroll
     }
@@ -155,6 +155,7 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
 
     func update(_ value: NativeTabOutlineConfiguration) {
         configuration = value
+        outline.setAccessibilityLabel(ChromeStrings.current.tabs)
         updating = true
         defer { updating = false }
         let oldRoots = roots.map(\.key)
@@ -304,19 +305,20 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
 
     private func menu(for row: Int) -> NSMenu? {
         guard let tab = (outline.item(atRow: row) as? NativeTabNode)?.tab?.controller else { return nil }
+        let strings = ChromeStrings.current
         return NativeActionMenu.make([
-            .action("New Tab", symbol: "plus") { [weak tab] in tab?.newVerticalTab() },
-            .action("Rename Tab…", symbol: "pencil") { [weak tab] in tab?.promptTabTitle() },
+            .action(strings.newTab, symbol: "plus") { [weak tab] in tab?.newVerticalTab() },
+            .action(strings.renameTab, symbol: "pencil") { [weak tab] in tab?.promptTabTitle() },
             .separator,
-            .action("Move Tab to New Window", symbol: "macwindow",
+            .action(strings.moveTabToNewWindow, symbol: "macwindow",
                     enabled: (tab.workspaceTabWindows.count) > 1) { [weak tab] in
                 guard let window = tab?.window else { return }
                 NSApp.sendAction(NSSelectorFromString("moveTabToNewWindow:"), to: window, from: nil)
             },
-            .action("Close Other Tabs", enabled: configuration.controller.tabControllers.count > 1) { [weak tab] in
+            .action(strings.closeOtherTabs, enabled: configuration.controller.tabControllers.count > 1) { [weak tab] in
                 tab?.closeOtherTabs(nil)
             },
-            .action("Close Tab", symbol: "xmark") { [weak tab] in tab?.closeTab(nil) },
+            .action(strings.closeTab, symbol: "xmark") { [weak tab] in tab?.closeTab(nil) },
         ])
     }
 
@@ -697,11 +699,11 @@ final class NativeTabCell: NSTableCellView {
         label.font = .systemFont(ofSize: 13)
         shortcut.font = .systemFont(ofSize: 10)
         shortcut.textColor = .secondaryLabelColor
-        closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close Tab")
+        closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: ChromeStrings.current.closeTab)
         closeButton.isBordered = false
         closeButton.target = self
         closeButton.action = #selector(closeTab)
-        closeButton.setAccessibilityLabel("Close Tab")
+        closeButton.setAccessibilityLabel(ChromeStrings.current.closeTab)
         let trailing = NSView()
         for view in [shortcut, closeButton] {
             view.translatesAutoresizingMaskIntoConstraints = false
@@ -749,6 +751,7 @@ final class NativeTabCell: NSTableCellView {
                    groupIcon: GhosttyTabIcon? = nil,
                    canClose: Bool, selected: Bool, select: @escaping () -> Void,
                    close: @escaping () -> Void) {
+        closeButton.setAccessibilityLabel(ChromeStrings.current.closeTab)
         let changedController = configuredTab?.controller !== tab?.controller
         if tab == nil || changedController {
             observations.removeAll()

@@ -236,12 +236,17 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
         let bgCount = SessionRuntimeBackgroundStore.shared.items(for: config.controller).count
         backgroundButton.update(count: bgCount, isPresented: backgroundPopover.isShown)
         backgroundWidth?.constant = backgroundButton.preferredWidth
-        optionsButton.entries = [.action("GROUP", enabled: false) {}] + GhosttyTabGroupingMode.allCases.map { mode in
-            .action(mode.title, checked: config.layoutState.groupingMode == mode) { [weak controller = config.controller] in
+        // Settings changes schedule this refresh, so the tooltip and menu
+        // follow a language switch without rebuilding the sidebar.
+        let strings = ChromeStrings.current
+        optionsButton.configure(title: "", symbol: "ellipsis", help: strings.organizeTabs,
+                                enabled: true, style: .plain, identifier: "tabs.organize")
+        optionsButton.entries = [.action(strings.groupHeader, enabled: false) {}] + GhosttyTabGroupingMode.allCases.map { mode in
+            .action(strings.groupingTitle(mode), checked: config.layoutState.groupingMode == mode) { [weak controller = config.controller] in
                 controller?.setTabGroupingMode(mode)
             }
-        } + [.separator, .action("ORDER", enabled: false) {}] + GhosttyTabOrderingMode.allCases.map { mode in
-            .action(mode.title, checked: config.layoutState.orderingMode == mode) { [weak controller = config.controller] in
+        } + [.separator, .action(strings.orderHeader, enabled: false) {}] + GhosttyTabOrderingMode.allCases.map { mode in
+            .action(strings.orderingTitle(mode), checked: config.layoutState.orderingMode == mode) { [weak controller = config.controller] in
                 controller?.setTabOrderingMode(mode)
             }
         }

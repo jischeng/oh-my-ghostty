@@ -70,7 +70,7 @@ struct VerticalTabMouseTests {
         let outlineController = try #require(host.sidebar.list)
         let outline = outlineController.outline
         func closeButton(in view: NSView) -> NativeActionControl? {
-            if let button = view as? NativeActionControl, button.accessibilityLabel() == "Close Tab" {
+            if let button = view as? NativeActionControl, button.accessibilityLabel() == ChromeStrings.current.closeTab {
                 return button
             }
             return view.subviews.lazy.compactMap(closeButton).first

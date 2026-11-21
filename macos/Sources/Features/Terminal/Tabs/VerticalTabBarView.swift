@@ -762,16 +762,12 @@ final class GhosttyTabOrganizationModel: ObservableObject {
             case .local: break
             }
         }
-        if let cached = projectCache[path] { return cached }
+        // The fallback group is not cached: its title follows the language.
         guard !path.isEmpty else {
-            let identity = GhosttyTabGroupIdentity(
-                id: "project:other",
-                title: ChromeStrings.current.otherProjects,
-                icon: .systemSymbol("folder")
-            )
-            projectCache[path] = identity
-            return identity
+            return .init(id: "project:other", title: ChromeStrings.current.otherProjects,
+                         icon: .systemSymbol("folder"))
         }
+        if let cached = projectCache[path] { return cached }
 
         var url = URL(fileURLWithPath: path)
             .standardizedFileURL
@@ -791,12 +787,14 @@ final class GhosttyTabOrganizationModel: ObservableObject {
             url.deleteLastPathComponent()
         }
 
+        // The filesystem root has no folder name; it joins the fallback group
+        // by title, uncached for the same reason as above.
         let title = URL(fileURLWithPath: path).lastPathComponent
-        let identity = GhosttyTabGroupIdentity(
-            id: path.isEmpty ? "project:other" : "cwd:\(path)",
-            title: title.isEmpty ? "Other" : title,
-            icon: .systemSymbol("folder")
-        )
+        guard !title.isEmpty else {
+            return .init(id: "cwd:\(path)", title: ChromeStrings.current.otherProjects,
+                         icon: .systemSymbol("folder"))
+        }
+        let identity = GhosttyTabGroupIdentity(id: "cwd:\(path)", title: title, icon: .systemSymbol("folder"))
         projectCache[path] = identity
         return identity
     }
@@ -807,13 +805,13 @@ final class GhosttyTabOrganizationModel: ObservableObject {
     ) -> (id: String, title: String, icon: GhosttyTabIcon) {
         let calendar = Calendar.current
         if calendar.isDate(date, inSameDayAs: now) {
-            return ("date:today", "Today", .systemSymbol("calendar"))
+            return ("date:today", ChromeStrings.current.today, .systemSymbol("calendar"))
         }
         if let yesterday = calendar.date(byAdding: .day, value: -1, to: now),
            calendar.isDate(date, inSameDayAs: yesterday) {
-            return ("date:yesterday", "Yesterday", .systemSymbol("calendar"))
+            return ("date:yesterday", ChromeStrings.current.yesterday, .systemSymbol("calendar"))
         }
-        return ("date:older", "Older", .systemSymbol("calendar"))
+        return ("date:older", ChromeStrings.current.older, .systemSymbol("calendar"))
     }
 }
 

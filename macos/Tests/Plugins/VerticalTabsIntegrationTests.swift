@@ -1210,7 +1210,7 @@ struct VerticalTabsIntegrationTests {
             ordering: .created
         )
         #expect(dateGroups.count == 1)
-        #expect(dateGroups[0].title == "Today")
+        #expect(dateGroups[0].title == ChromeStrings.current.today)
 
         eighth.setTabOrderingMode(.recentlyUsed)
         for index in 0..<40 {

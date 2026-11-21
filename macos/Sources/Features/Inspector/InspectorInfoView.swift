@@ -15,6 +15,18 @@ struct InfoWorkingDirectory: Equatable, Sendable {
         isRemote ? path : (path as NSString).abbreviatingWithTildeInPath
     }
 
+    /// The folder itself, which is what a glance needs. The home folder is
+    /// named too, with `~` as its location; only the root stands alone.
+    var name: String {
+        path == "/" ? path : (path as NSString).lastPathComponent
+    }
+
+    /// The full location, when it says more than the name does.
+    var location: String? {
+        let display = displayPath
+        return display == name ? nil : display
+    }
+
     enum Action: Equatable {
         case copyPath
         case revealInFinder
@@ -164,15 +176,19 @@ struct InfoDirectoryActions {
 
 // MARK: - Layout
 
+/// Sections are separated by space rather than rules: a quiet label, the
+/// value it names, then its actions. Every text edge shares one inset.
 enum InfoLayout {
-    static let headerHeight: CGFloat = 30
+    static let sectionTopInset: CGFloat = 12
+    static let sectionBottomInset: CGFloat = 8
+    static let headerHeight: CGFloat = 22
     static let rowHeight: CGFloat = 28
     static let detailHeight: CGFloat = 16
+    static let emptyRowHeight: CGFloat = 22
     /// Hover highlights stop short of the pane edges, as in the file tree.
     static let rowOuterInset = InspectorContentMetrics.treeOuterInset
     static let rowInnerInset = InspectorContentMetrics.leadingInset - rowOuterInset
-    static let rowCornerRadius: CGFloat = 5
-    static let sectionBottomInset: CGFloat = 6
+    static let rowCornerRadius: CGFloat = 6
 }
 
 enum InfoHistoryLayout {
@@ -181,9 +197,10 @@ enum InfoHistoryLayout {
     /// Ports take the height their rows need, so a typical list never scrolls
     /// inside the pane; `limit` keeps a long list from displacing history.
     static func portHeight(count: Int, detailCount: Int = 0, limit: CGFloat = minimumPortLimit) -> CGFloat {
-        guard count > 0 else { return 64 }
+        let chrome = InfoLayout.sectionTopInset + InfoLayout.headerHeight + InfoLayout.sectionBottomInset
+        guard count > 0 else { return chrome + InfoLayout.emptyRowHeight }
         let rows = CGFloat(count) * InfoLayout.rowHeight + CGFloat(detailCount) * InfoLayout.detailHeight
-        return min(limit, InfoLayout.headerHeight + rows + InfoLayout.sectionBottomInset + 2)
+        return min(limit, chrome + rows + 2)
     }
 
     /// Up to half of the pane, and never less than the fixed minimum.
@@ -210,18 +227,15 @@ private struct InfoSectionHeader<Accessory: View>: View {
     @ViewBuilder var accessory: () -> Accessory
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(alignment: .center, spacing: 5) {
             Text(title)
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             if let count, count > 0 {
                 Text(String(count))
-                    .font(.system(size: 10, weight: .medium).monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1)
-                    .background(Color.primary.opacity(0.08), in: Capsule())
+                    .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(.tertiary)
             }
             Spacer(minLength: 8)
             accessory()
@@ -238,11 +252,43 @@ extension InfoSectionHeader where Accessory == EmptyView {
     }
 }
 
-private struct InfoSectionDivider: View {
-    let color: Color
+/// The thing a section is about: a name, and where or what it is.
+private struct InfoSectionValue<Leading: View>: View {
+    let title: String
+    var detail: String?
+    var help: String?
+    var detailTruncation: Text.TruncationMode = .head
+    @ViewBuilder var leading: () -> Leading
 
     var body: some View {
-        Rectangle().fill(color).frame(height: TerminalShellStyle.dividerWidth)
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                leading()
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            if let detail {
+                Text(detail)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(detailTruncation)
+            }
+        }
+        .help(help ?? detail ?? title)
+        .padding(.horizontal, InspectorContentMetrics.leadingInset)
+        .padding(.top, 1)
+        .padding(.bottom, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+extension InfoSectionValue where Leading == EmptyView {
+    init(title: String, detail: String? = nil, help: String? = nil,
+         detailTruncation: Text.TruncationMode = .head) {
+        self.init(title: title, detail: detail, help: help, detailTruncation: detailTruncation) { EmptyView() }
     }
 }
 
@@ -271,7 +317,7 @@ private struct InfoActionRow: View {
 
     let icon: Icon
     let title: String
-    var tint: Color = .secondary
+    var tint: Color = .accentColor
     let action: () -> Void
     @State private var hovered = false
 
@@ -282,7 +328,7 @@ private struct InfoActionRow: View {
                     switch icon {
                     case .symbol(let name):
                         Image(systemName: name)
-                            .font(.system(size: 12))
+                            .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(tint)
                     case .image(let image):
                         Image(nsImage: image)
@@ -315,7 +361,7 @@ private struct InfoCopyRow: View {
         InfoActionRow(
             icon: .symbol(copied ? "checkmark" : "doc.on.doc"),
             title: copied ? CopyFeedback.confirmationText() : title,
-            tint: copied ? .green : .secondary
+            tint: copied ? .green : .accentColor
         ) {
             copy(value)
             reset?.cancel()
@@ -426,17 +472,14 @@ struct InspectorInfoView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
-                InfoSectionDivider(color: dividerColor)
             }
 
             if let directory {
                 InspectorWorkingDirectoryView(directory: directory, actions: directoryActions)
-                InfoSectionDivider(color: dividerColor)
             }
 
             if let agent = info.agent {
                 InspectorAgentSectionView(agent: agent, actions: directoryActions)
-                InfoSectionDivider(color: dividerColor)
             }
 
             if !info.portForwards.hostAlias.isEmpty {
@@ -446,7 +489,6 @@ struct InspectorInfoView: View {
                         detailCount: info.portForwards.items.count(where: InspectorPortForwardListView.hasDetail),
                         limit: InfoHistoryLayout.portLimit(paneHeight: paneHeight)
                     ))
-                InfoSectionDivider(color: dividerColor)
             }
 
             InspectorTerminalHistoryListView(
@@ -485,14 +527,7 @@ private struct InspectorWorkingDirectoryView: View {
                 }
             }
 
-            Text(directory.displayPath)
-                .font(.system(size: 12, weight: .medium))
-                .lineLimit(1)
-                .truncationMode(.head)
-                .help(directory.path)
-                .padding(.horizontal, InspectorContentMetrics.leadingInset)
-                .padding(.bottom, 6)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            InfoSectionValue(title: directory.name, detail: directory.location, help: directory.path)
 
             let rows = directory.actions(apps: apps)
             ForEach(rows.indices, id: \.self) { index in
@@ -516,6 +551,7 @@ private struct InspectorWorkingDirectoryView: View {
                 }
             }
         }
+        .padding(.top, InfoLayout.sectionTopInset)
         .padding(.bottom, InfoLayout.sectionBottomInset)
         .onAppear(perform: reloadApps)
         .onChange(of: settings.infoOpenInApplications) { _ in reloadApps() }
@@ -596,25 +632,29 @@ private struct InspectorAgentSectionView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             InfoSectionHeader(title: strings.agentTitle) {
-                HStack(spacing: 5) {
-                    if let icon = NSImage(named: agent.agent.assetName) {
-                        Image(nsImage: icon)
-                            .resizable()
-                            .interpolation(.high)
-                            .scaledToFit()
-                            .frame(width: 14, height: 14)
-                    }
-                    Text(agent.agent.displayName)
-                        .font(.system(size: 12, weight: .medium))
+                if let host = agent.remoteHost {
+                    Label(host, systemImage: "network")
+                        .labelStyle(.titleAndIcon)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
-                    if let host = agent.remoteHost {
-                        Text(host)
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
+                        .padding(.trailing, InspectorContentMetrics.leadingInset - InfoLayout.rowOuterInset - 2)
                 }
-                .padding(.trailing, InspectorContentMetrics.leadingInset - InfoLayout.rowOuterInset - 2)
+            }
+
+            InfoSectionValue(
+                title: agent.agent.displayName,
+                detail: agent.conversationID,
+                help: agent.sessionPath ?? agent.conversationID,
+                detailTruncation: .middle
+            ) {
+                if let icon = NSImage(named: agent.agent.assetName) {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .interpolation(.high)
+                        .scaledToFit()
+                        .frame(width: 15, height: 15)
+                }
             }
 
             ForEach(agent.actions, id: \.self) { action in
@@ -636,6 +676,7 @@ private struct InspectorAgentSectionView: View {
                 }
             }
         }
+        .padding(.top, InfoLayout.sectionTopInset)
         .padding(.bottom, InfoLayout.sectionBottomInset)
     }
 }
@@ -693,15 +734,17 @@ private struct InspectorTerminalHistoryListView: View {
                 TerminalHistoryTable(items: items) { perform(.jumpToHistoryItem($0)) }
             }
         }
+        .padding(.top, InfoLayout.sectionTopInset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func note(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 11))
+            .font(.system(size: 12))
             .foregroundStyle(.tertiary)
             .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, InspectorContentMetrics.leadingInset)
+            .padding(.top, 1)
             .padding(.bottom, 6)
     }
 }
@@ -747,9 +790,10 @@ private struct InspectorPortForwardListView: View {
 
             if forwards.items.isEmpty {
                 Text(strings.noForwardedPorts)
-                    .font(.system(size: 11))
+                    .font(.system(size: 12))
                     .foregroundStyle(.tertiary)
                     .padding(.horizontal, InspectorContentMetrics.leadingInset)
+                    .padding(.top, 1)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             } else {
                 let targetWidth = InfoHistoryLayout.targetColumnWidth(forwards.items.map(remoteTarget))
@@ -763,6 +807,7 @@ private struct InspectorPortForwardListView: View {
                 }
             }
         }
+        .padding(.top, InfoLayout.sectionTopInset)
         .sheet(isPresented: $isAdding) {
             VStack(alignment: .leading, spacing: 16) {
                 Text(strings.forwardAPort)

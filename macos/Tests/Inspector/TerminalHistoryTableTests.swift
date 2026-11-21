@@ -186,6 +186,20 @@ struct TerminalHistoryTableTests {
         #expect(jumped == [commands[1].id])
     }
 
+    /// Renders at 2x regardless of the display, so text weight and spacing
+    /// can be judged as they appear on a Retina screen.
+    private func retinaSnapshot(of view: NSView) -> Data? {
+        let size = view.bounds.size
+        guard let image = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: Int(size.width * 2), pixelsHigh: Int(size.height * 2),
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        ) else { return nil }
+        image.size = size
+        view.cacheDisplay(in: view.bounds, to: image)
+        return image.representation(using: .png, properties: [:])
+    }
+
     private func findScroll(in view: NSView) -> NSScrollView? {
         if let scroll = view as? TerminalHistoryTable.HistoryScrollView { return scroll }
         for child in view.subviews {
@@ -219,8 +233,9 @@ struct TerminalHistoryTableTests {
     }
 
     @Test func emptyPortsStayCompactAndPopulatedPortsAreBounded() {
-        #expect(InfoHistoryLayout.portHeight(count: 0) == 64)
-        #expect(InfoHistoryLayout.portHeight(count: 1) > 64)
+        let empty = InfoHistoryLayout.portHeight(count: 0)
+        #expect(empty == 64)
+        #expect(InfoHistoryLayout.portHeight(count: 1) > empty)
         #expect(InfoHistoryLayout.portHeight(count: 1, detailCount: 1) > InfoHistoryLayout.portHeight(count: 1))
         #expect(InfoHistoryLayout.portHeight(count: 100) <= 180)
         // Eight ports fit a tall pane without an inner scroll area, and a
@@ -286,6 +301,15 @@ struct TerminalHistoryTableTests {
             context(.init(workingDirectory: home + "/code", terminalTitle: "shell")))
         #expect(local == .init(path: home + "/code", host: nil))
         #expect(local?.displayPath == "~/code")
+        // The folder is the headline; the full location follows when it adds something.
+        #expect(local?.name == "code")
+        #expect(local?.location == "~/code")
+        #expect(InfoWorkingDirectory(path: home, host: nil).name == (home as NSString).lastPathComponent)
+        #expect(InfoWorkingDirectory(path: home, host: nil).location == "~")
+        #expect(InfoWorkingDirectory(path: "/", host: nil).name == "/")
+        #expect(InfoWorkingDirectory(path: "/", host: nil).location == nil)
+        #expect(InfoWorkingDirectory(path: "/home/test", host: "cloud").name == "test")
+        #expect(InfoWorkingDirectory(path: "/home/test", host: "cloud").location == "/home/test")
         #expect(InfoWorkingDirectory.resolve(
             context(.init(workingDirectory: nil, terminalTitle: "shell"))) == nil)
         #expect(InfoWorkingDirectory.resolve(
@@ -398,11 +422,8 @@ struct TerminalHistoryTableTests {
             #expect(host.fittingSize.width <= 300)
             #expect((findScroll(in: host) != nil) == !info.historyItems.isEmpty)
             // Opt-in visual artifact, with no filesystem writes in normal test runs.
-            if let path = ProcessInfo.processInfo.environment["OMG_INFO_SNAPSHOT"],
-               let image = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
-                host.cacheDisplay(in: host.bounds, to: image)
-                try image.representation(using: .png, properties: [:])?
-                    .write(to: URL(fileURLWithPath: "\(path)-\(name).png"))
+            if let path = ProcessInfo.processInfo.environment["OMG_INFO_SNAPSHOT"] {
+                try retinaSnapshot(of: host)?.write(to: URL(fileURLWithPath: "\(path)-\(name).png"))
             }
         }
     }
@@ -455,7 +476,8 @@ struct TerminalHistoryTableTests {
         }
         let failed = try cell(0)
         #expect(failed.failed)
-        #expect(failed.date.stringValue == "exit 2  ·  09:05  ·  3.2s  ·  Local")
+        // Every row here is local, so the source is not repeated on each one.
+        #expect(failed.date.stringValue == "exit 2  ·  09:05  ·  3.2s")
         #expect(failed.date.toolTip == "2026-11-21 09:05:00  ·  exit 2  ·  took 3.240s  ·  Local")
         let color = failed.date.attributedStringValue.attribute(.foregroundColor, at: 0, effectiveRange: nil)
         #expect(color as? NSColor == .systemRed)

@@ -122,6 +122,7 @@ struct TerminalHistoryTable: NSViewRepresentable {
         static let dateHeight: CGFloat = 14
         static let rowSpacing = verticalInset * 2 + textDateGap + dateHeight
         static let previewHeight: CGFloat = 72
+        static let labelBezelInset: CGFloat = 2
         static func failureMarker(in bounds: NSRect) -> NSRect {
             NSRect(x: 4, y: verticalInset, width: 2, height: max(0, bounds.height - 2 * verticalInset))
         }
@@ -195,6 +196,8 @@ struct TerminalHistoryTable: NSViewRepresentable {
         private var width: CGFloat = 300
         private var heights: [String: CGFloat] = [:]
         private var strings = InfoStrings()
+        /// A source on every row only says something when the rows differ.
+        private var showsSource = false
         var now: () -> Date = Date.init
         var calendar = Calendar.current
 
@@ -315,6 +318,7 @@ struct TerminalHistoryTable: NSViewRepresentable {
             let delta = topID == nil ? 0 : origin.y - table.rect(ofRow: topRow).minY
             items = next
             strings = nextStrings
+            showsSource = Set(next.map { $0.sourceLabel ?? "Local" }).count > 1
             heights.removeAll(keepingCapacity: true)
             table.reloadData()
             // Never silently select a different occurrence at the same row index.
@@ -343,7 +347,9 @@ struct TerminalHistoryTable: NSViewRepresentable {
         func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
             let item = items[row]
             if let height = heights[item.id] { return height }
-            let height = Metrics.textHeight(item, width: width - 2 * Metrics.inset) + Metrics.rowSpacing
+            let height = Metrics.textHeight(
+                item, width: width - 2 * (Metrics.inset - Metrics.labelBezelInset)
+            ) + Metrics.rowSpacing
             heights[item.id] = height
             return height
         }
@@ -379,7 +385,7 @@ struct TerminalHistoryTable: NSViewRepresentable {
             if let duration = Format.duration(milliseconds: item.duration) {
                 segments.append((duration, .secondaryLabelColor))
             }
-            if let origin = item.sourceLabel { segments.append((origin, .secondaryLabelColor)) }
+            if showsSource, let origin = item.sourceLabel { segments.append((origin, .secondaryLabelColor)) }
             if archived { segments.append((strings.archivedCommandLabel, .secondaryLabelColor)) }
             let meta = NSMutableAttributedString()
             for (index, segment) in segments.enumerated() {
@@ -468,10 +474,13 @@ struct TerminalHistoryTable: NSViewRepresentable {
         }
         override func layout() {
             super.layout()
-            text.frame = NSRect(x: Metrics.inset, y: Metrics.verticalInset,
-                                width: max(20, bounds.width - 2 * Metrics.inset),
+            // A label draws its glyphs two points inside its frame; pull the
+            // frames out so the text lines up with the section labels above.
+            let x = Metrics.inset - Metrics.labelBezelInset
+            text.frame = NSRect(x: x, y: Metrics.verticalInset,
+                                width: max(20, bounds.width - 2 * x),
                                 height: max(0, bounds.height - Metrics.rowSpacing))
-            date.frame = NSRect(x: Metrics.inset, y: text.frame.maxY + Metrics.textDateGap,
+            date.frame = NSRect(x: x, y: text.frame.maxY + Metrics.textDateGap,
                                 width: max(20, bounds.width - 44), height: Metrics.dateHeight)
             jump.frame = NSRect(x: bounds.width - 30, y: bounds.height - 26, width: 24, height: 20)
         }

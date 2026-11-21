@@ -2141,10 +2141,17 @@ stored as ordered bundle paths in `info.openInApplications`, at most eight,
 where an absent key means detection and an empty list offers none. When the
 pane runs an Agent conversation that belongs to its current host, an Agent
 section follows with the Agent's name and Copy Conversation ID. For a local
-conversation the transcript file is located once in the background (and
-retried while it does not exist yet), after which Copy Transcript Path and
-Reveal in Finder appear; a remote conversation is never read for this. The
-section adds no polling and reads no transcript content. A pane with an Agent descriptor or
+conversation the transcript file is located in the background. An Agent
+writes it on the first message, after attaching to the pane, so a lookup that
+finds nothing is repeated up to six times with doubling waits while a
+presented pane still shows that conversation, and otherwise on the next
+natural refresh. Copy Transcript Path and Reveal in Finder appear once it is
+found; a remote conversation is never read for this. The section never polls
+indefinitely and reads no transcript content. Each section is a quiet label,
+the thing it names (the folder or Agent in emphasis, its location or
+conversation ID beneath) and its actions; sections are separated by space
+rather than rules, and a history row names its source only when the rows come
+from more than one host. A pane with an Agent descriptor or
 activity (including `done`/`error`) continues to show that Surface's Shell
 command history in Info; only Agent Prompt rows are suppressed. Its Shell jump
 anchors remain available, and SSH port-forwarding controls remain visible.

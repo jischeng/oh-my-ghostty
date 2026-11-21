@@ -250,6 +250,14 @@ vm_xctest() {
     omg_vm_ssh "test -d '$guest_developer_dir'" ||
         omg_vm_die "host /Applications/Xcode.app is not mounted in guest at $guest_developer_dir"
 
+    # The test host is another `omg` process, so the deployed app has to stop
+    # for the run. Remember it so an acceptance session is reopened afterwards.
+    local reopen_deployed=false
+    if omg_vm_ssh "pgrep -x omg >/dev/null && test -d /Applications/OMG.app" 2>/dev/null; then
+        reopen_deployed=true
+        echo "omg-vm: closing OMG Dev in the guest for the test run; it is reopened afterwards" >&2
+    fi
+
     local ip guest_test_root="/tmp/omg-xctest-root"
     local guest_config_dir="$guest_test_root/$configuration"
     local guest_xctestrun="$guest_test_root/$(basename "$xctestrun")"
@@ -293,6 +301,15 @@ EOF
         "${test_args[@]}" || status=$?
 
     omg_vm_ssh "pkill -x omg 2>/dev/null || true" >/dev/null 2>&1 || true
+    if $reopen_deployed; then
+        # Windows and tabs come back through session restoration; a sheet or
+        # popover that was open before the run does not.
+        if (vm_run >/dev/null); then
+            echo "omg-vm: reopened OMG Dev in the guest (open sheets and popovers are not restored)" >&2
+        else
+            echo "omg-vm: could not reopen OMG Dev in the guest; run 'omg-vm run'" >&2
+        fi
+    fi
     return "$status"
 }
 

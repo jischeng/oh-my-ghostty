@@ -70,6 +70,14 @@ Guest rendering is 1x while the host is 2x Retina, so guest screenshots are
 Measured on an Apple Silicon host: `up` 14-17 s, `deploy` about 5 s, `smoke`
 about 6 s, `down` about 6.5 s.
 
+## Swift tests and a running app
+
+`omg-vm xctest` runs the suites in a test host that is itself an `omg` process,
+so it stops the deployed OMG Dev first. If the app was running, the command says
+so and reopens it after the run. Windows and tabs return through session
+restoration; a sheet or popover left open for acceptance does not, so finish or
+screenshot that state before running tests.
+
 ## Desktop checks
 
 `desktop` synthesizes HID events inside the guest instead of touching the host

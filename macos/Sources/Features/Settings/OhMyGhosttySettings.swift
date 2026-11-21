@@ -481,6 +481,23 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Shortcut to switch to or hide right sidebar panel 4.",
             requiresNewWindow: false, category: "keyboard"),
         .init(
+            id: "keyboard.toggleSidebar", type: .string,
+            defaultValue: OMGKeyboardShortcut.defaultToggleSidebar.storageValue,
+            allowedValues: nil, minimum: nil, maximum: nil,
+            description: "Shortcut that shows or hides the tab sidebar.",
+            requiresNewWindow: false, category: "keyboard"),
+        .init(
+            id: "keyboard.toggleInspector", type: .string,
+            defaultValue: OMGKeyboardShortcut.defaultToggleInspector.storageValue,
+            allowedValues: nil, minimum: nil, maximum: nil,
+            description: "Shortcut that shows or hides the right sidebar.",
+            requiresNewWindow: false, category: "keyboard"),
+        .init(
+            id: "keyboard.tabNumberModifiers", type: .enumeration, defaultValue: "",
+            allowedValues: [""] + OMGNumberShortcutModifiers.allCases.map(\.rawValue), minimum: nil, maximum: nil,
+            description: "Modifier keys for the tab 1-9 shortcuts. Empty keeps the Ghostty keybinds.",
+            requiresNewWindow: false, category: "keyboard"),
+        .init(
             id: "keyboard.quickInputImportShortcut", type: .string, defaultValue: "auto",
             allowedValues: nil, minimum: nil, maximum: nil,
             description: "Agent draft import: auto selects the external-editor shortcut; empty disables; other values override it. Comma separates chords.",
@@ -899,6 +916,33 @@ final class OhMyGhosttySettings: ObservableObject {
                 persist("keyboard.inspectorPanel4", normalized)
             }
         }
+    }
+
+    @Published var toggleSidebarShortcut = OMGKeyboardShortcut.defaultToggleSidebar.storageValue {
+        didSet {
+            let normalized = OMGKeyboardShortcut(storageValue: toggleSidebarShortcut)?.storageValue
+                ?? OMGKeyboardShortcut.defaultToggleSidebar.storageValue
+            if toggleSidebarShortcut != normalized {
+                toggleSidebarShortcut = normalized
+            } else {
+                persist("keyboard.toggleSidebar", normalized)
+            }
+        }
+    }
+    @Published var toggleInspectorShortcut = OMGKeyboardShortcut.defaultToggleInspector.storageValue {
+        didSet {
+            let normalized = OMGKeyboardShortcut(storageValue: toggleInspectorShortcut)?.storageValue
+                ?? OMGKeyboardShortcut.defaultToggleInspector.storageValue
+            if toggleInspectorShortcut != normalized {
+                toggleInspectorShortcut = normalized
+            } else {
+                persist("keyboard.toggleInspector", normalized)
+            }
+        }
+    }
+    /// nil keeps whatever the Ghostty config binds for `goto_tab`.
+    @Published var tabNumberModifiers: OMGNumberShortcutModifiers? {
+        didSet { persistOptional("keyboard.tabNumberModifiers", tabNumberModifiers?.rawValue) }
     }
 
     func inspectorPanelShortcut(slot: Int) -> String {
@@ -1454,6 +1498,16 @@ final class OhMyGhosttySettings: ObservableObject {
                 "keyboard.inspectorPanel4",
                 fallback: OMGKeyboardShortcut.defaultInspectorPanel(slot: 4).storageValue
             )
+            toggleSidebarShortcut = validatedShortcutValue(
+                "keyboard.toggleSidebar",
+                fallback: OMGKeyboardShortcut.defaultToggleSidebar.storageValue
+            )
+            toggleInspectorShortcut = validatedShortcutValue(
+                "keyboard.toggleInspector",
+                fallback: OMGKeyboardShortcut.defaultToggleInspector.storageValue
+            )
+            tabNumberModifiers = (chosen["keyboard.tabNumberModifiers"] as? String)
+                .flatMap(OMGNumberShortcutModifiers.init(rawValue:))
             quickInputImportShortcut = optionalStringValue("keyboard.quickInputImportShortcut") ?? "auto"
             quickInputControlJNewline = boolValue("keyboard.quickInputControlJNewline", fallback: false)
             quickInputHeight = numberValue(
@@ -1676,6 +1730,7 @@ final class OhMyGhosttySettings: ObservableObject {
                     lines.append("\(descriptor.key) = \(value)")
                 }
             }
+            lines.append(contentsOf: tabNumberModifiers?.tabKeybindLines ?? [])
             let content = lines.joined(separator: "\n") + "\n"
             try OMGPrivateFileWriter.writeAtomically(Data(content.utf8), to: appearanceOverlayURL)
         } catch {

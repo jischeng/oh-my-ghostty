@@ -178,10 +178,10 @@ final class EditorCommandRouter {
     }
 
     func handle(_ event: NSEvent) -> Bool {
+        // Tab numbers follow the modifier chosen in Settings > Shortcuts.
+        let tabModifiers = OhMyGhosttySettings.shared.tabNumberModifiers?.flags ?? [.command]
         if event.type == .keyDown,
-           event.modifierFlags.contains(.command),
-           !event.modifierFlags.contains(.control),
-           !event.modifierFlags.contains(.option),
+           event.modifierFlags.intersection([.command, .control, .option]) == tabModifiers,
            let char = event.charactersIgnoringModifiers?.first,
            let digit = char.wholeNumberValue,
            (1...9).contains(digit) {

@@ -30,6 +30,8 @@ final class SettingsSwitch: NSSwitch {
 
 final class SettingsPopup: NSPopUpButton {
     var change: ((Int) -> Void)?
+    /// Choices shown but not selectable, e.g. ones another setting already uses.
+    var disabledIndices: Set<Int> = []
     init(titles: [String], selected: Int, change: @escaping (Int) -> Void) {
         super.init(frame: .zero, pullsDown: false)
         let choices = NSMenu()
@@ -47,16 +49,22 @@ final class SettingsPopup: NSPopUpButton {
     /// Open the choices below the control, as wide as it, instead of the stock
     /// pop-up that covers the control and its neighbouring rows.
     override func mouseDown(with event: NSEvent) {
-        guard isEnabled, let menu else { return }
+        guard isEnabled else { return }
         window?.makeFirstResponder(self)
-        menu.minimumWidth = bounds.width
-        for (index, item) in menu.items.enumerated() {
+        // A separate menu: items of the pop-up's own menu are re-targeted by
+        // AppKit, which selects the title without reporting the change.
+        let dropdown = NSMenu()
+        dropdown.autoenablesItems = false
+        dropdown.minimumWidth = bounds.width
+        for (index, title) in itemTitles.enumerated() {
+            let item = NSMenuItem(title: title, action: #selector(pick(_:)), keyEquivalent: "")
             item.tag = index
             item.target = self
-            item.action = #selector(pick(_:))
+            item.isEnabled = !disabledIndices.contains(index)
             item.state = index == indexOfSelectedItem ? .on : .off
+            dropdown.addItem(item)
         }
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: isFlipped ? bounds.maxY + 5 : -5), in: self)
+        dropdown.popUp(positioning: nil, at: NSPoint(x: 0, y: isFlipped ? bounds.maxY + 5 : -5), in: self)
     }
     @objc private func pick(_ item: NSMenuItem) {
         guard item.tag != indexOfSelectedItem else { return }

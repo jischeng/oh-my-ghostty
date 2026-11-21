@@ -538,4 +538,40 @@ struct SettingsControlsTests {
         let cli = AgentCLIInstallation(version: "Hermes Agent v0.23.2 (2026.9.24)\nInstall directory: /tmp/hermes\nPython: 3.14")
         #expect(cli.displayVersion == "Hermes Agent v0.23.2 (2026.9.24)")
     }
+
+    @Test func numberShortcutFamiliesShareOneModifierChoiceAndRebindTabsThroughTheRealCore() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("settings.json")
+        let settings = OhMyGhosttySettings(fileURL: url)
+        #expect(OMGNumberShortcutModifiers.shared(by: (1...4).map { settings.inspectorPanelShortcut(slot: $0) }) == .option)
+        settings.setInspectorPanelShortcut(slot: 2, value: "control+command+2")
+        #expect(OMGNumberShortcutModifiers.shared(by: (1...4).map { settings.inspectorPanelShortcut(slot: $0) }) == nil)
+        #expect(OMGNumberShortcutModifiers.controlCommand.symbols == "⌃⌘")
+        #expect(OMGNumberShortcutModifiers.command.tabKeybindLines.isEmpty)
+
+        settings.tabNumberModifiers = .controlOption
+        settings.toggleSidebarShortcut = "option+command+s"
+        let overlay = root.appendingPathComponent("appearance.ghostty")
+        let config = Ghostty.Config(at: overlay.path)
+        #expect(config.loaded && config.errors.isEmpty, "\(config.errors)")
+        #expect(config.keyboardShortcut(for: "goto_tab:3")?.modifiers == [.control, .option])
+        #expect(config.keyboardShortcut(for: "last_tab")?.modifiers == [.control, .option])
+
+        let restored = OhMyGhosttySettings(fileURL: url)
+        #expect(restored.tabNumberModifiers == .controlOption)
+        #expect(restored.toggleSidebarShortcut == "option+command+s")
+        restored.tabNumberModifiers = nil
+        #expect(Ghostty.Config(at: overlay.path).keyboardShortcut(for: "goto_tab:3")?.modifiers == [.command])
+
+        let menu = NSMenu()
+        let item = NSMenuItem(title: "Toggle Sidebar", action: #selector(AppDelegate.toggleSidebar(_:)), keyEquivalent: "b")
+        item.keyEquivalentModifierMask = [.command]
+        menu.addItem(item)
+        OMGMenuShortcuts.apply(to: menu, settings: restored)
+        #expect(item.keyEquivalent == "s" && item.keyEquivalentModifierMask == [.option, .command])
+        let own = OMGKeyboardShortcut(storageValue: "option+command+s")
+        #expect(own?.conflictingMenuItemTitle(in: menu) == "Toggle Sidebar")
+        #expect(own?.conflictingMenuItemTitle(in: menu, excluding: #selector(AppDelegate.toggleSidebar(_:))) == nil)
+    }
 }

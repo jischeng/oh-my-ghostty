@@ -320,6 +320,27 @@
       "pattern": "^(control\\+|option\\+|shift\\+|command\\+)+[^+]$",
       "type": "string"
     },
+    "keyboard.toggleSidebar": {
+      "category": "keyboard",
+      "default": "command+b",
+      "description": "Shortcut that shows or hides the tab sidebar.",
+      "pattern": "^(control\\+|option\\+|shift\\+|command\\+)+[^+]$",
+      "type": "string"
+    },
+    "keyboard.toggleInspector": {
+      "category": "keyboard",
+      "default": "shift+command+b",
+      "description": "Shortcut that shows or hides the right sidebar.",
+      "pattern": "^(control\\+|option\\+|shift\\+|command\\+)+[^+]$",
+      "type": "string"
+    },
+    "keyboard.tabNumberModifiers": {
+      "category": "keyboard",
+      "default": "",
+      "description": "Modifier keys for the tab 1-9 shortcuts. Empty keeps the Ghostty keybinds.",
+      "enum": ["", "command", "option", "control", "control+command", "option+command", "control+option"],
+      "type": "string"
+    },
     "keyboard.quickInputImportShortcut": {
       "category": "keyboard",
       "default": "auto",

@@ -282,7 +282,7 @@ class AppDelegate: NSObject,
             let key = notification.userInfo?[
                 OhMyGhosttySettings.changedKeyUserInfoKey
             ] as? String
-            if key == nil || key == "general.language" {
+            if key == nil || key == "general.language" || key?.hasPrefix("keyboard.toggle") == true {
                 applyMenuLocalization()
             }
             if key == nil || key == "sessions.startupMode" {
@@ -301,6 +301,7 @@ class AppDelegate: NSObject,
             to: NSApp.mainMenu,
             strings: SettingsStrings(language: OhMyGhosttySettings.shared.language)
         )
+        OMGMenuShortcuts.apply(to: NSApp.mainMenu, settings: .shared)
     }
 
     @objc private func ohMyGhosttyAppearanceDidChange(_ notification: Notification) {

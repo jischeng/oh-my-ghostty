@@ -14,6 +14,9 @@ struct OMGKeyboardShortcut: Equatable {
         modifiers: [.command, .shift]
     )
 
+    static let defaultToggleSidebar = OMGKeyboardShortcut(key: "b", modifiers: [.command])
+    static let defaultToggleInspector = OMGKeyboardShortcut(key: "b", modifiers: [.command, .shift])
+
     static let defaultInspectorPanel1 = OMGKeyboardShortcut(
         key: "1",
         modifiers: [.option]
@@ -103,12 +106,13 @@ struct OMGKeyboardShortcut: Equatable {
     }
 
     @MainActor
-    func conflictingMenuItemTitle() -> String? {
-        conflictingMenuItemTitle(in: NSApp.mainMenu)
+    func conflictingMenuItemTitle(excluding action: Selector? = nil) -> String? {
+        conflictingMenuItemTitle(in: NSApp.mainMenu, excluding: action)
     }
 
+    /// `action` names the menu item this shortcut itself belongs to, if any.
     @MainActor
-    func conflictingMenuItemTitle(in menu: NSMenu?) -> String? {
+    func conflictingMenuItemTitle(in menu: NSMenu?, excluding action: Selector? = nil) -> String? {
         if self == .quickInputHistory { return "Quick Input History (⌘⇧H)" }
         guard let menu else { return nil }
         for item in menu.items {
@@ -116,10 +120,11 @@ struct OMGKeyboardShortcut: Equatable {
                 .intersection(Self.relevantModifiers)
             if item.keyEquivalent.lowercased() == key,
                itemModifiers == modifiers,
-               !item.title.isEmpty {
+               !item.title.isEmpty,
+               action == nil || item.action != action {
                 return item.title
             }
-            if let conflict = conflictingMenuItemTitle(in: item.submenu) {
+            if let conflict = conflictingMenuItemTitle(in: item.submenu, excluding: action) {
                 return conflict
             }
         }

@@ -398,34 +398,90 @@ extension NativeSettingsController {
     }
 
     private func keyboard(_ form: NativeSettingsForm) {
-        form.section(strings.quickInputSection,
+        form.section(text("Windows & Panels", "窗口与面板"),
                      caption: text("Click a shortcut, then press the new key combination. Press Esc to cancel.",
                                    "点击快捷键后按下新的组合键即可修改，按 Esc 取消。"))
         shortcut(form, strings.quickInputShortcutLabel, value: settings.quickInputShortcut,
                  fallback: OMGKeyboardShortcut.defaultQuickInput.storageValue) { [weak settings] in settings?.quickInputShortcut = $0 }
-        form.section(strings.rightSidebarShortcutsSection)
-        for slot in 1...4 {
-            shortcut(form, strings.inspectorPanelSlotLabel(slot: slot), value: settings.inspectorPanelShortcut(slot: slot),
-                     fallback: OMGKeyboardShortcut.defaultInspectorPanel(slot: slot).storageValue) { [weak settings] in settings?.setInspectorPanelShortcut(slot: slot, value: $0)
-            }
+        shortcut(form, text("Show or Hide Left Sidebar", "显示或隐藏左侧边栏"), value: settings.toggleSidebarShortcut,
+                 fallback: OMGKeyboardShortcut.defaultToggleSidebar.storageValue,
+                 menuAction: #selector(AppDelegate.toggleSidebar(_:))) { [weak settings] in settings?.toggleSidebarShortcut = $0 }
+        shortcut(form, text("Show or Hide Right Sidebar", "显示或隐藏右侧边栏"), value: settings.toggleInspectorShortcut,
+                 fallback: OMGKeyboardShortcut.defaultToggleInspector.storageValue,
+                 menuAction: #selector(AppDelegate.toggleInspector(_:))) { [weak settings] in settings?.toggleInspectorShortcut = $0 }
+        shortcut(form, text("Workspace switcher", "工作区切换器"), value: TerminalWorkspaceStore.shared.shortcut(slot: 0),
+                 fallback: TerminalWorkspaceStore.defaultShortcut(slot: 0), workspaceSlot: 0) {
+            TerminalWorkspaceStore.shared.setShortcut(slot: 0, value: $0)
         }
-        form.section(text("Workspaces", "工作区"),
-                     caption: text("Workspace shortcuts must include Command.", "工作区快捷键必须包含 Command 键。"))
-        for slot in 0...9 {
-            shortcut(form, slot == 0 ? text("Workspace switcher", "工作区切换器") : text("Workspace \(slot)", "工作区 \(slot)"),
-                     value: TerminalWorkspaceStore.shared.shortcut(slot: slot),
-                     fallback: TerminalWorkspaceStore.defaultShortcut(slot: slot), workspaceSlot: slot) {
-                TerminalWorkspaceStore.shared.setShortcut(slot: slot, value: $0)
-            }
-        }
+        numberShortcuts(form)
         form.section(text("Terminal", "终端"))
         form.row(strings.keybindingsSection,
                  subtitle: text("Terminal keybindings are defined in the Ghostty config file.", "终端快捷键在 Ghostty 配置文件中定义。"),
                  control: SettingsActionButton(strings.openFileButton) { (NSApp.delegate as? AppDelegate)?.ghostty.openConfig() })
     }
 
+    /// One modifier choice per "modifier + digit" family instead of a row per digit.
+    private func numberShortcuts(_ form: NativeSettingsForm) {
+        typealias Modifiers = OMGNumberShortcutModifiers
+        form.section(strings.numberShortcutsSection,
+                     caption: text("Hold the modifier and press a number to jump straight to that position. Combinations used by another row are unavailable.",
+                                   "按住修饰键再按数字，直接切换到对应位置。已被其他行占用的组合不可选。"))
+        let settings = settings
+        let store = TerminalWorkspaceStore.shared
+        let digits = text("number", "数字")
+        func title(_ value: Modifiers) -> String { value.symbols + " + " + digits }
+        struct Family {
+            let options: [Modifiers?]
+            let current: () -> Modifiers?
+            let popup: SettingsPopup
+        }
+        var families: [Family] = []
+        let refresh = { (families: [Family]) in
+            for (index, family) in families.enumerated() {
+                let taken = families.enumerated().filter { $0.offset != index }.compactMap { $0.element.current() }
+                family.popup.disabledIndices = Set(family.options.indices.filter { index in
+                    family.options[index].map(taken.contains) ?? false
+                })
+            }
+        }
+        func family(_ label: String, range: String, options: [Modifiers], defaultTitle: String? = nil,
+                    current: @escaping () -> Modifiers?, apply: @escaping (Modifiers?) -> Void) {
+            // A leading nil entry is either the inherited default or a hand-edited mix.
+            let leading: [Modifiers?] = defaultTitle != nil || current() == nil ? [nil] : []
+            let all = leading + options.map(Optional.init)
+            let titles = all.map { $0.map(title) ?? defaultTitle ?? text("Custom", "自定义") }
+            let selected = defaultTitle != nil && settings.tabNumberModifiers == nil ? 0 : all.firstIndex(of: current()) ?? 0
+            let popup = SettingsPopup(titles: titles, selected: selected) { index in
+                guard all.indices.contains(index), all[index] != nil || defaultTitle != nil else { return }
+                apply(all[index])
+                refresh(families)
+            }
+            form.row(label, subtitle: range, control: popup)
+            families.append(.init(options: all, current: current, popup: popup))
+        }
+        family(text("Left Sidebar Tabs", "左侧标签页"), range: text("Tabs 1–9", "标签页 1–9"),
+               options: Modifiers.allCases.filter { $0 != .command },
+               defaultTitle: title(.command) + text(" (Ghostty default)", "（Ghostty 默认）"),
+               current: { settings.tabNumberModifiers ?? .command }, apply: { settings.tabNumberModifiers = $0 })
+        family(text("Right Sidebar Panels", "右侧面板"), range: text("Panels 1–4", "面板 1–4"), options: Modifiers.allCases,
+               current: { Modifiers.shared(by: (1...4).map { settings.inspectorPanelShortcut(slot: $0) }) },
+               apply: { value in
+                   guard let value else { return }
+                   for slot in 1...4 { settings.setInspectorPanelShortcut(slot: slot, value: value.shortcut(digit: slot)) }
+               })
+        // Workspace shortcuts are matched only for Command chords.
+        family(text("Workspaces", "工作区"), range: text("Workspaces 1–9", "工作区 1–9"),
+               options: Modifiers.allCases.filter { $0.flags.contains(.command) },
+               current: { Modifiers.shared(by: (1...9).map { store.shortcut(slot: $0) }) },
+               apply: { value in
+                   guard let value else { return }
+                   for slot in 1...9 { store.setShortcut(slot: slot, value: value.shortcut(digit: slot)) }
+               })
+        refresh(families)
+    }
+
     private func shortcut(_ form: NativeSettingsForm, _ title: String, value: String, fallback: String? = nil, workspaceSlot: Int? = nil,
-                          change: @escaping (String) -> Void) {
+                          menuAction: Selector? = nil, change: @escaping (String) -> Void) {
         let button = ShortcutRecorderButton()
         button.updateShortcut(value)
         let conflict = NSTextField(wrappingLabelWithString: "")
@@ -434,7 +490,7 @@ extension NativeSettingsController {
         let copy = strings
         func update(_ value: String) {
             let duplicate = workspaceSlot.flatMap { TerminalWorkspaceStore.shared.shortcutConflict(slot: $0) } ??
-                OMGKeyboardShortcut(storageValue: value)?.conflictingMenuItemTitle()
+                OMGKeyboardShortcut(storageValue: value)?.conflictingMenuItemTitle(excluding: menuAction)
             conflict.stringValue = duplicate.map {
                 copy.shortcutConflictCaption($0)
             } ?? ""

@@ -188,12 +188,15 @@ extension NativeSettingsController {
         guard let window = view.window else { return }
         let alert = NSAlert()
         alert.messageText = text("Operation details", "操作详情")
-        let scroll = NSScrollView(frame: .init(x: 0, y: 0, width: 500, height: 220))
+        let scroll = NSScrollView(frame: .init(x: 0, y: 0, width: 520, height: 240))
         scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
         let detail = NSTextView(frame: scroll.bounds)
         detail.isEditable = false
-        detail.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        detail.string = message
+        detail.drawsBackground = false
+        detail.autoresizingMask = [.width]
+        detail.textContainerInset = .init(width: 2, height: 4)
+        detail.textStorage?.setAttributedString(AgentIntegrationErrorHint.formatted(message))
         scroll.documentView = detail
         alert.accessoryView = scroll
         alert.beginSheetModal(for: window)
@@ -400,7 +403,7 @@ extension NativeSettingsController {
             guard let self else { return }
             form.section(agent.displayName)
             form.row(self.text("Command", "命令路径"), subtitle: snapshot.cli[agent]?.path ?? self.text("Not detected", "未发现"),
-                     control: NSTextField(labelWithString: snapshot.cli[agent]?.version ?? ""))
+                     control: NSTextField(labelWithString: snapshot.cli[agent]?.displayVersion ?? ""))
             var hookToggle: SettingsSwitch?
             if target == AgentIntegrationManager.localID || agent.definition.hook.kind != .none {
                 let toggle = SettingsSwitch(value: snapshot.hooks[agent]?.isInstalled == true) { _ in }

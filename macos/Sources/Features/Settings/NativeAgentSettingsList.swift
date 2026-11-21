@@ -77,10 +77,12 @@ final class NativeAgentSettingsList: NSViewController, NSTableViewDataSource, NS
         labels.alignment = .leading
         labels.spacing = 3
         let title = NSTextField(labelWithString: agent.displayName)
-        let detail = NSTextField(labelWithString: snapshot.cli[agent]?.version ??
+        let detail = NSTextField(labelWithString: snapshot.cli[agent]?.displayVersion ??
             (snapshot.cli[agent]?.path == nil ? strings.t("Not installed", "未安装") : strings.t("Available", "可用")))
         detail.font = .systemFont(ofSize: 11)
         detail.textColor = .secondaryLabelColor
+        detail.lineBreakMode = .byTruncatingTail
+        detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         labels.addArrangedSubview(title)
         labels.addArrangedSubview(detail)
         let arrow = NSImageView(image: NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil) ?? NSImage())

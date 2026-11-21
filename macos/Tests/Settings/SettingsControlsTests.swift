@@ -517,4 +517,25 @@ struct SettingsControlsTests {
         #expect(!tap.isWaitingForPermission)
         #expect(!tap.isTapEnabled)
     }
+
+    @Test func agentErrorsDropInterpreterScaffoldingAndVersionsStayOnOneLine() {
+        let message = """
+        Claude Code: Traceback (most recent call last):
+          File "<stdin>", line 78, in <module>
+        RuntimeError: Error: Failed to install native update
+        Socket is closed
+        Cursor Agent: Traceback (most recent call last):
+          File "<stdin>", line 78, in <module>
+        RuntimeError: Checking for updates...
+        Error: Update failed: [unauthenticated] Error
+        """
+        let sections = AgentIntegrationErrorHint.sections(message)
+        #expect(sections.map(\.agent) == ["Claude Code", "Cursor Agent"])
+        #expect(sections[0].lines == ["Failed to install native update", "Socket is closed"])
+        #expect(sections[1].lines == ["Checking for updates...", "Update failed: [unauthenticated] Error"])
+        #expect(!AgentIntegrationErrorHint.plain(message).contains("Traceback"))
+        #expect(AgentIntegrationErrorHint.sections("npm failed")[0].agent == nil)
+        let cli = AgentCLIInstallation(version: "Hermes Agent v0.23.2 (2026.9.24)\nInstall directory: /tmp/hermes\nPython: 3.14")
+        #expect(cli.displayVersion == "Hermes Agent v0.23.2 (2026.9.24)")
+    }
 }

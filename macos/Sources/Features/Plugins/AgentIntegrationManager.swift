@@ -48,6 +48,11 @@ struct AgentCLIInstallation: Codable, Equatable, Sendable {
     var path: String?
     var updater: String?
 
+    /// One-line version for lists; cached snapshots may still hold multi-line `--version` output.
+    var displayVersion: String? {
+        version?.split(whereSeparator: \.isNewline).first.map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
     var canAutomaticallyUpdate: Bool { package != nil || updater == "native" }
     var needsUpdateCheck: Bool { updateAvailable || updater == "native" }
 
@@ -756,7 +761,9 @@ for agent, command in COMMANDS.items():
     else:
         try:
             version = run([path, "--version"], timeout=8)
-            if version.returncode == 0: item["version"] = version.stdout.strip()[:160]
+            lines = version.stdout.strip().splitlines()
+            # Some CLIs print install details after the version; keep the headline only.
+            if version.returncode == 0 and lines: item["version"] = lines[0].strip()[:160]
         except (subprocess.TimeoutExpired, OSError): pass
     # Reasonix refuses self-upgrade for package-manager installations. Droid's
     # npm builds are pinned; Grok/Qwen self-update only standalone installs.

@@ -363,7 +363,7 @@ struct AgentIntegrationSettingsView: View {
     private func cliStatus(_ cli: AgentCLIInstallation?) -> String {
         guard let cli else { return strings.agentNotChecked }
         guard cli.path != nil else { return strings.agentCLIMissing }
-        let version = cli.version ?? strings.agentVersionUnknown
+        let version = cli.displayVersion ?? strings.agentVersionUnknown
         if let latest = cli.latest, cli.updateAvailable { return "\(version) → \(latest)" }
         return version
     }

@@ -39,11 +39,16 @@ final class BuiltInInfoInspectorProvider {
     }
 
     private enum AgentSessionLookup {
-        case pending
+        case pending(attempt: Int)
         case resolved(String)
         /// Not found at this time; a new conversation may not be on disk yet.
-        case missing(ContinuousClock.Instant)
+        case missing(ContinuousClock.Instant, attempt: Int)
     }
+
+    /// An Agent writes its transcript on the first message, after it has
+    /// attached to the pane, and nothing else republishes Info at that point.
+    /// A few timed retries cover that gap without polling indefinitely.
+    static let agentSessionTimedRetries = 6
 
     private let registry: InspectorRegistry
     private let portForwards: SSHPortForwardService
@@ -360,26 +365,40 @@ final class BuiltInInfoInspectorProvider {
         )
     }
 
-    /// Returns the cached transcript path, locating it once in the background.
+    /// Returns the cached transcript path, locating it in the background.
     private func agentSessionPath(agent: SupportedAgent, conversationID: AgentConversationID) -> String? {
         let key = AgentSessionKey(agent: agent, conversationID: conversationID)
+        let attempt: Int
         switch agentSessions[key] {
         case .resolved(let path):
             return path
         case .pending:
             return nil
-        case .missing(let at) where ContinuousClock.now - at < agentSessionRetryInterval:
+        case .missing(let at, _) where ContinuousClock.now - at < agentSessionRetryInterval:
             return nil
-        case .missing, nil:
-            break
+        case .missing(_, let previous):
+            attempt = previous + 1
+        case nil:
+            attempt = 1
         }
-        agentSessions[key] = .pending
+        agentSessions[key] = .pending(attempt: attempt)
         let resolver = agentSessionResolver
+        let retryInterval = agentSessionRetryInterval
         Task { [weak self] in
             let path = await resolver(agent, conversationID)
             guard let self else { return }
-            agentSessions[key] = path.map(AgentSessionLookup.resolved) ?? .missing(.now)
-            if path != nil { publishPresentedContexts() }
+            guard path == nil else {
+                agentSessions[key] = path.map(AgentSessionLookup.resolved)
+                publishPresentedContexts()
+                return
+            }
+            agentSessions[key] = .missing(.now, attempt: attempt)
+            guard attempt <= Self.agentSessionTimedRetries else { return }
+            // Each wait doubles, so six lookups span about a quarter of an
+            // hour by default. Republishing asks again only while a presented
+            // pane still shows this conversation; otherwise the retries stop.
+            try? await Task.sleep(for: retryInterval * (1 << (attempt - 1)))
+            publishPresentedContexts()
         }
         return nil
     }

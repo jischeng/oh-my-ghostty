@@ -57,7 +57,9 @@ struct GitCommitAISettingsNativeTests {
 
         #expect(!containsHostingView(root))
         #expect(root.subviews.contains { $0 is NSStackView })
-        #expect(root.findViews(of: NSPopUpButton.self).contains { $0.numberOfItems == GitCommitAgent.allCases.count })
+        let tabs = root.findViews(of: GitCommitAgentTab.self)
+        #expect(tabs.map(\.agent) == GitCommitAgent.allCases)
+        #expect(tabs.filter(\.isSelected).map(\.agent) == [.claude])
         #expect(root.findViews(of: NSSearchField.self).count == 1)
         #expect(root.findViews(of: NSTableView.self).contains { $0.numberOfColumns == 1 })
     }

@@ -456,7 +456,7 @@ final class GitCommitAIPromptController: GitCommitSettingsPanelController, NSTex
 final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
     NSSearchFieldDelegate, NSTableViewDataSource, NSTableViewDelegate {
     private let add: (GitCommitAgent, [String]) -> Void
-    private let agentPicker = NSPopUpButton()
+    private var agentTabs: [GitCommitAgentTab] = []
     private let searchField = NSSearchField()
     private let modelTable = NSTableView()
     private let tableScroll = NSScrollView()
@@ -502,14 +502,18 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
         helpField.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         helpField.maximumNumberOfLines = 0
 
-        agentPicker.removeAllItems()
-        for value in GitCommitAgent.allCases {
-            agentPicker.addItem(withTitle: value.title)
-            agentPicker.lastItem?.representedObject = value.rawValue
+        // Every Agent stays visible and one click away; a pop-up hid three of four.
+        agentTabs = GitCommitAgent.allCases.map { value in
+            let tab = GitCommitAgentTab(agent: value) { [weak self] in self?.selectAgent(value) }
+            tab.isSelected = value == agent
+            return tab
         }
-        agentPicker.target = self
-        agentPicker.action = #selector(agentChanged)
-        agentPicker.setAccessibilityLabel(GitL10n.text("Agent"))
+        let tabs = NSStackView(views: agentTabs)
+        tabs.orientation = .horizontal
+        tabs.distribution = .fillEqually
+        tabs.spacing = 8
+        tabs.setAccessibilityLabel(GitL10n.text("Agent"))
+        tabs.setAccessibilityRole(.radioGroup)
         searchField.placeholderString = GitL10n.text("Search models…")
         searchField.delegate = self
         searchField.sendsSearchStringImmediately = true
@@ -523,8 +527,7 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
         reloadButton.toolTip = GitL10n.text("Reload")
         reloadButton.setAccessibilityLabel(GitL10n.text("Reload"))
         reloadButton.setAccessibilityIdentifier("git.commit-ai.models.reload")
-        // One toolbar row: which Agent, filter its models, refresh the list.
-        let toolbar = NSStackView(views: [agentPicker, searchField, reloadButton])
+        let toolbar = NSStackView(views: [searchField, reloadButton])
         toolbar.orientation = .horizontal
         toolbar.spacing = 8
 
@@ -611,7 +614,7 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
         actions.orientation = .horizontal
         actions.spacing = 8
         actions.translatesAutoresizingMaskIntoConstraints = false
-        let stack = NSStackView(views: [title, helpField, toolbar, list, update, errorField, actions])
+        let stack = NSStackView(views: [title, helpField, tabs, toolbar, list, update, errorField, actions])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 10
@@ -627,7 +630,7 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
             stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
             helpField.widthAnchor.constraint(equalTo: stack.widthAnchor),
             toolbar.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            agentPicker.widthAnchor.constraint(equalToConstant: 170),
+            tabs.widthAnchor.constraint(equalTo: stack.widthAnchor),
             reloadButton.widthAnchor.constraint(equalToConstant: 34),
             list.widthAnchor.constraint(equalTo: stack.widthAnchor),
             list.heightAnchor.constraint(equalToConstant: 300),
@@ -720,10 +723,10 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
         updateButtons()
     }
 
-    @objc private func agentChanged() {
-        guard let raw = agentPicker.selectedItem?.representedObject as? String,
-              let value = GitCommitAgent(rawValue: raw), value != agent else { return }
+    private func selectAgent(_ value: GitCommitAgent) {
+        guard value != agent, !updating else { return }
         agent = value
+        agentTabs.forEach { $0.isSelected = $0.agent == value }
         selected = []
         query = ""
         models = []
@@ -852,7 +855,7 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
     private func updateButtons() {
         guard isViewLoaded else { return }
         refreshPlaceholder()
-        agentPicker.isEnabled = !updating
+        agentTabs.forEach { $0.isEnabled = !updating }
         searchField.isEnabled = !updating
         modelTable.isEnabled = !updating
         reloadButton.isEnabled = !loading && !updating
@@ -880,6 +883,88 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
         closePanel()
     }
 
+}
+
+/// One Agent in the sheet's selector row: icon and name on a rounded tile.
+@MainActor
+final class GitCommitAgentTab: NSView {
+    let agent: GitCommitAgent
+    private let select: () -> Void
+    private let icon = NSImageView()
+    private let label = NSTextField(labelWithString: "")
+    private var hovering = false { didSet { needsDisplay = true } }
+    var isSelected = false { didSet { refresh() } }
+    var isEnabled = true { didSet { refresh() } }
+
+    init(agent: GitCommitAgent, select: @escaping () -> Void) {
+        self.agent = agent
+        self.select = select
+        super.init(frame: .zero)
+        icon.image = SupportedAgent(rawValue: agent.rawValue).flatMap { NSImage(named: $0.assetName) }
+            ?? NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        label.stringValue = agent.title
+        label.font = .systemFont(ofSize: 12, weight: .medium)
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let content = NSStackView(views: [icon, label])
+        content.spacing = 7
+        content.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(content)
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 36),
+            icon.widthAnchor.constraint(equalToConstant: 16),
+            icon.heightAnchor.constraint(equalToConstant: 16),
+            content.centerXAnchor.constraint(equalTo: centerXAnchor),
+            content.centerYAnchor.constraint(equalTo: centerYAnchor),
+            content.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 8),
+            content.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -8),
+        ])
+        setAccessibilityElement(true)
+        setAccessibilityRole(.radioButton)
+        setAccessibilityLabel(agent.title)
+        refresh()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    private func refresh() {
+        label.textColor = isSelected ? .labelColor : .secondaryLabelColor
+        alphaValue = isEnabled ? 1 : 0.5
+        setAccessibilityValue(isSelected)
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let tile = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 8, yRadius: 8)
+        if isSelected {
+            NSColor.controlAccentColor.withAlphaComponent(0.18).setFill()
+            tile.fill()
+            NSColor.controlAccentColor.withAlphaComponent(0.75).setStroke()
+        } else {
+            NSColor.labelColor.withAlphaComponent(hovering && isEnabled ? 0.10 : 0.05).setFill()
+            tile.fill()
+            NSColor.labelColor.withAlphaComponent(0.12).setStroke()
+        }
+        tile.stroke()
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                                       owner: self))
+    }
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+    override func mouseDown(with event: NSEvent) {
+        if isEnabled { select() }
+    }
+    override func accessibilityPerformPress() -> Bool {
+        guard isEnabled else { return false }
+        select()
+        return true
+    }
 }
 
 @MainActor

@@ -59,6 +59,20 @@ struct InspectorFileTreeViewTests {
         #expect(controller.outline.selectedRow == -1)
     }
 
+    @Test func filesPaneStringsFollowTheLanguageSetting() {
+        let english = FilesStrings(language: .english)
+        let chinese = FilesStrings(language: .simplifiedChinese)
+        #expect(english.title == "Files")
+        #expect(chinese.title == "文件")
+        #expect(english.rename == "Rename…")
+        #expect(chinese.rename == "重命名…")
+        #expect(chinese.openIn == "打开方式…")
+        #expect(chinese.renameTitle("a.txt") == "重命名 a.txt")
+        #expect(chinese.createMessage(folder: "src") == "请输入名称，将创建在 src 中。")
+        #expect(chinese.destinationTitle(.currentPane) == "当前窗格")
+        #expect(english.destinationTitle(.currentPane) == "Current Pane")
+    }
+
     @Test func menuActionsKeepTheContextThatOpenedTheMenu() throws {
         let controller = InspectorFileTreeController()
         let tree = InspectorFileTree(rootName: "repo", rootPath: "/repo", nodes: [file("/repo/one")])
@@ -67,7 +81,7 @@ struct InspectorFileTreeViewTests {
         controller.update(tree, isLight: false) { first.append($0) }
         let menu = controller.menu(for: try #require(controller.items["/repo/one"]))
         controller.update(tree, isLight: false) { second.append($0) }
-        let rename = try #require(menu.items.first { $0.title == "Rename…" })
+        let rename = try #require(menu.items.first { $0.title == FilesStrings.current.rename })
         let action = try #require(rename.action)
         NSApp.sendAction(action, to: rename.target, from: rename)
         #expect(first == [.renameFile(path: "/repo/one")])

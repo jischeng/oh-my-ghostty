@@ -164,6 +164,7 @@ final class BuiltInFilesInspectorProvider {
     private var loadTasks: [LoadKey: Task<Void, Never>] = [:]
     private var visibleTabs: Set<UUID> = []
     private var directoryWatchers: [UUID: LocalFilesDirectoryWatcher] = [:]
+    private var languageObserver: NSObjectProtocol?
 
     var activeWatchedDirectoryCountForTesting: Int {
         directoryWatchers.values.reduce(0) { $0 + $1.watchedDirectoryCount }
@@ -186,18 +187,43 @@ final class BuiltInFilesInspectorProvider {
         self.currentDocumentPath = currentDocumentPath
         self.fsEventDebounceInterval = fsEventDebounceInterval
         self.openFile = openFile
+        languageObserver = NotificationCenter.default.addObserver(
+            forName: OhMyGhosttySettings.didChangeNotification,
+            object: OhMyGhosttySettings.shared,
+            queue: .main
+        ) { [weak self] notification in
+            guard notification.userInfo?[
+                OhMyGhosttySettings.changedKeyUserInfoKey
+            ] as? String == "general.language" else { return }
+            Task { @MainActor [weak self] in self?.refreshLocalization() }
+        }
     }
 
     deinit {
         for task in loadTasks.values {
             task.cancel()
         }
+        if let languageObserver { NotificationCenter.default.removeObserver(languageObserver) }
+    }
+
+    /// The pane title follows the live language setting; rows, menus and
+    /// dialogs read it when they are next shown.
+    private func refreshLocalization() {
+        do {
+            try registry.updatePluginPaneTitle(
+                paneID: Self.paneID,
+                pluginID: Self.pluginID,
+                title: FilesStrings.current.title
+            )
+        } catch {
+            Self.logger.error("failed to localize Files: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     func register() throws {
         let descriptor = InspectorPaneDescriptor(
             id: Self.paneID,
-            title: "Files",
+            title: FilesStrings.current.title,
             systemImage: "folder",
             source: .plugin(Self.pluginID),
             preferredWidth: RightInspectorMetrics.defaultWidth,
@@ -238,8 +264,8 @@ final class BuiltInFilesInspectorProvider {
             states.removeValue(forKey: context.tabID)
             publish(
                 .empty(
-                    title: "Files",
-                    message: "The terminal has not reported a working directory."
+                    title: FilesStrings.current.title,
+                    message: FilesStrings.current.noWorkingDirectory
                 ),
                 tabID: context.tabID
             )
@@ -441,7 +467,7 @@ final class BuiltInFilesInspectorProvider {
 
     private func showError(_ error: Error) {
         let alert = NSAlert()
-        alert.messageText = "File operation failed"
+        alert.messageText = FilesStrings.current.operationFailed
         alert.informativeText = error.localizedDescription
         alert.alertStyle = .warning
         alert.runModal()
@@ -451,15 +477,14 @@ final class BuiltInFilesInspectorProvider {
         let state = state(for: context)
         guard let tree = state.tree, let node = Self.findNode(id: path, in: tree.nodes) else { return }
         guard !EditorWorkspaceStore.shared.containsOpenDocument(path: path, descriptor: state.filesystem.descriptor) else {
-            showError(WorkspaceFilesystemError.operationFailed(
-                "Close this file and any open files inside this folder before renaming it."
-            ))
+            showError(WorkspaceFilesystemError.operationFailed(FilesStrings.current.closeBeforeRenaming))
             return
         }
         let alert = NSAlert()
-        alert.messageText = "Rename \(node.name)"
-        alert.addButton(withTitle: "Rename")
-        alert.addButton(withTitle: "Cancel")
+        let strings = FilesStrings.current
+        alert.messageText = strings.renameTitle(node.name)
+        alert.addButton(withTitle: strings.renameButton)
+        alert.addButton(withTitle: strings.cancel)
         let field = NSTextField(string: (node.id as NSString).lastPathComponent)
         field.frame = NSRect(x: 0, y: 0, width: 300, height: 24)
         alert.accessoryView = field
@@ -472,7 +497,7 @@ final class BuiltInFilesInspectorProvider {
         }
         guard name != (node.id as NSString).lastPathComponent else { return }
         guard !EditorWorkspaceStore.shared.containsOpenDocument(path: path, descriptor: state.filesystem.descriptor) else {
-            showError(WorkspaceFilesystemError.operationFailed("Close this file and any open files inside this folder before renaming it."))
+            showError(WorkspaceFilesystemError.operationFailed(strings.closeBeforeRenaming))
             return
         }
         Task { [weak self] in
@@ -499,13 +524,14 @@ final class BuiltInFilesInspectorProvider {
         guard let tree = state.tree, let node = Self.findNode(id: path, in: tree.nodes) else { return }
         let remote = state.filesystem.descriptor.kind == .ssh
         guard !remote || !node.isDirectory else {
-            showError(WorkspaceFilesystemError.operationFailed("Open in… supports remote files, but not remote folders."))
+            showError(WorkspaceFilesystemError.operationFailed(FilesStrings.current.remoteFoldersUnsupported))
             return
         }
+        let strings = FilesStrings.current
         let panel = NSOpenPanel()
-        panel.title = remote ? "Open a read-only downloaded copy in…" : "Open in…"
-        panel.message = remote ? "Changes in the other app will not be uploaded to the server." : "Choose an application."
-        panel.prompt = "Open"
+        panel.title = remote ? strings.openRemoteCopyIn : strings.openIn
+        panel.message = remote ? strings.remoteCopyMessage : strings.chooseApplication
+        panel.prompt = strings.open
         panel.directoryURL = URL(fileURLWithPath: "/Applications")
         panel.allowedContentTypes = [.applicationBundle]
         panel.canChooseDirectories = false
@@ -567,7 +593,7 @@ final class BuiltInFilesInspectorProvider {
                       states[context.tabID]?.generation == generation,
                       states[context.tabID]?.tree == nil else { return }
                 publish(
-                    .empty(title: "Files", message: "Loading…"),
+                    .empty(title: FilesStrings.current.title, message: FilesStrings.current.loading),
                     tabID: context.tabID
                 )
                 loadTasks.removeValue(forKey: loadingKey)
@@ -796,13 +822,14 @@ final class BuiltInFilesInspectorProvider {
 
     private func promptCreate(directory: Bool, parent: String?, context: InspectorPaneContext) {
         let alert = NSAlert()
-        alert.messageText = directory ? "New Folder" : "New File"
+        let strings = FilesStrings.current
+        alert.messageText = directory ? strings.newFolder : strings.newFile
         let folder = ((parent ?? state(for: context).rootPath) as NSString).lastPathComponent
-        alert.informativeText = "Enter a name. It is created in \(folder)."
-        alert.addButton(withTitle: "Create")
-        alert.addButton(withTitle: "Cancel")
+        alert.informativeText = strings.createMessage(folder: folder)
+        alert.addButton(withTitle: strings.create)
+        alert.addButton(withTitle: strings.cancel)
         let field = NSTextField(string: "")
-        field.placeholderString = directory ? "folder" : "file.txt"
+        field.placeholderString = directory ? strings.folderPlaceholder : "file.txt"
         field.frame = NSRect(x: 0, y: 0, width: 300, height: 24)
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
@@ -945,8 +972,8 @@ final class BuiltInFilesInspectorProvider {
             ))
         } catch {
             return .empty(
-                title: "Files",
-                message: "The current working directory is unavailable."
+                title: FilesStrings.current.title,
+                message: FilesStrings.current.workingDirectoryUnavailable
             )
         }
     }

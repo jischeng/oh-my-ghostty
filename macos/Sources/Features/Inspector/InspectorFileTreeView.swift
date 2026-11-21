@@ -35,6 +35,8 @@ final class InspectorFileTreeController: NSViewController, NSOutlineViewDataSour
     private var appliedRevealToken: UInt64?
     private var isLight = false
     private var perform: (InspectorPaneActionKind) -> Void = { _ in }
+    private var strings: FilesStrings { .current }
+    private var toolbarStrings: FilesStrings?
 
     override func loadView() {
         view = NSView()
@@ -61,7 +63,7 @@ final class InspectorFileTreeController: NSViewController, NSOutlineViewDataSour
         outline.openSelection = { [weak self] in self?.openSelectedItem() }
         outline.renameSelection = { [weak self] in self?.renameSelectedItem() }
         outline.menuForItem = { [weak self] item in self?.menu(for: item) }
-        outline.setAccessibilityLabel("Files")
+        outline.setAccessibilityLabel(strings.title)
         scrollView.documentView = outline
         scrollView.hasVerticalScroller = true
         scrollView.drawsBackground = false
@@ -102,6 +104,7 @@ final class InspectorFileTreeController: NSViewController, NSOutlineViewDataSour
     func update(_ tree: InspectorFileTree, isLight: Bool, perform: @escaping (InspectorPaneActionKind) -> Void) {
         _ = view
         self.perform = perform
+        localizeToolbar()
         let themeChanged = self.isLight != isLight
         self.isLight = isLight
         if lastTree == tree, !themeChanged { return }
@@ -193,25 +196,45 @@ final class InspectorFileTreeController: NSViewController, NSOutlineViewDataSour
 
     // MARK: Toolbar
 
-    private lazy var toolbarButtons: [NativeActionControl] = [
-        toolbarButton("doc.badge.plus", help: "New File", identifier: "files.new-file", action: #selector(newFile)),
-        toolbarButton("folder.badge.plus", help: "New Folder", identifier: "files.new-folder", action: #selector(newFolder)),
-        toolbarButton("scope", help: "Locate Current File", identifier: "files.locate-current-file",
-                      action: #selector(locateCurrentFile)),
-        toolbarButton("arrow.down.right.and.arrow.up.left", help: "Collapse All", identifier: "files.collapse-all",
-                      action: #selector(collapseAll)),
-        toolbarButton("arrow.up.left.and.arrow.down.right", help: "Expand All", identifier: "files.expand-all",
-                      action: #selector(expandAll)),
+    private struct ToolbarItem {
+        let symbol: String
+        let help: KeyPath<FilesStrings, String>
+        let identifier: String
+        let action: Selector
+    }
+
+    private static let toolbarItems: [ToolbarItem] = [
+        .init(symbol: "doc.badge.plus", help: \.newFile, identifier: "files.new-file",
+              action: #selector(newFile)),
+        .init(symbol: "folder.badge.plus", help: \.newFolder, identifier: "files.new-folder",
+              action: #selector(newFolder)),
+        .init(symbol: "scope", help: \.locateCurrentFile, identifier: "files.locate-current-file",
+              action: #selector(locateCurrentFile)),
+        .init(symbol: "arrow.down.right.and.arrow.up.left", help: \.collapseAll,
+              identifier: "files.collapse-all", action: #selector(collapseAll)),
+        .init(symbol: "arrow.up.left.and.arrow.down.right", help: \.expandAll,
+              identifier: "files.expand-all", action: #selector(expandAll)),
     ]
 
-    private func toolbarButton(
-        _ symbol: String,
-        help: String,
-        identifier: String,
-        action: Selector
-    ) -> NativeActionControl {
+    private lazy var toolbarButtons: [NativeActionControl] = Self.toolbarItems.map(toolbarButton)
+
+    /// Tooltips follow the live language setting without rebuilding buttons.
+    private func localizeToolbar() {
+        let strings = strings
+        guard toolbarStrings != strings else { return }
+        toolbarStrings = strings
+        outline.setAccessibilityLabel(strings.title)
+        for (button, item) in zip(toolbarButtons, Self.toolbarItems) {
+            button.configure(title: "", symbol: item.symbol, help: strings[keyPath: item.help],
+                             enabled: true, style: .plain, identifier: item.identifier)
+        }
+    }
+
+    private func toolbarButton(_ item: ToolbarItem) -> NativeActionControl {
+        let action = item.action
         let button = NativeActionControl()
-        button.configure(title: "", symbol: symbol, help: help, enabled: true, style: .plain, identifier: identifier)
+        button.configure(title: "", symbol: item.symbol, help: strings[keyPath: item.help],
+                         enabled: true, style: .plain, identifier: item.identifier)
         button.showsKeyboardFocusBorder = false
         button.restingSymbolAlpha = 0.72
         button.onPress = { [weak self] in
@@ -293,17 +316,19 @@ final class InspectorFileTreeController: NSViewController, NSOutlineViewDataSour
             command.representedObject = MenuAction(action, perform: perform)
             menu.addItem(command)
         }
-        add("Copy Path", .copyFilePath(path: path, relative: false), to: menu)
-        add("Copy Relative Path", .copyFilePath(path: path, relative: true), to: menu)
-        add("Rename…", .renameFile(path: path), to: menu)
-        add("Open in…", .openFileExternally(path: path), to: menu)
+        let strings = strings
+        add(strings.copyPath, .copyFilePath(path: path, relative: false), to: menu)
+        add(strings.copyRelativePath, .copyFilePath(path: path, relative: true), to: menu)
+        add(strings.rename, .renameFile(path: path), to: menu)
+        add(strings.openIn, .openFileExternally(path: path), to: menu)
         if !item.node.isDirectory {
             menu.addItem(.separator())
-            add("Open in Editor", .openFile(path: path, destination: .currentPane), to: menu)
-            let side = NSMenuItem(title: "Open to the Side", action: nil, keyEquivalent: "")
+            add(strings.openInEditor, .openFile(path: path, destination: .currentPane), to: menu)
+            let side = NSMenuItem(title: strings.openToTheSide, action: nil, keyEquivalent: "")
             let destinations = NSMenu()
             for destination in EditorOpenDestination.allCases {
-                add(destination.title, .openFile(path: path, destination: destination), to: destinations)
+                add(strings.destinationTitle(destination),
+                    .openFile(path: path, destination: destination), to: destinations)
             }
             side.submenu = destinations
             menu.addItem(side)

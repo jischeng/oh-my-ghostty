@@ -14,7 +14,7 @@ struct GitCommitAIRoutesTable: NSViewRepresentable {
     }
 
     static func makeNativeView(coordinator: Coordinator) -> NSScrollView {
-        let scrollView = NSScrollView()
+        let scrollView = SettingsNestedScrollView()
         scrollView.drawsBackground = false
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
@@ -326,11 +326,24 @@ final class GitCommitAIPromptController: GitCommitSettingsPanelController, NSTex
         let title = NSTextField(labelWithString: GitL10n.text("Custom commit prompt"))
         title.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
         let scroll = NSScrollView()
-        scroll.borderType = .bezelBorder
+        // A quiet inset field in the sheet's own colours, not a black bezel box.
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
+        scroll.scrollerStyle = .overlay
+        let field = NSBox()
+        field.boxType = .custom
+        field.cornerRadius = 8
+        field.borderWidth = 1
+        field.borderColor = NSColor.labelColor.withAlphaComponent(0.14)
+        field.fillColor = NSColor.labelColor.withAlphaComponent(0.05)
+        field.contentViewMargins = .zero
+        field.contentView = scroll
         scroll.hasVerticalScroller = true
+        promptView.drawsBackground = false
+        promptView.textContainerInset = NSSize(width: 8, height: 10)
         promptView.isRichText = false
         promptView.allowsUndo = true
-        promptView.font = .monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        promptView.font = .systemFont(ofSize: NSFont.systemFontSize)
         promptView.string = prompt
         promptView.delegate = self
         promptView.setAccessibilityLabel(GitL10n.text("Custom commit prompt"))
@@ -344,7 +357,7 @@ final class GitCommitAIPromptController: GitCommitSettingsPanelController, NSTex
                                     height: CGFloat.greatestFiniteMagnitude)
         promptView.frame = NSRect(x: 0, y: 0, width: 520, height: 250)
         scroll.documentView = promptView
-        scroll.translatesAutoresizingMaskIntoConstraints = false
+        field.translatesAutoresizingMaskIntoConstraints = false
         let help = NSTextField(wrappingLabelWithString: GitL10n.text(
             "Specify language, format and commit style. Applied to all models, including fallbacks. Leave empty to follow recent commits."
         ))
@@ -358,12 +371,15 @@ final class GitCommitAIPromptController: GitCommitSettingsPanelController, NSTex
         saveButton.bezelStyle = .rounded
         saveButton.target = self
         saveButton.action = #selector(savePrompt)
+        saveButton.keyEquivalent = "\r"
+        saveButton.keyEquivalentModifierMask = .command
+        saveButton.bezelColor = .controlAccentColor
         saveButton.setAccessibilityIdentifier("git.commit-ai.prompt.save")
         let actions = NSStackView(views: [NSView(), cancel, saveButton])
         actions.orientation = .horizontal
         actions.spacing = 8
         actions.translatesAutoresizingMaskIntoConstraints = false
-        let stack = NSStackView(views: [title, scroll, help, actions])
+        let stack = NSStackView(views: [title, field, help, actions])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
@@ -374,8 +390,8 @@ final class GitCommitAIPromptController: GitCommitSettingsPanelController, NSTex
             stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
             stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 18),
             stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
-            scroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            scroll.heightAnchor.constraint(equalToConstant: 250),
+            field.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            field.heightAnchor.constraint(equalToConstant: 250),
             actions.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
         view = root

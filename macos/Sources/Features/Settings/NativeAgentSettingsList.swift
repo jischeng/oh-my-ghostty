@@ -24,7 +24,8 @@ final class NativeAgentSettingsList: NSViewController, NSTableViewDataSource, NS
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override func loadView() {
-        let scroll = NSScrollView()
+        // Sized to its rows by the form, so the wheel must reach the page.
+        let scroll = SettingsNestedScrollView()
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true

@@ -43,6 +43,26 @@ final class SettingsPopup: NSPopUpButton {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     @objc private func changed() { change?(indexOfSelectedItem) }
+
+    /// Open the choices below the control, as wide as it, instead of the stock
+    /// pop-up that covers the control and its neighbouring rows.
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled, let menu else { return }
+        window?.makeFirstResponder(self)
+        menu.minimumWidth = bounds.width
+        for (index, item) in menu.items.enumerated() {
+            item.tag = index
+            item.target = self
+            item.action = #selector(pick(_:))
+            item.state = index == indexOfSelectedItem ? .on : .off
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: isFlipped ? bounds.maxY + 5 : -5), in: self)
+    }
+    @objc private func pick(_ item: NSMenuItem) {
+        guard item.tag != indexOfSelectedItem else { return }
+        selectItem(at: item.tag)
+        changed()
+    }
 }
 
 final class SettingsTextField: NSTextField, NSTextFieldDelegate {

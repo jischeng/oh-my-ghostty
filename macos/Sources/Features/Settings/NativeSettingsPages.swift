@@ -67,7 +67,8 @@ extension NativeSettingsController {
             update(settings.gitCommitAIRoutes)
             let token = settings.$gitCommitAIRoutes.receive(on: RunLoop.main).sink { update($0) }
             form.retained.append(token)
-            form.row(text("Commit style", "提交风格"),
+            form.section(text("Commit style", "提交风格"))
+            form.row(text("Custom prompt", "自定义提示词"),
                      subtitle: text("Custom instructions for generated messages.", "自定义生成提交信息时使用的提示词。"),
                      control: SettingsActionButton(text("Edit…", "编辑…")) { [weak self] in
                 guard let self else { return }; GitCommitAISettingsPanel.presentPrompt(settings: self.settings, from: self.view.window)
@@ -408,15 +409,13 @@ extension NativeSettingsController {
                      fallback: OMGKeyboardShortcut.defaultInspectorPanel(slot: slot).storageValue) { [weak settings] in settings?.setInspectorPanelShortcut(slot: slot, value: $0)
             }
         }
-        more(form, text("Workspace shortcuts", "工作区快捷键")) { [weak self] page in
-            guard let self else { return }
-            page.section(self.text("Workspaces", "工作区"))
-            for slot in 0...9 {
-                self.shortcut(page, slot == 0 ? self.text("Workspace switcher", "工作区切换器") : self.text("Workspace \(slot)", "工作区 \(slot)"),
-                              value: TerminalWorkspaceStore.shared.shortcut(slot: slot),
-                              fallback: TerminalWorkspaceStore.defaultShortcut(slot: slot), workspaceSlot: slot) {
-                    TerminalWorkspaceStore.shared.setShortcut(slot: slot, value: $0)
-                }
+        form.section(text("Workspaces", "工作区"),
+                     caption: text("Workspace shortcuts must include Command.", "工作区快捷键必须包含 Command 键。"))
+        for slot in 0...9 {
+            shortcut(form, slot == 0 ? text("Workspace switcher", "工作区切换器") : text("Workspace \(slot)", "工作区 \(slot)"),
+                     value: TerminalWorkspaceStore.shared.shortcut(slot: slot),
+                     fallback: TerminalWorkspaceStore.defaultShortcut(slot: slot), workspaceSlot: slot) {
+                TerminalWorkspaceStore.shared.setShortcut(slot: slot, value: $0)
             }
         }
         form.section(text("Terminal", "终端"))
@@ -443,19 +442,31 @@ extension NativeSettingsController {
         }
         update(value)
         var current = value
-        button.onCapture = { [weak button] shortcut in
+        // A fixed width keeps the column aligned while the title changes during recording.
+        button.widthAnchor.constraint(equalToConstant: 120).isActive = true
+        button.toolTip = text("Click, then press a new shortcut", "点击后按下新的快捷键")
+        let reset = SettingsActionButton("") {}
+        reset.image = NSImage(systemSymbolName: "arrow.counterclockwise", accessibilityDescription: text("Reset", "重置"))
+        reset.imagePosition = .imageOnly
+        reset.isBordered = false
+        reset.toolTip = text("Restore default shortcut", "恢复默认快捷键")
+        reset.isEnabled = fallback != nil && value != fallback
+        button.onCapture = { [weak button, weak reset] shortcut in
             guard workspaceSlot == nil || shortcut.modifiers.contains(.command) else {
                 button?.updateShortcut(current); NSSound.beep(); return
             }
             current = shortcut.storageValue
             change(current); button?.updateShortcut(current); update(current)
+            reset?.isEnabled = fallback != nil && current != fallback
         }
         let controls = NSStackView(views: [button])
         if let fallback {
-            controls.addArrangedSubview(SettingsActionButton(text("Reset", "重置")) {
+            reset.invoke = { [weak reset] in
                 current = fallback
                 change(fallback); button.updateShortcut(fallback); update(fallback)
-            })
+                reset?.isEnabled = false
+            }
+            controls.addArrangedSubview(reset)
         }
         if let row = form.row(title, control: controls) {
             row.labels.addArrangedSubview(conflict)

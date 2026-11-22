@@ -116,7 +116,12 @@ struct AgentHistoryRemoteAccess: Sendable {
                 index = os.path.join(os.path.dirname(root), 'conversation_summaries.db')
                 try:
                     connection = sqlite3.connect('file:' + index + '?mode=ro', uri=True)
-                    rows = connection.execute("SELECT conversation_id, title, preview, workspace_uris, strftime('%s', last_modified_time) FROM conversation_summaries ORDER BY last_modified_time DESC LIMIT ?", (int(sys.argv[2]),))
+                    columns = "SELECT conversation_id, title, preview, workspace_uris, strftime('%s', last_modified_time) FROM conversation_summaries"
+                    order = " ORDER BY last_modified_time DESC LIMIT ?"
+                    try:
+                        rows = connection.execute(columns + " WHERE nesting_depth = 0 AND (title != '' OR preview != '')" + order, (int(sys.argv[2]),))
+                    except sqlite3.OperationalError:
+                        rows = connection.execute(columns + order, (int(sys.argv[2]),))
                     from urllib.parse import urlparse, unquote
                     for ident, title, preview, uris, modified in rows:
                         path = os.path.join(root, ident + '.db')

@@ -53,6 +53,12 @@
         "additionalProperties": false
       }
     },
+    "agents.historyBackgroundIndexing": {
+      "category": "general",
+      "default": false,
+      "description": "Keep the Agent History search index current while OMG runs. When off, the index is updated only when Agent History is opened.",
+      "type": "boolean"
+    },
     "agents.historyLimit": {
       "category": "general",
       "default": 10000,

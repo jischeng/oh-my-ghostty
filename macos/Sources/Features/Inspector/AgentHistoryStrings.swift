@@ -98,16 +98,13 @@ struct AgentHistoryStrings: Equatable, Sendable {
     var you: String { t("You", "你") }
     var searchTranscriptPlaceholder: String { t("Find in transcript (⌘F)", "在会话中搜索 (⌘F)") }
     var matchesCount: String { t("matches", "条匹配") }
-    func loadMoreMessages(_ remaining: Int) -> String {
-        t("Load more (\(remaining) remaining)…", "加载更多 (剩余 \(remaining) 条)…")
-    }
     func loadMoreSessions(_ remaining: Int) -> String {
         t("Load more sessions (\(remaining) remaining)…", "加载更多会话 (剩余 \(remaining) 个)…")
     }
     var truncated: String {
         t(
-            "This long transcript was truncated to keep the Inspector responsive.",
-            "为保持 Inspector 流畅，此超长会话记录已截断。"
+            "This transcript is longer than Agent History shows; the rest is in the session itself.",
+            "此会话超出 Agent 历史的显示上限，其余内容请在会话中查看。"
         )
     }
 

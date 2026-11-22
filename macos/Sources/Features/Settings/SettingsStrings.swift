@@ -106,6 +106,15 @@ struct SettingsStrings: Equatable, Sendable {
             "Agent History 索引并展示的最大历史会话数量，默认值为 10,000 条。"
         )
     }
+    var agentHistoryBackgroundIndexingLabel: String {
+        t("Update Search Index in the Background", "后台更新搜索索引")
+    }
+    var agentHistoryBackgroundIndexingHelp: String {
+        t(
+            "When off, the full-text index is updated each time Agent History is opened.",
+            "关闭时，仅在打开 Agent 历史时更新全文索引。"
+        )
+    }
     var startupModeLabel: String { t("When OMG Opens", "重新打开 OMG 时") }
     func startupModeTitle(_ mode: OMGStartupMode) -> String {
         switch mode {

@@ -267,6 +267,8 @@ extension NativeSettingsController {
         more(form, strings.agentHistorySection) { [weak self] page in
             guard let self else { return }; page.section(self.strings.agentHistorySection)
             self.number(page, self.strings.agentHistoryLimitLabel, \.agentHistoryLimit, range: 100...50000, step: 100)
+            self.toggle(page, self.strings.agentHistoryBackgroundIndexingLabel, \.agentHistoryBackgroundIndexing,
+                        help: self.strings.agentHistoryBackgroundIndexingHelp)
         }
         more(form, text("Agent tools", "Agent 工具")) { [weak self] page in
             guard let self else { return }

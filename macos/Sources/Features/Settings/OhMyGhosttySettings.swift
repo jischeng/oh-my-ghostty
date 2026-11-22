@@ -659,6 +659,11 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Maximum number of historical agent sessions to index and display.",
             requiresNewWindow: false, category: "general"),
         .init(
+            id: "agents.historyBackgroundIndexing", type: .boolean, defaultValue: "false",
+            allowedValues: nil, minimum: nil, maximum: nil,
+            description: "Keep the Agent History search index current while OMG runs. When off, the index is updated only when Agent History is opened.",
+            requiresNewWindow: false, category: "general"),
+        .init(
             id: "sessions.localRuntimeEnabled", type: .boolean, defaultValue: "true",
             allowedValues: nil, minimum: nil, maximum: nil,
             description: "Launch new local terminals in the durable local session runtime.",
@@ -1130,6 +1135,9 @@ final class OhMyGhosttySettings: ObservableObject {
             }
         }
     }
+    @Published var agentHistoryBackgroundIndexing = false {
+        didSet { persist("agents.historyBackgroundIndexing", agentHistoryBackgroundIndexing) }
+    }
     @Published var localRuntimeEnabled = true {
         didSet { persist("sessions.localRuntimeEnabled", localRuntimeEnabled) }
     }
@@ -1563,6 +1571,7 @@ final class OhMyGhosttySettings: ObservableObject {
                 fallback: 10_000,
                 range: 100...50_000
             )
+            agentHistoryBackgroundIndexing = boolValue("agents.historyBackgroundIndexing", fallback: false)
             localRuntimeEnabled = boolValue("sessions.localRuntimeEnabled", fallback: true)
             quickTerminalRuntimeEnabled = boolValue("sessions.quickTerminalRuntimeEnabled", fallback: false)
             keepLocalSessionsOnQuit = boolValue("sessions.keepLocalOnQuit", fallback: true)

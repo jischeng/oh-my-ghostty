@@ -7,7 +7,7 @@ import Foundation
 enum TransientAttachmentNoise {
     /// Directory and file markers used by the paste pipeline.
     private static let markers = [
-        "/omg-paste/", "/otty-paste/", "codex-clipboard", "/codex/attachments/",
+        "/omg-paste/", "/otty-paste/", "codex-clipboard", "pi-clipboard", "/codex/attachments/",
     ]
 
     /// True when a line only reports a temporary pasted image.

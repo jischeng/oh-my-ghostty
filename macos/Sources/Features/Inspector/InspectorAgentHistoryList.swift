@@ -160,7 +160,9 @@ final class InspectorAgentHistoryListController: NSViewController, NSTableViewDa
             table.noteHeightOfRows(withIndexesChanged: changed)
             let selection = rows.firstIndex { $0.id == selectedID }
             table.selectRowIndexes(selection.map { IndexSet(integer: $0) } ?? [], byExtendingSelection: false)
-            if let topID, let index = rows.firstIndex(where: { $0.id == topID }) {
+            // Results arrive in batches. A list still at its top stays there,
+            // so newer matches are not inserted out of sight above the fold.
+            if oldOrigin.y > 1, let topID, let index = rows.firstIndex(where: { $0.id == topID }) {
                 scroll.contentView.scroll(to: NSPoint(x: oldOrigin.x, y: table.rect(ofRow: index).minY + topOffset))
                 scroll.reflectScrolledClipView(scroll.contentView)
             }
@@ -404,7 +406,8 @@ final class InspectorAgentSessionCell: NSTableCellView, OMGNativeThemeApplying {
                 detail.attributedStringValue = highlighted(snippet, query: query, size: 10, color: .secondaryLabelColor)
                 detail.isHidden = false
             } else if let directory = session.workingDirectory {
-                detail.stringValue = directory
+                detail.stringValue = session.remoteHost == nil
+                    ? (directory as NSString).abbreviatingWithTildeInPath : directory
                 detail.isHidden = false
             }
             toolTip = session.title

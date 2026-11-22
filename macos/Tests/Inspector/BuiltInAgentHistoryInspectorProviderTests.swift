@@ -149,7 +149,7 @@ struct AgentHistoryInspectorTests {
         var unindexed = session
         unindexed.previewSnippet = nil
         let matches = await AgentHistoryStore.search(sessions: [unindexed], query: "ZSTD-only-needle")
-        #expect(matches[session.id]?.contains("zstd-only-needle") == true)
+        #expect(matches[session.id]?.snippet.contains("zstd-only-needle") == true)
         let transcript = await AgentHistoryStore.transcript(for: session)
         #expect(transcript.messages.map(\.text) == ["Archived question", "Reply with zstd-only-needle"])
         // Codex keeps compressed rollouts beside the live store.
@@ -403,7 +403,8 @@ struct AgentHistoryInspectorTests {
         let sessions = await AgentHistoryStore.load(
             agents: [.pi, .codex],
             rootURLs: [.pi: piRoot, .codex: codexRoot],
-            maximumSessions: 10
+            maximumSessions: 10,
+            cacheURL: root.appendingPathComponent("cache.json")
         )
 
         #expect(sessions.map(\.id) == [
@@ -508,13 +509,13 @@ struct AgentHistoryInspectorTests {
             query: "融合教育"
         ).makeAsyncIterator()
         let firstTitleBatch = await titleUpdates.next()
-        #expect(firstTitleBatch?[session.id]?.contains("融合教育") == true)
+        #expect(firstTitleBatch?[session.id]?.snippet.contains("融合教育") == true)
 
         let matches = await AgentHistoryStore.search(
             sessions: sessions,
             query: "编制资格核验"
         )
-        #expect(matches[session.id]?.contains("编制资格核验") == true)
+        #expect(matches[session.id]?.snippet.contains("编制资格核验") == true)
 
         let transcript = await AgentHistoryStore.transcript(for: session)
         #expect(transcript.messages.contains {
@@ -545,7 +546,8 @@ struct AgentHistoryInspectorTests {
         let sessions = await AgentHistoryStore.load(
             agents: [.pi],
             rootURLs: [.pi: root],
-            maximumSessions: 10
+            maximumSessions: 10,
+            cacheURL: root.appendingPathComponent("cache.json")
         )
         #expect(sessions.isEmpty)
     }
@@ -582,6 +584,7 @@ struct AgentHistoryInspectorTests {
                 "id": "pi-history",
                 "cwd": "/tmp/pi",
             ],
+            ["type": "message", "id": "a", "message": ["role": "user", "content": "Pi history"]],
         ], to: piRoot
             .appendingPathComponent("project/date_pi-history.jsonl"))
         try writeJSONL([
@@ -617,7 +620,8 @@ struct AgentHistoryInspectorTests {
         let sessions = await AgentHistoryStore.load(
             agents: [.claude, .pi, .qoder, .omp, .qwen],
             rootURLs: roots,
-            maximumSessions: 20
+            maximumSessions: 20,
+            cacheURL: root.appendingPathComponent("cache.json")
         )
         #expect(Set(sessions.map(\.agent)) == [
             .claude,
@@ -1274,7 +1278,12 @@ struct AgentHistoryInspectorTests {
     }
 
     @Test func searchReturnsBeforeReadingTheRemainderAndIgnoresCase() {
-        for agent in [SupportedAgent.codex, .claude, .pi] {
+        let turns: [SupportedAgent: String] = [
+            .codex: #"{"type":"response_item","payload":{"type":"message","role":"user","content":"NEEDLE"}}"#,
+            .claude: #"{"type":"user","message":{"role":"user","content":"NEEDLE"}}"#,
+            .pi: #"{"type":"message","id":"a","parentId":null,"message":{"role":"user","content":"NEEDLE"}}"#,
+        ]
+        for (agent, turn) in turns {
             var reads = 0
             let result = AgentHistoryStore.firstTranscriptMatch(query: "needle", agent: agent) {
                 reads += 1
@@ -1282,7 +1291,7 @@ struct AgentHistoryInspectorTests {
                     Issue.record("Search read past its first matching record")
                     return nil
                 }
-                return Data("{\"type\":\"user\",\"content\":\"NEEDLE\"}\n".utf8)
+                return Data((turn + "\n").utf8)
             }
             #expect(result == "NEEDLE")
             #expect(reads == 1)
@@ -1300,7 +1309,7 @@ struct AgentHistoryInspectorTests {
             defer { remainingChunks -= 1 }
             if remainingChunks > 0 { return Data(repeating: 97, count: 64 * 1_024) }
             if remainingChunks == 0 {
-                return Data("\n{\"type\":\"user\",\"content\":\"Surviving message\"}\n".utf8)
+                return Data(("\n" + #"{"type":"response_item","payload":{"type":"message","role":"user","content":"Surviving message"}}"# + "\n").utf8)
             }
             return nil
         }
@@ -1315,11 +1324,12 @@ struct AgentHistoryInspectorTests {
             sourcePath: "/unused", isActive: false
         )
         var reads = 0
+        let chunk = Data(repeating: 97, count: 1_024 * 1_024)
         let transcript = AgentHistoryStore.parseTranscript(session: session) {
             reads += 1
-            return Data(repeating: 97, count: 64 * 1_024)
+            return chunk
         }
-        #expect(reads == 129)
+        #expect(reads == AgentHistoryStore.maximumTranscriptBytes / chunk.count + 1)
         #expect(transcript.wasTruncated)
     }
 
@@ -1331,13 +1341,15 @@ struct AgentHistoryInspectorTests {
         )
         let start = "{\"type\":\"event_msg\",\"text\":\""
         let end = "\"}\n"
-        let padding = Data((start + String(repeating: "x", count: 64 * 1_024 - start.utf8.count - end.utf8.count) + end).utf8)
+        let size = 1_024 * 1_024
+        let padding = Data((start + String(repeating: "x", count: size - start.utf8.count - end.utf8.count) + end).utf8)
+        let chunks = AgentHistoryStore.maximumTranscriptBytes / size
         var reads = 0
         let transcript = AgentHistoryStore.parseTranscript(session: session) {
             reads += 1
-            return reads <= 128 ? padding : nil
+            return reads <= chunks ? padding : nil
         }
-        #expect(reads == 129)
+        #expect(reads == chunks + 1)
         #expect(!transcript.wasTruncated)
     }
 
@@ -1500,7 +1512,10 @@ struct AgentHistoryInspectorTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let file = root.appendingPathComponent("sessions/2026_deleted-session.jsonl")
         let cache = root.appendingPathComponent("cache.json")
-        try writeJSONL([["type": "session", "id": "deleted-session", "cwd": "/repo"]], to: file)
+        try writeJSONL([
+            ["type": "session", "id": "deleted-session", "cwd": "/repo"],
+            ["type": "message", "id": "a", "message": ["role": "user", "content": "Hello"]],
+        ], to: file)
         let sessions = await AgentHistoryStore.load(agents: [.pi],
             rootURLs: [.pi: file.deletingLastPathComponent()], cacheURL: cache)
         #expect(sessions.count == 1)
@@ -1518,7 +1533,10 @@ struct AgentHistoryInspectorTests {
         let file = sessionsDir.appendingPathComponent("2026_private-cache.jsonl")
         let cacheDir = root.appendingPathComponent("AgentHistory", isDirectory: true)
         let cache = cacheDir.appendingPathComponent("session-cache.json")
-        try writeJSONL([["type": "session", "id": "private-cache", "cwd": "/repo"]], to: file)
+        try writeJSONL([
+            ["type": "session", "id": "private-cache", "cwd": "/repo"],
+            ["type": "message", "id": "a", "message": ["role": "user", "content": "Hello"]],
+        ], to: file)
 
         let sessions = await AgentHistoryStore.load(
             agents: [.pi],

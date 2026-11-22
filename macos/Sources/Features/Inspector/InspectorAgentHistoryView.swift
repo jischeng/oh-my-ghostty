@@ -99,10 +99,9 @@ struct InspectorAgentHistoryView: View {
     let perform: (InspectorPaneActionKind) -> Void
     @ObservedObject private var settings = OhMyGhosttySettings.shared
     @State private var visibleSessionCount = 60
-    @State private var visibleMessageCount = 30
     @State private var query = ""
     @State private var committedQuery = ""
-    @State private var searchMatches: [String: String] = [:]
+    @State private var searchMatches: [String: AgentHistorySearchMatch] = [:]
     @State private var isSearching = false
     @State private var searchTask: Task<Void, Never>?
     @State private var filter = AgentHistoryFilterState()
@@ -328,7 +327,7 @@ struct InspectorAgentHistoryView: View {
     private var nativeSessionRows: [InspectorAgentHistoryListRow] {
         let needle = committedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         func row(_ session: AgentHistorySession) -> InspectorAgentHistoryListRow {
-            let snippet = searchMatches[session.id]
+            let snippet = searchMatches[session.id]?.snippet
             return .session(session, snippet: !needle.isEmpty && snippet != session.title ? snippet : nil)
         }
         if filter.grouping == .none {
@@ -350,8 +349,10 @@ struct InspectorAgentHistoryView: View {
     }
 
     private func selectSession(_ session: AgentHistorySession) {
-        let needle = committedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        visibleMessageCount = 30
+        // A query that only matched the title would filter the conversation
+        // down to nothing.
+        let needle = searchMatches[session.id]?.isInTranscript == true
+            ? committedQuery.trimmingCharacters(in: .whitespacesAndNewlines) : ""
         transcriptSearch = needle
         isTranscriptSearchVisible = !needle.isEmpty
         if !needle.isEmpty { transcriptSearchFocusRequestID &+= 1 }
@@ -502,13 +503,9 @@ struct InspectorAgentHistoryView: View {
                 )
             } else if let transcript = history.transcript,
                       transcript.sessionID == session.id {
-                let displayedMessages = needle.isEmpty
-                    ? Array(matchingMessages.prefix(visibleMessageCount))
-                    : matchingMessages
-
                 VStack(spacing: 0) {
                     AgentHistoryTranscriptTable(
-                        messages: displayedMessages,
+                        messages: matchingMessages,
                         agentName: session.agent.displayName,
                         strings: strings,
                         highlightText: needle,
@@ -517,17 +514,6 @@ struct InspectorAgentHistoryView: View {
                             : nil,
                         onFind: toggleTranscriptSearch
                     )
-
-                    if needle.isEmpty && visibleMessageCount < matchingMessages.count {
-                        Divider()
-                        NativeActionButton(
-                            title: strings.loadMoreMessages(matchingMessages.count - visibleMessageCount),
-                            symbol: "arrow.down.circle",
-                            expands: true
-                        ) { _ in
-                            visibleMessageCount += 50
-                        }
-                    }
 
                     if transcript.wasTruncated && needle.isEmpty {
                         Text(strings.truncated)

@@ -72,11 +72,15 @@ enum AgentHistoryStore {
     private static let maximumFiles = 200_000
     private static let maximumHeaderCandidates = 20_000
     private static let maximumHeaderBytes = 2 * 1_024 * 1_024
-    private static let maximumTranscriptBytes = 8 * 1_024 * 1_024
+    /// Raw bytes read from one local transcript. Tool output dominates a
+    /// session file and is skipped before JSON decoding, so the budget is on
+    /// input, while the limits below bound what a transcript keeps.
+    static let maximumTranscriptBytes = 768 * 1_024 * 1_024
+    private static let maximumRemoteTranscriptBytes = 8 * 1_024 * 1_024
     private static let maximumRecordBytes = 4 * 1_024 * 1_024
-    private static let maximumTranscriptMessages = 500
-    private static let maximumTranscriptCharacters = 500_000
-    private static let maximumMessageCharacters = 16_000
+    static let maximumTranscriptMessages = 4_000
+    private static let maximumTranscriptCharacters = 4_000_000
+    private static let maximumMessageCharacters = 48_000
 
     private enum Format {
         case jsonl
@@ -212,17 +216,22 @@ enum AgentHistoryStore {
         for session: AgentHistorySession,
         remoteAccess: AgentHistoryRemoteAccess? = nil
     ) async -> AgentHistoryTranscript {
-        // Agy stores protobuf steps in SQLite; its summary is the supported preview.
-        if session.agent == .antigravity {
-            return .init(sessionID: session.id, messages: session.previewSnippet.map {
-                [.init(id: session.id + ":preview", role: .user, text: $0, timestamp: nil)]
-            } ?? [], wasTruncated: true)
+        // A remote Antigravity trajectory is not fetched; its summary stands in.
+        if session.agent == .antigravity, session.remoteHost != nil {
+            return previewTranscript(for: session)
+        }
+        if usesDatabaseHistory(session.agent), session.remoteHost == nil {
+            let databaseTask = Task.detached(priority: .utility) { databaseTranscript(for: session) }
+            return await withTaskCancellationHandler(
+                operation: { await databaseTask.value },
+                onCancel: { databaseTask.cancel() }
+            )
         }
         if let alias = session.remoteHost {
             let access = remoteAccess ?? AgentHistoryRemoteAccess(alias: alias)
             guard let prefix = try? await access.readTranscript(
                 path: session.sourcePath,
-                maximumBytes: 8 * 1_024 * 1_024
+                maximumBytes: maximumRemoteTranscriptBytes
             ) else {
                 return .init(
                     sessionID: session.id,
@@ -245,26 +254,48 @@ enum AgentHistoryStore {
         )
     }
 
+    /// The Agent's own summary, shown when its conversation cannot be read.
+    nonisolated private static func previewTranscript(for session: AgentHistorySession) -> AgentHistoryTranscript {
+        .init(sessionID: session.id, messages: session.previewSnippet.map {
+            [.init(id: session.id + ":preview", role: .user, text: $0, timestamp: nil)]
+        } ?? [], wasTruncated: true)
+    }
+
+    nonisolated static func databaseTranscript(for session: AgentHistorySession) -> AgentHistoryTranscript {
+        var builder = TranscriptBuilder(session: session)
+        for message in databaseMessages(for: session) ?? [] {
+            let text = message.role == .user
+                ? cleanMeaningfulText(message.text, keepingUserPastes: true)
+                : removingLeadingReasoning(message.text)
+            guard !text.isEmpty, text != "[Image/Attachment]" else { continue }
+            if !builder.append(.init(role: message.role, text: text, timestamp: message.timestamp, turnID: nil)) { break }
+        }
+        if builder.messages.isEmpty, session.agent == .antigravity { return previewTranscript(for: session) }
+        return .init(sessionID: session.id, messages: builder.messages, wasTruncated: builder.wasTruncated)
+    }
+
     /// Searches metadata and complete user/assistant transcript text off the
-    /// main actor. Values are bounded snippets used for result highlighting.
+    /// main actor. Values locate the match for result rows and highlighting.
     static func search(
         sessions: [AgentHistorySession],
-        query: String
-    ) async -> [String: String] {
-        var latest: [String: String] = [:]
-        for await matches in searchUpdates(sessions: sessions, query: query) {
+        query: String,
+        index: AgentHistorySearchIndex? = .shared
+    ) async -> [String: AgentHistorySearchMatch] {
+        var latest: [String: AgentHistorySearchMatch] = [:]
+        for await matches in searchUpdates(sessions: sessions, query: query, index: index) {
             latest = matches
         }
         return latest
     }
 
-    /// Emits cached metadata/preview matches immediately, then progressively
-    /// adds complete transcript matches in recent-session order. A cold deep
-    /// search can scan gigabytes, but useful results never wait for the tail.
+    /// Emits title and path matches at once, then everything the full-text
+    /// index knows, then scans only the sessions the index does not cover yet.
+    /// Results therefore stay complete while the index is still being built.
     static func searchUpdates(
         sessions: [AgentHistorySession],
-        query: String
-    ) -> AsyncStream<[String: String]> {
+        query: String,
+        index: AgentHistorySearchIndex? = .shared
+    ) -> AsyncStream<[String: AgentHistorySearchMatch]> {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !needle.isEmpty else {
             return AsyncStream { continuation in
@@ -274,11 +305,10 @@ enum AgentHistoryStore {
         }
         return AsyncStream { continuation in
             let task = Task.detached(priority: .utility) {
-                var matches: [String: String] = [:]
+                var matches: [String: AgentHistorySearchMatch] = [:]
 
-                // Phase 1: title and small metadata only. This intentionally
-                // avoids touching multi-kilobyte preview strings so the first
-                // result batch can render immediately.
+                // Phase 1: title and small metadata only, so the first result
+                // batch renders immediately.
                 for session in sessions {
                     guard !Task.isCancelled else { break }
                     let metadata = [
@@ -287,61 +317,84 @@ enum AgentHistoryStore {
                         session.conversationID.rawValue,
                         session.workingDirectory ?? "",
                     ].joined(separator: "\n")
-                    guard let range = metadata.range(
-                        of: needle,
-                        options: .caseInsensitive
-                    ) else { continue }
-                    matches[session.id] = searchSnippet(
-                        metadata,
-                        around: range
+                    guard let range = metadata.range(of: needle, options: .caseInsensitive) else { continue }
+                    matches[session.id] = .init(
+                        snippet: searchSnippet(metadata, around: range), isInTranscript: false
                     )
                 }
                 continuation.yield(matches)
 
-                // Phase 2: cached bounded body previews. This still avoids
-                // filesystem I/O and usually resolves recent-session queries.
-                for session in sessions where matches[session.id] == nil {
+                // Phase 2: the full-text index answers every session whose
+                // indexed text is current.
+                var indexed = Set<String>()
+                if let index, !Task.isCancelled {
+                    indexed = index.currentSessionIDs(among: sessions)
+                    let found = indexed.isEmpty ? [:] : index.search(needle)
+                    for session in sessions where indexed.contains(session.id) {
+                        guard let hit = found[session.id] else { continue }
+                        if matches[session.id] == nil {
+                            matches[session.id] = hit
+                        } else {
+                            // A title match keeps its snippet; the body
+                            // match says the conversation contains it too.
+                            matches[session.id]?.messageIndex = hit.messageIndex
+                            matches[session.id]?.isInTranscript = true
+                        }
+                    }
+                    continuation.yield(matches)
+                }
+
+                // Phase 3: cached bounded previews for sessions the index does
+                // not cover, which includes every remote session.
+                for session in sessions where matches[session.id] == nil && !indexed.contains(session.id) {
                     guard !Task.isCancelled else { break }
                     guard let preview = session.previewSnippet,
-                          let range = preview.range(
-                              of: needle,
-                              options: .caseInsensitive
-                          ) else { continue }
-                    matches[session.id] = searchSnippet(
-                        preview,
-                        around: range
-                    )
+                          let range = preview.range(of: needle, options: .caseInsensitive) else { continue }
+                    matches[session.id] = .init(snippet: searchSnippet(preview, around: range))
                 }
                 continuation.yield(matches)
 
-                // Phase 3: complete transcript scan, yielding each newly found
-                // match instead of waiting for every historical file.
-                for (index, session) in sessions.enumerated() {
+                // Phase 4: read what is left. Remote full-body search would
+                // open one SSH process per session, so only local sessions
+                // are scanned.
+                var lastYield = Date()
+                for session in sessions {
                     guard !Task.isCancelled else { break }
-                    // Remote full-body search would otherwise open one SSH
-                    // process per session. Remote sessions use their bounded
-                    // metadata/preview index; local sessions keep deep search.
-                    guard session.remoteHost == nil,
-                          matches[session.id] == nil else { continue }
-                    if let snippet = firstTranscriptMatch(
-                        at: URL(fileURLWithPath: session.sourcePath),
-                        query: needle,
-                        agent: session.agent
-                    ) {
-                        matches[session.id] = snippet
+                    guard session.remoteHost == nil, matches[session.id] == nil,
+                          !indexed.contains(session.id) else { continue }
+                    if let snippet = unindexedMatch(in: session, query: needle) {
+                        matches[session.id] = .init(snippet: snippet)
+                    }
+                    // Each update redraws the list; batch them.
+                    if Date().timeIntervalSince(lastYield) > 0.25 {
                         continuation.yield(matches)
-                    } else if index.isMultiple(of: 100) {
-                        continuation.yield(matches)
+                        lastYield = Date()
                     }
                 }
+                continuation.yield(matches)
                 continuation.finish()
             }
             continuation.onTermination = { _ in task.cancel() }
         }
     }
 
+    /// Finds `query` in a session the index has not read yet.
+    nonisolated private static func unindexedMatch(in session: AgentHistorySession, query: String) -> String? {
+        guard usesDatabaseHistory(session.agent) else {
+            return firstTranscriptMatch(
+                at: URL(fileURLWithPath: session.sourcePath), query: query, agent: session.agent
+            )
+        }
+        for message in databaseTranscript(for: session).messages {
+            if let range = message.text.range(of: query, options: .caseInsensitive) {
+                return searchSnippet(message.text, around: range)
+            }
+        }
+        return nil
+    }
+
     private struct DiskCache: Codable {
-        static let currentVersion = 7
+        static let currentVersion = 8
         var version: Int = currentVersion
         struct Entry: Codable {
             let session: AgentHistorySession
@@ -462,9 +515,10 @@ enum AgentHistoryStore {
             let lock = NSLock()
             // Bound decompression/JSON workers, and check the parent task's
             // cancellation between batches (GCD workers have no Swift task).
-            for start in stride(from: 0, to: needsParse.count, by: 2) {
+            let workers = max(2, min(8, ProcessInfo.processInfo.activeProcessorCount))
+            for start in stride(from: 0, to: needsParse.count, by: workers) {
                 guard !Task.isCancelled else { break }
-                DispatchQueue.concurrentPerform(iterations: min(2, needsParse.count - start)) { offset in
+                DispatchQueue.concurrentPerform(iterations: min(workers, needsParse.count - start)) { offset in
                     let index = needsParse[start + offset]
                     let session = session(from: candidates[index])
                     lock.lock()
@@ -510,6 +564,11 @@ enum AgentHistoryStore {
                 sessionsByID[session.id] = session
             }
         }
+        for session in databaseSessions(
+            agents: agents, rootURLs: rootURLs, maximumSessions: maximumSessions, updatedAfter: updatedAfter
+        ) {
+            sessionsByID[session.id] = session
+        }
         return Array(sessionsByID.values.filter { session in updatedAfter.map { session.updatedAt >= $0 } ?? true }.sorted { lhs, rhs in
             if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
             return lhs.id < rhs.id
@@ -539,8 +598,13 @@ enum AgentHistoryStore {
         }
         defer { sqlite3_close(database) }
         var statement: OpaquePointer?
-        let query = "SELECT conversation_id, title, preview, workspace_uris, strftime('%s', last_modified_time) FROM conversation_summaries ORDER BY last_modified_time DESC LIMIT 10000"
-        guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK else { return [] }
+        let columns = "SELECT conversation_id, title, preview, workspace_uris, strftime('%s', last_modified_time) FROM conversation_summaries"
+        let order = " ORDER BY last_modified_time DESC LIMIT 10000"
+        // A swarm's workers talk to each other, not to the user: they have a
+        // parent, or no prompt to title or preview them by.
+        let conversations = columns + " WHERE nesting_depth = 0 AND (title != '' OR preview != '')" + order
+        guard sqlite3_prepare_v2(database, conversations, -1, &statement, nil) == SQLITE_OK ||
+            sqlite3_prepare_v2(database, columns + order, -1, &statement, nil) == SQLITE_OK else { return [] }
         defer { sqlite3_finalize(statement) }
         func value(_ column: Int32) -> String {
             sqlite3_column_text(statement, column).map { String(cString: $0) } ?? ""
@@ -652,9 +716,10 @@ enum AgentHistoryStore {
             }
             return title
         }
+        let agent = candidate.source.agent
         let userTitle = records.lazy.compactMap { record -> String? in
-            guard role(of: record) == .user else { return nil }
-            return text(of: record)
+            guard role(of: record, agent: agent) == .user else { return nil }
+            return text(of: record, role: .user)
         }.compactMap { cleaned -> String? in
             guard !cleaned.isEmpty, cleaned != "[Image/Attachment]" else { return nil }
             return cleaned
@@ -665,10 +730,17 @@ enum AgentHistoryStore {
             conversationID: conversationID
         )
 
-        let previewSnippet = conversationRecords(records, agent: candidate.source.agent, isComplete: header.isComplete).lazy.compactMap { record -> String? in
-            guard role(of: record) != nil, let cleaned = text(of: record) else { return nil }
+        let previewSnippet = conversationRecords(records, agent: agent, isComplete: header.isComplete).lazy.compactMap { record -> String? in
+            guard let role = role(of: record, agent: agent), let cleaned = text(of: record, role: role) else { return nil }
             return cleaned.isEmpty || cleaned == "[Image/Attachment]" ? nil : String(cleaned.prefix(1_000))
         }.prefix(10).joined(separator: "\n")
+
+        // An Agent that was opened and closed without a turn leaves a file
+        // with nothing to read or resume.
+        if header.isComplete, RecordFamily(agent) != .generic,
+           explicitTitle == nil, userTitle == nil, previewSnippet.isEmpty {
+            return nil
+        }
 
         return .init(
             agent: candidate.source.agent,
@@ -690,7 +762,7 @@ enum AgentHistoryStore {
         var offset = 0
         return parseTranscript(session: session, sourceWasTruncated: sourceWasTruncated) {
             guard offset < data.count else { return nil }
-            let end = min(offset + 64 * 1_024, data.count)
+            let end = min(offset + 256 * 1_024, data.count)
             defer { offset = end }
             return data.subdata(in: offset..<end)
         }
@@ -702,13 +774,7 @@ enum AgentHistoryStore {
             return .init(sessionID: session.id, messages: [], wasTruncated: false)
         }
         defer { reader.close() }
-        var bytesRead = 0
-        return parseTranscript(session: session) {
-            let count = min(64 * 1_024, max(1, maximumTranscriptBytes - bytesRead))
-            let data = reader.read(upToCount: count)
-            bytesRead += data?.count ?? 0
-            return data
-        }
+        return parseTranscript(session: session) { reader.read(upToCount: 256 * 1_024) }
     }
 
     nonisolated static func parseTranscript(
@@ -716,17 +782,52 @@ enum AgentHistoryStore {
         sourceWasTruncated: Bool = false,
         readChunk: () -> Data?
     ) -> AgentHistoryTranscript {
-        var filter = ConversationRecordFilter(agent: session.agent)
+        let agent = session.agent
+        var filter = ConversationRecordFilter(agent: agent)
         var builder = TranscriptBuilder(session: session)
-        let scan = scanJSONLines(maximumBytes: maximumTranscriptBytes, readChunk: readChunk) { line in
-            guard let record = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { return true }
-            return filter.consume(record).allSatisfy { builder.append($0) }
+        var branches = ConversationBranches(agent: agent)
+        func take(_ record: [String: Any]) -> Bool {
+            guard let message = parsedMessage(from: record, agent: agent, keepingUserPastes: true) else { return true }
+            guard branches.isTracking else { return builder.append(message) }
+            branches.hold(message, entry: record["id"] as? String)
+            return true
         }
+        let scan = scanJSONLines(
+            maximumBytes: maximumTranscriptBytes,
+            readChunk: readChunk,
+            oversized: { branches.note(line: $0) },
+            visit: { line in
+                guard let record = conversationRecord(line, agent: agent, branches: &branches) else { return true }
+                return filter.consume(record).allSatisfy(take)
+            }
+        )
         if let pending = filter.finish(isComplete: scan.reachedEnd && !sourceWasTruncated) {
-            _ = builder.append(pending)
+            _ = take(pending)
         }
+        for message in branches.activeMessages() where !builder.append(message) { break }
         return .init(sessionID: session.id, messages: builder.messages,
                      wasTruncated: scan.wasTruncated || sourceWasTruncated || builder.wasTruncated || filter.wasTruncated)
+    }
+
+    /// One conversation turn taken from a stored record.
+    struct ParsedMessage {
+        let role: AgentHistoryMessageRole
+        let text: String
+        let timestamp: Date?
+        /// Codex writes one answer as several records of the same turn.
+        let turnID: String?
+    }
+
+    nonisolated private static func parsedMessage(
+        from record: [String: Any], agent: SupportedAgent, keepingUserPastes: Bool
+    ) -> ParsedMessage? {
+        guard let role = role(of: record, agent: agent),
+              let cleaned = text(of: record, role: role, keepingUserPastes: keepingUserPastes),
+              !cleaned.isEmpty, cleaned != "[Image/Attachment]" else { return nil }
+        let payload = record["payload"] as? [String: Any]
+        let metadata = payload?["internal_chat_message_metadata_passthrough"] as? [String: Any]
+        return .init(role: role, text: cleaned, timestamp: timestamp(of: record),
+                     turnID: agent == .codex ? metadata?["turn_id"] as? String : nil)
     }
 
     private struct TranscriptBuilder {
@@ -736,15 +837,18 @@ enum AgentHistoryStore {
         var lastTurnID: String?
         var wasTruncated = false
 
-        mutating func append(_ record: [String: Any]) -> Bool {
-            guard let role = AgentHistoryStore.role(of: record),
-                  let cleaned = AgentHistoryStore.text(of: record, keepingUserPastes: true),
-                  !cleaned.isEmpty, cleaned != "[Image/Attachment]" else { return true }
-            let payload = record["payload"] as? [String: Any]
-            let metadata = payload?["internal_chat_message_metadata_passthrough"] as? [String: Any]
-            let turnID = metadata?["turn_id"] as? String
-            let merge = session.agent == .codex && role == .assistant && messages.last?.role == .assistant &&
-                turnID == lastTurnID
+        mutating func append(_ parsed: ParsedMessage) -> Bool {
+            let role = parsed.role
+            // An Agent narrates between tool calls, so one reply arrives as
+            // several records. A transcript reads as turns: they join until
+            // the user speaks again, or until a reply is as long as one row
+            // may be. Codex marks its turns, so only a turn's own parts join.
+            let sameTurn = session.agent != .codex || parsed.turnID == lastTurnID
+            var merge = role == .assistant && messages.last?.role == .assistant && sameTurn
+            if merge, session.agent != .codex, let last = messages.last,
+               last.text.count + parsed.text.count + 2 > AgentHistoryStore.maximumMessageCharacters {
+                merge = false
+            }
             let previous = merge ? messages.last : nil
             let separator = previous == nil ? "" : "\n\n"
             let existing = previous?.text ?? ""
@@ -755,17 +859,17 @@ enum AgentHistoryStore {
                 wasTruncated = true
                 return false
             }
-            let value = String(cleaned.prefix(remaining - separator.count))
-            if value.count < cleaned.count { wasTruncated = true }
+            let value = String(parsed.text.prefix(remaining - separator.count))
+            if value.count < parsed.text.count { wasTruncated = true }
             let message = AgentHistoryMessage(
                 id: previous?.id ?? "\(session.id):\(messages.count)", role: role,
                 text: existing + separator + value,
-                timestamp: previous?.timestamp ?? AgentHistoryStore.timestamp(of: record)
+                timestamp: previous?.timestamp ?? parsed.timestamp
             )
             if merge { messages[messages.count - 1] = message } else { messages.append(message) }
             characterCount += separator.count + value.count
-            lastTurnID = turnID
-            return !wasTruncated
+            lastTurnID = parsed.turnID
+            return true
         }
     }
 
@@ -857,8 +961,8 @@ enum AgentHistoryStore {
                 return title
             }
             let userTitle = records.lazy.compactMap { record -> String? in
-                guard role(of: record) == .user else { return nil }
-                return text(of: record)
+                guard role(of: record, agent: matchedAgent) == .user else { return nil }
+                return text(of: record, role: .user)
             }.compactMap { cleaned -> String? in
                 guard !cleaned.isEmpty, cleaned != "[Image/Attachment]" else { return nil }
                 return cleaned
@@ -869,7 +973,8 @@ enum AgentHistoryStore {
                 conversationID: conversationID
             )
             let previewSnippet = conversationRecords(records, agent: matchedAgent, isComplete: false).lazy.compactMap { record -> String? in
-                guard role(of: record) != nil, let cleaned = text(of: record) else { return nil }
+                guard let role = role(of: record, agent: matchedAgent),
+                      let cleaned = text(of: record, role: role) else { return nil }
                 return cleaned.isEmpty || cleaned == "[Image/Attachment]"
                     ? nil
                     : String(cleaned.prefix(1_000))
@@ -995,10 +1100,10 @@ enum AgentHistoryStore {
     ) -> (records: [[String: Any]], isComplete: Bool) {
         guard maximumBytes > 0 else { return ([], false) }
         if url.lastPathComponent.lowercased().hasSuffix(".zst") {
-            // Codex archives are single-session rollouts whose metadata sits in
-            // the leading records; decompressing less keeps thousands of archive
-            // headers affordable.
-            let limit = min(maximumBytes, 64 * 1_024)
+            // The first prompt follows the session's base instructions, which
+            // alone can exceed 64 KB. Starting zstd dominates the cost, so a
+            // larger prefix is nearly free.
+            let limit = min(maximumBytes, 1_024 * 1_024)
             let data = decompressedHeader(at: url, maximumBytes: limit)
             return (headerRecords(from: data), data.count < limit)
         }
@@ -1077,30 +1182,66 @@ enum AgentHistoryStore {
         query: String, agent: SupportedAgent, readChunk: () -> Data?
     ) -> String? {
         var filter = ConversationRecordFilter(agent: agent)
+        var branches = ConversationBranches(agent: agent)
         var match: String?
         func findMatch(_ record: [String: Any]) -> Bool {
-            guard role(of: record) != nil, let cleaned = text(of: record),
+            guard let role = role(of: record, agent: agent), let cleaned = text(of: record, role: role),
                   let range = cleaned.range(of: query, options: .caseInsensitive) else { return true }
             match = searchSnippet(cleaned, around: range)
             return false
         }
         let scan = scanJSONLines(readChunk: readChunk, visit: { line in
-            guard let raw = String(data: line, encoding: .utf8) else { return true }
-            let isControl = agent == .codex && ["response_item", "token_usage_record", "compacted", "turn_context", "task_complete", "turn_aborted"]
-                .contains { raw.contains("\"\($0)\"") }
-            guard isControl || raw.range(of: query, options: .caseInsensitive) != nil,
-                  let record = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { return true }
+            guard let record = conversationRecord(line, agent: agent, branches: &branches) else { return true }
             return filter.consume(record).allSatisfy(findMatch)
         })
         if match == nil, let pending = filter.finish(isComplete: scan.reachedEnd) { _ = findMatch(pending) }
         return match
     }
 
+    /// Decodes a line only when it can carry a conversation turn or a marker
+    /// the reader depends on. Tool output is most of a session file; skipping
+    /// its JSON decode is what keeps a long session quick to open.
+    nonisolated private static func conversationRecord(
+        _ line: Data, agent: SupportedAgent, branches: inout ConversationBranches
+    ) -> [String: Any]? {
+        let family = RecordFamily(agent)
+        if !contains(line, "\"user\""), !contains(line, "\"assistant\"") {
+            switch family {
+            case .codex:
+                // The compaction filter resolves a pending answer on the next
+                // response item; it does not need that item's content.
+                if contains(line, "\"response_item\"") { return ["type": "response_item"] }
+                guard contains(line, "\"token_usage_record\"") || contains(line, "\"compacted\"") ||
+                    contains(line, "\"turn_context\"") || contains(line, "\"task_complete\"") ||
+                    contains(line, "\"turn_aborted\"") else { return nil }
+            case .pi:
+                branches.note(line: line)
+                return nil
+            case .claude, .generic:
+                return nil
+            }
+        }
+        guard let record = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { return nil }
+        if family == .pi {
+            branches.note(id: record["id"] as? String, parent: record["parentId"] as? String)
+        }
+        return record
+    }
+
+    nonisolated private static func contains(_ data: Data, _ needle: StaticString) -> Bool {
+        data.withUnsafeBytes { buffer in
+            guard let base = buffer.baseAddress else { return false }
+            return needle.withUTF8Buffer { memmem(base, buffer.count, $0.baseAddress, $0.count) != nil }
+        }
+    }
+
     /// Returns whether input was cut short or an oversized record was skipped.
     /// Readers can stop on a match without scanning the rest of a session.
+    /// `oversized` receives the head of a record too large to decode.
     nonisolated private static func scanJSONLines(
         maximumBytes: Int = Int.max,
         readChunk: () -> Data?,
+        oversized: (Data) -> Void = { _ in },
         visit: (Data) -> Bool
     ) -> (wasTruncated: Bool, reachedEnd: Bool) {
         var leftover = Data()
@@ -1111,24 +1252,40 @@ enum AgentHistoryStore {
             guard count < maximumBytes else { return (true, false) }
             let available = chunk.prefix(maximumBytes - count)
             count += available.count
-            var buffer = leftover + available
+            let buffer = leftover + available
             leftover = Data()
-            while let newline = buffer.firstIndex(of: 0x0A) {
-                let line = buffer[buffer.startIndex..<newline]
-                if !discardingLine && line.count <= maximumRecordBytes {
-                    if !visit(Data(line)) { return (true, false) }
-                } else {
-                    truncated = true
+            var stopped = false
+            buffer.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+                guard let base = raw.baseAddress else { return }
+                var start = 0
+                while start < raw.count, let newline = memchr(base + start, 0x0A, raw.count - start) {
+                    let end = base.distance(to: newline)
+                    let length = end - start
+                    if !discardingLine && length <= maximumRecordBytes {
+                        // The visitor decodes within the call and keeps nothing.
+                        let line = Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: base + start),
+                                        count: length, deallocator: .none)
+                        if length > 0, !visit(line) {
+                            stopped = true
+                            return
+                        }
+                    } else {
+                        if !discardingLine { oversized(Data(bytes: base + start, count: min(length, 512))) }
+                        truncated = true
+                    }
+                    discardingLine = false
+                    start = end + 1
                 }
-                discardingLine = false
-                buffer = buffer[buffer.index(after: newline)...]
+                let rest = raw.count - start
+                if rest > maximumRecordBytes {
+                    if !discardingLine { oversized(Data(bytes: base + start, count: 512)) }
+                    discardingLine = true
+                    truncated = true
+                } else if !discardingLine, rest > 0 {
+                    leftover = Data(bytes: base + start, count: rest)
+                }
             }
-            if buffer.count > maximumRecordBytes {
-                discardingLine = true
-                truncated = true
-            } else if !discardingLine {
-                leftover = Data(buffer)
-            }
+            if stopped { return (true, false) }
             if available.count < chunk.count { return (true, false) }
         }
         guard !Task.isCancelled else { return (true, false) }
@@ -1136,18 +1293,20 @@ enum AgentHistoryStore {
         return (truncated, true)
     }
 
-    nonisolated private static func searchSnippet(
+    nonisolated static func searchSnippet(
         _ text: String,
         around range: Range<String.Index>
     ) -> String {
+        // A result row shows two short lines, so the match sits near the
+        // start with most of the context after it.
         let start = text.index(
             range.lowerBound,
-            offsetBy: -80,
+            offsetBy: -28,
             limitedBy: text.startIndex
         ) ?? text.startIndex
         let end = text.index(
             range.upperBound,
-            offsetBy: 120,
+            offsetBy: 150,
             limitedBy: text.endIndex
         ) ?? text.endIndex
         let value = text[start..<end]
@@ -1183,7 +1342,7 @@ enum AgentHistoryStore {
             var result: [[String: Any]] = []
             let completedTurn = type == "event_msg" &&
                 ["task_complete", "turn_aborted"].contains(payload["type"] as? String ?? "")
-            if type == "response_item" || type == "turn_context" || completedTurn || AgentHistoryStore.role(of: record) == .user {
+            if type == "response_item" || type == "turn_context" || completedTurn || AgentHistoryStore.role(of: record, agent: agent) == .user {
                 if let pending { result.append(pending) }
                 pending = nil
                 responseID = nil
@@ -1210,6 +1369,66 @@ enum AgentHistoryStore {
         }
     }
 
+    /// Pi and OMP store a conversation as a tree: retrying a turn or editing
+    /// a prompt starts a sibling branch. Only the branch that ends at the
+    /// newest entry is the conversation; the others repeat or contradict it.
+    private struct ConversationBranches {
+        let isTracking: Bool
+        private var parents: [String: String] = [:]
+        private var newest: String?
+        private var held: [(entry: String?, message: ParsedMessage)] = []
+
+        init(agent: SupportedAgent) {
+            isTracking = RecordFamily(agent) == .pi
+        }
+
+        mutating func note(id: String?, parent: String?) {
+            guard isTracking, let id else { return }
+            if let parent { parents[id] = parent }
+            newest = id
+        }
+
+        /// Links an entry that is not decoded as a turn. Message entries,
+        /// which hold the large tool results, start with their identifiers;
+        /// anything else is small enough to decode.
+        mutating func note(line: Data) {
+            guard isTracking else { return }
+            // The head can end inside a multi-byte character; ASCII keys do not.
+            let head = String(bytes: line.prefix(160), encoding: .isoLatin1) ?? ""
+            let prefix = "{\"type\":\"message\",\"id\":\""
+            if head.hasPrefix(prefix) {
+                let rest = head.dropFirst(prefix.count)
+                guard let idEnd = rest.firstIndex(of: "\"") else { return }
+                let id = String(rest[..<idEnd])
+                let after = rest[rest.index(after: idEnd)...]
+                let parentPrefix = ",\"parentId\":\""
+                var parent: String?
+                if after.hasPrefix(parentPrefix) {
+                    let value = after.dropFirst(parentPrefix.count)
+                    parent = value.firstIndex(of: "\"").map { String(value[..<$0]) }
+                }
+                note(id: id, parent: parent)
+            } else if line.count <= 512 * 1_024,
+                      let record = try? JSONSerialization.jsonObject(with: line) as? [String: Any] {
+                note(id: record["id"] as? String, parent: record["parentId"] as? String)
+            }
+        }
+
+        mutating func hold(_ message: ParsedMessage, entry: String?) {
+            held.append((entry, message))
+        }
+
+        /// The held turns on the newest entry's branch, in file order. A turn
+        /// without an identifier predates the tree format and is kept.
+        func activeMessages() -> [ParsedMessage] {
+            guard isTracking else { return [] }
+            var active = Set<String>()
+            var cursor = newest
+            while let id = cursor, active.insert(id).inserted { cursor = parents[id] }
+            return held.filter { $0.entry.map(active.contains) ?? true }.map(\.message)
+        }
+    }
+
     nonisolated private static func conversationRecords(
         _ records: [[String: Any]], agent: SupportedAgent, isComplete: Bool
     ) -> [[String: Any]] {
@@ -1219,31 +1438,75 @@ enum AgentHistoryStore {
         return result
     }
 
-    nonisolated private static func role(
-        of record: [String: Any]
-    ) -> AgentHistoryMessageRole? {
-        let rawRole = (record["message"] as? [String: Any])?["role"] as? String ??
-            (record["payload"] as? [String: Any])?["role"] as? String ??
-            record["role"] as? String ??
-            record["type"] as? String
-        switch rawRole?.lowercased() {
-        case "user": return .user
-        case "assistant": return .assistant
-        default: return nil
+    /// How an Agent's records name a conversation turn.
+    enum RecordFamily: Equatable {
+        /// Claude Code and its forks: `type` is the role; flags mark records
+        /// the Agent wrote for itself.
+        case claude
+        /// Codex: turns are `response_item` messages.
+        case codex
+        /// Pi and OMP: turns are `message` entries of a tree.
+        case pi
+        /// Any other store: the role wherever a record declares one.
+        case generic
+
+        init(_ agent: SupportedAgent) {
+            switch agent {
+            case .claude, .qoder: self = .claude
+            case .codex: self = .codex
+            case .pi, .omp: self = .pi
+            default: self = .generic
+            }
         }
     }
 
-    nonisolated private static func text(of record: [String: Any]) -> String? {
-        text(of: record, keepingUserPastes: false)
+    /// Records Claude Code writes around a conversation rather than in it:
+    /// skill bodies, sub-agent turns, compaction summaries, API failures.
+    nonisolated private static let claudeBookkeepingFlags = [
+        "isMeta", "isSidechain", "isCompactSummary", "isApiErrorMessage",
+    ]
+
+    /// The role of a record that is a turn of the conversation, else nil.
+    /// A store also logs requests, tool traffic and bookkeeping that carry a
+    /// `role` of their own, so each family names its turns explicitly.
+    nonisolated static func role(
+        of record: [String: Any], agent: SupportedAgent
+    ) -> AgentHistoryMessageRole? {
+        func parsed(_ raw: Any?) -> AgentHistoryMessageRole? {
+            switch (raw as? String)?.lowercased() {
+            case "user": return .user
+            case "assistant": return .assistant
+            default: return nil
+            }
+        }
+        let type = record["type"] as? String
+        switch RecordFamily(agent) {
+        case .claude:
+            guard let role = parsed(type),
+                  !claudeBookkeepingFlags.contains(where: { record[$0] as? Bool == true }) else { return nil }
+            return role
+        case .codex:
+            // Tool calls and reasoning are response items too, without a role.
+            guard type == "response_item", let payload = record["payload"] as? [String: Any],
+                  (payload["type"] as? String).map({ $0 == "message" }) ?? true else { return nil }
+            return parsed(payload["role"])
+        case .pi:
+            guard type == "message" else { return nil }
+            return parsed((record["message"] as? [String: Any])?["role"])
+        case .generic:
+            return parsed((record["message"] as? [String: Any])?["role"] ??
+                (record["payload"] as? [String: Any])?["role"] ??
+                record["role"] ?? type)
+        }
     }
 
     /// - Parameter keepingUserPastes: Keeps the body of a `<pasted_content>`
     ///   wrapper. Transcripts show what the user actually pasted, while titles
     ///   and previews drop the wrapper so the surrounding request surfaces.
     nonisolated private static func text(
-        of record: [String: Any], keepingUserPastes: Bool
+        of record: [String: Any], role: AgentHistoryMessageRole, keepingUserPastes: Bool = false
     ) -> String? {
-        let filterInjected = role(of: record) == .user
+        let filterInjected = role == .user
         if let message = record["message"] as? [String: Any],
            let text = text(from: message["content"], filterInjected: filterInjected,
                            keepingUserPastes: keepingUserPastes) {
@@ -1271,7 +1534,7 @@ enum AgentHistoryStore {
         func cleaned(_ value: String) -> String {
             filterInjected
                 ? cleanMeaningfulText(value, keepingUserPastes: keepingUserPastes)
-                : value.trimmingCharacters(in: .whitespacesAndNewlines)
+                : removingLeadingReasoning(value)
         }
         if let value = value as? String { return cleaned(value) }
         guard let values = value as? [Any] else { return nil }
@@ -1349,7 +1612,7 @@ enum AgentHistoryStore {
         )
     }
 
-    nonisolated private static func validWorkingDirectory(
+    nonisolated static func validWorkingDirectory(
         _ value: String?
     ) -> String? {
         guard let value,
@@ -1365,7 +1628,8 @@ enum AgentHistoryStore {
         "local-command-stdout", "system-reminder", "external_codex_apps_open_page",
         "recommended_plugins", "environment_context", "instructions", "pasted_content",
         "skills_instructions", "model_switch", "codex_apps_client_time_context",
-        "task-notification",
+        "task-notification", "turn_aborted", "codex_internal_context", "user_instructions",
+        "subagent_notification", "user_shell_command", "skill",
     ]
 
     /// Wrapper families whose tag name carries a generated suffix.
@@ -1518,6 +1782,8 @@ enum AgentHistoryStore {
         _ raw: String, keepingUserPastes: Bool
     ) -> String {
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if interruptionMarkers.contains(text) { return "" }
+        text = collapsingSkillInvocation(text)
         // Only remove these wrappers at the beginning of a user content block.
         // Inline quotations, fenced examples and assistant answers are content.
         while let wrapper = leadingInjectedWrapper(in: text) {
@@ -1554,6 +1820,36 @@ enum AgentHistoryStore {
         }
         if !prose.isEmpty { output.append(cleanUserProse(prose.joined(separator: "\n"))) }
         return output.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Some models write their reasoning into the answer as a leading
+    /// `<thinking>` block. The reply is what follows it.
+    nonisolated static func removingLeadingReasoning(_ raw: String) -> String {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        while text.hasPrefix("<thinking>") {
+            guard let closing = text.range(of: "</thinking>") else { return "" }
+            text = String(text[closing.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return text
+    }
+
+    /// Text an Agent records as a user turn when a request is cancelled.
+    nonisolated private static let interruptionMarkers: Set<String> = [
+        "[Request interrupted by user]", "[Request interrupted by user for tool use]",
+    ]
+
+    /// Pi expands a skill command into the skill's whole body. The command is
+    /// what the user typed, followed by whatever they wrote after it.
+    nonisolated private static func collapsingSkillInvocation(_ text: String) -> String {
+        guard text.hasPrefix("<skill "), let openEnd = text.range(of: ">"),
+              let closing = text.range(of: "</skill>", range: openEnd.upperBound..<text.endIndex),
+              let nameStart = text.range(of: "name=\"", range: text.startIndex..<openEnd.lowerBound),
+              let nameEnd = text.range(of: "\"", range: nameStart.upperBound..<openEnd.lowerBound) else {
+            return text
+        }
+        let command = "/skill:" + text[nameStart.upperBound..<nameEnd.lowerBound]
+        let rest = text[closing.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+        return rest.isEmpty ? command : command + "\n" + rest
     }
 
     nonisolated private static func cleanUserProse(_ raw: String) -> String {
@@ -1640,10 +1936,14 @@ enum AgentHistoryStore {
             line.hasPrefix("<image") || line.hasPrefix("</image>") {
             return true
         }
+        // Claude Code records where a pasted image was saved.
+        if line.hasPrefix("[Image: source: "), line.hasSuffix("]") {
+            return true
+        }
         return false
     }
 
-    nonisolated private static func normalizedTitle(
+    nonisolated static func normalizedTitle(
         _ rawValue: String?,
         workingDirectory: String?,
         conversationID: AgentConversationID

@@ -159,6 +159,84 @@ filter, grouping and ordering. The trigger shows the selected Agent's icon plus
 a corner badge (an overlay, so the glyph stays centered) whenever any
 non-default choice is active.
 
+Sessions come from two kinds of store. JSONL Agents use the store or discovery
+roots their manifest declares. OpenCode, Hermes and Antigravity keep
+conversations in SQLite, which a manifest cannot describe, so the host reads
+those itself: `~/.local/share/opencode/opencode.db`, `~/.hermes/state.db`, and
+the per-conversation `steps` table of the Antigravity database the manifest
+store already names. These databases are opened read-only (falling back to an
+immutable handle when a WAL database has no `-shm` file); the host never writes
+to, checkpoints or locks an Agent's own files. Each query has a fallback for an
+older schema, and a database that cannot be read contributes no sessions.
+Sub-agent, archived and hidden sessions are not listed: OpenCode sessions with
+a parent or an archive time, Hermes sessions marked hidden or without messages,
+and Antigravity conversations with a nesting depth above zero or with neither
+title nor preview. Remote Antigravity conversations still show the summary
+only; remote OpenCode and Hermes sessions are not discovered.
+
+A transcript is the conversation, not the log. Each record family has its own
+rule for what a turn is, and anything else is dropped rather than shown as a
+user or assistant message:
+
+- Claude Code and Qoder: records whose `type` is `user` or `assistant`, except
+  those flagged `isMeta`, `isSidechain`, `isCompactSummary` or
+  `isApiErrorMessage`. Request snapshots, tool calls and tool results are not
+  turns.
+- Codex: `response_item` records whose payload is a message, minus the
+  compaction summaries described below.
+- Pi and OMP: `message` entries on the ancestor chain of the newest entry. A
+  retried or edited prompt leaves a sibling branch in the file; only the branch
+  the session ended on is shown.
+- OpenCode: `text` parts that are neither synthetic nor ignored, of messages
+  that are not summaries. Parts of one message are joined.
+- Hermes: `user` and `assistant` rows with content, excluding compressed
+  summaries. A multimodal turn stored as a JSON array contributes its text.
+- Antigravity: user-input and planner-response steps. Injected context, system
+  and tool steps are skipped.
+- Any other JSONL Agent: records with a `user` or `assistant` role and text.
+
+Consecutive assistant records are one turn: an Agent narrates between tool
+calls, so they are joined until the user speaks again (for Codex, only within
+one turn ID). Leading `<thinking>` blocks are removed from assistant text, an
+interruption marker is not a message, a Pi skill expansion collapses to its
+`/skill:name` invocation, and `[Image: source: …]` lines are dropped. For the
+JSONL families with their own rule above, a session whose file was read to the
+end and holds no user turn, title or preview — an Agent that was opened and
+closed — is not listed.
+
+Search reads a full-text index instead of every transcript. The index holds
+the cleaned turns of local sessions in an FTS5 table with the trigram
+tokenizer, so a query is a substring match that works for Chinese and for
+identifiers; three or more characters use the index and a shorter query scans
+the stored text. It lives beside the metadata cache at
+`AgentHistory/search-index.sqlite` under the channel's Application Support
+directory with mode 0600, contains only text already present in the session
+stores, and is rebuilt when its schema version changes. Each session is
+recorded with its store path and modification time, so only new or changed
+sessions are read again, and a session that has disappeared is removed once a
+scan has covered the complete history. By default the index is brought up to
+date when Agent History finishes loading the local list, in a utility-priority
+task, newest sessions first, for the sessions of the loaded time range; choosing
+a wider range indexes the rest. `agents.historyBackgroundIndexing` (off by
+default) additionally indexes the whole history at launch and every 30 minutes
+while the app runs, without the pane being open. A newer update replaces one
+still running; sessions already indexed are not read twice. Sessions the index
+does not cover yet are still found:
+search answers from titles and metadata first, the index second, cached
+previews third, and then scans the remaining local sessions in recency order.
+Remote sessions are never indexed; they match on title, metadata and preview.
+Results stay in the list's order and carry a snippet around the first match.
+Opening a result filters the transcript to matching turns with their
+neighbours; a result that matched only its title, ID or folder opens the whole
+conversation instead.
+
+Turns are rendered from the Markdown Agents answer in: headings, lists, task
+items, quotes, rules, bold, italic, code spans and links are styled; fenced
+code is a monospaced block; a pipe table is aligned in a monospaced block when
+it fits 40 columns and otherwise becomes one labelled record per row. Text that
+only resembles Markdown is left as written. Only `http` and `https` link
+targets are clickable.
+
 Transcript titles, previews, searches and messages omit known injected
 instruction and local-command blocks from user content. Local-command and
 system-reminder wrappers are removed only at the start of a user content block;
@@ -174,8 +252,11 @@ same turn are combined, including interrupted turns without a final answer.
 Codex compaction summaries are identified by their response and compaction
 records in a single pass, so an ordinary answer with the same heading remains
 visible. An unresolved final assistant record at the end of a bounded prefix
-is withheld until its classification is known. Local and SSH transcript views
-bound content to 8 MiB, skip individual records over 4 MiB, and report truncation.
+is withheld until its classification is known. A local transcript reads up to
+768 MiB of its session file and keeps at most 4,000 turns, 4,000,000 characters
+in total and 48,000 characters per turn; an SSH transcript is bounded to 8 MiB.
+Both skip individual records over 4 MiB and report truncation. The transcript
+view has no paging: every kept turn is a row of one reused table.
 Deep search can stop at its first match without a full-file pre-scan. Remote
 reads retain their final complete line and explicitly detect a byte cutoff.
 The metadata cache is versioned so previously generated titles are refreshed.
@@ -1190,7 +1271,7 @@ honored.
 
 Temporary pasted-image paths are shared noise: `TransientAttachmentNoise`
 (macOS `Helpers/TransientAttachmentNoise.swift`) recognizes `omg-paste`,
-`otty-paste`, `codex-clipboard` and Agent attachment paths plus the
+`otty-paste`, `codex-clipboard`, `pi-clipboard` and Agent attachment paths plus the
 `Image attachment: true` marker. Agent History drops those lines while cleaning
 user content, and Git History removes them from commit bodies before display.
 A line of prose that merely quotes a path keeps its sentence.
@@ -2628,15 +2709,17 @@ metadata uses a versioned mtime cache and
 bounded configurable count. The default time range is the last three calendar
 months. Local and SSH discovery skip older file timestamps before reading or
 decompressing transcript headers; local enumeration still checks file metadata.
-Local parsing uses at most two workers and checks cancellation between batches.
+Local parsing uses between two and eight workers, following the core count, and
+checks cancellation between batches.
 Choosing All or Year sends the built-in `setAgentHistoryTimeRange` action and
 expands the shared host cache once; narrower ranges and search filter that cache.
 A limited scan preserves older valid metadata cache entries for later expansion.
 When focused on a Pane with an active SSH session,
 Agent History automatically switches scope to the remote host using batch SSH
 queries and displays remote agent conversations; focusing a local Pane returns
-to local history. Registration starts no scan, timer, watcher, or
-helper process; appearance reuses the host cache or starts one cancellable scan.
+to local history. Registration starts no scan, watcher, or helper process, and
+no timer unless `agents.historyBackgroundIndexing` is on; appearance reuses the
+host cache or starts one cancellable scan.
 An already-started metadata scan may finish into the shared cache after hiding.
 Transcript reads are cancelled on disappearance and resumed on return when needed;
 loaded transcripts and selection remain tab-owned until close or scope change.

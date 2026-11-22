@@ -45,6 +45,8 @@ final class BuiltInAgentHistoryInspectorProvider {
     private var tabStates: [UUID: TabState] = [:]
     private var presentedContexts: [UUID: InspectorPaneContext] = [:]
     private var notificationObservers: [NSObjectProtocol] = []
+    private var backgroundIndexTimer: Timer?
+    private var backgroundIndexTask: Task<Void, Never>?
 
     init(
         registry: InspectorRegistry,
@@ -77,6 +79,8 @@ final class BuiltInAgentHistoryInspectorProvider {
                 Task { @MainActor [weak self] in
                     self?.refreshLocalization()
                 }
+            } else if key == "agents.historyBackgroundIndexing" {
+                Task { @MainActor [weak self] in self?.configureBackgroundIndexing() }
             } else if key == "agents.historyLimit" {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
@@ -88,9 +92,12 @@ final class BuiltInAgentHistoryInspectorProvider {
                 }
             }
         })
+        configureBackgroundIndexing()
     }
 
     deinit {
+        backgroundIndexTimer?.invalidate()
+        backgroundIndexTask?.cancel()
         for task in loadTasks.values { task.cancel() }
         for task in transcriptTasks.values { task.cancel() }
         for observer in notificationObservers {
@@ -239,6 +246,10 @@ final class BuiltInAgentHistoryInspectorProvider {
             }
             guard !Task.isCancelled else { return }
             sessionsByHost[hostKey] = loaded
+            if isSSH == nil {
+                // Opening Agent History is what keeps its search index current.
+                updateSearchIndex(with: loaded, isComplete: cutoff == nil && loaded.count < limit)
+            }
             if cutoff == nil { loadedFullHistoryHosts.insert(hostKey) }
             loadingHosts.remove(hostKey)
             loadTasks.removeValue(forKey: taskID)
@@ -247,6 +258,37 @@ final class BuiltInAgentHistoryInspectorProvider {
                let visible = presentedContexts.values.first(where: { self.hostKey(for: $0) == hostKey }) {
                 loadOnDemand(context: visible)
             }
+        }
+    }
+
+    /// An injected loader means a test or preview owns the sessions; the
+    /// user's real index is left alone.
+    private func updateSearchIndex(with sessions: [AgentHistorySession], isComplete: Bool) {
+        guard sessionLoader == nil else { return }
+        AgentHistorySearchIndex.shared.scheduleUpdate(sessions: sessions, pruneMissing: isComplete)
+    }
+
+    /// With the setting on, the index follows new sessions even while Agent
+    /// History stays closed. Off, it is updated only when the pane loads.
+    private func configureBackgroundIndexing() {
+        backgroundIndexTimer?.invalidate()
+        backgroundIndexTimer = nil
+        backgroundIndexTask?.cancel()
+        backgroundIndexTask = nil
+        guard sessionLoader == nil, OhMyGhosttySettings.shared.agentHistoryBackgroundIndexing else { return }
+        refreshSearchIndexInBackground()
+        backgroundIndexTimer = Timer.scheduledTimer(withTimeInterval: 30 * 60, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.refreshSearchIndexInBackground() }
+        }
+    }
+
+    private func refreshSearchIndexInBackground() {
+        backgroundIndexTask?.cancel()
+        let limit = Int(OhMyGhosttySettings.shared.agentHistoryLimit)
+        backgroundIndexTask = Task.detached(priority: .background) {
+            let sessions = await AgentHistoryStore.load(maximumSessions: limit)
+            guard !Task.isCancelled else { return }
+            AgentHistorySearchIndex.shared.scheduleUpdate(sessions: sessions, pruneMissing: sessions.count < limit)
         }
     }
 

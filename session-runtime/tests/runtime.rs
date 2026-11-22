@@ -1010,11 +1010,22 @@ while True:
     .unwrap();
     session_rec.save(&rec_path).unwrap();
 
+    // The session leader has to show up as `login` in the process table. A
+    // macOS framework Python (Homebrew, Xcode) is a launcher that starts the
+    // real interpreter and puts that interpreter's path back in argv[0], so
+    // exec the running binary itself rather than `sys.executable`.
     let argv = vec![
         "python3".to_owned(),
         "-c".to_owned(),
         format!(
-            "import os, sys; os.execvp(sys.executable, ['login', '-u', {:?}])",
+            r#"import os, sys
+real = sys.executable
+if sys.platform == "darwin":
+    import ctypes
+    buf = ctypes.create_string_buffer(4096)
+    if ctypes.CDLL(None).proc_pidpath(os.getpid(), buf, len(buf)) > 0:
+        real = buf.value.decode()
+os.execv(real, ["login", "-u", {:?}])"#,
             login_script.to_str().unwrap()
         ),
     ];

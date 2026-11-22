@@ -42,8 +42,19 @@ pub fn captureWithKeys(
     formatter.content = .{ .selection = Selection.init(top, bottom, false) };
     formatter.pin_map = .{ .alloc = alloc, .map = &points };
     formatter.format(&formatted) catch return null;
-    const bytes = formatted.buffered();
-    if (bytes.len == 0 or bytes.len > max_bytes or points.count() != bytes.len) return null;
+    const formatted_bytes = formatted.buffered();
+    if (formatted_bytes.len == 0 or
+        formatted_bytes.len > max_bytes or
+        points.count() != formatted_bytes.len) return null;
+
+    // Untrimmed VT output ends with one newline per blank row below the last
+    // row with content, so that a replay reproduces the layout. A restore
+    // replays this export above a new prompt, where those rows would be an
+    // empty gap that also pushes earlier rows off the screen. Leave them out.
+    var text_len = formatted_bytes.len;
+    while (text_len >= 2 and std.mem.eql(u8, formatted_bytes[text_len - 2 .. text_len], "\r\n")) text_len -= 2;
+    if (text_len == 0) return null;
+    const bytes = formatted_bytes[0..text_len];
 
     const output_buffer = try alloc.alloc(u8, max_bytes);
     defer alloc.free(output_buffer);
@@ -53,7 +64,7 @@ pub fn captureWithKeys(
         if (!entry.isValid()) continue;
         var start: ?usize = null;
         var end: ?usize = null;
-        for (copied..points.count()) |i| {
+        for (copied..bytes.len) |i| {
             const pin = points.get(i) orelse return null;
             if (start == null) {
                 if (pin.eql(entry.pin.*)) start = i;
@@ -110,6 +121,8 @@ test "OMG scrollback VT export retains output without baking theme colors" {
     defer alloc.free(snapshot);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "first line") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "second line") != null);
+    // The blank third row is left out: a restore replays this above a prompt.
+    try std.testing.expect(!std.mem.endsWith(u8, snapshot, "\r\n"));
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "\x1b]10;") == null);
     try std.testing.expect((try capture(alloc, &t, 1)) == null);
 }

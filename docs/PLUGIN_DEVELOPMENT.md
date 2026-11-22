@@ -2539,7 +2539,9 @@ textless cells at the end of non-wrapped rows (including Starship/powerline
 redraw fill). Soft-wrapped trailing blanks retain their width but render with
 default styling; otherwise repeated recovery into narrower panes turns that
 fill into colored bars. Real colored text and interior styled spaces are
-preserved, and no live cell is mutated. This is a rendered-cell snapshot, not
+preserved, and no live cell is mutated. The blank rows below the last row with
+content are not exported: a restore replays the snapshot above a new prompt,
+where they would be an empty gap. This is a rendered-cell snapshot, not
 a re-execution of the prompt theme: soft-wrapped complete prompt text can
 reflow to a wider pane, but text already abbreviated by Fish/Starship before
 capture (such as a literal ellipsis) cannot be expanded from missing cells. Tests cover multiple capture/replay

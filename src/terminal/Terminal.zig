@@ -2013,6 +2013,13 @@ pub fn print(self: *Terminal, c: u21) !void {
                     // the cursor within this block to the proper location.
                     self.screens.active.cursorLeft(prev.left);
 
+                    // OMG: the graphemes of a base cell that wraps. They are
+                    // attached after its spacer tail is written below, because
+                    // setGraphemes checks page integrity and a wide cell
+                    // without its tail fails that check.
+                    var prev_grapheme_buf: [pagepkg.grapheme_max_len]u21 = undefined;
+                    var prev_grapheme: []const u21 = &.{};
+
                     // If we don't have space for the wide char, we need to
                     // insert spacers and wrap.
                     if (self.screens.active.cursor.x == right_limit - 1) {
@@ -2027,8 +2034,7 @@ pub fn print(self: *Terminal, c: u21) !void {
 
                         const prev_cp = prev.cell.content.codepoint.data;
                         // Copy the grapheme codepoints since overwriting the cell frees them.
-                        var prev_grapheme_buf: [pagepkg.grapheme_max_len]u21 = undefined;
-                        const prev_grapheme: []const u21 = prev_grapheme: {
+                        prev_grapheme = prev_grapheme: {
                             if (!prev.cell.hasGrapheme()) break :prev_grapheme &.{};
                             const cps = self.screens.active.cursor.page_pin.grapheme(prev.cell).?;
                             const copy = prev_grapheme_buf[0..cps.len];
@@ -2040,12 +2046,6 @@ pub fn print(self: *Terminal, c: u21) !void {
                         try self.printWrap();
                         right_limit = self.scrolling_region.right + 1;
                         self.writeCell(prev_cp, .wide);
-                        if (prev_grapheme.len > 0) {
-                            try self.screens.active.setGraphemes(
-                                self.screens.active.cursor.page_cell,
-                                prev_grapheme,
-                            );
-                        }
 
                         prev.cell = self.screens.active.cursor.page_cell;
                     } else {
@@ -2075,6 +2075,13 @@ pub fn print(self: *Terminal, c: u21) !void {
 
                         // The cursor is on the spacer tail we just wrote, so
                         // the wide cell we append to is the one to its left.
+                        prev.cell = self.screens.active.cursorCellLeft(1);
+                    }
+
+                    // OMG: see prev_grapheme above. Setting graphemes can grow
+                    // the page as well, so reload the cell afterwards.
+                    if (prev_grapheme.len > 0) {
+                        try self.screens.active.setGraphemes(prev.cell, prev_grapheme);
                         prev.cell = self.screens.active.cursorCellLeft(1);
                     }
                     // Move the cursor again so we're beyond our spacer

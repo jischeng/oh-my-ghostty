@@ -7,10 +7,12 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import stat
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -189,6 +191,53 @@ Failing tests:
                 "GhosttyTests/VerticalTabsIntegrationTests",
             ],
         )
+
+    def test_runtime_gate_is_selected_by_every_input_of_the_runtime_revision(self):
+        source = (ROOT / "dist/macos/build-session-runtime.py").read_text()
+        hashed = source[source.index("digest = hashlib.sha256()"):source.index("revision = digest.hexdigest()")]
+        inputs = [path for path in re.findall(r"'([^']+)'", hashed) if "/" in path]
+        # The runtime embeds libghostty-vt, so the terminal core is one of them.
+        self.assertIn("src/terminal", inputs)
+        self.assertIn("include/ghostty/vt", inputs)
+        for path in inputs + ["dist/macos/build-session-runtime.py"]:
+            self.assertTrue(
+                any(path.startswith(prefix) or (path + "/").startswith(prefix) for prefix in release.RUNTIME_GATE_PREFIXES),
+                f"{path} changes the runtime revision but does not select the runtime gate",
+            )
+
+    def test_runtime_gate_builds_the_vt_library_first_and_runs_every_test_binary(self):
+        commands = release.runtime_gate_commands(ROOT)
+        # The crate links zig-out/lib, so a stale library would be tested.
+        self.assertIn("-Demit-lib-vt", commands[0])
+        self.assertTrue(any(arg.startswith("-Dversion-string=") for arg in commands[0]))
+        cargo_test = next(cmd for cmd in commands if cmd[:2] == ["cargo", "test"])
+        self.assertLess(cargo_test.index("--no-fail-fast"), cargo_test.index("--"))
+
+    def test_swift_gate_rebuilds_a_release_ghosttykit_when_the_core_changed(self):
+        command = release.ghosttykit_build_command(ROOT)
+        for flag in ["-Doptimize=ReleaseFast", "-Demit-xcframework=true", "-Dxcframework-target=native", "-Demit-macos-app=false"]:
+            self.assertIn(flag, command)
+        for path in ["src/terminal/Terminal.zig", "include/ghostty.h", "pkg/macos/main.zig", "build.zig.zon"]:
+            self.assertTrue(path.startswith(release.GHOSTTYKIT_PREFIXES), path)
+        for path in ["macos/Sources/App/AppDelegate.swift", "session-runtime/src/lib.rs", "docs/TESTING.md"]:
+            self.assertFalse(path.startswith(release.GHOSTTYKIT_PREFIXES), path)
+
+    def test_zig_gate_runs_the_tests_of_changed_zig_files(self):
+        passed = {
+            "status": "passed", "filters": ["cli.ssh."], "declared": 20, "baseline": 79,
+            "selected": 20, "passed": 99, "total": 99, "detail": "", "failed_tests": [],
+        }
+        with mock.patch.object(release.omg_zig_tests, "run", return_value=passed) as run:
+            self.assertEqual(release.run_zig_test_gate(ROOT, ["docs/TESTING.md"])["status"], "not_selected")
+            run.assert_not_called()
+
+            report = release.run_zig_test_gate(ROOT, ["src/cli/ssh.zig", "docs/TESTING.md"])
+            self.assertEqual((report["status"], report["files"], report["selected"]), ("passed", ["src/cli/ssh.zig"], 20))
+            self.assertEqual(run.call_args.args[1], ["cli.ssh."])
+
+            run.return_value = {**passed, "status": "failed", "stage": "tests", "detail": "1 failed", "failed_tests": ["cli.ssh.test.parse"]}
+            with self.assertRaisesRegex(RuntimeError, "cli.ssh.test.parse"):
+                release.run_zig_test_gate(ROOT, ["src/cli/ssh.zig"])
 
     def test_clean_release_builds_preserves_artifacts_and_latest_universal_app(self):
         with tempfile.TemporaryDirectory() as tmp:

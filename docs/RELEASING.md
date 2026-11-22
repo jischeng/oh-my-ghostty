@@ -491,6 +491,9 @@ warning.
 ## 3. Validation gate
 
 Run before signing and again on the commit that will be tagged.
+`python3 dist/macos/omg_release.py gate` runs everything in this section that the
+changes since the previous published tag select; [TESTING.md](TESTING.md#what-the-release-gate-runs)
+lists each layer, what selects it, and what the gate leaves out.
 
 Formatting and resources:
 
@@ -516,8 +519,19 @@ macos/build.nu --action test --changed-since "v<PREVIOUS_VERSION>"
 Shared host/core, build/test infrastructure, or unmapped changes fall back to all
 routine Swift suites. For an intentional broad sweep, use
 `macos/build.nu --action test --test-modules all`. Builds/tests remain serialized.
-Affected Zig/Python/shell tests and actual-artifact checks still run separately;
-the selector does not claim to run those layers.
+The Swift selector does not run other layers. Zig tests of the changed files and
+the session-runtime checks have their own selection:
+
+```bash
+python3 dist/omg_zig_tests.py --changed-since "v<PREVIOUS_VERSION>"
+```
+
+The runtime checks are selected by every input of the bundled runtime's
+revision, which includes `src/terminal/` and `include/ghostty/vt/`: a
+terminal-core change ships a new runtime even when `session-runtime/` is
+untouched. Their commands are in
+[TESTING.md](TESTING.md#session-runtime). Affected Python/shell tests and
+actual-artifact checks still run separately.
 
 The iOS app has a separate change-based gate:
 `python3 dist/omg_mobile_test_plan.py --changed-since "v<PREVIOUS_VERSION>"`.

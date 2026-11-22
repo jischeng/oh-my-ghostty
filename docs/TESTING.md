@@ -213,19 +213,115 @@ gateway and disposable sessions, saves receipts/screenshots and shuts the VM dow
 Physical-device provisioning and acceptance are separate; ordinary macOS releases
 do not require them.
 
-### Other layer checks
+### Zig tests
 
-The selector runs **Swift tests only**. It does not rebuild GhosttyKit or run Zig,
-Python, shell, browser, lint, code-signature, or artifact launch checks.
-Continue running the checks relevant to those changed layers, strictly serially:
+Run Zig unit tests through the wrapper instead of typing `zig build test`:
 
 ```bash
-# Selector/CLI contract tests: no Xcode or desktop interaction
-python3 -m unittest discover -s dist -p 'test_omg_test_plan.py'
+# Tests of the Zig files changed since a ref, including the worktree
+python3 dist/omg_zig_tests.py --changed-since <base-ref>
 
-# Changed Zig area (choose the affected test filter)
-mise exec zig@0.17.1 -- zig build test \
-  -Dversion-string=1.3.2-dev -Dtest-filter="OMG command history"
+# Preview that selection without building
+python3 dist/omg_zig_tests.py --changed-since <base-ref> --plan-only
+
+# One file, or any text contained in a test's full name (repeatable)
+python3 dist/omg_zig_tests.py --filter terminal.Terminal.
+
+# The whole suite: about 4,400 tests, several minutes
+python3 dist/omg_zig_tests.py --all
+```
+
+A changed file `src/terminal/Terminal.zig` selects the filter
+`terminal.Terminal.`, because a test's full name starts with its file's path
+below `src/`. The wrapper exists because a hand-typed `zig build test` goes
+wrong in five ways here:
+
+- **Toolchain.** The `zig` on `PATH` is usually not the release named in
+  `build.zig.zon`. The wrapper runs `mise exec zig@<minimum_zig_version>`.
+- **Tagged commits.** Without `-Dversion-string`, the build reads its version
+  from Git and panics (`tagged releases must be in vX.Y.Z format matching
+  build.zig`) on any commit that carries an OMG tag, which is every `main`
+  right after a release. The wrapper passes the Ghostty version from
+  `build.zig.zon`. This also lets an old tag be built in a `git worktree`.
+- **Filters that match nothing.** Unnamed `test { … }` blocks run under every
+  filter, so a misspelled filter still prints a passing summary. The wrapper
+  first builds with a filter no test can match, then reports how many
+  **selected** tests ran on top of that. A typed `--filter` that selects
+  nothing fails. A file selected by `--changed-since` that selects nothing
+  (not compiled for this platform) is reported, not failed.
+- **Reused results.** zig reuses the result of an identical earlier test run
+  and then prints `cached` with no counts, so a second run cannot tell a pass
+  from a filter that selected nothing. The wrapper puts an id unique to the
+  invocation into the version's build metadata, which makes every run real.
+- **An unfiltered run does much more than run Zig tests.** On macOS,
+  `zig build test` without `-Dtest-filter` also builds a **Debug** GhosttyKit
+  over `macos/GhosttyKit.xcframework` and runs the app's XCTest through raw
+  `xcodebuild` on the host desktop, with none of `macos/build.nu`'s selection
+  or VM isolation. `-Demit-macos-app=false` alone does not prevent this;
+  the wrapper also passes `-Demit-xcframework=false`. If it happened anyway,
+  stop `xcodebuild` and rebuild GhosttyKit (see below) before the next app
+  build or Swift test run.
+
+A crash in one test is reported with its name, and the remaining tests still
+run.
+
+### Session runtime
+
+The bundled runtime embeds `libghostty-vt`, so its revision changes whenever
+`session-runtime/`, `src/terminal/`, `include/ghostty/vt/`, the OMG shell
+integration or its build scripts change. Run its checks for any of those, not
+only for edits under `session-runtime/`:
+
+```bash
+# The crate links zig-out/lib/libghostty-vt: build the current terminal core first
+mise exec zig@0.17.1 -- zig build -Demit-lib-vt -Demit-macos-app=false \
+  -Demit-xcframework=false -Doptimize=ReleaseFast -Dversion-string=1.4.1-dev
+
+export OMG_RUNTIME_CC=/usr/bin/cc OMG_RUNTIME_AR=/usr/bin/ar
+cargo fmt --manifest-path session-runtime/Cargo.toml --check
+cargo clippy --manifest-path session-runtime/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path session-runtime/Cargo.toml --no-fail-fast -- --test-threads=1
+cargo build --manifest-path session-runtime/Cargo.toml
+python3 -m unittest discover -s session-runtime/tests -p 'test_*.py'
+```
+
+- `OMG_RUNTIME_AR` matters when Homebrew binutils is on `PATH`: GNU `ar`
+  writes archives that the macOS linker rejects as `not 8-byte aligned`.
+- Without `--no-fail-fast`, cargo stops at the first failing test binary and
+  the later binaries are never run.
+- The first command is not optional. The crate links whatever
+  `libghostty-vt` is in `zig-out/lib`, so without it the tests exercise the
+  terminal core that was built there last, or fail to link in a fresh
+  checkout. `-Dversion-string` is the Ghostty version in `build.zig.zon`.
+- Python discovery skips the tests that need a configured SSH or Linux host.
+  Report them as skipped, not passed.
+
+### GhosttyKit under Swift tests
+
+`macos/build.nu` links whatever is in `macos/GhosttyKit.xcframework` and never
+rebuilds it. After a change under `src/`, `include/`, `pkg/`, `vendor/` or to
+`build.zig*`, rebuild it before running Swift tests, or they exercise the
+previous core:
+
+```bash
+mise exec zig@0.17.1 -- zig build -Doptimize=ReleaseFast -Demit-xcframework=true \
+  -Dxcframework-target=native -Demit-macos-app=false -Dversion-string=1.4.1-dev
+```
+
+`-Dversion-string` is the Ghostty version in `build.zig.zon`. Keep the build
+ReleaseFast: a Debug core enables page-integrity checks on every terminal
+write, which makes the app slow and is never what a release ships.
+
+### Other layer checks
+
+The Swift selector runs **Swift tests only**. It does not rebuild GhosttyKit or
+run Python, shell, browser, lint, code-signature, or artifact launch checks.
+Run the ones that match the changed layer, strictly serially:
+
+```bash
+# Selector/CLI contract tests: no Xcode, zig or desktop interaction
+python3 -m unittest discover -s dist -p 'test_omg_test_plan.py'
+python3 -m unittest discover -s dist -p 'test_omg_zig_tests.py'
 
 # Changed SSH transport/integration/wrappers: validate the actual rebuilt artifact
 python3 dist/test_ssh_shell_integration.py \
@@ -237,24 +333,63 @@ python3 -m unittest discover -s dist -p 'test_omg_community_docs.py'
 
 # Always keep the OMG documentation contract
 python3 dist/check_omg_docs.py
-```
 
-For releases, use the **previous published OMG tag**, inspect the plan, and record
-selected modules, any broad fallback, measured results, and desktop tests not run
-in the release notes. Do not select only the version bump commit. Full routine
-regression remains useful for upstream syncs, cross-module refactors, and periodic
-sweeps. Release apps use persistent self-signed code signatures and are not notarized;
-certificate/DR continuity, Sparkle EdDSA, and artifact launch checks remain separate
-gates. Run signing contracts separately:
-
-```bash
+# Signing contracts
 python3 -m unittest discover -s dist -p 'test_omg_signing.py'
 python3 -m unittest discover -s dist -p 'test_omg_keychain.py'
 ```
 
-Full TCC permission-upgrade experiments are not a prerequisite for this policy;
-report them NOT RUN if omitted. See
+### What the release gate runs
+
+`python3 dist/macos/omg_release.py gate` compares against the previous published
+OMG tag and runs each layer only when the changes select it.
+`python3 dist/macos/omg_release.py plan` prints the selection without running
+anything.
+
+| Layer | Selected when | What runs |
+| --- | --- | --- |
+| Static and contract checks | Always | SwiftLint, `zig fmt --check` on changed Zig files, settings schema, documentation contract, `plutil`, `ibtool`, and the signing, keychain, release, test-plan, mobile-plan and Zig-test-selection contracts |
+| Session runtime | An input of the runtime revision changed (see above) | The commands under [Session runtime](#session-runtime) |
+| Zig | A changed file under `src/` declares tests | `dist/omg_zig_tests.py` for those files |
+| GhosttyKit | Swift is selected and a source of GhosttyKit changed | The native ReleaseFast rebuild under [GhosttyKit under Swift tests](#ghosttykit-under-swift-tests) |
+| Swift | The module map selects suites | `macos/build.nu --action test --changed-since <tag>`; up to three suites that fail in that run are rerun alone |
+| iOS | The mobile plan selects checks | `ios/scripts/test.sh`, `ios/scripts/test-vm.sh` |
+
+The gate does **not** run: the whole Zig suite, `.interactiveDesktop` suites,
+XCUITest, TCC and Sparkle upgrade experiments, live remote SSH deployment and
+Linux containment checks, or frame-rate, multi-display and latency
+measurements. Record the ones a release leaves out as NOT RUN in its notes,
+together with the selected modules, any broad fallback, and measured results.
+Do not select only the version bump commit. Release apps use persistent
+self-signed code signatures and are not notarized; certificate/DR continuity,
+Sparkle EdDSA, and artifact launch checks are packaging steps, described in
 [RELEASING.md](RELEASING.md).
+
+### When a check fails
+
+There is no list of expected failures. The whole Zig suite and every
+session-runtime test passed on the build host on 2026-11-22, so a failing test
+is either new or depends on the machine.
+
+- **Decide whether it is new before fixing it.** Check out the previous tag in
+  a worktree and run the same test there:
+  `git worktree add --detach /tmp/omg-prev v<PREVIOUS_VERSION>`. Remove the
+  worktree afterwards. Tags up to `v0.23.0` predate `dist/omg_zig_tests.py`;
+  there, run the `zig build test` command that `--plan-only` prints here.
+- **A Swift suite that fails only in the broad run.** Rerun it alone without
+  rebuilding: `macos/build.nu --action test --skip-build --only-testing
+  GhosttyTests/<Suite>`. If it passes alone, the release notes name the suite
+  and say so. The suite has varied from release to release
+  (`EditorWorkspaceLifetimeTests` in 0.22.2, `TerminalWorkspaceAppearanceTests`
+  in 0.23.0), which suggests interference between suites in one app process
+  rather than a defect in one test.
+- **A debug assertion in the terminal core** (`page integrity violation`) is
+  compiled only into Debug builds. It still means the page was inconsistent at
+  the moment of the check, so fix the order of the writes instead of the check.
+- **A test that starts another program** depends on what that name resolves to
+  on the host. The framework Python that Homebrew and Xcode install starts a
+  second process and replaces `argv[0]`, which broke a runtime test that
+  expected to see a process named `login`.
 
 ## Isolated GUI runs
 

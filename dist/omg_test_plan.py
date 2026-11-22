@@ -126,6 +126,7 @@ NO_SWIFT_GLOBS = (
     "dist/*docs*.py", "dist/macos/altstore_source.py", "dist/macos/omg_release.py", "dist/test_omg_release.py",
     ".github/ISSUE_TEMPLATE/**",
     "ios/**", "dist/omg_mobile_test_plan.py", "dist/test_omg_mobile_test_plan.py",
+    "dist/omg_zig_tests.py", "dist/test_omg_zig_tests.py",
 )
 SMOKE_SUITE = "GhosttyTests/OhMyGhosttyVersionTests"
 SUITE_TYPE = re.compile(r"\b(?:struct|class|enum)\s+(\w+(?:Tests|Suite))\b")

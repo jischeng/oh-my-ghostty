@@ -19,6 +19,14 @@ See [.agents/WORKSPACE_DEV.md](.agents/WORKSPACE_DEV.md) for identity and data p
   - Prefer to run targeted tests with `-Dtest-filter` because the full
     test suite is slow to run.
 - **Test filter (Zig)**: `zig build test -Dtest-filter=<test name>`
+- **Test (Zig, in this checkout)**: `python3 dist/omg_zig_tests.py --changed-since <base-ref>`
+  - Also `--filter terminal.Terminal.` for one file and `--all` for the suite.
+  - Use it instead of typing the two commands above. It runs Zig 0.17.1 through
+    `mise`, passes the `-Dversion-string` without which a tagged commit panics,
+    and fails when a filter selects no test. See `docs/TESTING.md`.
+  - Never run an unfiltered `zig build test` by hand on macOS: it also replaces
+    `macos/GhosttyKit.xcframework` with a Debug build and runs the app's XCTest
+    through raw `xcodebuild` on the host desktop.
 - **Test (Swift modules)**: `macos/build.nu --action test --test-modules git,editor`
 - **Test (Swift changes)**: `macos/build.nu --action test --changed-since <base-ref>`
   - Inspect with `--test-plan-only`; releases use the previous published OMG tag.
@@ -29,6 +37,9 @@ See [.agents/WORKSPACE_DEV.md](.agents/WORKSPACE_DEV.md) for identity and data p
   - After native tab/drag/focus changes, run relevant desktop tests explicitly on
     an unlocked foreground desktop with `--include-desktop-tests`.
   - Swift selection does not replace affected Zig/Python/shell/artifact checks.
+- **Test (session runtime)**: the commands under "Session runtime" in
+  `docs/TESTING.md`. Run them when `session-runtime/`, `src/terminal/` or
+  `include/ghostty/vt/` change: the runtime embeds `libghostty-vt`.
 - **Test (GUI in the VM)**: `macos/scripts/vm/omg-vm up|deploy|smoke|desktop|xctest|down`
   - `macos/build.nu --action test` builds on the host (`build-for-testing`) and
     runs app-hosted Swift tests (`GhosttyTests`) inside the retained Tart VM via

@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import altstore_source  # noqa: E402
 import omg_mobile_test_plan  # noqa: E402
 import omg_test_plan  # noqa: E402
+import omg_zig_tests  # noqa: E402
 
 SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
@@ -35,6 +36,10 @@ VERSION_TEST_REL = "macos/Tests/Helpers/OhMyGhosttyVersionTests.swift"
 INFO_PLIST_REL = "macos/Ghostty-Info.plist"
 DRAFT_MARKER = "<!-- TODO(release-notes): replace draft bullets with user-facing highlights -->"
 
+# Every input of the bundled runtime's revision (see build-session-runtime.py)
+# selects the runtime checks. The runtime embeds libghostty-vt, so a change to
+# the terminal core ships a new runtime even when `session-runtime/` is
+# untouched; `test_omg_release.py` keeps this list and that script in step.
 RUNTIME_GATE_PREFIXES = (
     "session-runtime/",
     "dist/macos/build-session-runtime.py",
@@ -42,7 +47,14 @@ RUNTIME_GATE_PREFIXES = (
     "dist/macos/check-session-runtime.py",
     "dist/macos/session-runtime-",
     "src/shell-integration/omg/",
+    "src/terminal/",
+    "include/ghostty/vt/",
 )
+# Sources of macos/GhosttyKit.xcframework. `macos/build.nu` links whatever is
+# there and never rebuilds it, so when these change the Swift gate would
+# otherwise test the previous core, or a Debug one left by another build.
+GHOSTTYKIT_PREFIXES = ("src/", "include/", "pkg/", "vendor/", "build.zig")
+
 
 
 def parse_semver(version: str) -> tuple[int, int, int]:
@@ -490,6 +502,7 @@ def run_parallel_static_gates(root: Path, changed: list[str]) -> list[dict[str, 
         ("keychain-contract", ["bash", dev_tool, "python3", "-m", "unittest", "discover", "-s", "dist", "-p", "test_omg_keychain.py"]),
         ("test-plan-contract", ["bash", dev_tool, "python3", "-m", "unittest", "discover", "-s", "dist", "-p", "test_omg_test_plan.py"]),
         ("mobile-plan-contract", ["bash", dev_tool, "python3", "-m", "unittest", "discover", "-s", "dist", "-p", "test_omg_mobile_test_plan.py"]),
+        ("zig-tests-contract", ["bash", dev_tool, "python3", "-m", "unittest", "discover", "-s", "dist", "-p", "test_omg_zig_tests.py"]),
         ("release-contract", ["bash", dev_tool, "python3", "-m", "unittest", "discover", "-s", "dist", "-p", "test_omg_release.py"]),
     ]
     if zig_changed:
@@ -517,6 +530,45 @@ def run_parallel_static_gates(root: Path, changed: list[str]) -> list[dict[str, 
     return results
 
 
+def ghosttykit_build_command(root: Path) -> list[str]:
+    """The native ReleaseFast GhosttyKit that app-hosted Swift tests link."""
+    return [
+        "mise", "exec", f"zig@{omg_zig_tests.zon_value(root, 'minimum_zig_version')}", "--", "zig", "build",
+        "-Doptimize=ReleaseFast", "-Demit-xcframework=true", "-Dxcframework-target=native",
+        "-Demit-macos-app=false", f"-Dversion-string={omg_zig_tests.zon_value(root, 'version')}",
+    ]
+
+
+def rebuild_ghosttykit(root: Path) -> None:
+    env = dict(os.environ)
+    for name in ("SDKROOT", "http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"):
+        env.pop(name, None)
+    proc = subprocess.run(ghosttykit_build_command(root), cwd=root, capture_output=True, text=True, errors="replace", env=env)
+    if proc.returncode != 0:
+        raise RuntimeError(f"GhosttyKit rebuild failed (exit {proc.returncode}):\n{proc.stdout}\n{proc.stderr}")
+
+
+def runtime_gate_commands(root: Path) -> list[list[str]]:
+    zig = f"zig@{omg_zig_tests.zon_value(root, 'minimum_zig_version')}"
+    manifest = ["--manifest-path", "session-runtime/Cargo.toml"]
+    return [
+        # The crate links the libghostty-vt in zig-out/lib. Build it first, or
+        # the tests exercise whichever terminal core was built there last.
+        [
+            "mise", "exec", zig, "--", "zig", "build", "-Demit-lib-vt", "-Demit-macos-app=false",
+            "-Demit-xcframework=false", "-Doptimize=ReleaseFast",
+            f"-Dversion-string={omg_zig_tests.zon_value(root, 'version')}",
+        ],
+        ["cargo", "fmt", *manifest, "--check"],
+        ["cargo", "clippy", *manifest, "--all-targets", "--", "-D", "warnings"],
+        # Without --no-fail-fast cargo stops at the first failing test binary
+        # and the report hides every failure after it.
+        ["cargo", "test", *manifest, "--no-fail-fast", "--", "--test-threads=1"],
+        ["cargo", "build", *manifest],
+        ["bash", "dist/macos/dev-tool.sh", "python3", "-m", "unittest", "discover", "-s", "session-runtime/tests", "-p", "test_*.py"],
+    ]
+
+
 def runtime_build_env() -> dict[str, str]:
     """Pin Apple's toolchain for the runtime build script.
 
@@ -540,8 +592,12 @@ def run_cargo_gate_step(root: Path, cmd: list[str], *, attempts: int = 2) -> Non
     instead of failing the whole release.
     """
     env = runtime_build_env()
+    if cmd[0] == "mise":
+        # A stale absolute SDKROOT outlives the Xcode that provided it.
+        env.pop("SDKROOT", None)
     for attempt in range(1, attempts + 1):
-        proc = subprocess.run(cmd, cwd=root, capture_output=True, text=True, env=env)
+        # Test output is not always valid UTF-8; a decode error must not hide a result.
+        proc = subprocess.run(cmd, cwd=root, capture_output=True, text=True, errors="replace", env=env)
         if proc.returncode == 0:
             if proc.stdout:
                 print(proc.stdout, end="")
@@ -561,6 +617,26 @@ def run_cargo_gate_step(root: Path, cmd: list[str], *, attempts: int = 2) -> Non
         raise RuntimeError(f"session-runtime gate failed (exit {proc.returncode}): {cmd}\n{combined}")
 
 
+def run_zig_test_gate(root: Path, changed: list[str]) -> dict[str, object]:
+    """Run the Zig unit tests of the changed Zig files (see dist/omg_zig_tests.py)."""
+    plan = omg_zig_tests.make_plan(root, changed)
+    if not plan["run_zig"]:
+        return {"status": "not_selected", "seconds": 0.0}
+    t0 = time.monotonic()
+    result = omg_zig_tests.run(root, plan["filters"], declared=plan["declared"])
+    summary = {
+        "status": result["status"],
+        "files": [item["path"] for item in plan["files"]],
+        "selected": result.get("selected", 0),
+        "declared": plan["declared"],
+        "seconds": round(time.monotonic() - t0, 2),
+    }
+    if result["status"] == "failed":
+        raise RuntimeError(f"Zig test gate failed: {omg_zig_tests.describe(result)}")
+    print(f"[zig-gate] {omg_zig_tests.describe(result)}", flush=True)
+    return summary
+
+
 def run_serial_test_gates(
     root: Path,
     prev_tag: str,
@@ -573,18 +649,13 @@ def run_serial_test_gates(
     runtime_touched = any(p.startswith(RUNTIME_GATE_PREFIXES) for p in changed)
     if runtime_touched:
         t0 = time.monotonic()
-        runtime_cmds = [
-            ["cargo", "fmt", "--manifest-path", "session-runtime/Cargo.toml", "--check"],
-            ["cargo", "clippy", "--manifest-path", "session-runtime/Cargo.toml", "--all-targets", "--", "-D", "warnings"],
-            ["cargo", "test", "--manifest-path", "session-runtime/Cargo.toml", "--", "--test-threads=1"],
-            ["cargo", "build", "--manifest-path", "session-runtime/Cargo.toml"],
-            ["bash", "dist/macos/dev-tool.sh", "python3", "-m", "unittest", "discover", "-s", "session-runtime/tests", "-p", "test_*.py"],
-        ]
-        for cmd in runtime_cmds:
+        for cmd in runtime_gate_commands(root):
             run_cargo_gate_step(root, cmd)
         report["session_runtime"] = {"status": "passed", "seconds": round(time.monotonic() - t0, 2)}
     else:
         report["session_runtime"] = {"status": "not_selected", "seconds": 0.0}
+
+    report["zig"] = run_zig_test_gate(root, changed)
 
     catalog = omg_test_plan.inventory(root)
     _, base_commit = omg_test_plan.changed_paths(root, prev_tag)
@@ -594,12 +665,19 @@ def run_serial_test_gates(
         version_only=PBXPROJ_REL in changed and omg_test_plan.version_only_change(root, base_commit),
     )
     if swift_plan["run_swift"]:
+        if any(p.startswith(GHOSTTYKIT_PREFIXES) for p in changed):
+            t0 = time.monotonic()
+            rebuild_ghosttykit(root)
+            report["ghosttykit"] = {"status": "rebuilt", "seconds": round(time.monotonic() - t0, 2)}
+        else:
+            report["ghosttykit"] = {"status": "not_selected", "seconds": 0.0}
         t0 = time.monotonic()
         proc = subprocess.run(
             ["nu", "macos/build.nu", "--action", "test", "--changed-since", prev_tag],
             cwd=root,
             capture_output=True,
             text=True,
+            errors="replace",
         )
         combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
         if proc.returncode == 0:
@@ -798,6 +876,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
     ios_ver_only = IOS_SPEC_REL in changed and omg_mobile_test_plan.ios_version_only_change(REPO_ROOT, base_commit)
     mobile_plan = omg_mobile_test_plan.make_plan(changed, ios_version_only=ios_ver_only)
     cleanup_preview = clean_release_builds(REPO_ROOT, keep_latest=1, dry_run=True)
+    zig_plan = omg_zig_tests.make_plan(REPO_ROOT, changed)
 
     payload = {
         "previous_tag": prev_tag,
@@ -810,6 +889,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         },
         "changed_files_count": len(changed),
         "session_runtime_gate_selected": any(p.startswith(RUNTIME_GATE_PREFIXES) for p in changed),
+        "zig_gate": {key: zig_plan[key] for key in ("run_zig", "filters", "declared", "files_without_tests")},
         "swift_gate": {
             "run_swift": swift_plan["run_swift"],
             "scope": swift_plan["scope"],

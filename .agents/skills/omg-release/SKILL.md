@@ -18,7 +18,7 @@ Use this skill in the `oh-my-ghostty` repo. Never open the Xcode GUI. Never touc
    - For patch/minor/major releases, preview then execute `macos/build.nu --action test --changed-since "v<PREVIOUS_VERSION>"`. This includes all release commits and worktree changes, plus direct module dependents and version smoke coverage.
    - Shared host/core, build/test infrastructure, or unmapped changes conservatively select all routine Swift suites. Explicit broad sweeps remain available with `--test-modules all`; do not force them solely because of a minor bump.
    - `.interactiveDesktop` native drag/focus tests are optional, excluded by default, and reported **NOT RUN**, not passed. After relevant native tab/drag/focus/event changes, schedule them explicitly with `--include-desktop-tests` on an unlocked foreground desktop. XCUITest stays excluded.
-   - Swift selection does not replace affected Zig/Python/shell or artifact checks. See `docs/TESTING.md`.
+   - Swift selection does not replace affected Zig/Python/shell or artifact checks. `omg_release.py gate` also runs the Zig tests of changed files (`dist/omg_zig_tests.py`) and, when an input of the runtime revision changed (including `src/terminal/`), the session-runtime checks. See "What the release gate runs" and "When a check fails" in `docs/TESTING.md`.
    - iOS is independent: inspect `python3 dist/omg_mobile_test_plan.py --changed-since "v<PREVIOUS_VERSION>"`. Run mobile checks only when mobile implementation/shared runtime or VT dependencies changed. An unrelated macOS release or full Swift sweep must not build or start the iOS app.
 2. **Build and test strictly serially**: Never run multiple builds or tests concurrently (`build.db: database is locked`).
 3. **Shell compatibility**: Pi shell may be Fish. Wrap multiline shell commands with `/bin/bash -lc '...'`.
@@ -166,6 +166,9 @@ macos/build.nu --action test --changed-since "v<PREVIOUS_VERSION>"
 
 # Selector changes need offline contract tests too
 python3 -m unittest discover -s dist -p 'test_omg_test_plan.py'
+
+# 3. Zig tests of the files changed since the previous published OMG version
+python3 dist/omg_zig_tests.py --changed-since "v<PREVIOUS_VERSION>"
 ```
 
 ### Step 3: Build Release Binaries (`omg_release.py build`)
@@ -176,11 +179,14 @@ Output placed under `.release-build/<OMG_VERSION>/`, with content-addressed cach
 
 The script reuses cached universal `GhosttyKit.xcframework` and `session-runtime` bundles when their source/toolchain SHA-256 inputs are unchanged, builds the `universal` Release App once via `xcodebuild`, embeds `session-runtime`, and derives `arm64` and `x86_64` Apps via `lipo -thin` (preserving universal `Sparkle.framework` and multi-platform `session-runtime` payloads). Keep builds serial; `TMPDIR=/tmp` may be used when the invoking environment has a short-lived temporary directory. Rust/Cargo, the corresponding Rust targets and Zig are required when `session-runtime` inputs change.
 
-For runtime changes, run these checks serially before packaging:
+When an input of the runtime revision changed (`session-runtime/`, `src/terminal/`, `include/ghostty/vt/`, the OMG shell integration or the runtime build scripts), the gate runs these checks serially; run them by hand the same way:
 ```bash
+# The crate links zig-out/lib/libghostty-vt, so build the current terminal core first
+mise exec zig@0.17.1 -- zig build -Demit-lib-vt -Demit-macos-app=false \
+  -Demit-xcframework=false -Doptimize=ReleaseFast -Dversion-string=<GHOSTTY_VERSION>
 cargo fmt --manifest-path session-runtime/Cargo.toml --check
 cargo clippy --manifest-path session-runtime/Cargo.toml --all-targets -- -D warnings
-cargo test --manifest-path session-runtime/Cargo.toml -- --test-threads=1
+cargo test --manifest-path session-runtime/Cargo.toml --no-fail-fast -- --test-threads=1
 cargo build --manifest-path session-runtime/Cargo.toml
 python3 -m unittest discover -s session-runtime/tests -p 'test_*.py'
 macos/build.nu --action test --only-testing GhosttyTests/SessionRuntimeConnectionTests

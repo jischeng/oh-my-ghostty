@@ -72,6 +72,11 @@ For releases, use the previous published OMG tag rather than only the latest
 commit. These selectors run Swift tests only; rebuild GhosttyKit and run affected
 Zig/Python/shell tests separately. Use one scope selector per invocation.
 
+For Zig tests use `python3 dist/omg_zig_tests.py --changed-since <ref>` (or
+`--filter terminal.Terminal.`) rather than a hand-typed `zig build test`: it
+picks the toolchain and flags and fails when a filter selects no test. The
+session-runtime checks and the reasons behind both are in `docs/TESTING.md`.
+
 Specific suites/methods remain available:
 
 ```bash

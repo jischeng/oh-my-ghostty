@@ -46,6 +46,9 @@ struct AgentHistoryStrings: Equatable, Sendable {
     var groupDate: String { t("By Date", "按日期") }
     var orderRecentlyUpdated: String { t("Recently Updated", "最近更新") }
     var orderTitle: String { t("Title", "会话标题") }
+    var orderRelevance: String { t("Relevance", "相关度") }
+    var previousMatch: String { t("Previous Match", "上一处匹配") }
+    var nextMatch: String { t("Next Match", "下一处匹配") }
     var today: String { t("Today", "今天") }
     var yesterday: String { t("Yesterday", "昨天") }
     var copyMessage: String { t("Copy Message", "复制内容") }

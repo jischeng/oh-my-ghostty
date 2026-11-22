@@ -6,12 +6,18 @@ import SQLite3
 final class AgentHistoryDatabase {
     private var handle: OpaquePointer?
 
-    /// A WAL database whose `-shm` file is absent cannot be opened read-only;
-    /// with no pending `-wal` an immutable handle reads the same content.
+    /// A reader of a write-ahead-log database joins its shared `-shm` index,
+    /// and SQLite creates that file and an empty `-wal` beside the database
+    /// when they are missing. With nothing in the log there is no writer to
+    /// coordinate with, so an immutable handle reads the same content and
+    /// leaves the Agent's folder as it found it. A database with a pending
+    /// log, or a rollback journal, is opened read-only so its locks apply.
     init?(path: String) {
         guard FileManager.default.fileExists(atPath: path) else { return nil }
         let base = URL(fileURLWithPath: path).absoluteString
-        for uri in [base + "?mode=ro", base + "?immutable=1"] {
+        let readOnly = base + "?mode=ro"
+        let immutable = base + "?immutable=1"
+        for uri in Self.hasIdleWriteAheadLog(path) ? [immutable, readOnly] : [readOnly, immutable] {
             var database: OpaquePointer?
             if sqlite3_open_v2(uri, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK,
                sqlite3_exec(database, "SELECT 1 FROM sqlite_master LIMIT 1", nil, nil, nil) == SQLITE_OK {
@@ -25,6 +31,19 @@ final class AgentHistoryDatabase {
     }
 
     deinit { sqlite3_close(handle) }
+
+    /// Size of the write-ahead log beside a database; 0 when there is none.
+    static func writeAheadLogSize(_ path: String) -> Int {
+        ((try? FileManager.default.attributesOfItem(atPath: path + "-wal"))?[.size] as? NSNumber)?.intValue ?? 0
+    }
+
+    /// Bytes 18 and 19 of the header are 2 for a write-ahead-log database.
+    private static func hasIdleWriteAheadLog(_ path: String) -> Bool {
+        guard writeAheadLogSize(path) == 0, let file = FileHandle(forReadingAtPath: path) else { return false }
+        defer { try? file.close() }
+        guard let header = try? file.read(upToCount: 20), header.count == 20 else { return false }
+        return header[header.startIndex + 18] == 2 && header[header.startIndex + 19] == 2
+    }
 
     struct Row {
         fileprivate let statement: OpaquePointer?
@@ -142,14 +161,17 @@ extension AgentHistoryStore {
     }
 
     nonisolated static func usesDatabaseHistory(_ agent: SupportedAgent) -> Bool {
-        agent == .opencode || agent == .hermes || agent == .antigravity
+        agent == .opencode || agent == .hermes || agent == .antigravity || agent == .cursor
     }
 
+    /// The database of an Agent that keeps one, or for Cursor the folder of
+    /// its per-chat databases.
     nonisolated static func defaultDatabaseURL(for agent: SupportedAgent) -> URL? {
         let path: String
         switch agent {
         case .opencode: path = "~/.local/share/opencode/opencode.db"
         case .hermes: path = "~/.hermes/state.db"
+        case .cursor: path = "~/.cursor/chats"
         default: return nil
         }
         return URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
@@ -164,8 +186,12 @@ extension AgentHistoryStore {
     ) -> [AgentHistorySession] {
         var sessions: [AgentHistorySession] = []
         for agent in agents where !Task.isCancelled {
-            guard let url = rootURLs[agent] ?? defaultDatabaseURL(for: agent),
-                  let database = AgentHistoryDatabase(path: url.path) else { continue }
+            guard let url = rootURLs[agent] ?? defaultDatabaseURL(for: agent) else { continue }
+            if agent == .cursor {
+                sessions += cursorSessions(root: url, limit: maximumSessions, updatedAfter: updatedAfter)
+                continue
+            }
+            guard let database = AgentHistoryDatabase(path: url.path) else { continue }
             switch agent {
             case .opencode:
                 sessions += openCodeSessions(database, path: url.path, limit: maximumSessions, updatedAfter: updatedAfter)
@@ -186,6 +212,7 @@ extension AgentHistoryStore {
         case .opencode: return openCodeMessages(database, session: session.conversationID.rawValue)
         case .hermes: return hermesMessages(database, session: session.conversationID.rawValue)
         case .antigravity: return antigravityMessages(database)
+        case .cursor: return cursorMessages(database)
         default: return nil
         }
     }
@@ -355,6 +382,138 @@ extension AgentHistoryStore {
         return text.isEmpty ? content : text
     }
 
+    // MARK: Cursor
+
+    /// Cursor's CLI keeps one database per chat at
+    /// `chats/<workspace>/<chat>/store.db`: a `meta` row describing the chat
+    /// and content-addressed `blobs`. The root blob lists the chat's messages
+    /// in order; each message is a JSON blob with a role and its parts.
+    private struct CursorChat {
+        let identifier: String
+        let name: String?
+        let workingDirectory: String?
+        let messages: [DatabaseMessage]
+    }
+
+    nonisolated private static func cursorSessions(
+        root: URL, limit: Int, updatedAfter: Date?
+    ) -> [AgentHistorySession] {
+        let manager = FileManager.default
+        var stores: [(url: URL, updated: Date)] = []
+        for workspace in (try? manager.contentsOfDirectory(atPath: root.path)) ?? [] {
+            let folder = root.appendingPathComponent(workspace)
+            for chat in (try? manager.contentsOfDirectory(atPath: folder.path)) ?? [] {
+                let store = folder.appendingPathComponent(chat).appendingPathComponent("store.db")
+                // Recent writes sit in the write-ahead log until a checkpoint.
+                // An empty log holds none; a reader can have created it.
+                let files = AgentHistoryDatabase.writeAheadLogSize(store.path) > 0
+                    ? [store.path, store.path + "-wal"] : [store.path]
+                let updated = files.compactMap {
+                    (try? manager.attributesOfItem(atPath: $0))?[.modificationDate] as? Date
+                }.max()
+                guard let updated, updatedAfter.map({ updated >= $0 }) ?? true else { continue }
+                stores.append((store, updated))
+            }
+        }
+        var sessions: [AgentHistorySession] = []
+        for store in stores.sorted(by: { $0.updated > $1.updated }) where !Task.isCancelled {
+            guard sessions.count < limit,
+                  let database = AgentHistoryDatabase(path: store.url.path),
+                  let chat = cursorChat(database, maximumMessages: 1),
+                  // The chat folder is the ID `cursor-agent --resume` takes.
+                  chat.identifier == store.url.deletingLastPathComponent().lastPathComponent,
+                  let id = AgentConversationID(chat.identifier),
+                  let prompt = chat.messages.first?.text else { continue }
+            let directory = validWorkingDirectory(chat.workingDirectory)
+            // Cursor names a chat itself once it has something to go on.
+            let title = chat.name.flatMap { $0.isEmpty || $0 == "New Agent" ? nil : $0 } ?? prompt
+            sessions.append(.init(
+                agent: .cursor, conversationID: id,
+                title: normalizedTitle(title, workingDirectory: directory, conversationID: id),
+                workingDirectory: directory, updatedAt: store.updated,
+                sourcePath: store.url.path, isActive: false, previewSnippet: String(prompt.prefix(1_000))
+            ))
+        }
+        return sessions
+    }
+
+    nonisolated private static func cursorMessages(_ database: AgentHistoryDatabase) -> [DatabaseMessage] {
+        cursorChat(database, maximumMessages: nil)?.messages ?? []
+    }
+
+    /// Reads a chat's description and its turns, stopping after
+    /// `maximumMessages` when only the opening prompt is wanted.
+    nonisolated private static func cursorChat(
+        _ database: AgentHistoryDatabase, maximumMessages: Int?
+    ) -> CursorChat? {
+        var encoded: String?
+        database.query("SELECT value FROM meta WHERE key = '0'") { row in
+            encoded = row.text(0)
+            return false
+        }
+        // The description is JSON, stored as hexadecimal text.
+        guard let encoded, let description = Data(hexadecimal: encoded),
+              let meta = try? JSONSerialization.jsonObject(with: description) as? [String: Any],
+              let identifier = meta["agentId"] as? String,
+              let rootID = meta["latestRootBlobId"] as? String,
+              let root = cursorBlob(database, id: rootID).flatMap(AgentHistoryProtobuf.init) else { return nil }
+        var workingDirectory: String?
+        var messages: [DatabaseMessage] = []
+        for field in root.fields {
+            guard case .bytes(let value) = field.value else { continue }
+            if field.number == 9, let uri = String(data: value, encoding: .utf8), uri.hasPrefix("file://") {
+                workingDirectory = URL(string: uri)?.path
+            }
+            guard field.number == 1, maximumMessages.map({ messages.count < $0 }) ?? true,
+                  let blob = cursorBlob(database, id: value.map { String(format: "%02x", $0) }.joined()),
+                  let message = try? JSONSerialization.jsonObject(with: blob) as? [String: Any],
+                  let role = (message["role"] as? String).flatMap(AgentHistoryMessageRole.init(rawValue:)),
+                  let text = cursorText(message["content"], role: role), !text.isEmpty else { continue }
+            // A prompt sent again before any reply is one request, retried.
+            if role == .user, messages.last?.role == .user, messages.last?.text == text { continue }
+            messages.append(.init(role: role, text: text, timestamp: nil))
+        }
+        return .init(
+            identifier: identifier, name: meta["name"] as? String,
+            workingDirectory: workingDirectory, messages: messages
+        )
+    }
+
+    nonisolated private static func cursorBlob(_ database: AgentHistoryDatabase, id: String) -> Data? {
+        var data: Data?
+        database.query("SELECT data FROM blobs WHERE id = ?1", [id]) { row in
+            data = row.data(0)
+            return false
+        }
+        return data
+    }
+
+    /// The readable text of a message. Cursor sends the user's prompt inside
+    /// `<user_query>`; a user message without one is context it attached
+    /// (environment, rules, reminders). Reasoning and tool calls are parts of
+    /// an assistant message that are not its reply.
+    nonisolated private static func cursorText(_ content: Any?, role: AgentHistoryMessageRole) -> String? {
+        let texts: [String]
+        if let content = content as? String {
+            texts = [content]
+        } else if let parts = content as? [[String: Any]] {
+            texts = parts.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
+        } else {
+            return nil
+        }
+        guard role == .user else { return texts.joined(separator: "\n\n") }
+        var queries: [String] = []
+        for text in texts {
+            var rest = Substring(text)
+            while let open = rest.range(of: "<user_query>"),
+                  let close = rest[open.upperBound...].range(of: "</user_query>") {
+                queries.append(rest[open.upperBound..<close.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines))
+                rest = rest[close.upperBound...]
+            }
+        }
+        return queries.joined(separator: "\n\n")
+    }
+
     // MARK: Antigravity
 
     /// Step types of an Antigravity trajectory that carry conversation text.
@@ -385,5 +544,28 @@ extension AgentHistoryStore {
             return true
         }
         return messages
+    }
+}
+
+private extension Data {
+    /// Bytes written as hexadecimal digits, or nil when the text is not that.
+    init?(hexadecimal text: String) {
+        let digits = Array(text.utf8)
+        guard digits.count.isMultiple(of: 2) else { return nil }
+        func value(_ digit: UInt8) -> UInt8? {
+            switch digit {
+            case 48...57: digit - 48
+            case 97...102: digit - 87
+            case 65...70: digit - 55
+            default: nil
+            }
+        }
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(digits.count / 2)
+        for index in stride(from: 0, to: digits.count, by: 2) {
+            guard let high = value(digits[index]), let low = value(digits[index + 1]) else { return nil }
+            bytes.append(high << 4 | low)
+        }
+        self.init(bytes)
     }
 }

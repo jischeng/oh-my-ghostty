@@ -279,10 +279,13 @@ enum AgentHistoryStore {
     static func search(
         sessions: [AgentHistorySession],
         query: String,
-        index: AgentHistorySearchIndex? = .shared
+        index: AgentHistorySearchIndex? = .shared,
+        remoteAccess: @escaping @Sendable (String) -> AgentHistoryRemoteAccess = { .init(alias: $0) }
     ) async -> [String: AgentHistorySearchMatch] {
         var latest: [String: AgentHistorySearchMatch] = [:]
-        for await matches in searchUpdates(sessions: sessions, query: query, index: index) {
+        for await matches in searchUpdates(
+            sessions: sessions, query: query, index: index, remoteAccess: remoteAccess
+        ) {
             latest = matches
         }
         return latest
@@ -291,10 +294,12 @@ enum AgentHistoryStore {
     /// Emits title and path matches at once, then everything the full-text
     /// index knows, then scans only the sessions the index does not cover yet.
     /// Results therefore stay complete while the index is still being built.
+    /// Sessions on an SSH host are searched last, in one command per host.
     static func searchUpdates(
         sessions: [AgentHistorySession],
         query: String,
-        index: AgentHistorySearchIndex? = .shared
+        index: AgentHistorySearchIndex? = .shared,
+        remoteAccess: @escaping @Sendable (String) -> AgentHistoryRemoteAccess = { .init(alias: $0) }
     ) -> AsyncStream<[String: AgentHistorySearchMatch]> {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !needle.isEmpty else {
@@ -318,8 +323,12 @@ enum AgentHistoryStore {
                         session.workingDirectory ?? "",
                     ].joined(separator: "\n")
                     guard let range = metadata.range(of: needle, options: .caseInsensitive) else { continue }
+                    let inTitle = session.title.range(of: needle, options: .caseInsensitive) != nil
                     matches[session.id] = .init(
-                        snippet: searchSnippet(metadata, around: range), isInTranscript: false
+                        snippet: searchSnippet(metadata, around: range), isInTranscript: false, matchCount: 0,
+                        relevance: (inTitle ? AgentHistorySearchMatch.titleRelevance
+                            : AgentHistorySearchMatch.metadataRelevance)
+                            + AgentHistorySearchMatch.relevance(matchCount: 0, updatedAt: session.updatedAt)
                     )
                 }
                 continuation.yield(matches)
@@ -332,14 +341,7 @@ enum AgentHistoryStore {
                     let found = indexed.isEmpty ? [:] : index.search(needle)
                     for session in sessions where indexed.contains(session.id) {
                         guard let hit = found[session.id] else { continue }
-                        if matches[session.id] == nil {
-                            matches[session.id] = hit
-                        } else {
-                            // A title match keeps its snippet; the body
-                            // match says the conversation contains it too.
-                            matches[session.id]?.messageIndex = hit.messageIndex
-                            matches[session.id]?.isInTranscript = true
-                        }
+                        matches[session.id] = transcriptMatch(hit, of: session, over: matches[session.id])
                     }
                     continuation.yield(matches)
                 }
@@ -350,20 +352,24 @@ enum AgentHistoryStore {
                     guard !Task.isCancelled else { break }
                     guard let preview = session.previewSnippet,
                           let range = preview.range(of: needle, options: .caseInsensitive) else { continue }
-                    matches[session.id] = .init(snippet: searchSnippet(preview, around: range))
+                    matches[session.id] = .init(
+                        snippet: searchSnippet(preview, around: range),
+                        relevance: AgentHistorySearchMatch.relevance(matchCount: 1, updatedAt: session.updatedAt)
+                    )
                 }
                 continuation.yield(matches)
 
-                // Phase 4: read what is left. Remote full-body search would
-                // open one SSH process per session, so only local sessions
-                // are scanned.
+                // Phase 4: read the local sessions that are left.
                 var lastYield = Date()
                 for session in sessions {
                     guard !Task.isCancelled else { break }
                     guard session.remoteHost == nil, matches[session.id] == nil,
                           !indexed.contains(session.id) else { continue }
                     if let snippet = unindexedMatch(in: session, query: needle) {
-                        matches[session.id] = .init(snippet: snippet)
+                        matches[session.id] = .init(
+                            snippet: snippet,
+                            relevance: AgentHistorySearchMatch.relevance(matchCount: 1, updatedAt: session.updatedAt)
+                        )
                     }
                     // Each update redraws the list; batch them.
                     if Date().timeIntervalSince(lastYield) > 0.25 {
@@ -372,10 +378,74 @@ enum AgentHistoryStore {
                     }
                 }
                 continuation.yield(matches)
+
+                // Phase 5: the transcripts of each SSH host, newest first.
+                // A single character matches nearly every session, which is
+                // work for the host and no help to the reader.
+                if needle.count >= 2 {
+                    let remote = sessions.filter {
+                        $0.remoteHost != nil && !usesDatabaseHistory($0.agent)
+                            && matches[$0.id]?.isInTranscript != true
+                    }
+                    for (host, hostSessions) in Dictionary(grouping: remote, by: { $0.remoteHost ?? "" }) {
+                        guard !Task.isCancelled else { break }
+                        let found = await remoteMatches(
+                            in: hostSessions, query: needle, access: remoteAccess(host)
+                        )
+                        for session in hostSessions {
+                            guard let hit = found[session.id] else { continue }
+                            matches[session.id] = transcriptMatch(hit, of: session, over: matches[session.id])
+                        }
+                        continuation.yield(matches)
+                    }
+                }
                 continuation.finish()
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    /// A match in the conversation, scored, on top of a title or ID match
+    /// the session may already have. The earlier match keeps its snippet and
+    /// its rank; the conversation adds how often it names the query.
+    nonisolated private static func transcriptMatch(
+        _ hit: AgentHistorySearchMatch, of session: AgentHistorySession, over metadata: AgentHistorySearchMatch?
+    ) -> AgentHistorySearchMatch {
+        var match = hit
+        match.relevance = AgentHistorySearchMatch.relevance(matchCount: hit.matchCount, updatedAt: session.updatedAt)
+        if let metadata {
+            match.snippet = metadata.snippet
+            match.relevance += metadata.relevance
+                - AgentHistorySearchMatch.relevance(matchCount: 0, updatedAt: session.updatedAt)
+        }
+        return match
+    }
+
+    /// Matches of `query` in the transcripts of one SSH host's sessions.
+    ///
+    /// The host returns the records that name the query. Each is cleaned
+    /// here exactly as a transcript is, so text the Agent injected around a
+    /// prompt never counts as a match.
+    nonisolated private static func remoteMatches(
+        in sessions: [AgentHistorySession], query: String, access: AgentHistoryRemoteAccess
+    ) async -> [String: AgentHistorySearchMatch] {
+        let newest = Array(sessions.prefix(AgentHistoryRemoteAccess.maximumSearchFiles))
+        guard let hits = try? await access.searchTranscripts(
+            paths: newest.map(\.sourcePath), query: query
+        ) else { return [:] }
+        let sessionsByPath = Dictionary(newest.map { ($0.sourcePath, $0) }, uniquingKeysWith: { first, _ in first })
+        var matches: [String: AgentHistorySearchMatch] = [:]
+        for hit in hits {
+            guard let session = sessionsByPath[hit.path] else { continue }
+            for line in hit.lines {
+                guard let record = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                      let message = parsedMessage(from: record, agent: session.agent, keepingUserPastes: true),
+                      let range = message.text.range(of: query, options: .caseInsensitive) else { continue }
+                matches[session.id] = .init(snippet: searchSnippet(message.text, around: range), matchCount: hit.count)
+                break
+            }
+        }
+        return matches
     }
 
     /// Finds `query` in a session the index has not read yet.
@@ -513,13 +583,24 @@ enum AgentHistoryStore {
         }
         if !needsParse.isEmpty {
             let lock = NSLock()
-            // Bound decompression/JSON workers, and check the parent task's
-            // cancellation between batches (GCD workers have no Swift task).
-            let workers = max(2, min(8, ProcessInfo.processInfo.activeProcessorCount))
-            for start in stride(from: 0, to: needsParse.count, by: workers) {
-                guard !Task.isCancelled else { break }
-                DispatchQueue.concurrentPerform(iterations: min(workers, needsParse.count - start)) { offset in
-                    let index = needsParse[start + offset]
+            var next = 0
+            var cancelled = false
+            // A bounded pool of decompression/JSON workers, each taking the
+            // next file as it finishes one, so a slow archive holds up only
+            // its own worker. GCD workers have no Swift task; the calling
+            // thread is one of the workers and relays the task's cancellation.
+            let workers = min(needsParse.count, max(2, min(8, ProcessInfo.processInfo.activeProcessorCount)))
+            DispatchQueue.concurrentPerform(iterations: workers) { _ in
+                while true {
+                    lock.lock()
+                    if Task.isCancelled { cancelled = true }
+                    guard !cancelled, next < needsParse.count else {
+                        lock.unlock()
+                        return
+                    }
+                    let index = needsParse[next]
+                    next += 1
+                    lock.unlock()
                     let session = session(from: candidates[index])
                     lock.lock()
                     parsedSessions[index] = session
@@ -717,23 +798,31 @@ enum AgentHistoryStore {
             return title
         }
         let agent = candidate.source.agent
-        let userTitle = records.lazy.compactMap { record -> String? in
-            guard role(of: record, agent: agent) == .user else { return nil }
-            return text(of: record, role: .user)
-        }.compactMap { cleaned -> String? in
-            guard !cleaned.isEmpty, cleaned != "[Image/Attachment]" else { return nil }
-            return cleaned
-        }.first
+        // Cleaning a turn is the expensive step of a scan, and a first prompt
+        // can be hundreds of kilobytes. Plain loops clean each record once;
+        // a lazy chain re-evaluates its closure on every traversal.
+        var userTitle: String?
+        for record in records where role(of: record, agent: agent) == .user {
+            guard let cleaned = text(of: record, role: .user),
+                  !cleaned.isEmpty, cleaned != "[Image/Attachment]" else { continue }
+            // A title shows 140 characters; do not collapse a whole paste.
+            userTitle = String(cleaned.prefix(2_000))
+            break
+        }
         let title = normalizedTitle(
             explicitTitle ?? userTitle,
             workingDirectory: workingDirectory,
             conversationID: conversationID
         )
 
-        let previewSnippet = conversationRecords(records, agent: agent, isComplete: header.isComplete).lazy.compactMap { record -> String? in
-            guard let role = role(of: record, agent: agent), let cleaned = text(of: record, role: role) else { return nil }
-            return cleaned.isEmpty || cleaned == "[Image/Attachment]" ? nil : String(cleaned.prefix(1_000))
-        }.prefix(10).joined(separator: "\n")
+        var previewLines: [String] = []
+        for record in conversationRecords(records, agent: agent, isComplete: header.isComplete) {
+            guard let role = role(of: record, agent: agent), let cleaned = text(of: record, role: role),
+                  !cleaned.isEmpty, cleaned != "[Image/Attachment]" else { continue }
+            previewLines.append(String(cleaned.prefix(1_000)))
+            if previewLines.count == 10 { break }
+        }
+        let previewSnippet = previewLines.joined(separator: "\n")
 
         // An Agent that was opened and closed without a turn leaves a file
         // with nothing to read or resume.
@@ -1066,7 +1155,7 @@ enum AgentHistoryStore {
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
         process.standardInput = FileHandle.nullDevice
-        guard (try? process.run()) != nil else { return Data() }
+        guard let exit = ProcessExit(running: process) else { return Data() }
         var data = Data()
         let handle = pipe.fileHandleForReading
         while data.count < maximumBytes {
@@ -1075,9 +1164,30 @@ enum AgentHistoryStore {
             data.append(chunk.prefix(maximumBytes - data.count))
         }
         try? handle.close()
-        if process.isRunning { process.terminate() }
-        process.waitUntilExit()
+        exit.stopAndWait()
         return data
+    }
+
+    /// Starts a helper process and later waits for it to exit.
+    /// `Process.waitUntilExit` polls a run loop, which on a worker thread
+    /// costs about ten milliseconds a call; over thousands of archives that
+    /// was a quarter of a scan. The termination handler returns at once.
+    private struct ProcessExit {
+        private let process: Process
+        private let exited = DispatchSemaphore(value: 0)
+
+        init?(running process: Process) {
+            self.process = process
+            process.terminationHandler = { [exited] _ in exited.signal() }
+            guard (try? process.run()) != nil else { return nil }
+        }
+
+        func stopAndWait() {
+            if process.isRunning { process.terminate() }
+            // The process is already signalled; the timeout only keeps a
+            // scan from hanging on a handler that never arrives.
+            _ = exited.wait(timeout: .now() + 5)
+        }
     }
 
     nonisolated private static func headerRecords(from data: Data) -> [[String: Any]] {
@@ -1144,13 +1254,13 @@ enum AgentHistoryStore {
     /// zstd, so a reader that stops early never decompresses the remainder.
     private final class TranscriptByteReader {
         private let handle: FileHandle
-        private let process: Process?
+        private let exit: ProcessExit?
 
         init?(url: URL) {
             guard url.lastPathComponent.lowercased().hasSuffix(".zst") else {
                 guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
                 self.handle = handle
-                process = nil
+                exit = nil
                 return
             }
             guard let executable = AgentHistoryStore.zstdExecutable else { return nil }
@@ -1161,9 +1271,9 @@ enum AgentHistoryStore {
             process.standardOutput = pipe
             process.standardError = FileHandle.nullDevice
             process.standardInput = FileHandle.nullDevice
-            guard (try? process.run()) != nil else { return nil }
+            guard let exit = ProcessExit(running: process) else { return nil }
             handle = pipe.fileHandleForReading
-            self.process = process
+            self.exit = exit
         }
 
         func read(upToCount count: Int) -> Data? {
@@ -1172,9 +1282,7 @@ enum AgentHistoryStore {
 
         func close() {
             try? handle.close()
-            guard let process else { return }
-            if process.isRunning { process.terminate() }
-            process.waitUntilExit()
+            exit?.stopAndWait()
         }
     }
 
@@ -1689,6 +1797,9 @@ enum AgentHistoryStore {
     nonisolated private static func removingUserPasteWrappers(
         in text: String, keepingBody: Bool
     ) -> String {
+        guard containsIgnoringASCIICase(text, "<pasted_content") else {
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         var output = ""
         var cursor = text.startIndex
         var searchStart = text.startIndex
@@ -1852,10 +1963,42 @@ enum AgentHistoryStore {
         return rest.isEmpty ? command : command + "\n" + rest
     }
 
+    /// Whether `text` holds `needle`, an ASCII tag opening with a character
+    /// that has no letter case such as `<`, in any letter case.
+    ///
+    /// Foundation's case-insensitive search folds every character it passes;
+    /// over a first prompt of several hundred kilobytes, once per tag, that
+    /// was the largest cost of a scan. Most text holds none of the tags, and
+    /// this rules them out from the bytes.
+    nonisolated static func containsIgnoringASCIICase(_ text: String, _ needle: String) -> Bool {
+        func lowered(_ byte: UInt8) -> UInt8 { byte >= 65 && byte <= 90 ? byte + 32 : byte }
+        let pattern = needle.utf8.map(lowered)
+        guard let first = pattern.first else { return true }
+        assert(lowered(first) == first && !(97...122).contains(first))
+        var text = text
+        return text.withUTF8 { bytes -> Bool in
+            guard bytes.count >= pattern.count, let base = bytes.baseAddress else { return false }
+            let last = bytes.count - pattern.count
+            var offset = 0
+            while offset <= last {
+                guard let hit = memchr(base + offset, Int32(first), last - offset + 1) else { return false }
+                let start = base.distance(to: hit.assumingMemoryBound(to: UInt8.self))
+                var matches = true
+                for index in 1..<pattern.count where lowered(bytes[start + index]) != pattern[index] {
+                    matches = false
+                    break
+                }
+                if matches { return true }
+                offset = start + 1
+            }
+            return false
+        }
+    }
+
     nonisolated private static func cleanUserProse(_ raw: String) -> String {
         var text = raw
         let blockTags = ["recommended_plugins", "environment_context", "instructions"]
-        for tag in blockTags {
+        for tag in blockTags where containsIgnoringASCIICase(text, "<\(tag)>") {
             var searchStart = text.startIndex
             while let startRange = text.range(of: "<\(tag)>", options: .caseInsensitive,
                                              range: searchStart..<text.endIndex),

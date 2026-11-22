@@ -4,11 +4,19 @@ import SwiftUI
 /// AppKit-backed transcript renderer. NSTableView reuses only visible rows and
 /// caches dynamic row heights, avoiding SwiftUI's repeated whole-list text
 /// measurement during high-velocity scrolling.
+/// A turn to bring into view. The token names the request, so the same turn
+/// is scrolled to once and the reader can move away from it afterwards.
+struct AgentHistoryTranscriptFocus: Equatable {
+    let row: Int
+    let token: String
+}
+
 struct AgentHistoryTranscriptTable: NSViewRepresentable {
     let messages: [AgentHistoryMessage]
     let agentName: String
     let strings: AgentHistoryStrings
     let highlightText: String
+    var focus: AgentHistoryTranscriptFocus?
     /// nil when the session's Agent has no native fork; hides the action.
     let onFork: (() -> Void)?
     var onFind: () -> Void = {}
@@ -47,6 +55,7 @@ struct AgentHistoryTranscriptTable: NSViewRepresentable {
             agentName: agentName,
             strings: strings,
             highlightText: highlightText,
+            focus: focus,
             onFork: onFork
         )
         context.coordinator.updateWidth(scrollView.contentSize.width)
@@ -60,6 +69,7 @@ struct AgentHistoryTranscriptTable: NSViewRepresentable {
             agentName: agentName,
             strings: strings,
             highlightText: highlightText,
+            focus: focus,
             onFork: onFork
         )
         guard let tableView = scrollView.documentView as? NSTableView else { return }
@@ -75,12 +85,15 @@ struct AgentHistoryTranscriptTable: NSViewRepresentable {
         private var highlightText = ""
         private var onFork: (() -> Void)?
         private var lastWidth: CGFloat = 0
+        private var handledFocusToken: String?
+        var handledFocusTokenForTesting: String? { handledFocusToken }
 
         func update(
             messages: [AgentHistoryMessage],
             agentName: String,
             strings: AgentHistoryStrings,
             highlightText: String,
+            focus: AgentHistoryTranscriptFocus? = nil,
             onFork: (() -> Void)?
         ) {
             let contentChanged = self.messages != messages ||
@@ -93,11 +106,43 @@ struct AgentHistoryTranscriptTable: NSViewRepresentable {
             self.strings = strings
             self.highlightText = highlightText
             self.onFork = onFork
-            guard contentChanged, let tableView else { return }
-            tableView.reloadData()
-            tableView.noteHeightOfRows(
-                withIndexesChanged: IndexSet(integersIn: 0..<messages.count)
-            )
+            if contentChanged, let tableView {
+                tableView.reloadData()
+                tableView.noteHeightOfRows(
+                    withIndexesChanged: IndexSet(integersIn: 0..<messages.count)
+                )
+            }
+            // A request waits here while the transcript is still loading.
+            if let focus, focus.token != handledFocusToken, messages.indices.contains(focus.row) {
+                handledFocusToken = focus.token
+                scroll(toMatchIn: focus.row)
+            } else if focus == nil {
+                handledFocusToken = nil
+            }
+        }
+
+        /// Brings the first occurrence of the search term in `row` into view.
+        ///
+        /// Rows are measured as they appear, so the offset of a row that has
+        /// not been shown is an estimate. The first pass brings the row on
+        /// screen; once it is laid out the second places the match itself.
+        private func scroll(toMatchIn row: Int) {
+            guard let tableView else { return }
+            tableView.scrollRowToVisible(row)
+            let term = highlightText
+            DispatchQueue.main.async { [weak tableView] in
+                guard let tableView, row < tableView.numberOfRows else { return }
+                tableView.layoutSubtreeIfNeeded()
+                var target = tableView.rect(ofRow: row)
+                if let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? AgentHistoryTranscriptCell,
+                   let offset = cell.offsetOfFirstOccurrence(of: term) {
+                    target.origin.y += offset
+                }
+                // Leave the turn's header, or a line of context, above it.
+                let visible = tableView.visibleRect.height
+                let top = max(tableView.rect(ofRow: row).minY, target.minY - min(60, visible / 4))
+                tableView.scroll(NSPoint(x: 0, y: max(0, top - 4)))
+            }
         }
 
         func updateWidth(_ width: CGFloat) {
@@ -149,7 +194,7 @@ final class AgentHistoryTranscriptScrollView: NSScrollView {
     }
 }
 
-private final class AgentHistoryTranscriptCell: NSTableCellView {
+final class AgentHistoryTranscriptCell: NSTableCellView {
     static let reuseIdentifier = NSUserInterfaceItemIdentifier(
         "agent-history-transcript-cell"
     )
@@ -282,6 +327,24 @@ private final class AgentHistoryTranscriptCell: NSTableCellView {
             bodyStack.addArrangedSubview(view)
             view.widthAnchor.constraint(equalTo: bodyStack.widthAnchor).isActive = true
         }
+    }
+
+    /// Distance from the top of the cell to the first occurrence of `term`.
+    /// Inside a block of text the position follows the share of characters
+    /// before the match, which is close enough to land it on screen.
+    func offsetOfFirstOccurrence(of term: String) -> CGFloat? {
+        guard !term.isEmpty else { return nil }
+        layoutSubtreeIfNeeded()
+        for block in bodyStack.arrangedSubviews {
+            let field = block as? NSTextField ?? block.subviews.compactMap { $0 as? NSTextField }.first
+            guard let text = field?.attributedStringValue.string as NSString?, text.length > 0 else { continue }
+            let range = text.range(of: term, options: .caseInsensitive)
+            guard range.location != NSNotFound else { continue }
+            let frame = convert(block.bounds, from: block)
+            let top = isFlipped ? frame.minY : bounds.height - frame.maxY
+            return top + frame.height * CGFloat(range.location) / CGFloat(text.length)
+        }
+        return nil
     }
 
     private static func proseField(_ text: NSAttributedString) -> NSTextField {

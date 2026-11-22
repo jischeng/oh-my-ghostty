@@ -8,7 +8,11 @@ struct AgentHistoryTranscriptToolbar: NSViewControllerRepresentable {
     let isSearchVisible: Bool
     let focusRequestID: Int
     let matchCount: Int
+    /// 1-based position of the match in view; 0 when there is none.
+    var matchPosition = 0
     let onQueryChange: (String) -> Void
+    /// Moves to the next (+1) or previous (-1) matching turn.
+    var onStepMatch: (Int) -> Void = { _ in }
     let onToggleSearch: () -> Void
     let onEscape: () -> Void
     let onBack: () -> Void
@@ -37,6 +41,8 @@ final class AgentHistoryTranscriptToolbarController: NSViewController, NSSearchF
     private let resumeButton = NSButton()
     private let searchField = AgentHistoryTranscriptSearchField()
     private let matchLabel = NSTextField(labelWithString: "")
+    private let previousMatchButton = NSButton()
+    private let nextMatchButton = NSButton()
     private var snapshot: AgentHistoryTranscriptToolbar?
     private var handledFocusRequestID = -1
     private weak var previousResponder: NSView?
@@ -46,6 +52,9 @@ final class AgentHistoryTranscriptToolbarController: NSViewController, NSSearchF
     var findButtonForTesting: NSButton { findButton }
     var forkButtonForTesting: NSButton { forkButton }
     var resumeButtonForTesting: NSButton { resumeButton }
+    var matchLabelForTesting: NSTextField { matchLabel }
+    var nextMatchButtonForTesting: NSButton { nextMatchButton }
+    var previousMatchButtonForTesting: NSButton { previousMatchButton }
 
     override func loadView() {
         stack.orientation = .vertical
@@ -100,10 +109,23 @@ final class AgentHistoryTranscriptToolbarController: NSViewController, NSSearchF
         searchField.onEscape = { [weak self] in self?.snapshot?.onEscape() }
         searchField.onFind = { [weak self] in self?.snapshot?.onToggleSearch() }
         searchField.setAccessibilityLabel(AgentHistoryStrings.current.searchTranscriptPlaceholder)
-        matchLabel.font = .systemFont(ofSize: 10)
+        matchLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
         matchLabel.textColor = .secondaryLabelColor
+        for (button, symbol, action) in [
+            (previousMatchButton, "chevron.up", #selector(previousMatch)),
+            (nextMatchButton, "chevron.down", #selector(nextMatch)),
+        ] {
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            button.bezelStyle = .accessoryBar
+            button.target = self
+            button.action = action
+            button.widthAnchor.constraint(equalToConstant: 22).isActive = true
+        }
         searchRow.addArrangedSubview(searchField)
         searchRow.addArrangedSubview(matchLabel)
+        searchRow.addArrangedSubview(previousMatchButton)
+        searchRow.addArrangedSubview(nextMatchButton)
+        searchRow.setCustomSpacing(2, after: previousMatchButton)
         searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 80).isActive = true
         matchLabel.setContentHuggingPriority(.required, for: .horizontal)
@@ -141,7 +163,15 @@ final class AgentHistoryTranscriptToolbarController: NSViewController, NSSearchF
         if searchField.stringValue != next.query, !hasMarkedText {
             searchField.stringValue = next.query
         }
-        matchLabel.stringValue = next.query.isEmpty ? "" : "\(next.matchCount) \(next.strings.matchesCount)"
+        matchLabel.stringValue = next.query.isEmpty ? ""
+            : next.matchCount == 0 ? "0 \(next.strings.matchesCount)" : "\(next.matchPosition)/\(next.matchCount)"
+        for (button, title) in [(previousMatchButton, next.strings.previousMatch),
+                                (nextMatchButton, next.strings.nextMatch)] {
+            button.isHidden = next.query.isEmpty
+            button.isEnabled = next.matchCount > 1
+            button.toolTip = title
+            button.setAccessibilityLabel(title)
+        }
         searchRow.isHidden = !next.isSearchVisible
         if wasSearchVisible && !next.isSearchVisible,
            let previousResponder,
@@ -183,6 +213,12 @@ final class AgentHistoryTranscriptToolbarController: NSViewController, NSSearchF
             snapshot?.onToggleSearch()
             return true
         }
+        // Return walks the matches, as in any find bar; Shift goes back.
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            guard !textView.hasMarkedText() else { return false }
+            snapshot?.onStepMatch(NSApp.currentEvent?.modifierFlags.contains(.shift) == true ? -1 : 1)
+            return true
+        }
         return false
     }
 
@@ -199,6 +235,8 @@ final class AgentHistoryTranscriptToolbarController: NSViewController, NSSearchF
         snapshot?.onQueryChange(sender.stringValue)
     }
 
+    @objc private func previousMatch() { snapshot?.onStepMatch(-1) }
+    @objc private func nextMatch() { snapshot?.onStepMatch(1) }
     @objc private func toggleSearch() { snapshot?.onToggleSearch() }
     @objc private func back() { snapshot?.onBack() }
     @objc private func resume() { snapshot?.onResume() }

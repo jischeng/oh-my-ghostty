@@ -9,8 +9,25 @@ struct AgentHistorySearchMatch: Equatable, Sendable {
     /// Position of the first matching message in the session's transcript.
     var messageIndex: Int?
     /// False when only the title, ID or folder matched. Opening such a
-    /// result shows the whole conversation rather than filtering it.
+    /// result shows the conversation from its start.
     var isInTranscript = true
+    /// How many turns hold the query, as far as the search counted them.
+    var matchCount = 1
+    /// How strongly the session answers the query; larger sorts first.
+    var relevance: Double = 0
+
+    /// A title that holds the query outranks any number of mentions; the ID
+    /// or folder is a deliberate lookup but says less about the content.
+    static let titleRelevance: Double = 100
+    static let metadataRelevance: Double = 40
+
+    /// Mentions count logarithmically, so a long session cannot bury a
+    /// short one that is about the query, and recent work breaks ties.
+    static func relevance(matchCount: Int, updatedAt: Date, now: Date = Date()) -> Double {
+        let mentions = 10 * log2(1 + Double(min(max(matchCount, 0), 63)))
+        let ageInDays = max(0, now.timeIntervalSince(updatedAt)) / 86_400
+        return mentions + 10 * exp(-ageInDays / 30)
+    }
 }
 
 /// A full-text index over the cleaned user and assistant turns of local
@@ -81,9 +98,13 @@ final class AgentHistorySearchIndex: @unchecked Sendable {
             defer { sqlite3_finalize(statement) }
             sqlite3_bind_text(statement, 1, argument, -1, Self.transient)
             var matches: [String: AgentHistorySearchMatch] = [:]
-            while !Task.isCancelled, matches.count < maximumSessions, sqlite3_step(statement) == SQLITE_ROW {
-                guard let session = sqlite3_column_text(statement, 0).map({ String(cString: $0) }),
-                      matches[session] == nil,
+            while !Task.isCancelled, sqlite3_step(statement) == SQLITE_ROW {
+                guard let session = sqlite3_column_text(statement, 0).map({ String(cString: $0) }) else { continue }
+                if matches[session] != nil {
+                    matches[session]?.matchCount += 1
+                    continue
+                }
+                guard matches.count < maximumSessions,
                       let body = sqlite3_column_text(statement, 2).map({ String(cString: $0) }) else { continue }
                 let range = body.range(of: needle, options: .caseInsensitive)
                 matches[session] = .init(

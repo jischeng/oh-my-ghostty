@@ -4,6 +4,9 @@ import SwiftUI
 struct AgentHistoryToolbar: NSViewControllerRepresentable {
     let query: String
     let isSearching: Bool
+    /// A search is typed, whether or not it has finished; relevance ordering
+    /// is offered only then.
+    var hasQuery = false
     let filter: AgentHistoryFilterState
     let sessions: [AgentHistorySession]
     let agents: [SupportedAgent]
@@ -107,7 +110,7 @@ final class AgentHistoryToolbarController: NSViewController, NSSearchFieldDelega
         filterButton.setAccessibilityValue(active ? next.strings.filterActive : "")
         filterController.update(sessions: next.sessions, agents: next.agents,
                                 filter: next.filter, strings: next.strings,
-                                currentDirectory: next.currentDirectory)
+                                currentDirectory: next.currentDirectory, hasQuery: next.hasQuery)
     }
 
     @objc private func searchChanged(_ sender: NSSearchField) {
@@ -137,7 +140,7 @@ final class AgentHistoryToolbarController: NSViewController, NSSearchFieldDelega
             popoverDelegate.previousResponder = view.window?.firstResponder as? NSView
             filterController.update(sessions: snapshot.sessions, agents: snapshot.agents,
                                     filter: snapshot.filter, strings: snapshot.strings,
-                                    currentDirectory: snapshot.currentDirectory)
+                                    currentDirectory: snapshot.currentDirectory, hasQuery: snapshot.hasQuery)
             let window = view.window
             filterController.bindTheme(to: window)
             popover.contentSize = filterController.preferredContentSize
@@ -191,6 +194,7 @@ final class AgentHistoryFilterController: NSViewController {
     private var agentCounts: [AgentHistoryAgentCount] = []
     private var agentScrollHeight: NSLayoutConstraint?
     private var filter = AgentHistoryFilterState()
+    private var hasQuery = false
     private var strings = AgentHistoryStrings.current
     private var currentDirectory: String?
     var onChange: ((AgentHistoryFilterState) -> Void)?
@@ -294,9 +298,10 @@ final class AgentHistoryFilterController: NSViewController {
 
     func update(sessions: [AgentHistorySession], agents: [SupportedAgent],
                 filter: AgentHistoryFilterState, strings: AgentHistoryStrings,
-                currentDirectory: String?) {
+                currentDirectory: String?, hasQuery: Bool = false) {
         _ = view
         self.filter = filter
+        self.hasQuery = hasQuery
         self.strings = strings
         self.currentDirectory = currentDirectory
         sectionLabels[.agent]?.stringValue = strings.filterSection
@@ -349,7 +354,8 @@ final class AgentHistoryFilterController: NSViewController {
         update(groupingButtons, values: AgentHistoryGroupingMode.allCases.map { ($0.rawValue, groupingTitle($0)) },
                selected: filter.grouping.rawValue)
         update(orderingButtons, values: AgentHistoryOrderingMode.allCases.map { ($0.rawValue, orderingTitle($0)) },
-               selected: filter.ordering.rawValue)
+               selected: filter.effectiveOrdering(isSearching: hasQuery).rawValue)
+        orderingButtons[AgentHistoryOrderingMode.relevance.rawValue]?.isHidden = !hasQuery
         directoryHint.stringValue = AgentHistoryFilterState.normalizedPath(currentDirectory)
             .map { $0 == "/" ? "/" : WorkspacePathPresentation.folderName($0) }
             ?? strings.directoryUnavailable
@@ -393,7 +399,7 @@ final class AgentHistoryFilterController: NSViewController {
         groupingGrid = NSGridView(views: [
             [groupingButtons[AgentHistoryGroupingMode.none.rawValue]!, orderingButtons[AgentHistoryOrderingMode.recentlyUpdated.rawValue]!],
             [groupingButtons[AgentHistoryGroupingMode.project.rawValue]!, orderingButtons[AgentHistoryOrderingMode.title.rawValue]!],
-            [groupingButtons[AgentHistoryGroupingMode.agent.rawValue]!, NSView()],
+            [groupingButtons[AgentHistoryGroupingMode.agent.rawValue]!, orderingButtons[AgentHistoryOrderingMode.relevance.rawValue]!],
             [groupingButtons[AgentHistoryGroupingMode.date.rawValue]!, NSView()],
         ])
         groupingGrid.columnSpacing = 8
@@ -428,7 +434,8 @@ final class AgentHistoryFilterController: NSViewController {
             result.optionSymbol = ["none": "list.bullet", "project": "folder",
                                    "agent": "person.2", "date": "calendar"][value]
         case .ordering:
-            result.optionSymbol = value == AgentHistoryOrderingMode.title.rawValue ? "textformat" : "clock"
+            result.optionSymbol = [AgentHistoryOrderingMode.title.rawValue: "textformat",
+                                   AgentHistoryOrderingMode.relevance.rawValue: "text.magnifyingglass"][value] ?? "clock"
         default: break
         }
         result.target = self
@@ -470,7 +477,11 @@ final class AgentHistoryFilterController: NSViewController {
         case .grouping:
             if let next = AgentHistoryGroupingMode(rawValue: value) { filter.grouping = next }
         case .ordering:
-            if let next = AgentHistoryOrderingMode(rawValue: value) { filter.ordering = next }
+            // Choosing the order already shown is not a choice: without a
+            // search, "recently updated" is what the default looks like.
+            guard let next = AgentHistoryOrderingMode(rawValue: value),
+                  next != filter.effectiveOrdering(isSearching: hasQuery) else { return }
+            filter.ordering = next
         }
         onChange?(filter)
     }
@@ -509,6 +520,7 @@ final class AgentHistoryFilterController: NSViewController {
         switch value {
         case .recentlyUpdated: strings.orderRecentlyUpdated
         case .title: strings.orderTitle
+        case .relevance: strings.orderRelevance
         }
     }
     private func sectionLabel(_ value: String) -> NSTextField {

@@ -286,6 +286,78 @@ struct AgentHistoryParsingTests {
         #expect(!transcript.wasTruncated)
     }
 
+    @Test func cursorChatsComeFromTheirPerChatStores() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let hex = { (data: Data) in data.map { String(format: "%02x", $0) }.joined() }
+        // Blob IDs are 32 bytes; the root blob lists the messages in order.
+        func blobID(_ byte: UInt8) -> Data { Data(repeating: byte, count: 32) }
+        func message(_ role: String, _ content: Any) throws -> Data {
+            try JSONSerialization.data(withJSONObject: ["role": role, "content": content])
+        }
+        let messages: [Data] = [
+            try message("system", "You are a coding agent."),
+            try message("user", "<user_info>\nWorkspace Path: /repo\n</user_info>"),
+            try message("user", [["type": "text", "text": "<timestamp>Monday</timestamp>\n<user_query>\nWhy is the build red?\n</user_query>"]]),
+            // Sent again after the first attempt got no reply.
+            try message("user", [["type": "text", "text": "<user_query>\nWhy is the build red?\n\n</user_query>"]]),
+            try message("assistant", [
+                ["type": "reasoning", "text": "private reasoning"],
+                ["type": "tool-call", "toolName": "Shell"],
+            ]),
+            try message("tool", [["type": "tool-result", "result": "exit 1"]]),
+            try message("assistant", [["type": "text", "text": "A test fixture is missing."]]),
+        ]
+        var rootBlob = Data()
+        var inserts = ""
+        for (offset, data) in messages.enumerated() {
+            let id = blobID(UInt8(offset + 1))
+            rootBlob += Proto.field(1, id)
+            inserts += "INSERT INTO blobs VALUES ('\(hex(id))', x'\(hex(data))');\n"
+        }
+        rootBlob += Proto.field(9, "file:///repo")
+        let rootID = blobID(0xEE)
+        let chat = "0f2f4a6c-1111-4222-8333-444455556666"
+        let meta = try JSONSerialization.data(withJSONObject: [
+            "agentId": chat, "latestRootBlobId": hex(rootID), "name": "Red Build", "createdAt": 1_780_000_000_000,
+        ])
+        let store = root.appendingPathComponent("workspace/\(chat)/store.db")
+        try makeDatabase(store, """
+        PRAGMA journal_mode = WAL;
+        CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB);
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO meta VALUES ('0', '\(hex(meta))');
+        INSERT INTO blobs VALUES ('\(hex(rootID))', x'\(hex(rootBlob))');
+        \(inserts)
+        PRAGMA wal_checkpoint(TRUNCATE);
+        """)
+        // An idle chat: everything is in the database and no log is beside it.
+        for suffix in ["-wal", "-shm"] { try? FileManager.default.removeItem(atPath: store.path + suffix) }
+        // A chat that was opened and never used has a description and no root.
+        try makeDatabase(root.appendingPathComponent("workspace/unused/store.db"), """
+        CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB);
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO meta VALUES ('0', '\(hex(try JSONSerialization.data(withJSONObject: ["agentId": "unused", "latestRootBlobId": hex(blobID(0x77))])))');
+        """)
+
+        let sessions = await load(.cursor, root: root, cache: root.appendingPathComponent("cache.json"))
+        #expect(sessions.map(\.conversationID.rawValue) == [chat])
+        let session = try #require(sessions.first)
+        #expect(session.title == "Red Build")
+        #expect(session.workingDirectory == "/repo")
+        #expect(session.previewSnippet == "Why is the build red?")
+        let transcript = await AgentHistoryStore.transcript(for: session)
+        // Attached context, reasoning and tool traffic are not turns.
+        #expect(transcript.messages.map(\.text) == ["Why is the build red?", "A test fixture is missing."])
+        #expect(transcript.messages.map(\.role) == [.user, .assistant])
+        // Reading an idle chat leaves nothing beside its database, so the
+        // session keeps the time Cursor last wrote it.
+        #expect(!FileManager.default.fileExists(atPath: store.path + "-wal"))
+        #expect(!FileManager.default.fileExists(atPath: store.path + "-shm"))
+        let again = await load(.cursor, root: root, cache: root.appendingPathComponent("cache.json"))
+        #expect(again.first?.updatedAt == session.updatedAt)
+    }
+
     // MARK: Full-text index
 
     private func session(_ id: String, updated: TimeInterval = 1_000, path: String = "/tmp/a.jsonl") -> AgentHistorySession {
@@ -362,6 +434,149 @@ struct AgentHistoryParsingTests {
         #expect(titled[indexed.id]?.isInTranscript == false)
         #expect(matches[indexed.id]?.isInTranscript == true)
         #expect(await AgentHistoryStore.search(sessions: [indexed], query: "absent", index: index).isEmpty)
+    }
+
+    @Test func searchRanksTitlesThenMentionsThenRecency() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let index = AgentHistorySearchIndex(url: root.appendingPathComponent("search-index.sqlite"))
+        let now = Date().timeIntervalSince1970
+        func make(_ id: String, title: String, age: TimeInterval) -> AgentHistorySession {
+            .init(agent: .codex, conversationID: AgentConversationID(id)!, title: title, workingDirectory: "/repo",
+                  updatedAt: Date(timeIntervalSince1970: now - age * 86_400),
+                  sourcePath: root.appendingPathComponent(id + ".jsonl").path, isActive: false, previewSnippet: nil)
+        }
+        let titled = make("titled", title: "Fix the websocket reconnect", age: 60)
+        let thorough = make("thorough", title: "Networking", age: 60)
+        let passing = make("passing", title: "Release notes", age: 60)
+        let recent = make("recent", title: "Standup", age: 0)
+        let texts: [String: [String]] = [
+            titled.id: ["hello", "nothing relevant"],
+            thorough.id: ["websocket drops", "the websocket closes", "websocket ping", "websocket pong"],
+            passing.id: ["also mention websocket once", "fine"],
+            recent.id: ["websocket came up today", "ok"],
+        ]
+        let sessions = [recent, titled, thorough, passing]
+        await index.update(sessions: sessions) { [self] in transcript($0, texts[$0.id] ?? []) }
+
+        let matches = await AgentHistoryStore.search(sessions: sessions, query: "websocket", index: index)
+        #expect(matches[thorough.id]?.matchCount == 4)
+        let ranked = sessions.sorted { (matches[$0.id]?.relevance ?? 0) > (matches[$1.id]?.relevance ?? 0) }
+        // A title naming the query first, then the conversation most about
+        // it; of two single mentions the recent one leads.
+        #expect(ranked.map(\.conversationID.rawValue) == ["titled", "thorough", "recent", "passing"])
+    }
+
+    @Test func remoteSearchCleansTheRecordsTheHostReturns() async throws {
+        func record(_ type: String, _ text: String) throws -> String {
+            try json(["type": type, "message": ["role": type, "content": [["type": "text", "text": text]]]])
+        }
+        func remote(_ id: String, title: String = "Session") -> AgentHistorySession {
+            .init(agent: .claude, conversationID: AgentConversationID(id)!, title: title, workingDirectory: "/srv/app",
+                  updatedAt: Date(), sourcePath: "/home/dev/.claude/projects/app/\(id).jsonl",
+                  remoteHost: "cloud", isActive: false, previewSnippet: nil)
+        }
+        let real = remote("real")
+        let injected = remote("injected")
+        let silent = remote("silent")
+        let commands = ReadCounter()
+        let wrapper = "<system-reminder>The deploy token rotates daily.</system-reminder>"
+        let response = [
+            try json(["path": real.sourcePath, "count": 3,
+                      "lines": [try record("assistant", "Rotate the deploy token before Friday.")]]),
+            // The host matched text the Agent attached to the prompt.
+            try json(["path": injected.sourcePath, "count": 1, "lines": [try record("user", wrapper)]]),
+        ].joined(separator: "\n\n")
+        let access = AgentHistoryRemoteAccess(alias: "cloud") { command in
+            await commands.note(command)
+            return response
+        }
+
+        let matches = await AgentHistoryStore.search(
+            sessions: [real, injected, silent], query: "deploy token", index: nil, remoteAccess: { _ in access }
+        )
+        #expect(matches[real.id]?.snippet == "Rotate the deploy token before Friday.")
+        #expect(matches[real.id]?.matchCount == 3)
+        #expect(matches[real.id]?.isInTranscript == true)
+        #expect(matches[injected.id] == nil)
+        #expect(matches[silent.id] == nil)
+        // One command for the host, naming every session file and the query.
+        let sent = await commands.ids
+        #expect(sent.count == 1)
+        let command = try #require(sent.first)
+        #expect(command.contains("deploy token"))
+        #expect([real, injected, silent].allSatisfy { command.contains($0.sourcePath) })
+
+        // A single character is not sent to the host.
+        _ = await AgentHistoryStore.search(sessions: [real], query: "d", index: nil, remoteAccess: { _ in access })
+        #expect(await commands.ids.count == 1)
+    }
+
+    @Test @MainActor func relevanceOrderIsOfferedOnlyWhileSearching() throws {
+        let controller = AgentHistoryFilterController()
+        var published: [AgentHistoryFilterState] = []
+        controller.onChange = { published.append($0) }
+        func update(_ filter: AgentHistoryFilterState, hasQuery: Bool) {
+            controller.update(sessions: [], agents: [], filter: filter, strings: .init(language: .english),
+                              currentDirectory: nil, hasQuery: hasQuery)
+        }
+        // Browsing: the default reads as "recently updated", and choosing
+        // what is already shown changes nothing.
+        update(.init(), hasQuery: false)
+        let relevance = try #require(controller.choiceButtonForTesting(.ordering, "relevance"))
+        let recent = try #require(controller.choiceButtonForTesting(.ordering, "recentlyUpdated"))
+        #expect(relevance.isHidden)
+        let selected = AgentHistoryStrings(language: .english).filterActive
+        #expect(recent.accessibilityValue() as? String == selected)
+        recent.performClick(nil)
+        #expect(published.isEmpty)
+        #expect(AgentHistoryFilterState().effectiveOrdering(isSearching: false) == .recentlyUpdated)
+
+        // Searching: relevance is the default and the other orders remain.
+        update(.init(), hasQuery: true)
+        #expect(!relevance.isHidden)
+        #expect(relevance.accessibilityValue() as? String == selected)
+        #expect(recent.accessibilityValue() as? String == "")
+        recent.performClick(nil)
+        #expect(published.last?.ordering == .recentlyUpdated)
+        #expect(published.last?.isDefault == false)
+    }
+
+    @Test @MainActor func findBarShowsThePositionAndStepsThroughMatches() throws {
+        let controller = AgentHistoryTranscriptToolbarController()
+        var steps: [Int] = []
+        func update(count: Int, position: Int) {
+            controller.update(AgentHistoryTranscriptToolbar(
+                session: session("find"), strings: .init(language: .english), query: "needle",
+                isSearchVisible: true, focusRequestID: 0, matchCount: count, matchPosition: position,
+                onQueryChange: { _ in }, onStepMatch: { steps.append($0) },
+                onToggleSearch: {}, onEscape: {}, onBack: {}, onResume: {}
+            ))
+        }
+        update(count: 5, position: 2)
+        #expect(controller.matchLabelForTesting.stringValue == "2/5")
+        #expect(controller.nextMatchButtonForTesting.isEnabled)
+        controller.nextMatchButtonForTesting.performClick(nil)
+        controller.previousMatchButtonForTesting.performClick(nil)
+        // Return in the field moves forward, as in any find bar.
+        let editor = NSTextView()
+        #expect(controller.control(controller.searchFieldForTesting, textView: editor,
+                                   doCommandBy: #selector(NSResponder.insertNewline(_:))))
+        #expect(steps == [1, -1, 1])
+
+        update(count: 0, position: 0)
+        #expect(controller.matchLabelForTesting.stringValue == "0 matches")
+        update(count: 1, position: 1)
+        #expect(!controller.nextMatchButtonForTesting.isEnabled)
+    }
+
+    @Test func tagCheckIgnoresLetterCase() {
+        #expect(AgentHistoryStore.containsIgnoringASCIICase("lead <INSTRUCTIONS>x</INSTRUCTIONS>", "<instructions>"))
+        #expect(AgentHistoryStore.containsIgnoringASCIICase("中文 <Pasted_Content id=1>", "<pasted_content"))
+        #expect(!AgentHistoryStore.containsIgnoringASCIICase("a < instructions> and <instruction>", "<instructions>"))
+        #expect(!AgentHistoryStore.containsIgnoringASCIICase("<i", "<instructions>"))
+        // Cleaning a prompt still removes a block whatever its case.
+        #expect(AgentHistoryStore.cleanMeaningfulText("<INSTRUCTIONS>\nbe terse\n</INSTRUCTIONS>\nShip it") == "Ship it")
     }
 
     // MARK: Markdown

@@ -11,6 +11,9 @@ enum AgentHistoryGroupingMode: String, CaseIterable, Sendable {
 enum AgentHistoryOrderingMode: String, CaseIterable, Sendable {
     case recentlyUpdated
     case title
+    /// Best answer to the search first. It only orders search results, so it
+    /// is offered while a search is active.
+    case relevance
 }
 
 enum AgentHistoryDirectoryFilter: String, CaseIterable, Sendable {
@@ -46,11 +49,17 @@ struct AgentHistoryFilterState: Equatable, Sendable {
     var directory: AgentHistoryDirectoryFilter = .any
     var time: AgentHistoryTimeFilter = .quarter
     var grouping: AgentHistoryGroupingMode = .none
-    var ordering: AgentHistoryOrderingMode = .recentlyUpdated
+    var ordering: AgentHistoryOrderingMode = .relevance
 
     static let initial = Self()
 
     var isDefault: Bool { self == Self.initial }
+
+    /// The order the list is in. Without a search nothing has a relevance,
+    /// so the default lists the most recent sessions first.
+    func effectiveOrdering(isSearching: Bool) -> AgentHistoryOrderingMode {
+        ordering == .relevance && !isSearching ? .recentlyUpdated : ordering
+    }
     var narrowsSessions: Bool { agent != nil || directory != .any || time != .any }
 
     mutating func reset() { self = Self.initial }
@@ -109,6 +118,8 @@ struct InspectorAgentHistoryView: View {
     @State private var transcriptSearch = ""
     @State private var isTranscriptSearchVisible = false
     @State private var transcriptSearchFocusRequestID = 0
+    /// Which of the transcript's matching turns is in view.
+    @State private var transcriptMatchCursor = 0
 
     private var strings: AgentHistoryStrings {
         .init(language: settings.language)
@@ -135,7 +146,7 @@ struct InspectorAgentHistoryView: View {
             }
             return needle.isEmpty || searchMatches[session.id] != nil
         }
-        switch filter.ordering {
+        switch filter.effectiveOrdering(isSearching: !needle.isEmpty) {
         case .recentlyUpdated:
             // Store snapshots are already newest-first. Preserve that order to
             // avoid sorting thousands of rows on every SwiftUI body update.
@@ -144,6 +155,13 @@ struct InspectorAgentHistoryView: View {
             return matching.sorted {
                 $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
             }
+        case .relevance:
+            // Equal scores keep the newest-first order they arrived in.
+            return matching.enumerated().sorted { lhs, rhs in
+                let left = searchMatches[lhs.element.id]?.relevance ?? 0
+                let right = searchMatches[rhs.element.id]?.relevance ?? 0
+                return left != right ? left > right : lhs.offset < rhs.offset
+            }.map(\.element)
         }
     }
 
@@ -245,6 +263,7 @@ struct InspectorAgentHistoryView: View {
             AgentHistoryToolbar(
                 query: query,
                 isSearching: isSearching,
+                hasQuery: !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                 filter: filter,
                 sessions: scopedSessions,
                 agents: availableAgents,
@@ -349,11 +368,12 @@ struct InspectorAgentHistoryView: View {
     }
 
     private func selectSession(_ session: AgentHistorySession) {
-        // A query that only matched the title would filter the conversation
-        // down to nothing.
+        // A query that only matched the title has nothing to show in the
+        // conversation; it opens at its start.
         let needle = searchMatches[session.id]?.isInTranscript == true
             ? committedQuery.trimmingCharacters(in: .whitespacesAndNewlines) : ""
         transcriptSearch = needle
+        transcriptMatchCursor = 0
         isTranscriptSearchVisible = !needle.isEmpty
         if !needle.isEmpty { transcriptSearchFocusRequestID &+= 1 }
         perform(.selectAgentHistorySession(id: session.id))
@@ -371,6 +391,7 @@ struct InspectorAgentHistoryView: View {
     private func closeTranscriptSearch() {
         isTranscriptSearchVisible = false
         transcriptSearch = ""
+        transcriptMatchCursor = 0
     }
 
     private func scheduleSessionSearch(
@@ -407,25 +428,12 @@ struct InspectorAgentHistoryView: View {
         }
     }
 
-    private func transcriptMessages(
-        _ messages: [AgentHistoryMessage],
-        aroundMatchesFor query: String
-    ) -> [AgentHistoryMessage] {
-        guard !query.isEmpty else { return messages }
-        var indexes = Set<Int>()
-        for index in messages.indices where
-            messages[index].text.range(
-                of: query,
-                options: .caseInsensitive
-            ) != nil {
-            for nearby in max(messages.startIndex, index - 1)...min(
-                messages.index(before: messages.endIndex),
-                index + 1
-            ) {
-                indexes.insert(nearby)
-            }
+    /// Rows of the turns that hold `query`, in transcript order.
+    private func transcriptMatchRows(_ messages: [AgentHistoryMessage], query: String) -> [Int] {
+        guard !query.isEmpty else { return [] }
+        return messages.indices.filter {
+            messages[$0].text.range(of: query, options: .caseInsensitive) != nil
         }
-        return indexes.sorted().map { messages[$0] }
     }
 
     private func transcriptView(_ session: AgentHistorySession) -> some View {
@@ -433,13 +441,14 @@ struct InspectorAgentHistoryView: View {
         let allMessages = history.transcript?.sessionID == session.id
             ? (history.transcript?.messages ?? [])
             : []
-        let matchCount = needle.isEmpty ? 0 : allMessages.count {
-            $0.text.range(of: needle, options: .caseInsensitive) != nil
+        // The whole conversation stays on screen; a search moves through it
+        // rather than hiding what surrounds a match.
+        let matchRows = transcriptMatchRows(allMessages, query: needle)
+        let cursor = matchRows.isEmpty ? 0 : min(max(transcriptMatchCursor, 0), matchRows.count - 1)
+        let step: (Int) -> Void = { delta in
+            guard !matchRows.isEmpty else { return }
+            transcriptMatchCursor = (cursor + delta + matchRows.count) % matchRows.count
         }
-        let matchingMessages = transcriptMessages(
-            allMessages,
-            aroundMatchesFor: needle
-        )
 
         return VStack(spacing: 0) {
             AgentHistoryTranscriptToolbar(
@@ -448,8 +457,13 @@ struct InspectorAgentHistoryView: View {
                 query: transcriptSearch,
                 isSearchVisible: isTranscriptSearchVisible,
                 focusRequestID: transcriptSearchFocusRequestID,
-                matchCount: matchCount,
-                onQueryChange: { transcriptSearch = $0 },
+                matchCount: matchRows.count,
+                matchPosition: matchRows.isEmpty ? 0 : cursor + 1,
+                onQueryChange: {
+                    if $0 != transcriptSearch { transcriptMatchCursor = 0 }
+                    transcriptSearch = $0
+                },
+                onStepMatch: step,
                 onToggleSearch: toggleTranscriptSearch,
                 onEscape: closeTranscriptSearch,
                 onBack: {
@@ -495,27 +509,24 @@ struct InspectorAgentHistoryView: View {
                     title: strings.emptyTranscript,
                     message: strings.emptyTranscriptMessage
                 )
-            } else if matchingMessages.isEmpty, !needle.isEmpty {
-                AgentHistoryEmptyView(
-                    systemImage: "magnifyingglass",
-                    title: strings.noMatches,
-                    message: strings.noMatchesMessage
-                )
             } else if let transcript = history.transcript,
                       transcript.sessionID == session.id {
                 VStack(spacing: 0) {
                     AgentHistoryTranscriptTable(
-                        messages: matchingMessages,
+                        messages: allMessages,
                         agentName: session.agent.displayName,
                         strings: strings,
                         highlightText: needle,
+                        focus: matchRows.isEmpty ? nil : .init(
+                            row: matchRows[cursor], token: "\(session.id)\n\(needle)\n\(cursor)"
+                        ),
                         onFork: session.supportsFork
                             ? { perform(.forkAgentHistorySession(id: session.id)) }
                             : nil,
                         onFind: toggleTranscriptSearch
                     )
 
-                    if transcript.wasTruncated && needle.isEmpty {
+                    if transcript.wasTruncated {
                         Text(strings.truncated)
                             .font(.caption)
                             .foregroundStyle(.secondary)

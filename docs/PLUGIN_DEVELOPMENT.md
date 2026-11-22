@@ -160,19 +160,25 @@ a corner badge (an overlay, so the glyph stays centered) whenever any
 non-default choice is active.
 
 Sessions come from two kinds of store. JSONL Agents use the store or discovery
-roots their manifest declares. OpenCode, Hermes and Antigravity keep
+roots their manifest declares. OpenCode, Hermes, Antigravity and Cursor keep
 conversations in SQLite, which a manifest cannot describe, so the host reads
-those itself: `~/.local/share/opencode/opencode.db`, `~/.hermes/state.db`, and
-the per-conversation `steps` table of the Antigravity database the manifest
-store already names. These databases are opened read-only (falling back to an
-immutable handle when a WAL database has no `-shm` file); the host never writes
-to, checkpoints or locks an Agent's own files. Each query has a fallback for an
-older schema, and a database that cannot be read contributes no sessions.
+those itself: `~/.local/share/opencode/opencode.db`, `~/.hermes/state.db`, the
+per-conversation `steps` table of the Antigravity database the manifest store
+already names, and Cursor's per-chat `~/.cursor/chats/<workspace>/<chat>/store.db`.
+The host never writes to, checkpoints or locks an Agent's own files. A
+write-ahead-log database with nothing in its log is opened as an immutable
+file, so SQLite creates no `-wal` or `-shm` beside it; one with a pending log,
+or a rollback journal, is opened read-only so the Agent's locks apply. Each
+query has a fallback for an older schema, and a database that cannot be read
+contributes no sessions.
 Sub-agent, archived and hidden sessions are not listed: OpenCode sessions with
 a parent or an archive time, Hermes sessions marked hidden or without messages,
-and Antigravity conversations with a nesting depth above zero or with neither
-title nor preview. Remote Antigravity conversations still show the summary
-only; remote OpenCode and Hermes sessions are not discovered.
+Antigravity conversations with a nesting depth above zero or with neither
+title nor preview, and Cursor chats without a prompt. A Cursor chat is listed
+under the name Cursor gave it, with the workspace its root record names and the
+time its database, or a non-empty log, was last written. Remote Antigravity
+conversations still show the summary only; remote OpenCode, Hermes and Cursor
+sessions are not discovered.
 
 A transcript is the conversation, not the log. Each record family has its own
 rule for what a turn is, and anything else is dropped rather than shown as a
@@ -193,6 +199,10 @@ user or assistant message:
   summaries. A multimodal turn stored as a JSON array contributes its text.
 - Antigravity: user-input and planner-response steps. Injected context, system
   and tool steps are skipped.
+- Cursor: the messages the chat's root record lists, in order. A user turn is
+  the text inside `<user_query>`; a user message without one is context Cursor
+  attached. An assistant turn is its `text` parts, without reasoning or tool
+  calls.
 - Any other JSONL Agent: records with a `user` or `assistant` role and text.
 
 Consecutive assistant records are one turn: an Agent narrates between tool
@@ -224,11 +234,30 @@ still running; sessions already indexed are not read twice. Sessions the index
 does not cover yet are still found:
 search answers from titles and metadata first, the index second, cached
 previews third, and then scans the remaining local sessions in recency order.
-Remote sessions are never indexed; they match on title, metadata and preview.
-Results stay in the list's order and carry a snippet around the first match.
-Opening a result filters the transcript to matching turns with their
-neighbours; a result that matched only its title, ID or folder opens the whole
-conversation instead.
+Remote sessions are never indexed. After the local phases, the sessions of each
+SSH host that have no transcript match yet are searched on the host in one
+command: a `python3` script receives the query and up to 500 of the newest
+session paths as one JSON argument, dismisses megabyte blocks that do not hold
+the query's bytes, parses the lines that do, and returns up to five records per
+file whose user or assistant text names it, with the number of matching turns.
+`.jsonl.zst` archives are read through the `zstandard` module or the `zstd`
+binary. The script stops after 15 seconds or 16 MiB of results, uses at most
+four processes, and ends at the next file once the connection closes. The
+records it returns are cleaned by the same rules as a local transcript before
+they count, so a match inside an injected wrapper is dropped. A query of one
+character is not sent to a host; without `python3` the remote phase finds
+nothing and title and preview matches remain.
+
+Search results are ordered by relevance unless another order is chosen: a
+title that holds the query first, then an ID or folder match, then the number
+of turns naming it on a logarithmic scale, with recency breaking ties.
+"Relevance" appears in the order menu only while a search is typed; without
+one the default lists the most recent sessions first. Each result carries a
+snippet around its first match. Opening one shows the whole conversation
+scrolled to the first turn that holds the query, with every occurrence
+highlighted; the find bar shows the position among matching turns, and Return
+and Shift-Return (or its arrows) step through them. A result that matched only
+its title, ID or folder opens the conversation at its start.
 
 Turns are rendered from the Markdown Agents answer in: headings, lists, task
 items, quotes, rules, bold, italic, code spans and links are styled; fenced
@@ -254,7 +283,8 @@ records in a single pass, so an ordinary answer with the same heading remains
 visible. An unresolved final assistant record at the end of a bounded prefix
 is withheld until its classification is known. A local transcript reads up to
 768 MiB of its session file and keeps at most 4,000 turns, 4,000,000 characters
-in total and 48,000 characters per turn; an SSH transcript is bounded to 8 MiB.
+in total and 48,000 characters per turn; an SSH transcript is bounded to 8 MiB,
+decompressed on the host when the session is an archive.
 Both skip individual records over 4 MiB and report truncation. The transcript
 view has no paging: every kept turn is a row of one reused table.
 Deep search can stop at its first match without a full-file pre-scan. Remote
@@ -2709,8 +2739,8 @@ metadata uses a versioned mtime cache and
 bounded configurable count. The default time range is the last three calendar
 months. Local and SSH discovery skip older file timestamps before reading or
 decompressing transcript headers; local enumeration still checks file metadata.
-Local parsing uses between two and eight workers, following the core count, and
-checks cancellation between batches.
+Local parsing uses a pool of two to eight workers, following the core count;
+each takes the next file as it finishes one and stops when the scan is cancelled.
 Choosing All or Year sends the built-in `setAgentHistoryTimeRange` action and
 expands the shared host cache once; narrower ranges and search filter that cache.
 A limited scan preserves older valid metadata cache entries for later expansion.

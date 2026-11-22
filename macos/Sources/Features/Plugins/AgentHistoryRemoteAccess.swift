@@ -202,6 +202,184 @@ struct AgentHistoryRemoteAccess: Sendable {
         return Self.parseBatchStream(output)
     }
 
+    /// Records of one session file that hold a search query.
+    struct TranscriptSearchHit: Equatable, Sendable {
+        let path: String
+        /// The first matching records as the Agent wrote them, oldest first.
+        let lines: [String]
+        /// Every matching turn in the part of the file that was read.
+        let count: Int
+    }
+
+    /// Most recent session files one search reads on a host.
+    static let maximumSearchFiles = 500
+
+    /// Full-text search of session files on the host, in one SSH command.
+    ///
+    /// The host does the cheap work: it skips every line that does not hold
+    /// the query's bytes, then keeps the lines that are a user or assistant
+    /// turn naming it. The caller cleans those records with the rules of a
+    /// local transcript, so a match inside an injected wrapper is dropped
+    /// rather than trusted. The host bounds the search itself (500 files,
+    /// 15 seconds, 16 MiB of results, four processes), so a dropped
+    /// connection cannot leave it running. Without `python3` the command
+    /// fails and the caller keeps its title and preview matches; an archive
+    /// is skipped when the host can read no zstd.
+    func searchTranscripts(paths: [String], query: String) async throws -> [TranscriptSearchHit] {
+        // The whole command is one argument to the remote shell, which Linux
+        // limits to 128 KiB; the path list stays well inside it.
+        var requestBytes = 0
+        let safePaths = paths.lazy.filter { Self.validRemotePath($0) && !$0.hasSuffix(".db") }
+            .prefix(Self.maximumSearchFiles)
+            .prefix { path in
+                requestBytes += path.utf8.count + 4
+                return requestBytes <= 64 * 1_024
+            }
+        guard !safePaths.isEmpty, !query.isEmpty, query.utf8.count <= 1_024 else { return [] }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.withoutEscapingSlashes]
+        let request = try encoder.encode(SearchRequest(query: query, paths: Array(safePaths)))
+        let script = """
+        python3 - \(Self.shellQuote(String(bytes: request, encoding: .utf8) ?? "{}")) <<'OMG_HISTORY_SEARCH_PY'
+        import io, json, os, subprocess, sys, time
+        request = json.loads(sys.argv[1])
+        query = request['query'].lower()
+        # A record stores the query as typed, or JSON-escaped.
+        needles = {query.encode('utf-8')}
+        for ascii_only in (False, True):
+            needles.add(json.dumps(query, ensure_ascii=ascii_only)[1:-1].lower().encode('utf-8'))
+        deadline = time.monotonic() + 15
+        output = 16 * 1024 * 1024
+        flags = ('isMeta', 'isSidechain', 'isCompactSummary', 'isApiErrorMessage')
+
+        def named(data):
+            lowered = data.lower()
+            return any(needle in lowered for needle in needles)
+
+        def turn_text(record):
+            if not isinstance(record, dict) or any(record.get(flag) for flag in flags):
+                return None
+            kind = record.get('type')
+            payload = record
+            for key in ('message', 'payload'):
+                if isinstance(record.get(key), dict):
+                    payload = record[key]
+                    break
+            if kind == 'response_item' and payload.get('type') not in (None, 'message'):
+                return None
+            role = payload.get('role') or (kind if kind in ('user', 'assistant') else None)
+            if role not in ('user', 'assistant'):
+                return None
+            content = payload.get('content')
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                return '\\n'.join(part['text'] for part in content
+                                 if isinstance(part, dict) and isinstance(part.get('text'), str)
+                                 and part.get('type') in ('text', 'input_text', 'output_text'))
+            return None
+
+        def open_lines(path):
+            if not path.endswith('.zst'):
+                return open(path, 'rb'), None
+            try:
+                import zstandard
+                return io.BufferedReader(zstandard.ZstdDecompressor().stream_reader(open(path, 'rb'))), None
+            except ImportError:
+                process = subprocess.Popen(['zstd', '--decompress', '--stdout', '--quiet', path],
+                                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                           stderr=subprocess.DEVNULL)
+                return process.stdout, process
+
+        def blocks(source):
+            # Whole lines, about a megabyte at a time: most blocks hold no
+            # match and are dismissed without being split.
+            rest = b''
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    if rest:
+                        yield rest
+                    return
+                chunk = rest + chunk
+                cut = chunk.rfind(b'\\n')
+                if cut < 0:
+                    rest = chunk
+                    continue
+                yield chunk[:cut + 1]
+                rest = chunk[cut + 1:]
+
+        def search(path):
+            lines, count, process = [], 0, None
+            try:
+                source, process = open_lines(path)
+                with source:
+                    for block in blocks(source):
+                        if time.monotonic() > deadline:
+                            break
+                        if not named(block):
+                            continue
+                        for line in block.split(b'\\n'):
+                            if not named(line):
+                                continue
+                            try:
+                                text = turn_text(json.loads(line))
+                            except (ValueError, UnicodeDecodeError):
+                                continue
+                            if not text or query not in text.lower():
+                                continue
+                            count += 1
+                            if len(lines) < 5 and len(line) <= 512 * 1024:
+                                lines.append(line.decode('utf-8', 'replace'))
+            except (OSError, ValueError):
+                pass
+            finally:
+                if process is not None:
+                    process.kill()
+                    process.wait()
+            return path, count, lines
+
+        # Decompression is most of the work; a few processes share it. Fork
+        # keeps these functions, which a script read from stdin cannot import.
+        pool = None
+        try:
+            import multiprocessing
+            workers = min(4, os.cpu_count() or 1, len(request['paths']))
+            if workers > 1:
+                pool = multiprocessing.get_context('fork').Pool(workers)
+        except (ImportError, ValueError, OSError):
+            pool = None
+        try:
+            results = pool.imap(search, request['paths'], 2) if pool else map(search, request['paths'])
+            for path, count, lines in results:
+                if count:
+                    result = json.dumps(dict(path=path, count=count, lines=lines))
+                    output -= len(result)
+                    print(result)
+                # A closed connection ends the search at the next file.
+                sys.stdout.write('\\n')
+                sys.stdout.flush()
+                if output <= 0 or time.monotonic() > deadline:
+                    break
+        finally:
+            if pool:
+                pool.terminate()
+        OMG_HISTORY_SEARCH_PY
+        """
+        let response = try await runCommand(script)
+        return response.split(separator: "\n").compactMap { line -> TranscriptSearchHit? in
+            guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  let path = object["path"] as? String, let count = object["count"] as? Int,
+                  let lines = object["lines"] as? [String] else { return nil }
+            return .init(path: path, lines: lines, count: count)
+        }
+    }
+
+    private struct SearchRequest: Encodable {
+        let query: String
+        let paths: [String]
+    }
+
     struct TranscriptPrefix {
         let data: Data
         let wasTruncated: Bool
@@ -211,9 +389,14 @@ struct AgentHistoryRemoteAccess: Sendable {
         guard Self.validRemotePath(path), maximumBytes > 0, maximumBytes < Int.max else {
             throw AgentHistoryRemoteError.invalidPath
         }
-        // One extra byte distinguishes EOF from a bounded prefix without
-        // deleting the last complete line of short transcripts.
-        let command = "head -c \(maximumBytes + 1) \(Self.shellQuote(path)) 2>/dev/null"
+        // Bytes past the limit distinguish EOF from a bounded prefix without
+        // deleting the last complete line of short transcripts; four of them
+        // survive a character cut in half at the end. An archive is
+        // decompressed on the host; `head` closing the pipe stops zstd.
+        let source = path.lowercased().hasSuffix(".zst")
+            ? "zstd --decompress --stdout --quiet \(Self.shellQuote(path)) 2>/dev/null |"
+            : "< \(Self.shellQuote(path))"
+        let command = "\(source) head -c \(maximumBytes + 4) 2>/dev/null"
         let output = try await runCommand(command)
         let data = Data(output.utf8)
         return .init(data: Data(data.prefix(maximumBytes)), wasTruncated: data.count > maximumBytes)
@@ -401,12 +584,13 @@ struct AgentHistoryRemoteAccess: Sendable {
                       let data = try? Data(contentsOf: outputURL) else {
                     throw AgentHistoryRemoteError.unavailable
                 }
-                // Remote readers drop their potentially incomplete final line
-                // before transport, so the bounded JSONL stream stays valid UTF-8.
-                guard let text = String(bytes: data, encoding: .utf8) else {
-                    throw AgentHistoryRemoteError.unavailable
+                // A byte-bounded read can end inside a multi-byte character,
+                // which is at most three bytes of an otherwise valid stream.
+                // The JSONL parsers already discard a cut final line.
+                for trailing in 0...3 {
+                    if let text = String(bytes: data.dropLast(trailing), encoding: .utf8) { return text }
                 }
-                return text
+                throw AgentHistoryRemoteError.unavailable
             }.value
         } onCancel: {
             if process.isRunning { process.terminate() }

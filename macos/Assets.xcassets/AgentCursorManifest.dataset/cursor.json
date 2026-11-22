@@ -13,7 +13,7 @@
     ]
   },
   "resume": {
-    "resumeArguments": []
+    "resumeArguments": ["--resume", "{id}"]
   },
   "hook": {
     "kind": "json",

@@ -52,6 +52,18 @@ extension NSWindow {
         return firstWindow === self
     }
 
+    /// True if this window is the displayed selection of its native tab group
+    /// (or standalone). Avoids reading `tabGroup.selectedWindow` on an empty or
+    /// detached `NSWindowStackController`, which raises
+    /// `NSInternalInconsistencyException: expected no items`.
+    var isSelectedInTabGroup: Bool {
+        guard let tabGroup else { return true }
+        let windows = tabGroup.windows
+        guard windows.contains(self) else { return false }
+        if windows.count == 1 { return true }
+        return tabGroup.selectedWindow === self
+    }
+
     /// Wraps `addTabbedWindow` with an Objective-C exception catcher because AppKit can
     /// throw NSExceptions in visual tab picker flows. Swift cannot safely recover from
     /// those exceptions, so we route through Obj-C and log a recoverable failure.

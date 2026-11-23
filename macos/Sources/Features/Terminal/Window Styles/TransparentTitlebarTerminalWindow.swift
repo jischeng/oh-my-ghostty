@@ -14,6 +14,7 @@ class TransparentTitlebarTerminalWindow: TerminalWindow {
     private var tabBarVisibleObservation: NSKeyValueObservation?
     private var appearanceRefreshPending = false
     private var observationRefreshPending = false
+    private var isClosing = false
 
     deinit {
         tabGroupWindowsObservation?.invalidate()
@@ -21,6 +22,16 @@ class TransparentTitlebarTerminalWindow: TerminalWindow {
     }
 
     // MARK: NSWindow
+
+    override func close() {
+        isClosing = true
+        tabGroupWindowsObservation?.invalidate()
+        tabGroupWindowsObservation = nil
+        tabBarVisibleObservation?.invalidate()
+        tabBarVisibleObservation = nil
+        observedTabGroup = nil
+        super.close()
+    }
 
     override func awakeFromNib() {
         super.awakeFromNib()
@@ -41,7 +52,8 @@ class TransparentTitlebarTerminalWindow: TerminalWindow {
         // at some point macOS replaces the tab views.
         if tabGroup?.windows.count ?? 0 == 2 {
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self] in
-                self?.syncAppearance(self?.lastSurfaceConfig ?? lastSurfaceConfig)
+                guard let self, !self.isClosing else { return }
+                self.syncAppearance(self.lastSurfaceConfig ?? lastSurfaceConfig)
             }
         }
     }
@@ -103,7 +115,8 @@ class TransparentTitlebarTerminalWindow: TerminalWindow {
             // 1. AppKit resets the style after exiting fullscreen
             // 2. AppKit resets the style after adding a new tab
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self] in
-                self?.reduceTabBarBackgroundGoldenGate()
+                guard let self, !self.isClosing else { return }
+                self.reduceTabBarBackgroundGoldenGate()
             }
         }
 
@@ -141,11 +154,12 @@ class TransparentTitlebarTerminalWindow: TerminalWindow {
         // This can run from one of the observation callbacks below. Replacing
         // an observation before its callback returns leaves the window retained
         // by AppKit, so always rebind on the next main-queue turn.
-        guard !observationRefreshPending else { return }
+        guard !isClosing, !observationRefreshPending else { return }
         observationRefreshPending = true
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.observationRefreshPending = false
+            guard !self.isClosing else { return }
 
             // Recheck because the tab group and observation state may have changed
             // while this work was waiting on the main queue.
@@ -165,14 +179,14 @@ class TransparentTitlebarTerminalWindow: TerminalWindow {
     }
 
     private func scheduleTabAppearanceRefresh() {
-        guard !appearanceRefreshPending else { return }
+        guard !isClosing, !appearanceRefreshPending else { return }
         appearanceRefreshPending = true
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.appearanceRefreshPending = false
             // Group mutations notify every tab. Only the displayed window has
             // titlebar pixels to repair, after AppKit finishes changing the group.
-            guard self.isVisible, (self.tabGroup?.selectedWindow ?? self) === self,
+            guard !self.isClosing, self.isVisible, self.isSelectedInTabGroup,
                   let config = self.lastSurfaceConfig else { return }
             self.syncAppearance(config)
         }

@@ -12,7 +12,7 @@ extension TerminalController {
               !workspaceCoordinator.isTerminating,
               !workspaceCoordinator.native.transitioningWindows.contains(windowSessionID),
               isAvailableForWorkspace, !workspacePresentationIsParked,
-              let window, (window.tabGroup?.selectedWindow ?? window) === window else { return }
+              let window, window.isSelectedInTabGroup else { return }
         window.contentView?.superview?.layoutSubtreeIfNeeded()
         refreshWorkspaceTabs()
         tabLayoutState.sidebarHost.presentSelectedWindow(updateContent: true)

@@ -297,11 +297,17 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
     }
 
     func forget(_ controller: TerminalController) {
-        guard !quitting else { return }
-        sessions.forget(controller)
-        store.transaction {
-            $0.remove(controller.tabSessionID)
-            $0.pruneEmptyWindows()
+        forget([controller])
+    }
+
+    func forget(_ controllers: [TerminalController]) {
+        guard !quitting, !controllers.isEmpty else { return }
+        sessions.forget(controllers)
+        store.transaction { state in
+            for controller in controllers {
+                state.remove(controller.tabSessionID)
+            }
+            state.pruneEmptyWindows()
         }
     }
 
@@ -816,7 +822,7 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
         let current = ordered.filter { !state.isParked($0.tabSessionID) }
         guard !current.contains(where: {
             guard let window = $0.window, window.isVisible, !window.isMiniaturized else { return false }
-            return (window.tabGroup?.selectedWindow ?? window) === window
+            return window.isSelectedInTabGroup
         }) else { return false }
         let selected = current.first {
             state.windows?[$0.windowSessionID]?.groups[$0.workspaceID]?.selected == $0.tabSessionID

@@ -147,7 +147,7 @@ final class VerticalTabSidebarContainer: NSView {
         // before it has joined the group and become its committed selection.
         let selectedID = controller.tabLayoutState.tabSnapshot.selectedID
         guard selectedID == nil || selectedID == ObjectIdentifier(controller) else { return false }
-        return (window.tabGroup?.selectedWindow ?? window) === window
+        return window.isSelectedInTabGroup
     }
 
     override init(frame: NSRect) {

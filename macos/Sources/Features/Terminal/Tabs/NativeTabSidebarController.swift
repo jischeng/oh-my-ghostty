@@ -216,7 +216,7 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
               !controller.workspaceTabAttachmentIsPending, let window = controller.window else { return false }
         if controller.workspaceCoordinator.hasNonNativeFullscreen(in: controller.windowSessionID),
            !window.isVisible { return false }
-        guard (window.tabGroup?.selectedWindow ?? window) === window else { return false }
+        guard window.isSelectedInTabGroup else { return false }
         let selectedID = configuration.layoutState.tabSnapshot.selectedID
         return selectedID == nil || selectedID == ObjectIdentifier(controller)
     }

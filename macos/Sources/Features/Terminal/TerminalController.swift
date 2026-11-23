@@ -4754,6 +4754,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         registerUndoForCloseWindow()
 
         if window.tabGroup != nil, activeWindows.count > 1 {
+            workspaceCoordinator.forget(activeWindows.compactMap { $0.windowController as? TerminalController })
             activeWindows.forEach { window in
                 // Clear out the surfacetree to ensure there is no undo state.
                 // This prevents unnecessary undos registered since AppKit may
@@ -4767,6 +4768,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 window.close()
             }
         } else {
+            workspaceCoordinator.forget(self)
             window.close()
         }
     }

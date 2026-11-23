@@ -762,4 +762,150 @@ struct TerminalWorkspaceLaunchTests {
         #expect(store.snapshot.windows?[live.windowSessionID] != nil)
         #expect(store.snapshot.validationErrors.isEmpty)
     }
+
+    @Test func closeWindowImmediatelyRemovesClosedWindowsFromCheckpointAndRelaunch() async throws {
+        let previousMode = OhMyGhosttySettings.shared.startupMode
+        OhMyGhosttySettings.shared.startupMode = .restoreSessions
+        defer { OhMyGhosttySettings.shared.startupMode = previousMode }
+        let undoManager = (NSApp.delegate as? AppDelegate)?.undoManager
+
+        let fixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { fixture.close() }
+        let keptFirst = try fixture.tab()
+        keptFirst.showWindow(nil)
+        let keptSecond = try fixture.tab(parent: keptFirst)
+        keptSecond.window?.makeKeyAndOrderFront(nil)
+        fixture.coordinator.didActivate(keptSecond)
+
+        // Single-tab window (mirrors Cmd+N -> Cmd+Shift+W).
+        let singleWindow = try fixture.tab()
+        singleWindow.showWindow(nil)
+        let singleHost = singleWindow.windowSessionID
+        let singleTabID = singleWindow.tabSessionID
+
+        // Multi-tab window (mirrors multi-tab Cmd+Shift+W + Undo Close Window).
+        let multiFirst = try fixture.tab()
+        multiFirst.showWindow(nil)
+        let multiSecond = try fixture.tab(parent: multiFirst)
+        multiSecond.window?.makeKeyAndOrderFront(nil)
+        fixture.coordinator.didActivate(multiSecond)
+        let multiHost = multiFirst.windowSessionID
+        let multiTabIDs = Set([multiFirst.tabSessionID, multiSecond.tabSessionID])
+
+        fixture.sessions.start(fixture.app)
+        fixture.sessions.capture(foreground: keptSecond.window)
+        fixture.sessions.flush()
+        let stateURL = fixture.directory.appendingPathComponent("state.json")
+        let before = try JSONDecoder().decode(
+            TerminalWorkspaceSessionStore.Snapshot.self,
+            from: Data(contentsOf: stateURL)
+        )
+        #expect(before.catalog?.windows?.count == 3)
+        #expect(before.tabs.count == 5)
+
+        // Close single-tab window via Cmd+Shift+W path.
+        undoManager?.disableUndoRegistration()
+        singleWindow.closeWindowImmediately()
+        undoManager?.enableUndoRegistration()
+        fixture.sessions.flush()
+        #expect(fixture.store.snapshot.windows?[singleHost] == nil)
+        #expect(fixture.store.snapshot.owner(of: singleTabID) == nil)
+        let afterSingle = try JSONDecoder().decode(
+            TerminalWorkspaceSessionStore.Snapshot.self,
+            from: Data(contentsOf: stateURL)
+        )
+        #expect(afterSingle.catalog?.windows?.count == 2)
+        #expect(!afterSingle.tabs.contains { $0.id == singleTabID })
+
+        // Close multi-tab window via Cmd+Shift+W path.
+        multiSecond.closeWindowImmediately()
+        fixture.sessions.flush()
+        #expect(fixture.store.snapshot.windows?[multiHost] == nil)
+        #expect(multiTabIDs.allSatisfy { fixture.store.snapshot.owner(of: $0) == nil })
+        let afterMulti = try JSONDecoder().decode(
+            TerminalWorkspaceSessionStore.Snapshot.self,
+            from: Data(contentsOf: stateURL)
+        )
+        #expect(afterMulti.catalog?.windows?.count == 1)
+        #expect(Set(afterMulti.tabs.map(\.id)) == Set([keptFirst.tabSessionID, keptSecond.tabSessionID]))
+
+        // Copy checkpoint before exercising Undo Close Window so we can verify cold relaunch.
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let checkpoint = directory.appendingPathComponent("state.json")
+        try FileManager.default.copyItem(at: stateURL, to: checkpoint)
+
+        // Undo Close Window must still restore both tabs of the closed multi-tab window.
+        if let undoManager, undoManager.canUndo {
+            undoManager.undo()
+            let restoredIDs = Set(fixture.coordinator.liveControllers.map(\.tabSessionID))
+            #expect(multiTabIDs.isSubset(of: restoredIDs))
+            #expect(fixture.store.snapshot.windows?[multiHost] != nil)
+            for controller in fixture.coordinator.liveControllers where multiTabIDs.contains(controller.tabSessionID) {
+                fixture.controllers.append(controller)
+            }
+        }
+        fixture.close()
+
+        // Cold relaunch from the post-close checkpoint must not resurrect closed windows.
+        let relaunchStore = TerminalWorkspaceStore(fileURL: nil)
+        let relaunchSessions = TerminalWorkspaceSessionStore(url: checkpoint, testing: true, workspaces: relaunchStore)
+        let relaunchCoordinator = TerminalWorkspaceCoordinator(store: relaunchStore, sessions: relaunchSessions)
+        relaunchSessions.prepare()
+        relaunchSessions.start(fixture.app)
+        let relaunched = relaunchCoordinator.liveControllers
+        defer {
+            relaunchSessions.prepareToQuit()
+            relaunchCoordinator.commitTermination()
+            relaunchCoordinator.closeBackgroundTabsForTermination()
+            for controller in relaunched { controller.window?.close() }
+            relaunchSessions.flush()
+        }
+        #expect(Set(relaunched.map(\.tabSessionID)) == Set([keptFirst.tabSessionID, keptSecond.tabSessionID]))
+        #expect(relaunchStore.snapshot.windows?.count == 1)
+    }
+
+    @Test func closeWindowImmediatelyLeavesParkedWorkspaceTabsInCheckpoint() async throws {
+        let undoManager = (NSApp.delegate as? AppDelegate)?.undoManager
+        undoManager?.disableUndoRegistration()
+        defer { undoManager?.enableUndoRegistration() }
+
+        let fixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { fixture.close() }
+        let parked = try fixture.tab()
+        parked.showWindow(nil)
+        fixture.coordinator.didActivate(parked)
+        let workID = try #require(fixture.store.create(name: "Work close", symbol: "briefcase", color: "blue"))
+        let activeFirst = try #require(fixture.coordinator.switchWorkspace(to: workID, from: parked))
+        fixture.controllers.append(activeFirst)
+        let activeSecond = try fixture.tab(workspace: workID, parent: activeFirst)
+        activeSecond.window?.makeKeyAndOrderFront(nil)
+        fixture.coordinator.didActivate(activeSecond)
+        try await Task.sleep(for: .milliseconds(80))
+
+        fixture.sessions.start(fixture.app)
+        fixture.sessions.capture(foreground: activeSecond.window)
+        fixture.sessions.flush()
+
+        let host = parked.windowSessionID
+        let parkedID = parked.tabSessionID
+        let activeIDs = Set([activeFirst.tabSessionID, activeSecond.tabSessionID])
+        activeSecond.closeWindowImmediately()
+        fixture.sessions.flush()
+        // Drain queued tab-group KVO / appearance refresh turns after closing
+        // an active multi-tab workspace while parked workspaces remain.
+        try await Task.sleep(for: .milliseconds(100))
+
+        let stateURL = fixture.directory.appendingPathComponent("state.json")
+        let snapshot = try JSONDecoder().decode(
+            TerminalWorkspaceSessionStore.Snapshot.self,
+            from: Data(contentsOf: stateURL)
+        )
+        #expect(fixture.store.snapshot.windows?[host] != nil)
+        #expect(fixture.store.snapshot.owner(of: parkedID) != nil)
+        #expect(activeIDs.allSatisfy { fixture.store.snapshot.owner(of: $0) == nil })
+        #expect(Set(snapshot.tabs.map(\.id)) == Set([parkedID]))
+        #expect(parked.isAvailableForWorkspace)
+    }
 }

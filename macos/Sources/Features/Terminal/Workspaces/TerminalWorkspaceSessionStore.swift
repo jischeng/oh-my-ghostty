@@ -429,13 +429,22 @@ final class TerminalWorkspaceSessionStore {
     }
 
     func forget(_ controller: TerminalController) {
-        guard !quitting else { return }
-        closing[controller.tabSessionID] = Weak(controller)
-        descriptors.removeValue(forKey: controller.tabSessionID)
-        saved.tabs.removeAll { $0.id == controller.tabSessionID }
-        workspaces.transaction {
-            $0.remove(controller.tabSessionID)
-            $0.pruneEmptyWindows()
+        forget([controller])
+    }
+
+    func forget(_ controllers: [TerminalController]) {
+        guard !quitting, !controllers.isEmpty else { return }
+        let ids = Set(controllers.map(\.tabSessionID))
+        for controller in controllers {
+            closing[controller.tabSessionID] = Weak(controller)
+            descriptors.removeValue(forKey: controller.tabSessionID)
+        }
+        saved.tabs.removeAll { ids.contains($0.id) }
+        workspaces.transaction { state in
+            for id in ids {
+                state.remove(id)
+            }
+            state.pruneEmptyWindows()
         }
         capture()
     }

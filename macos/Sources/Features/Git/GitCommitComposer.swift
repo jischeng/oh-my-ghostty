@@ -202,9 +202,7 @@ struct GitCommitComposer: View {
                 noticeID = UUID()
             } catch {
                 guard !Task.isCancelled, generationID == id else { return }
-                if case GitExecutionError.outputLimitExceeded = error {
-                    notice = GitL10n.text("Staged changes are too large for AI generation (200 KB patch limit). Split the commit and try again.")
-                } else { notice = error.localizedDescription }
+                notice = error.localizedDescription
             }
         }
     }

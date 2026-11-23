@@ -457,6 +457,11 @@ struct TerminalShellLayoutContainer<Content: View>: View {
             leadingVisible: leftVisible,
             trailingVisible: rightVisible,
             chromeBackground: chromeBackground,
+            fillsCenterUntilSurfaceReady: true,
+            trackedSurfaces: Array(controller.surfaceTree),
+            isEditorCoveringSurface: { [weak controller] surfaceID in
+                controller?.editorWorkspaceStore.isEditorCovering(surfaceID: surfaceID) ?? false
+            },
             leading: AnyView(HStack(spacing: 0) {
                 SharedTerminalTabSidebar(
                     controller: controller, layoutState: layoutState,

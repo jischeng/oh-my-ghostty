@@ -285,6 +285,7 @@ class SurfaceScrollView: NSView {
         if needsPostMountSync, window != nil {
             needsPostMountSync = false
             surfaceView.syncAfterScrollViewMount()
+            surfaceView.notifyEnclosingTerminalShellBackdrop()
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.ownsSurface, self.window != nil else { return }
                 self.surfaceView.syncAfterScrollViewMount()

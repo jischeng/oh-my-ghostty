@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import IOSurface
 import SwiftUI
 import Testing
 @testable import Ghostty
@@ -26,6 +27,159 @@ struct NativeTerminalShellTests {
         #expect(!rightOnly.contains(.init(x: 100, y: 300)))
         #expect(rightOnly.contains(.init(x: 900, y: 300)))
         update(false, false)
+        #expect(shell.chromeBackdrop.isHidden)
+        #expect(shell.chromeBackdrop.path?.isEmpty == true)
+    }
+
+    private func makeTestSurface(app: Ghostty.App) throws -> Ghostty.SurfaceView {
+        let ghosttyApp = try #require(app.app)
+        let connection = try GitSSHConnection(destination: "devbox")
+        let source = SessionRuntimeDescriptor(connection: connection, revision: "rev-a", policy: .init())
+        let target = SessionRuntimeDescriptor(connection: connection, revision: "rev-b", policy: .init())
+        let handoff = SessionRuntimeRevisionHandoffContext(
+            paneID: UUID(),
+            sourceDescriptor: source,
+            targetDescriptor: target,
+            savedWorkingDirectory: "/tmp",
+            savedAgentResume: nil
+        )
+        return Ghostty.SurfaceView(ghosttyApp, pendingRevisionHandoff: handoff)
+    }
+
+    private func makeTestIOSurface() throws -> IOSurface {
+        try #require(IOSurface(properties: [
+            .width: 4,
+            .height: 4,
+            .bytesPerElement: 4,
+            .pixelFormat: kCVPixelFormatType_32BGRA,
+        ]))
+    }
+
+    @Test func centerBackdropCoversColdStartupUntilFirstSurfaceFrameThenStopsDoublePainting() throws {
+        let app = try #require(NSApp.delegate as? AppDelegate)
+        let surface = try makeTestSurface(app: app.ghostty)
+        let iosurface = try makeTestIOSurface()
+        let fill = NSColor(displayP3Red: 26 / 217, green: 26 / 217, blue: 38 / 217, alpha: 217 / 255)
+        let shell = TerminalShellNativeView(frame: .init(x: 0, y: 0, width: 1_000, height: 600))
+        var editorCovering = false
+
+        func update(_ left: Bool, _ right: Bool) {
+            shell.update(
+                leading: AnyView(Color.clear),
+                center: AnyView(Color.clear),
+                trailing: AnyView(Color.clear),
+                layout: .init(leadingWidth: 201, trailingWidth: 320,
+                              leadingVisible: left, trailingVisible: right),
+                background: fill,
+                fillsCenterUntilSurfaceReady: true,
+                trackedSurfaces: [surface],
+                isEditorCoveringSurface: { $0 == surface.id && editorCovering }
+            )
+            shell.layoutSubtreeIfNeeded()
+        }
+
+        // Cold startup before SwiftUI mounts the SurfaceView: center must be filled
+        // alongside the sidebars so a non-opaque window never flashes transparent.
+        update(true, true)
+        let unmountedPath = try #require(shell.chromeBackdrop.path)
+        #expect(unmountedPath.contains(.init(x: 100, y: 300)))
+        #expect(unmountedPath.contains(.init(x: 500, y: 300)))
+        #expect(unmountedPath.contains(.init(x: 900, y: 300)))
+        #expect(!shell.chromeBackdrop.isHidden)
+
+        // Even with both sidebars hidden, the unmounted center still gets the fallback fill.
+        update(false, false)
+        #expect(!shell.chromeBackdrop.isHidden)
+        #expect(try #require(shell.chromeBackdrop.path).contains(.init(x: 500, y: 300)))
+
+        // Mount the surface inside centerHost with a backing layer but no IOSurface yet.
+        update(true, true)
+        let backingLayer = CALayer()
+        surface.layer = backingLayer
+        surface.wantsLayer = true
+        surface.autoresizingMask = [.width, .height]
+        surface.frame = shell.centerHost.bounds
+        shell.centerHost.addSubview(surface)
+        shell.layoutSubtreeIfNeeded()
+        #expect(try #require(shell.chromeBackdrop.path).contains(.init(x: 500, y: 300)))
+
+        // First IOSurface arrives on main thread: KVO must synchronously punch out
+        // the center without waiting for another layout pass.
+        backingLayer.contents = iosurface
+        let presentedPath = try #require(shell.chromeBackdrop.path)
+        #expect(presentedPath.contains(.init(x: 100, y: 300)))
+        #expect(presentedPath.contains(.init(x: 900, y: 300)))
+        #expect(!presentedPath.contains(.init(x: 500, y: 300)),
+                "Once IOSurface is presented, center must not be double-painted")
+
+        // With sidebars hidden and IOSurface presented, chromeBackdrop hides completely.
+        update(false, false)
+        #expect(shell.chromeBackdrop.isHidden)
+        #expect(shell.chromeBackdrop.path?.isEmpty == true)
+
+        // Editor covering an unready surface already paints its own chrome; never double-paint.
+        backingLayer.contents = nil
+        #expect(try #require(shell.chromeBackdrop.path).contains(.init(x: 500, y: 300)))
+        editorCovering = true
+        shell.refreshCenterBackdrop()
+        #expect(shell.chromeBackdrop.isHidden)
+        editorCovering = false
+
+        // Surface that already has an IOSurface before mount drops the center fallback
+        // as soon as post-mount sync notifies the enclosing shell.
+        surface.removeFromSuperview()
+        backingLayer.contents = iosurface
+        shell.layoutSubtreeIfNeeded()
+        #expect(try #require(shell.chromeBackdrop.path).contains(.init(x: 500, y: 300)))
+        shell.centerHost.addSubview(surface)
+        surface.notifyEnclosingTerminalShellBackdrop()
+        #expect(shell.chromeBackdrop.isHidden)
+    }
+
+    @Test func centerBackdropTracksSplitPanesIndependentlyUntilEachPresentsAnIOSurface() throws {
+        let app = try #require(NSApp.delegate as? AppDelegate)
+        let leftPane = try makeTestSurface(app: app.ghostty)
+        let rightPane = try makeTestSurface(app: app.ghostty)
+        let iosurface = try makeTestIOSurface()
+        let leftLayer = CALayer()
+        let rightLayer = CALayer()
+        leftPane.layer = leftLayer
+        leftPane.wantsLayer = true
+        rightPane.layer = rightLayer
+        rightPane.wantsLayer = true
+
+        let shell = TerminalShellNativeView(frame: .init(x: 0, y: 0, width: 1_000, height: 600))
+        shell.update(
+            leading: AnyView(Color.clear),
+            center: AnyView(Color.clear),
+            trailing: AnyView(Color.clear),
+            layout: .init(leadingWidth: 200, trailingWidth: 200,
+                          leadingVisible: false, trailingVisible: false),
+            background: .black.withAlphaComponent(0.85),
+            fillsCenterUntilSurfaceReady: true,
+            trackedSurfaces: [leftPane, rightPane]
+        )
+        shell.layoutSubtreeIfNeeded()
+
+        leftPane.frame = NSRect(x: 0, y: 0, width: 500, height: 600)
+        rightPane.frame = NSRect(x: 500, y: 0, width: 500, height: 600)
+        shell.centerHost.addSubview(leftPane)
+        shell.centerHost.addSubview(rightPane)
+        shell.layoutSubtreeIfNeeded()
+
+        // Both panes unready -> both halves covered.
+        let bothUnready = try #require(shell.chromeBackdrop.path)
+        #expect(bothUnready.contains(.init(x: 250, y: 300)))
+        #expect(bothUnready.contains(.init(x: 750, y: 300)))
+
+        // Left pane presents first -> left punched out, right still covered.
+        leftLayer.contents = iosurface
+        let rightOnly = try #require(shell.chromeBackdrop.path)
+        #expect(!rightOnly.contains(.init(x: 250, y: 300)))
+        #expect(rightOnly.contains(.init(x: 750, y: 300)))
+
+        // Right pane presents -> both punched out, backdrop hidden.
+        rightLayer.contents = iosurface
         #expect(shell.chromeBackdrop.isHidden)
         #expect(shell.chromeBackdrop.path?.isEmpty == true)
     }

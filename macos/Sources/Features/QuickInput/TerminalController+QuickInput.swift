@@ -71,9 +71,9 @@ extension TerminalController {
         if !quickInputModel.isPresented || quickInputModel.targetSurfaceID != surface.id {
             presentQuickInput(for: surface, requestFocus: true)
         }
+        let strings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
         guard !ProgrammaticInputGuard.isGlobalSecureInputActive,
               !surface.blocksProgrammaticInput else {
-            let strings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
             quickInputModel.setStatusMessage(strings.quickInputPasswordLockedMessage)
             return
         }
@@ -91,8 +91,21 @@ extension TerminalController {
             runtimeState: surface.runtimeConnectionState,
             isSSHConnecting: sshConnecting,
             hasPendingSSHRecovery: pendingSSHRecovery(for: surface) != nil
-        ) else { return }
+        ) else {
+            quickInputModel.setStatusMessage(strings.t(
+                "The target terminal is not ready for draft import.",
+                "目标终端尚未就绪，暂无法导入草稿。"
+            ))
+            return
+        }
         let setting = OhMyGhosttySettings.shared.quickInputImportShortcut
+        guard !setting.isEmpty else {
+            quickInputModel.setStatusMessage(strings.t(
+                "Agent draft import is disabled in Settings.",
+                "已在设置中禁用 Agent 草稿导入。"
+            ))
+            return
+        }
         if let context = currentContext, context.isSSHSession {
             importRemoteQuickInputDraft(for: surface, context: context, setting: setting)
             return
@@ -102,7 +115,13 @@ extension TerminalController {
         }
         // Also cover plain SSH before the asynchronous session poll catches up.
         if let foregroundCommands,
-           ForegroundSSHProcessDetector.observe(in: foregroundCommands) != .none { return }
+           ForegroundSSHProcessDetector.observe(in: foregroundCommands) != .none {
+            quickInputModel.setStatusMessage(strings.t(
+                "This SSH session has no draft bridge. Connect through OMG SSH to import remote drafts.",
+                "此 SSH 会话没有草稿桥接。请通过 OMG SSH 连接后再导入远程草稿。"
+            ))
+            return
+        }
         // Draft import must work independently of Agent Status hooks and
         // conversation discovery, including a freshly started agent.
         let foregroundAgent = foregroundCommands.flatMap {
@@ -111,12 +130,36 @@ extension TerminalController {
         let agent = foregroundAgent ?? detectedAgentInstances[surface.id]?.agent
             ?? agentActivities[surface.id].flatMap { SupportedAgent(rawValue: $0.source) }
             ?? agentResumeDescriptor(for: surface)?.agent
-        guard !surface.blocksProgrammaticInput,
-              let keys = QuickInputDraftBridge.importKeys(
-                setting: setting, agent: agent, hasAgentActivity: agentActivities[surface.id] != nil
-              ),
-              let terminal = surface.surfaceModel,
-              let request = try? QuickInputDraftBridge.shared.begin(surfaceID: surface.id) else {
+        guard !surface.blocksProgrammaticInput else {
+            quickInputModel.setStatusMessage(strings.quickInputPasswordLockedMessage)
+            return
+        }
+        guard let keys = QuickInputDraftBridge.importKeys(
+            setting: setting, agent: agent, hasAgentActivity: agentActivities[surface.id] != nil
+        ) else {
+            quickInputModel.setStatusMessage(setting == "auto"
+                ? strings.t(
+                    "No active Agent detected in this terminal.",
+                    "当前终端未检测到运行中的 Agent。"
+                )
+                : strings.t(
+                    "Invalid draft-import shortcut. Check Quick Input settings.",
+                    "草稿导入快捷键无效，请检查 Quick Input 设置。"
+                ))
+            return
+        }
+        guard let terminal = surface.surfaceModel else {
+            quickInputModel.setStatusMessage(strings.t(
+                "The target terminal is no longer available.",
+                "目标终端已不可用。"
+            ))
+            return
+        }
+        guard let request = try? QuickInputDraftBridge.shared.begin(surfaceID: surface.id) else {
+            quickInputModel.setStatusMessage(strings.t(
+                "Draft bridge is not configured for this terminal. Open a new terminal and ensure Python 3 is available.",
+                "当前终端未配置草稿桥接。请新建终端并确认 Python 3 可用。"
+            ))
             return
         }
         let importForegroundPID = terminal.foregroundPID

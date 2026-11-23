@@ -112,9 +112,26 @@ extension TerminalController {
     func importRemoteQuickInputDraft(
         for surface: Ghostty.SurfaceView, context: PaneSessionContext, setting: String
     ) {
-        guard !setting.isEmpty, !surface.blocksProgrammaticInput,
-              case .sshReady(let ssh, _) = context.state,
-              let connection = try? GitSSHConnection(session: context) else { return }
+        let strings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
+        guard !setting.isEmpty else {
+            quickInputModel.setStatusMessage(strings.t(
+                "Agent draft import is disabled in Settings.",
+                "已在设置中禁用 Agent 草稿导入。"
+            ))
+            return
+        }
+        guard !surface.blocksProgrammaticInput else {
+            quickInputModel.setStatusMessage(strings.quickInputPasswordLockedMessage)
+            return
+        }
+        guard case .sshReady(let ssh, _) = context.state,
+              let connection = try? GitSSHConnection(session: context) else {
+            quickInputModel.setStatusMessage(strings.t(
+                "SSH session is not ready for draft import.",
+                "SSH 会话尚未就绪，暂无法导入草稿。"
+            ))
+            return
+        }
         let descriptor = surface.runtimeInlineSession?.descriptor ?? surface.runtimeDescriptor
         let runtime = descriptor.flatMap { $0.isLocal ? nil : $0 }
         let inlinePane = surface.runtimeInlineSession?.pane
@@ -151,15 +168,36 @@ extension TerminalController {
                         probeForegroundAgent: true
                     )
                 } catch CocoaError.featureUnsupported {
+                    if isStillTargetingSurface() {
+                        let currentStrings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
+                        self.quickInputModel.setStatusMessage(currentStrings.t(
+                            "This SSH session has no draft bridge. Connect through OMG SSH to import remote drafts.",
+                            "此 SSH 会话没有草稿桥接。请通过 OMG SSH 连接后再导入远程草稿。"
+                        ))
+                    }
                     return
                 }
                 let resolved = resolution.target
                 let foregroundAgent = resolution.foregroundAgent
+                guard !Task.isCancelled else { return }
+                guard let keys = QuickInputDraftBridge.importKeys(
+                    setting: setting, agent: foregroundAgent ?? agent, hasAgentActivity: hasAgentActivity
+                ) else {
+                    if isStillTargetingSurface() {
+                        let currentStrings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
+                        self.quickInputModel.setStatusMessage(setting == "auto"
+                            ? currentStrings.t(
+                                "No active Agent detected in this terminal.",
+                                "当前终端未检测到运行中的 Agent。"
+                            )
+                            : currentStrings.t(
+                                "Invalid draft-import shortcut. Check Quick Input settings.",
+                                "草稿导入快捷键无效，请检查 Quick Input 设置。"
+                            ))
+                    }
+                    return
+                }
                 target = resolved
-                guard !Task.isCancelled,
-                      let keys = QuickInputDraftBridge.importKeys(
-                        setting: setting, agent: foregroundAgent ?? agent, hasAgentActivity: hasAgentActivity
-                      ) else { return }
                 try await QuickInputRemoteDraftBridge.begin(
                     connection: connection, session: resolved.session, request: request, tty: resolved.tty,
                     root: resolved.root, generation: resolved.generation

@@ -207,6 +207,7 @@ struct QuickInputDraftBridgeTests {
         #expect(controller.quickInputModel.targetSurfaceID == surface.id)
         try await Task.sleep(for: .milliseconds(500))
         #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("keys").path))
+        #expect(controller.quickInputModel.statusMessage != nil)
     }
 
     @Test func agentSnapshotDoesNotAppendExistingPrefix() {
@@ -428,7 +429,7 @@ struct QuickInputDraftBridgeTests {
     }
 
     @Test func sharedImportPolicyCoversEveryAgentAndCustomBindings() {
-        for agent in SupportedAgent.allCases where !QuickInputDraftBridge.reprintsTranscriptAfterEditor(agent) {
+        for agent in SupportedAgent.allCases {
             let keys = QuickInputDraftBridge.importKeys(setting: "auto", agent: agent, hasAgentActivity: false)
             #expect(keys != nil)
             #expect(keys?.map(\.key) == (agent == .opencode ? [.x, .e] : [.g]))
@@ -441,17 +442,70 @@ struct QuickInputDraftBridgeTests {
         )?.map(\.key) == [.x, .e])
     }
 
-    /// #64: agy reprints its full inline transcript after an editor round
-    /// trip, so auto mode must open Quick Input in place without editor keys.
-    /// An explicit custom chord remains an opt-in.
-    @Test func autoImportSkipsAgentsThatReprintTranscriptAfterEditor() {
-        #expect(QuickInputDraftBridge.reprintsTranscriptAfterEditor(.antigravity))
-        #expect(!QuickInputDraftBridge.reprintsTranscriptAfterEditor(.pi))
-        #expect(QuickInputDraftBridge.importKeys(setting: "auto", agent: .antigravity, hasAgentActivity: true) == nil)
-        #expect(QuickInputDraftBridge.importKeys(setting: "auto", agent: .antigravity, hasAgentActivity: false) == nil)
+    @Test func antigravityExplicitImportUsesDefaultEditorChordInAutoMode() {
+        #expect(QuickInputDraftBridge.importKeys(
+            setting: "auto", agent: .antigravity, hasAgentActivity: true
+        )?.map(\.key) == [.g])
+        #expect(QuickInputDraftBridge.importKeys(
+            setting: "auto", agent: .antigravity, hasAgentActivity: false
+        )?.map(\.key) == [.g])
         #expect(QuickInputDraftBridge.importKeys(
             setting: "control+g", agent: .antigravity, hasAgentActivity: true
         )?.map(\.key) == [.g])
+    }
+
+    @Test func preflightImportRejectionsReportStatusMessages() throws {
+        let app = try #require(NSApp.delegate as? AppDelegate)
+        let settings = OhMyGhosttySettings.shared
+        let previous = settings.quickInputImportShortcut
+        defer { settings.quickInputImportShortcut = previous }
+
+        var configuration = Ghostty.SurfaceConfiguration()
+        configuration.command = "/bin/sleep 30"
+        configuration.workingDirectory = "/tmp"
+        let controller = TerminalController(app.ghostty, withBaseConfig: configuration, tabLayout: .vertical)
+        defer {
+            controller.dismissQuickInput()
+            controller.window?.delegate = nil
+            controller.window?.close()
+        }
+        let surface = try #require(controller.focusedSurface)
+
+        // 1. Plain shell / no active agent in auto mode
+        settings.quickInputImportShortcut = "auto"
+        controller.importQuickInputDraftFromTerminal(for: surface.id)
+        #expect(controller.quickInputModel.statusMessage != nil)
+        #expect(controller.quickInputDraftImportTask == nil)
+
+        // 2. Disabled setting
+        controller.quickInputModel.setStatusMessage(nil)
+        settings.quickInputImportShortcut = ""
+        controller.importQuickInputDraftFromTerminal(for: surface.id)
+        #expect(controller.quickInputModel.statusMessage != nil)
+        #expect(controller.quickInputDraftImportTask == nil)
+
+        // 3. Invalid custom shortcut
+        controller.quickInputModel.setStatusMessage(nil)
+        settings.quickInputImportShortcut = "not-a-shortcut"
+        controller.importQuickInputDraftFromTerminal(for: surface.id)
+        #expect(controller.quickInputModel.statusMessage != nil)
+        #expect(controller.quickInputDraftImportTask == nil)
+
+        // 4. Terminal opened while draft import was disabled (no bridge configured)
+        settings.quickInputImportShortcut = ""
+        let unconfiguredController = TerminalController(
+            app.ghostty, withBaseConfig: configuration, tabLayout: .vertical
+        )
+        defer {
+            unconfiguredController.dismissQuickInput()
+            unconfiguredController.window?.delegate = nil
+            unconfiguredController.window?.close()
+        }
+        let unconfiguredSurface = try #require(unconfiguredController.focusedSurface)
+        settings.quickInputImportShortcut = "control+g"
+        unconfiguredController.importQuickInputDraftFromTerminal(for: unconfiguredSurface.id)
+        #expect(unconfiguredController.quickInputModel.statusMessage != nil)
+        #expect(unconfiguredController.quickInputDraftImportTask == nil)
     }
 
     @Test func remoteDraftResponsePreservesTextAndRejectsInvalidPayloads() throws {

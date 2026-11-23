@@ -311,6 +311,32 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
         }
     }
 
+    /// Forgets closed window tabs from the workspace checkpoint only when no
+    /// sibling or parked workspaces remain on the same host window. When other
+    /// workspaces share the host window, the closing workspace's tabs stay
+    /// suspended in the session store so switching back restores them.
+    func forgetClosedWindowIfStandalone(_ controllers: [TerminalController]) {
+        guard !quitting, !controllers.isEmpty else { return }
+        let closingIDs = Set(controllers.map(\.tabSessionID))
+        let closingObjects = Set(controllers.map(ObjectIdentifier.init))
+        let state = store.snapshot
+        let standalone = controllers.filter { controller in
+            let host = controller.windowSessionID
+            let hasOtherSavedTabs = state.windows?[host]?.groups.values.contains { group in
+                group.tabs.contains { !closingIDs.contains($0) }
+            } ?? false
+            if hasOtherSavedTabs { return false }
+            let hasOtherLiveControllers = liveControllers.contains { other in
+                other.windowSessionID == host
+                    && !closingObjects.contains(ObjectIdentifier(other))
+                    && !closingIDs.contains(other.tabSessionID)
+            }
+            return !hasOtherLiveControllers
+        }
+        guard !standalone.isEmpty else { return }
+        forget(standalone)
+    }
+
     func handle(_ event: NSEvent, in controller: TerminalController) -> Bool {
         guard controller.window?.attachedSheet == nil,
               (controller.window?.firstResponder as? NSTextView)?.hasMarkedText() != true else { return false }

@@ -904,8 +904,8 @@ struct TerminalWorkspaceLaunchTests {
         )
         #expect(fixture.store.snapshot.windows?[host] != nil)
         #expect(fixture.store.snapshot.owner(of: parkedID) != nil)
-        #expect(activeIDs.allSatisfy { fixture.store.snapshot.owner(of: $0) == nil })
-        #expect(Set(snapshot.tabs.map(\.id)) == Set([parkedID]))
+        #expect(activeIDs.allSatisfy { fixture.store.snapshot.owner(of: $0) != nil })
+        #expect(Set(snapshot.tabs.map(\.id)) == Set([parkedID]).union(activeIDs))
         #expect(parked.isAvailableForWorkspace)
     }
 }

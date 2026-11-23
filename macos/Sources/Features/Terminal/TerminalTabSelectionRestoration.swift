@@ -168,6 +168,7 @@ final class TerminalTabSelectionRestoration {
                 unresolved.append(group)
                 continue
             }
+            guard !selected.workspaceCoordinator.store.snapshot.isParked(selected.tabSessionID) else { continue }
             let actual = Set(selected.workspaceTabWindows.filter { ownsCheckpoint || $0.isRestorable }.compactMap {
                 ($0.windowController as? TerminalController)?.tabSessionID
             })
@@ -175,7 +176,6 @@ final class TerminalTabSelectionRestoration {
                 unresolved.append(group)
                 continue
             }
-            guard !selected.workspaceCoordinator.store.snapshot.isParked(selected.tabSessionID) else { continue }
             if let nativeGroup = window.tabGroup, nativeGroup.windows.contains(window),
                nativeGroup.selectedWindow !== window {
                 nativeGroup.selectedWindow = window

@@ -44,8 +44,13 @@ final class InspectorHostController: NSViewController {
             layoutState.$isInspectorVisible.removeDuplicates(),
             layoutState.$selectedInspectorPaneID.removeDuplicates()
         ).dropFirst()
+        let selectedTabChanges = layoutState.tabPresentation.$tabSnapshot
+            .map(\.selectedID)
+            .removeDuplicates()
+            .dropFirst()
         observations = [controller.objectWillChange.sink { [weak self] _ in self?.scheduleRefresh() },
                         inspectorLayoutChanges.sink { [weak self] _, _ in self?.scheduleRefresh() },
+                        selectedTabChanges.sink { [weak self] _ in self?.scheduleRefresh() },
                         registry.objectWillChange.sink { [weak self] _ in self?.scheduleRefresh() },
                         registry.contentChanges.sink { [weak self] change in
                             guard let self, self.requestedPresentation, self.layoutState.isInspectorVisible else { return }
@@ -248,7 +253,7 @@ private final class InspectorAttachmentView: NSView {
         windowObservers = []
         if let window {
             for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification,
-                         NSWindow.didChangeOcclusionStateNotification] {
+                         NSWindow.didBecomeMainNotification, NSWindow.didChangeOcclusionStateNotification] {
                 windowObservers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
                     MainActor.assumeIsolated { self?.attachmentChanged?() }
                 })

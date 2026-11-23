@@ -299,7 +299,10 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
     func forget(_ controller: TerminalController) {
         guard !quitting else { return }
         sessions.forget(controller)
-        store.transaction { $0.remove(controller.tabSessionID) }
+        store.transaction {
+            $0.remove(controller.tabSessionID)
+            $0.pruneEmptyWindows()
+        }
     }
 
     func handle(_ event: NSEvent, in controller: TerminalController) -> Bool {
@@ -753,7 +756,7 @@ final class TerminalWorkspaceCoordinator: ObservableObject {
         }
     }
 
-    private func projectIdentities(_ state: TerminalWorkspaceState, controllers: [TerminalController]) {
+    func projectIdentities(_ state: TerminalWorkspaceState, controllers: [TerminalController]) {
         for controller in controllers {
             guard let owner = state.owner(of: controller.tabSessionID) else { continue }
             controller.windowSessionID = owner.window

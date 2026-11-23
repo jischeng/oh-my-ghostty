@@ -5141,7 +5141,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         syncAppearance(.init(config))
         // newTab installs observation after attachment. Reading tabGroup here
         // otherwise builds a temporary native stack and a second sidebar host.
-        if initialTabParent == nil { setupTabObservation() }
+        if initialTabParent == nil && !TerminalWorkspacePresentation.isChanging { setupTabObservation() }
         syncSurfaceTreeOcclusionState()
     }
 

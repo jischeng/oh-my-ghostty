@@ -96,6 +96,37 @@ struct TerminalWorkspaceState: Codable, Equatable {
         updateLegacyPresentation()
     }
 
+    /// Removes stale empty groups and empty host windows while preserving
+    /// window/workspace preferences for an explicitly empty (zero-tab) state.
+    mutating func pruneEmptyWindows() {
+        guard var currentWindows = windows else { return }
+        let hasAnyTabs = currentWindows.values.contains { record in
+            record.groups.values.contains { !$0.tabs.isEmpty }
+        }
+        guard hasAnyTabs else { return }
+        for host in Array(currentWindows.keys) {
+            guard var record = currentWindows[host] else { continue }
+            for workspace in Array(record.groups.keys) where record.groups[workspace]?.tabs.isEmpty == true {
+                record.groups.removeValue(forKey: workspace)
+            }
+            if record.groups.isEmpty {
+                currentWindows.removeValue(forKey: host)
+            } else {
+                if record.groups[record.currentWorkspace] == nil,
+                   let fallback = workspaces.first(where: { record.groups[$0.id] != nil })?.id {
+                    record.currentWorkspace = fallback
+                }
+                if let previous = record.previousWorkspace,
+                   previous == record.currentWorkspace || record.groups[previous] == nil {
+                    record.previousWorkspace = nil
+                }
+                currentWindows[host] = record
+            }
+        }
+        windows = currentWindows
+        updateLegacyPresentation()
+    }
+
     mutating func select(_ workspace: UUID, in host: UUID) {
         guard var window = windows?[host] else { return }
         if window.currentWorkspace != workspace {

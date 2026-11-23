@@ -146,8 +146,12 @@ final class TerminalWorkspaceNativeAdapter {
         }.map { $0.selected.windowSessionID })
         retainedVerticalHosts.subtract(affectedHosts)
         retainedVerticalHosts.formUnion(retainedHosts)
+        syncTabbingIdentifiers(for: groups, retaining: retainedHosts)
         defer {
-            if !completed { retainedVerticalHosts = retainedBefore }
+            if !completed {
+                retainedVerticalHosts = retainedBefore
+                syncTabbingIdentifiers(for: previous.isEmpty ? groups : previous, retaining: retainedBefore)
+            }
             let destinations = completed ? groups : previous
             for (host, mode) in modes {
                 guard let target = destinations.first(where: { $0.visible && $0.selected.windowSessionID == host })?.selected else { continue }
@@ -180,25 +184,49 @@ final class TerminalWorkspaceNativeAdapter {
             if retainedHosts.contains(group.selected.windowSessionID) {
                 anchor = attachedWindows.last ?? anchor
             }
-            for member in physicalMembers {
-                guard let window = member.window else { return false }
-                let alreadyAttached = attached.contains(ObjectIdentifier(window))
-                if !activeIDs.contains(ObjectIdentifier(member)), alreadyAttached { continue }
-                if activeIDs.contains(ObjectIdentifier(member)) {
-                    member.cancelWorkspacePendingPresentation()
-                    // A warm retained group only prepares its selected tab.
-                    // Other tabs keep their geometry until selected.
-                    if !keepsExistingGroup || member === group.selected, let outgoing,
-                       !window.styleMask.contains(.fullScreen), window.frame != outgoing.frame {
-                        window.setFrame(outgoing.frame, display: false)
-                    }
+            let context = AttachmentContext(
+                activeIDs: activeIDs,
+                keepsExistingGroup: keepsExistingGroup,
+                selected: group.selected,
+                outgoing: outgoing
+            )
+            if outgoing == nil,
+               let selectedIndex = physicalMembers.firstIndex(where: { $0 === group.selected }) {
+                group.selected.cancelWorkspacePendingPresentation()
+                group.selected.finishWorkspaceTabAttachment()
+                var beforeAnchor = selectedWindow
+                for member in physicalMembers[..<selectedIndex].reversed() {
+                    guard let attachedWindow = attachMember(
+                        member,
+                        to: beforeAnchor,
+                        ordered: .below,
+                        context: context,
+                        attached: &attached
+                    ) else { return false }
+                    beforeAnchor = attachedWindow
                 }
-                if window !== anchor && !alreadyAttached {
-                    guard attach(anchor, window, .above) else { return false }
-                    attached.insert(ObjectIdentifier(window))
+                var afterAnchor = selectedWindow
+                for member in physicalMembers[(selectedIndex + 1)...] {
+                    guard let attachedWindow = attachMember(
+                        member,
+                        to: afterAnchor,
+                        ordered: .above,
+                        context: context,
+                        attached: &attached
+                    ) else { return false }
+                    afterAnchor = attachedWindow
                 }
-                member.finishWorkspaceTabAttachment()
-                anchor = window
+            } else {
+                for member in physicalMembers {
+                    guard let attachedWindow = attachMember(
+                        member,
+                        to: anchor,
+                        ordered: .above,
+                        context: context,
+                        attached: &attached
+                    ) else { return false }
+                    anchor = attachedWindow
+                }
             }
             if let outgoing, outgoing !== selectedWindow {
                 let canSelectRetained = keepsExistingGroup && !restoringTopology &&
@@ -274,6 +302,63 @@ final class TerminalWorkspaceNativeAdapter {
            !window.makeKeyAndOrderFrontSafely(nil) { return false }
         completed = true
         return true
+    }
+
+    private func syncTabbingIdentifiers(for groups: [Group], retaining hosts: Set<UUID>) {
+        for group in groups {
+            let host = group.selected.windowSessionID
+            let workspace = group.layout.workspaceBindingID ?? group.selected.workspaceID
+            let identifier = hosts.contains(host)
+                ? "omg.window.\(host)"
+                : "omg.window.\(host).workspace.\(workspace)"
+            for member in group.members where member.window?.tabbingIdentifier != identifier {
+                member.window?.tabbingIdentifier = identifier
+            }
+        }
+    }
+
+    private func detachFromForeignGroupIfNeeded(_ window: NSWindow, targetGroup: NSWindowTabGroup?) {
+        guard let existing = window.tabGroup,
+              existing !== targetGroup,
+              existing.windows.count > 1 else { return }
+        existing.removeWindow(window)
+    }
+
+    private struct AttachmentContext {
+        let activeIDs: Set<ObjectIdentifier>
+        let keepsExistingGroup: Bool
+        let selected: TerminalController
+        let outgoing: NSWindow?
+    }
+
+    private func attachMember(
+        _ member: TerminalController,
+        to anchor: NSWindow,
+        ordered: NSWindow.OrderingMode,
+        context: AttachmentContext,
+        attached: inout Set<ObjectIdentifier>
+    ) -> NSWindow? {
+        guard let window = member.window else { return nil }
+        let alreadyAttached = attached.contains(ObjectIdentifier(window))
+        if !context.activeIDs.contains(ObjectIdentifier(member)), alreadyAttached { return anchor }
+        if context.activeIDs.contains(ObjectIdentifier(member)) {
+            member.cancelWorkspacePendingPresentation()
+            // A warm retained group only prepares its selected tab.
+            // Other tabs keep their geometry until selected.
+            if !context.keepsExistingGroup || member === context.selected, let outgoing = context.outgoing,
+               !window.styleMask.contains(.fullScreen), window.frame != outgoing.frame {
+                window.setFrame(outgoing.frame, display: false)
+            }
+        }
+        if window !== anchor && !alreadyAttached {
+            detachFromForeignGroupIfNeeded(window, targetGroup: anchor.tabGroup)
+            guard attach(anchor, window, ordered),
+                  let targetGroup = anchor.tabGroup,
+                  window.tabGroup === targetGroup else { return nil }
+            attached.insert(ObjectIdentifier(window))
+        }
+        member.finishWorkspaceTabAttachment()
+        return window
     }
 
     private func physicalMembers(for group: Group, in groups: [Group], retaining hosts: Set<UUID>) -> [TerminalController] {

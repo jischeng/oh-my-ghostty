@@ -467,4 +467,299 @@ struct TerminalWorkspaceLaunchTests {
         transaction.publish {}
         #expect(window.frame == expected)
     }
+
+    @Test func coldRestoreMultiWorkspaceVerticalWithNonFirstSelectionUnifiesGroupAndSidebars() async throws {
+        let previousMode = OhMyGhosttySettings.shared.startupMode
+        OhMyGhosttySettings.shared.startupMode = .restoreSessions
+        defer { OhMyGhosttySettings.shared.startupMode = previousMode }
+
+        let fixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { fixture.close() }
+        let personal = fixture.store.defaultID
+        let p0 = try fixture.tab()
+        p0.showWindow(nil)
+        let p1 = try fixture.tab(parent: p0)
+        let p2 = try fixture.tab(parent: p1)
+        p1.window?.makeKeyAndOrderFront(nil)
+        fixture.coordinator.didActivate(p1)
+
+        let work = try #require(fixture.store.create(name: "work", symbol: "briefcase", color: "blue"))
+        let w0 = try #require(fixture.coordinator.switchWorkspace(to: work, from: p1))
+        fixture.controllers.append(w0)
+        let w1 = try fixture.tab(workspace: work, parent: w0)
+
+        let testWorkspace = try #require(fixture.store.create(name: "test", symbol: "flask", color: "mint"))
+        let t0 = try #require(fixture.coordinator.switchWorkspace(to: testWorkspace, from: w1))
+        fixture.controllers.append(t0)
+
+        try #require(fixture.coordinator.switchWorkspace(to: personal, from: t0) === p1)
+        fixture.sessions.start(fixture.app)
+        fixture.sessions.capture(foreground: p1.window)
+        fixture.sessions.flush()
+
+        let host = p0.windowSessionID
+        let personalIDs = [p0.tabSessionID, p1.tabSessionID, p2.tabSessionID]
+        let selectedID = p1.tabSessionID
+        let firstID = p0.tabSessionID
+        let workIDs = Set([w0.tabSessionID, w1.tabSessionID])
+        let testID = t0.tabSessionID
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let checkpoint = directory.appendingPathComponent("state.json")
+        try FileManager.default.copyItem(at: fixture.directory.appendingPathComponent("state.json"), to: checkpoint)
+        fixture.close()
+
+        let store = TerminalWorkspaceStore(fileURL: nil)
+        var restoredCoordinator: TerminalWorkspaceCoordinator?
+        var completed = 0
+        let selection = TerminalTabSelectionRestoration(finishRestoring: {
+            completed += 1
+            restoredCoordinator?.finishRestoring()
+        })
+        let sessions = TerminalWorkspaceSessionStore(url: checkpoint, testing: true, workspaces: store,
+                                                     selectionRestoration: selection)
+        let coordinator = TerminalWorkspaceCoordinator(store: store, sessions: sessions)
+        restoredCoordinator = coordinator
+        defer { restoredCoordinator = nil }
+        sessions.prepare()
+        try #require(sessions.ownsRestoration)
+        sessions.start(fixture.app)
+        let restored = coordinator.liveControllers
+        defer {
+            sessions.prepareToQuit()
+            coordinator.commitTermination()
+            coordinator.closeBackgroundTabsForTermination()
+            for controller in restored { controller.window?.close() }
+            sessions.flush()
+        }
+        selection.finishLaunching()
+        for _ in 0..<100 {
+            if completed > 0 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(completed == 1)
+        #expect(coordinator.usesRetainedNativeTabs(in: host))
+        let expectedIdentifier = "omg.window.\(host)"
+        #expect(restored.count == 6)
+        #expect(restored.allSatisfy { $0.window?.tabbingIdentifier == expectedIdentifier })
+
+        let restoredP1 = try #require(restored.first { $0.tabSessionID == selectedID })
+        let restoredP0 = try #require(restored.first { $0.tabSessionID == firstID })
+        let p1Window = try #require(restoredP1.window)
+        let p0Window = try #require(restoredP0.window)
+        let group = try #require(p1Window.tabGroup)
+        #expect(restored.allSatisfy { $0.window?.tabGroup === group })
+        #expect(group.windows.count == 6)
+        #expect(group.selectedWindow === p1Window)
+        #expect(p1Window.isVisible)
+        #expect(!restoredP1.workspacePresentationIsParked)
+        #expect(!restoredP0.workspacePresentationIsParked)
+        #expect(restoredP1.tabControllers.map(\.tabSessionID) == personalIDs)
+
+        let parked = restored.filter { workIDs.contains($0.tabSessionID) || $0.tabSessionID == testID }
+        #expect(parked.count == 3)
+        #expect(parked.allSatisfy { $0.workspacePresentationIsParked })
+
+        for _ in 0..<100 {
+            if let hostView = restoredP1.tabLayoutState.sidebarHost.liveView as? NativeTabSidebarHostingView,
+               hostView.window === p1Window { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(restoredP1.tabLayoutState.sidebarHost.liveView?.window === p1Window)
+
+        // Switching to tab 1 (index 0) must move the live sidebar and keep native selection in sync.
+        restoredP1.selectVerticalTab(restoredP0)
+        for _ in 0..<100 {
+            if group.selectedWindow === p0Window,
+               restoredP0.tabLayoutState.tabSnapshot.selectedID == ObjectIdentifier(restoredP0),
+               restoredP0.tabLayoutState.sidebarHost.liveView?.window === p0Window { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(group.selectedWindow === p0Window)
+        #expect(restoredP0.tabLayoutState.tabSnapshot.selectedID == ObjectIdentifier(restoredP0))
+        #expect(restoredP0.tabLayoutState.sidebarHost.liveView?.window === p0Window)
+
+        // Switching to a parked workspace must succeed and keep the unified retained group.
+        let switched = try #require(coordinator.switchWorkspace(to: work, from: restoredP0))
+        #expect(switched.workspaceID == work)
+        #expect(!switched.workspacePresentationIsParked)
+        #expect(restoredP0.workspacePresentationIsParked)
+        #expect(group.selectedWindow === switched.window)
+        #expect(restored.allSatisfy { $0.window?.tabGroup === group })
+    }
+
+    @Test func coldRestoreFallsBackToNonRetainedWhenRetainedAttachFails() async throws {
+        let previousMode = OhMyGhosttySettings.shared.startupMode
+        OhMyGhosttySettings.shared.startupMode = .restoreSessions
+        defer { OhMyGhosttySettings.shared.startupMode = previousMode }
+
+        let fixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { fixture.close() }
+        let personal = fixture.store.defaultID
+        let p0 = try fixture.tab()
+        p0.showWindow(nil)
+        let p1 = try fixture.tab(parent: p0)
+        p1.window?.makeKeyAndOrderFront(nil)
+        fixture.coordinator.didActivate(p1)
+
+        let work = try #require(fixture.store.create(name: "work", symbol: "briefcase", color: "blue"))
+        let w0 = try #require(fixture.coordinator.switchWorkspace(to: work, from: p1))
+        fixture.controllers.append(w0)
+        _ = try fixture.tab(workspace: work, parent: w0)
+        try #require(fixture.coordinator.switchWorkspace(to: personal, from: w0) === p1)
+        fixture.sessions.start(fixture.app)
+        fixture.sessions.capture(foreground: p1.window)
+        fixture.sessions.flush()
+
+        let host = p0.windowSessionID
+        let selectedID = p1.tabSessionID
+        let personalIDs = Set([p0.tabSessionID, p1.tabSessionID])
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let checkpoint = directory.appendingPathComponent("state.json")
+        try FileManager.default.copyItem(at: fixture.directory.appendingPathComponent("state.json"), to: checkpoint)
+        fixture.close()
+
+        let store = TerminalWorkspaceStore(fileURL: nil)
+        let sessions = TerminalWorkspaceSessionStore(url: checkpoint, testing: true, workspaces: store)
+        let coordinator = TerminalWorkspaceCoordinator(store: store, sessions: sessions)
+        let originalAttach = coordinator.native.attach
+        coordinator.native.attach = { anchor, child, ordering in
+            if let controller = child.windowController as? TerminalController,
+               controller.workspaceID != personal {
+                return false
+            }
+            return originalAttach(anchor, child, ordering)
+        }
+        defer { coordinator.native.attach = originalAttach }
+
+        sessions.prepare()
+        sessions.start(fixture.app)
+        let restored = coordinator.liveControllers
+        defer {
+            sessions.prepareToQuit()
+            coordinator.commitTermination()
+            coordinator.closeBackgroundTabsForTermination()
+            for controller in restored { controller.window?.close() }
+            sessions.flush()
+        }
+
+        #expect(!coordinator.usesRetainedNativeTabs(in: host))
+        let restoredP1 = try #require(restored.first { $0.tabSessionID == selectedID })
+        let p1Window = try #require(restoredP1.window)
+        let group = try #require(p1Window.tabGroup)
+        let activeControllers = restored.filter { personalIDs.contains($0.tabSessionID) }
+        let parkedControllers = restored.filter { !personalIDs.contains($0.tabSessionID) }
+        #expect(Set(group.windows.map(ObjectIdentifier.init)) ==
+                Set(activeControllers.compactMap(\.window).map(ObjectIdentifier.init)))
+        #expect(group.selectedWindow === p1Window)
+        #expect(p1Window.isVisible)
+        #expect(parkedControllers.allSatisfy { $0.workspacePresentationIsParked })
+        #expect(parkedControllers.allSatisfy { $0.window?.isVisible == false })
+        #expect(parkedControllers.allSatisfy { $0.window?.tabGroup !== group })
+        #expect(restored.allSatisfy {
+            $0.window?.tabbingIdentifier == "omg.window.\(host).workspace.\($0.workspaceID)"
+        })
+    }
+
+    @Test func workspaceSwitchSelfHealsCrossTabGroupSplit() async throws {
+        let fixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { fixture.close() }
+        let personal = fixture.store.defaultID
+        let p0 = try fixture.tab()
+        p0.showWindow(nil)
+        let p1 = try fixture.tab(parent: p0)
+        p1.window?.makeKeyAndOrderFront(nil)
+        fixture.coordinator.didActivate(p1)
+        let work = try #require(fixture.store.create(name: "work", symbol: "briefcase", color: "blue"))
+        let w0 = try #require(fixture.coordinator.switchWorkspace(to: work, from: p1))
+        fixture.controllers.append(w0)
+        let w1 = try fixture.tab(workspace: work, parent: w0)
+        try #require(fixture.coordinator.switchWorkspace(to: personal, from: w1) === p1)
+
+        // Simulate a split where `work` ended up in its own NSWindowTabGroup
+        // with a mismatched per-workspace tabbingIdentifier.
+        let host = p0.windowSessionID
+        let w0Window = try #require(w0.window)
+        let w1Window = try #require(w1.window)
+        let p1Window = try #require(p1.window)
+        let personalGroup = try #require(p1Window.tabGroup)
+        TerminalWorkspacePresentation.begin()
+        personalGroup.removeWindow(w0Window)
+        personalGroup.removeWindow(w1Window)
+        w0Window.tabbingIdentifier = "omg.window.\(host).workspace.\(work)"
+        w1Window.tabbingIdentifier = "omg.window.\(host).workspace.\(work)"
+        try #require(w0Window.addTabbedWindowSafely(w1Window, ordered: .above))
+        TerminalWorkspacePresentation.end()
+        try #require(w0Window.tabGroup !== personalGroup)
+        try #require(w0Window.tabGroup === w1Window.tabGroup)
+
+        let destination = try #require(fixture.coordinator.switchWorkspace(to: work, from: p1))
+        let unifiedGroup = try #require(destination.window?.tabGroup)
+        #expect(destination.workspaceID == work)
+        #expect(!destination.workspacePresentationIsParked)
+        #expect(p1.workspacePresentationIsParked)
+        #expect(unifiedGroup.selectedWindow === destination.window)
+        #expect([p0, p1, w0, w1].allSatisfy { $0.window?.tabGroup === unifiedGroup })
+        #expect([p0, p1, w0, w1].allSatisfy { $0.window?.tabbingIdentifier == "omg.window.\(host)" })
+    }
+
+    @Test func emptyWindowsAndGroupsArePrunedOnRemovePrepareAndCapture() throws {
+        var state = TerminalWorkspaceState()
+        let work = TerminalWorkspace(id: UUID(), name: "work", symbol: "briefcase", color: "blue")
+        state.workspaces.append(work)
+        let hostA = UUID()
+        let hostB = UUID()
+        let tabA = UUID()
+        let tabB = UUID()
+        state.register(tabA, owner: .init(window: hostA, workspace: state.defaultID, group: UUID()))
+        state.register(tabB, owner: .init(window: hostB, workspace: work.id, group: UUID()))
+        #expect(state.windows?.keys.count == 2)
+
+        state.remove(tabB)
+        state.pruneEmptyWindows()
+        #expect(state.windows?[hostB] == nil)
+        #expect(state.windows?[hostA]?.groups[state.defaultID]?.tabs == [tabA])
+        #expect(state.validationErrors.isEmpty)
+
+        // Verify prepare() prunes stale empty windows from an existing v2 state.json.
+        let previousMode = OhMyGhosttySettings.shared.startupMode
+        OhMyGhosttySettings.shared.startupMode = .restoreSessions
+        defer { OhMyGhosttySettings.shared.startupMode = previousMode }
+        let fixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { fixture.close() }
+        let live = try fixture.tab()
+        live.showWindow(nil)
+        fixture.sessions.start(fixture.app)
+        fixture.sessions.capture(foreground: live.window)
+        fixture.sessions.flush()
+
+        let stateURL = fixture.directory.appendingPathComponent("state.json")
+        var snapshot = try JSONDecoder().decode(TerminalWorkspaceSessionStore.Snapshot.self,
+                                                from: Data(contentsOf: stateURL))
+        let staleHost = UUID()
+        snapshot.catalog?.windows?[staleHost] = TerminalWorkspaceState.Window(
+            currentWorkspace: fixture.store.defaultID,
+            groups: [fixture.store.defaultID: .init(id: UUID(), tabs: [], selected: nil)]
+        )
+        try #require(snapshot.isComplete)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let polluted = directory.appendingPathComponent("state.json")
+        try JSONEncoder().encode(snapshot).write(to: polluted)
+
+        let store = TerminalWorkspaceStore(fileURL: nil)
+        let sessions = TerminalWorkspaceSessionStore(url: polluted, testing: true, workspaces: store)
+        sessions.prepare()
+        #expect(sessions.ownsRestoration)
+        #expect(store.snapshot.windows?[staleHost] == nil)
+        #expect(store.snapshot.windows?[live.windowSessionID] != nil)
+        #expect(store.snapshot.validationErrors.isEmpty)
+    }
 }

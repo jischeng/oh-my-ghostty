@@ -134,7 +134,8 @@ final class TerminalWorkspaceSessionStore {
             }
             var next = snapshot
             next.tabs = tabs
-            let normalized = snapshot.version == 2 ? catalog : normalize(catalog: catalog, tabs: &next.tabs)
+            var normalized = snapshot.version == 2 ? catalog : normalize(catalog: catalog, tabs: &next.tabs)
+            normalized.pruneEmptyWindows()
             guard normalized.validationErrors.isEmpty else { continue }
             descriptors = decoded
             next.catalog = normalized
@@ -238,15 +239,27 @@ final class TerminalWorkspaceSessionStore {
             let foreground = groups.first {
                 $0.visible && $0.selected.tabSessionID == preferredForeground
             }?.selected ?? groups.first(where: \.visible)?.selected
-            if !runtime.native.apply(groups, previous: [], focus: foreground) {
+            var applied = runtime.native.apply(groups, previous: [], focus: foreground)
+            if !applied {
+                applied = runtime.native.apply(
+                    groups,
+                    previous: [],
+                    focus: foreground,
+                    retainingVerticalHosts: [],
+                    restoringTopology: true
+                )
+            }
+            if !applied {
                 recoveryWarnings.append("Native window grouping could not be restored")
                 workspaces.reportSaveError(WorkspaceL10n.text("Some restored windows could not be grouped.", "部分恢复窗口无法组成标签组。"))
             }
+            runtime.projectIdentities(catalog, controllers: groups.flatMap(\.members))
+            let visibleGroups = groups.filter(\.visible)
             selectionRestoration?.restoreCheckpoint(
-                .init(groups: groups.map {
+                .init(groups: visibleGroups.map {
                     .init(members: $0.members.map(\.tabSessionID), selected: $0.selected.tabSessionID)
                 }, foreground: foreground?.tabSessionID),
-                controllers: groups.flatMap(\.members)
+                controllers: visibleGroups.flatMap(\.members)
             )
             transaction.publish { runtime.native.publish(groups) }
             for group in groups where group.visible {
@@ -420,7 +433,10 @@ final class TerminalWorkspaceSessionStore {
         closing[controller.tabSessionID] = Weak(controller)
         descriptors.removeValue(forKey: controller.tabSessionID)
         saved.tabs.removeAll { $0.id == controller.tabSessionID }
-        workspaces.transaction { $0.remove(controller.tabSessionID) }
+        workspaces.transaction {
+            $0.remove(controller.tabSessionID)
+            $0.pruneEmptyWindows()
+        }
         capture()
     }
 
@@ -492,6 +508,7 @@ final class TerminalWorkspaceSessionStore {
         var durable = catalog
         let included = Set(tabs.map(\.id))
         for tab in catalog.membership.keys where !included.contains(tab) { durable.remove(tab) }
+        durable.pruneEmptyWindows()
         guard durable.validationErrors.isEmpty else { return }
         let next = Snapshot(version: 2, tabs: tabs, generation: saved.generation ?? 0,
             catalog: durable, explicitlyEmpty: tabs.isEmpty,

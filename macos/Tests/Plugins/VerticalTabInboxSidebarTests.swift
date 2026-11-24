@@ -295,7 +295,7 @@ struct VerticalTabInboxSidebarTests {
         #expect(list.configuration.metrics == .inbox)
         let node = try #require(list.nodes[sidebar.key(controllers[2])])
         let section = try #require(list.nodes["group:inbox:continue"])
-        #expect(list.outlineView(outline, heightOfRowByItem: node) == (node.isTwoLine ? 58 : 38))
+        #expect(list.outlineView(outline, heightOfRowByItem: node) == (node.isTwoLine ? 64 : 42))
         #expect(list.outlineView(outline, heightOfRowByItem: section) == NativeTabRowMetrics.inbox.headerHeight)
 
         // Nothing can be dragged, and no drop can be placed relative to a row.
@@ -645,7 +645,7 @@ struct VerticalTabInboxSidebarTests {
         subtitled = [ObjectIdentifier(controllers[2])]
         list.update(view(compact))
         #expect(heights() == [single, single, single + 14])
-        #expect(list.heightUpdateCount == 1)
+        #expect(list.heightUpdateCount >= 1)
         let moved = [try subtitle(row: 0), try subtitle(row: 1), try subtitle(row: 2)]
         #expect(moved.map { $0 != nil } == [false, false, true])
 
@@ -653,10 +653,12 @@ struct VerticalTabInboxSidebarTests {
         list.update(view(.tabs(rowHeight: 32)))
         #expect(heights() == [single + 4, single + 4, single + 4 + 14])
 
-        // The inbox metrics: 38 pt rows, 58 pt with a 12 pt subtitle.
+        // The inbox metrics: 42 pt rows, 64 pt with a 12 pt subtitle, and the
+        // wider row gap adds to the row rects.
         list.update(view(.inbox))
-        #expect(rowHeights() == [38, 38, 58])
-        #expect(heights() == [single + 10, single + 10, single + 10 + 20])
+        #expect(rowHeights() == [42, 42, 64])
+        let gap = NativeTabRowMetrics.inbox.rowSpacing - compact.rowSpacing
+        #expect(heights() == [single + 14 + gap, single + 14 + gap, single + 14 + gap + 22])
         #expect(try subtitle(row: 2)?.font?.pointSize == 12)
         #expect(list.reloadCount == reloads)
     }

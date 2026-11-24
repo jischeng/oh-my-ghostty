@@ -662,6 +662,8 @@ struct GhosttyTabPresentation {
     /// tab name or a conversation title): the working directory, prefixed
     /// with the host for SSH. Rows render it as a second line.
     var subtitle: String?
+    /// The subtitle names a place on another host: the row marks it with a cloud.
+    var subtitleIsRemote: Bool = false
     let shortcut: String?
     let icon: GhosttyTabIcon
     let activity: TabActivity?

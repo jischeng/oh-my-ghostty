@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import SwiftUI
 
+
 /// Row geometry of the tab list. The Tabs view follows the row density
 /// setting; the inbox has roomier rows.
 struct NativeTabRowMetrics: Equatable {
@@ -19,11 +20,13 @@ struct NativeTabRowMetrics: Equatable {
     /// Rows of a group start at the list's edge instead of under its header,
     /// and a header without an icon of its own shows none.
     var flattensGroups = false
-    /// The subtitle starts under the icon and runs the width of the row.
-    var subtitleSpansRow = false
     /// A row with a name and a subtitle sets the name slightly heavier.
     var emphasizesNames = false
-    var shortcutFontSize: CGFloat = 10
+    var shortcutFontSize: CGFloat = 11
+    /// Room between a selected row's highlight and the list's edges.
+    var selectionInset: CGFloat = 2
+    /// Gap between rows.
+    var rowSpacing: CGFloat = 2
 
     /// What a row gains for its subtitle.
     var subtitleBlockHeight: CGFloat { subtitleSpacing + subtitleLineHeight }
@@ -36,12 +39,12 @@ struct NativeTabRowMetrics: Equatable {
         .init(rowHeight: rowHeight, headerHeight: rowHeight)
     }
 
-    /// The inbox: 38 pt rows, 58 pt with a subtitle, laid out flat so a name
+    /// The inbox: 42 pt rows, 62 pt with a subtitle, laid out flat so a name
     /// and the place below it have the whole row.
-    static let inbox = Self(rowHeight: 38, headerHeight: 30, titleFontSize: 14, headerFontSize: 12,
-                            subtitleFontSize: 12, subtitleLineHeight: 16, subtitleSpacing: 4,
-                            flattensGroups: true, subtitleSpansRow: true, emphasizesNames: true,
-                            shortcutFontSize: 11)
+    static let inbox = Self(rowHeight: 42, headerHeight: 34, titleFontSize: 14, headerFontSize: 12,
+                            subtitleFontSize: 12, subtitleLineHeight: 17, subtitleSpacing: 5,
+                            flattensGroups: true, emphasizesNames: true,
+                            shortcutFontSize: 11, selectionInset: 7, rowSpacing: 6)
 }
 
 /// AppKit presentation over the existing native-window tab model.
@@ -74,6 +77,9 @@ final class NativeTabNode: NSObject {
     var count: Int?
     /// The row shows a subtitle below its title and is taller for it.
     var isTwoLine = false
+    /// The row has rendered once; its own content decides its height from
+    /// then on, so a later guess never overrules what is on screen.
+    var hasRenderedHeight = false
     var children: [NativeTabNode] = []
     init(key: String) { self.key = key }
 }
@@ -95,7 +101,6 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
     private(set) var membershipUpdateCount = 0
     private(set) var heightUpdateCount = 0
     private var pointer: NativeTabListPointer?
-    private var pendingHeightNodes: [NativeTabNode] = []
     /// The pointer left the list; a held display order can be applied.
     var pointerDidLeave: (() -> Void)?
     /// Test seam for the pointer state, which needs a real desktop pointer.
@@ -249,7 +254,7 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
                 // New rows get their height from the delegate on insertion;
                 // rows already in the outline need an explicit height update.
                 let twoLine = value.isTwoLine(tab)
-                if item.isTwoLine != twoLine {
+                if !item.hasRenderedHeight, item.isTwoLine != twoLine {
                     item.isTwoLine = twoLine
                     if known { resized.append(item) }
                 }
@@ -275,6 +280,7 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
         outline.reservesDisclosureSpace = roots.contains { $0.tab == nil }
         outline.flattensGroupRows = value.metrics.flattensGroups
         outline.rowHeight = value.metrics.rowHeight
+        outline.intercellSpacing = NSSize(width: 0, height: value.metrics.rowSpacing)
         if structure != nextStructure {
             structure = nextStructure
             let newRoots = roots.map(\.key)
@@ -360,7 +366,19 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
         (item as? NativeTabNode)?.tab == nil
     }
 
-    func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? { NativeTabRowView() }
+    func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
+        let row = NativeTabRowView()
+        row.selectionInset = configuration.metrics.selectionInset
+        return row
+    }
+
+    /// Applies a metrics change to the rows already on screen.
+    private func applySelectionInset() {
+        for row in 0..<outline.numberOfRows {
+            (outline.rowView(atRow: row, makeIfNecessary: false) as? NativeTabRowView)?
+                .selectionInset = configuration.metrics.selectionInset
+        }
+    }
 
     func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
         let metrics = configuration.metrics
@@ -381,27 +399,13 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
 
     /// A cell refreshes itself when its tab changes. When that adds or removes
     /// the subtitle, its row height follows without a sidebar refresh.
-    private func rowLayoutChanged(_ item: NativeTabNode?) {
+    private func rowLayoutChanged(_ item: NativeTabNode?, twoLine: Bool) {
         guard let item else { return }
-        pendingHeightNodes.append(item)
-        guard pendingHeightNodes.count == 1 else { return }
-        // Never resize rows from inside the table's own layout pass.
-        DispatchQueue.main.async { [weak self] in self?.syncPendingRowHeights() }
-    }
-
-    private func syncPendingRowHeights() {
-        let pending = pendingHeightNodes
-        pendingHeightNodes.removeAll()
-        var rows = IndexSet()
-        for node in pending {
-            guard nodes[node.key] === node, let tab = node.tab else { continue }
-            let twoLine = configuration.isTwoLine(tab)
-            guard node.isTwoLine != twoLine else { continue }
-            node.isTwoLine = twoLine
-            let row = outline.row(forItem: node)
-            if row >= 0 { rows.insert(row) }
-        }
-        noteHeights(rows)
+        item.hasRenderedHeight = true
+        guard item.isTwoLine != twoLine else { return }
+        item.isTwoLine = twoLine
+        let row = outline.row(forItem: item)
+        noteHeights(row >= 0 ? IndexSet(integer: row) : IndexSet())
     }
 
     func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
@@ -428,8 +432,8 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
         }, close: { [weak self, weak item] in
             guard let self, let tab = item?.tab else { return }
             self.configuration.controller.closeVerticalTab(tab.controller)
-        }, layoutChanged: { [weak self, weak item] in
-            self?.rowLayoutChanged(item)
+        }, layoutChanged: { [weak self, weak item] renderedTwoLine in
+            self?.rowLayoutChanged(item, twoLine: renderedTwoLine)
         })
     }
 
@@ -841,9 +845,14 @@ private final class NativeTabRowView: NativeHoverRowView {
         }
     }
     override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }
+    /// Kept in step with the row metrics by the outline controller.
+    var selectionInset: CGFloat = 2 {
+        didSet { if oldValue != selectionInset { needsDisplay = true } }
+    }
+
     override func drawSelection(in dirtyRect: NSRect) {
         OMGNativeTheme.resolve(for: self).selectedFill.setFill()
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 1), xRadius: 5, yRadius: 5).fill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: selectionInset, dy: 1), xRadius: 6, yRadius: 6).fill()
     }
 }
 
@@ -854,6 +863,7 @@ final class NativeTabCell: NSTableCellView {
     private let icon = NativeTabIconView()
     private let label = NSTextField(labelWithString: "")
     private let subtitle = NSTextField(labelWithString: "")
+    private let subtitleIcon = NSImageView()
     private let shortcut = NSTextField(labelWithString: "")
     private let status = NSImageView()
     private let closeButton = NativeActionControl()
@@ -866,12 +876,10 @@ final class NativeTabCell: NSTableCellView {
     private var selectAction: (() -> Void)?
     private var refreshScheduled = false
     private var canClose = false
-    private var stackCenterY: NSLayoutConstraint?
-    private var subtitleTop: NSLayoutConstraint?
+    private var content: NSStackView?
+    private var subtitleLine: NSStackView?
     /// The subtitle under the title, or under the icon across the whole row.
-    private var subtitleUnderTitle: [NSLayoutConstraint] = []
-    private var subtitleAcrossRow: [NSLayoutConstraint] = []
-    private var layoutChanged: (() -> Void)?
+    private var layoutChanged: ((Bool) -> Void)?
     /// Subtitle visibility last rendered for the configured tab.
     private var renderedTwoLine: Bool?
     override func viewDidMoveToSuperview() {
@@ -921,34 +929,48 @@ final class NativeTabCell: NSTableCellView {
         }
         trailing.widthAnchor.constraint(equalToConstant: 28).isActive = true
         trailing.heightAnchor.constraint(equalToConstant: 24).isActive = true
-        let stack = NSStackView(views: [icon, label, status, trailing])
-        stack.distribution = .fill
-        stack.spacing = 6
-        stack.alignment = .centerY
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
+        let titleRow = NSStackView(views: [icon, label, status, trailing])
+        titleRow.distribution = .fill
+        titleRow.spacing = 6
+        titleRow.alignment = .centerY
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         label.setContentHuggingPriority(.init(1), for: .horizontal)
-        // The subtitle hangs below the title outside the stack, so the icon,
-        // status and trailing slot stay on the title line and a single-line
-        // row keeps its exact layout.
+        // The place sits on its own line, starting where the name starts. A
+        // place on another host leads with a cloud, so a named row still says
+        // it is remote.
         subtitle.translatesAutoresizingMaskIntoConstraints = false
         subtitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         subtitle.setContentHuggingPriority(.init(1), for: .horizontal)
-        addSubview(subtitle)
-        let centerY = stack.centerYAnchor.constraint(equalTo: centerYAnchor)
-        stackCenterY = centerY
-        let subtitleTop = subtitle.topAnchor.constraint(equalTo: label.bottomAnchor, constant: metrics.subtitleSpacing)
-        self.subtitleTop = subtitleTop
-        // AppKit briefly sizes newly attached cells below their icon footprint.
-        // Keep their content intact without unsatisfiable required constraints.
-        let trailingConstraint = stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -9)
+        subtitleIcon.image = NSImage(systemSymbolName: "cloud", accessibilityDescription: nil)
+        subtitleIcon.contentTintColor = .tertiaryLabelColor
+        subtitleIcon.imageScaling = .scaleProportionallyDown
+        subtitleIcon.isHidden = true
+        let subtitleLine = NSStackView(views: [subtitleIcon, subtitle])
+        subtitleLine.orientation = .horizontal
+        subtitleLine.alignment = .centerY
+        subtitleLine.spacing = 3
+        subtitleLine.isHidden = true
+        // Name and place are one block, centred in the row; a single-line row
+        // is the same block without its second line.
+        let content = NSStackView(views: [titleRow, subtitleLine])
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = metrics.subtitleSpacing
+        content.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(content)
+        self.content = content
+        self.subtitleLine = subtitleLine
+        let trailingConstraint = content.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -9)
         trailingConstraint.priority = .defaultHigh
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            content.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
             trailingConstraint,
-            centerY,
-            subtitleTop,
+            content.centerYAnchor.constraint(equalTo: centerYAnchor),
+            content.trailingAnchor.constraint(greaterThanOrEqualTo: subtitleLine.trailingAnchor),
+            titleRow.widthAnchor.constraint(equalTo: content.widthAnchor),
+            subtitleLine.leadingAnchor.constraint(equalTo: label.leadingAnchor),
+            subtitleIcon.widthAnchor.constraint(equalToConstant: 13),
+            subtitleIcon.heightAnchor.constraint(equalToConstant: 13),
             icon.widthAnchor.constraint(equalToConstant: TabIconMetrics.footprint),
             icon.heightAnchor.constraint(equalToConstant: TabIconMetrics.footprint),
             status.widthAnchor.constraint(equalToConstant: 14),
@@ -956,26 +978,12 @@ final class NativeTabCell: NSTableCellView {
             closeButton.widthAnchor.constraint(equalToConstant: 20),
             closeButton.heightAnchor.constraint(equalToConstant: 20)
         ])
-        subtitleUnderTitle = [
-            subtitle.leadingAnchor.constraint(equalTo: label.leadingAnchor),
-            subtitle.trailingAnchor.constraint(equalTo: label.trailingAnchor)
-        ]
-        let acrossTrailing = subtitle.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -9)
-        acrossTrailing.priority = .defaultHigh
-        subtitleAcrossRow = [subtitle.leadingAnchor.constraint(equalTo: icon.leadingAnchor, constant: 2), acrossTrailing]
-        applySubtitlePlacement()
+
         // Do not register these as NSTableCellView's standard outlets: source
         // list cell layout can reposition them around our stack constraints.
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    private func applySubtitlePlacement() {
-        NSLayoutConstraint.deactivate(metrics.subtitleSpansRow ? subtitleUnderTitle : subtitleAcrossRow)
-        NSLayoutConstraint.activate(metrics.subtitleSpansRow ? subtitleAcrossRow : subtitleUnderTitle)
-        // The directory's tail matters most when it runs the width of the row.
-        subtitle.lineBreakMode = metrics.subtitleSpansRow ? .byTruncatingHead : .byTruncatingMiddle
-    }
 
     // Row configuration keeps the native interaction callbacks explicit.
     // swiftlint:disable:next function_parameter_count
@@ -984,14 +992,13 @@ final class NativeTabCell: NSTableCellView {
                    groupIcon: GhosttyTabIcon? = nil, count: Int? = nil,
                    metrics: NativeTabRowMetrics? = nil,
                    canClose: Bool, selected: Bool, select: @escaping () -> Void,
-                   close: @escaping () -> Void, layoutChanged: (() -> Void)? = nil) {
+                   close: @escaping () -> Void, layoutChanged: ((Bool) -> Void)? = nil) {
         closeButton.setAccessibilityLabel(ChromeStrings.current.closeTab)
         if let metrics, metrics != self.metrics {
             self.metrics = metrics
             subtitle.font = .systemFont(ofSize: metrics.subtitleFontSize)
-            subtitleTop?.constant = metrics.subtitleSpacing
+            content?.spacing = metrics.subtitleSpacing
             shortcut.font = .systemFont(ofSize: metrics.shortcutFontSize)
-            applySubtitlePlacement()
         }
         let changedController = configuredTab?.controller !== tab?.controller
         if tab == nil || changedController {
@@ -1089,9 +1096,12 @@ final class NativeTabCell: NSTableCellView {
         let theme = OMGNativeTheme.resolve(for: self)
         label.textColor = theme.foreground
         subtitle.textColor = theme.secondary
+        subtitle.lineBreakMode = .byTruncatingHead
         shortcut.textColor = theme.secondary
-        setSubtitle(detail)
-        if let renderedTwoLine, renderedTwoLine != (detail != nil) { layoutChanged?() }
+        setSubtitle(detail, remote: value.subtitleIsRemote)
+        // The rendered content decides the height, not a prediction: a row
+        // whose subtitle appears later grows on the spot.
+        if renderedTwoLine != (detail != nil) { layoutChanged?(detail != nil) }
         renderedTwoLine = detail != nil
         let badge = AgentStatusBadge.resolve(value.activity)
         status.isHidden = badge == nil
@@ -1101,12 +1111,11 @@ final class NativeTabCell: NSTableCellView {
         setAccessibilityLabel(value.title)
     }
 
-    private func setSubtitle(_ text: String?) {
+    private func setSubtitle(_ text: String?, remote: Bool = false) {
         subtitle.stringValue = text ?? ""
+        subtitleIcon.isHidden = !(remote && text != nil)
         if subtitle.isHidden != (text == nil) { subtitle.isHidden = text == nil }
-        // Title and subtitle stay centred in the row as one block.
-        let offset = text == nil ? 0 : -metrics.subtitleBlockHeight / 2
-        if stackCenterY?.constant != offset { stackCenterY?.constant = offset }
+        if subtitleLine?.isHidden != (text == nil) { subtitleLine?.isHidden = text == nil }
     }
 
     @objc private func closeTab() { closeAction?() }

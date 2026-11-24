@@ -366,9 +366,9 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
             metrics: inbox ? .inbox : .tabs(rowHeight: OhMyGhosttySettings.shared.tabRowDensity.rowHeight),
             allowsReordering: !inbox,
             // The resolver's rule, without resolving the whole presentation.
-            showsSubtitle: { [weak self] in
+            showsSubtitle: inbox ? { [weak self] in
                 $0.controller.tabTitleHasSubtitle(activities: self?.configuration.statusStore)
-            },
+            } : nil,
             presentation: { [weak self] in self?.presentation(for: $0) }
         )
     }
@@ -430,6 +430,6 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
         TerminalTabPresentationResolver.resolve(tab.controller, index: shortcutIndex(for: tab),
             selected: tab.id == configuration.layoutState.tabSnapshot.selectedID,
             activities: configuration.statusStore, icons: configuration.iconProvider,
-            style: isInbox ? .inbox : .sidebar)
+            style: isInbox ? .inbox : .chrome)
     }
 }

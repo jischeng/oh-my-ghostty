@@ -313,35 +313,25 @@ struct TerminalLiveTabLayoutTests {
             scope: .local, workingDirectory: "/tmp/project"), for: surface)
         let path = settings.tabPathDisplay == .folderName ? "project" : "/tmp/project"
         func resolved() throws -> GhosttyTabPresentation {
-            let value = try #require(
-                TerminalTabPresentationResolver.resolve(controller, index: 0, selected: true, activities: nil)
-            )
+            // The inbox row is the one that carries the session's name.
+            let value = try #require(TerminalTabPresentationResolver.resolve(
+                controller, index: 0, selected: true, activities: nil, style: .inbox))
             // The sidebar picks the row height from the cheap predicate.
-            let row = try #require(TerminalTabPresentationResolver.resolve(
-                controller, index: 0, selected: true, activities: nil, style: .sidebar))
-            #expect(controller.tabTitleHasSubtitle == (row.subtitle != nil))
+            #expect(controller.tabTitleHasSubtitle == (value.subtitle != nil))
             return value
         }
-        // A conversation without a stored title names its tab as before in
-        // tab chrome, which has one line.
-        #expect(try resolved().title == path)
-        #expect(try resolved().subtitle == nil)
+        // A conversation without a stored title still names its row after the
+        // Agent, so the row is not just a folder; the Tabs view and tab
+        // chrome are left as they were.
+        #expect(try resolved().title == "Claude Code")
+        #expect(try resolved().subtitle == "/tmp/project")
         #expect(controller.tabAgentConversationTitle == nil)
-        // A sidebar row has a second line, so it names the Agent and puts the
-        // place below; the inbox row is the same.
-        for style in [TerminalTabPresentationResolver.Style.sidebar, .inbox] {
-            let row = try #require(TerminalTabPresentationResolver.resolve(
-                controller, index: 0, selected: true, activities: nil, style: style))
-            #expect(row.title == "Claude Code")
-            #expect(row.subtitle == "/tmp/project")
-            #expect(row.remoteBreadcrumb == nil)
-        }
 
         // The title belongs to the conversation; the tab's own tracker relays it.
         let store = AgentConversationTitleStore.shared
         #expect(store.set("Stabilise login", source: .native, agent: .claude, conversationID: conversation))
         var value = try resolved()
-        #expect(value.title == "Stabilise login")
+        #expect(value.title == "Stabilise login", "got \(value.title) / \(value.subtitle ?? "nil")")
         // The place below the name is the directory itself, whatever
         // tabs.pathDisplay shortens an unnamed tab's title to.
         #expect(value.subtitle == "/tmp/project")
@@ -364,10 +354,11 @@ struct TerminalLiveTabLayoutTests {
         controller.titleOverride = nil
         #expect(try resolved().title == "✳ Claude Code review")
 
-        // Turning titles off restores the path title everywhere.
+        // Turning titles off leaves the inbox row with the place, as a plain
+        // terminal shows it.
         settings.agentSessionTitleMode = .off
         value = try resolved()
-        #expect(value.title == path)
+        #expect(value.title == "/tmp/project")
         #expect(value.subtitle == nil)
         try await waitForAppKit { controller.window?.title != "✳ Claude Code review" }
         settings.agentSessionTitleMode = .native
@@ -377,8 +368,8 @@ struct TerminalLiveTabLayoutTests {
         let next = try #require(AgentConversationID(UUID().uuidString))
         controller.adoptAgentResumeDescriptor(.init(agent: .claude, conversationID: next,
             scope: .local, workingDirectory: "/tmp/project"), for: surface)
-        #expect(try resolved().title == path)
-        #expect(try resolved().subtitle == nil)
+        #expect(try resolved().title == "Claude Code")
+        #expect(try resolved().subtitle == "/tmp/project")
         try await waitForAppKit { controller.window?.title != "✳ Claude Code review" }
     }
 
@@ -390,9 +381,8 @@ struct TerminalLiveTabLayoutTests {
         surface.runtimeDescriptor = nil
         surface.pwd = NSHomeDirectory() + "/code/project"
         func resolved() throws -> GhosttyTabPresentation {
-            let value = try #require(
-                TerminalTabPresentationResolver.resolve(controller, index: 0, selected: true, activities: nil)
-            )
+            let value = try #require(TerminalTabPresentationResolver.resolve(
+                controller, index: 0, selected: true, activities: nil, style: .inbox))
             #expect(controller.tabTitleHasSubtitle == (value.subtitle != nil))
             return value
         }
@@ -501,14 +491,15 @@ struct TerminalLiveTabLayoutTests {
         // keep following tabs.pathDisplay.
         #expect(try row(.inbox).title == "~/code/project")
         #expect(try row(.inbox).subtitle == nil)
-        #expect(try row(.sidebar).title == row(.chrome).title)
-        #expect(try row(.sidebar).subtitle == nil)
-        // A manual name is the title in every style, with the place below it.
+        #expect(try row(.chrome).subtitle == nil)
+        // A manual name is the title in every style; the place below it
+        // belongs to the inbox, which has a second line for it.
         controller.titleOverride = "Scratch"
-        for style in [TerminalTabPresentationResolver.Style.chrome, .sidebar, .inbox] {
+        for style in [TerminalTabPresentationResolver.Style.chrome, .inbox] {
             #expect(try row(style).title == "Scratch")
-            #expect(try row(style).subtitle == "~/code/project")
         }
+        #expect(try row(.inbox).subtitle == "~/code/project")
+        #expect(try row(.chrome).subtitle == nil)
     }
 
     @Test func aBoundConversationIsLookedUpAndNamesItsTab() async throws {
@@ -539,8 +530,9 @@ struct TerminalLiveTabLayoutTests {
             scope: .local, workingDirectory: "/tmp/project"), for: surface)
         try await waitForAppKit { controller.window?.title == "Stabilise login" }
         withExtendedLifetime(tracker) {}
+        // The inbox row carries the conversation's name.
         let value = try #require(TerminalTabPresentationResolver.resolve(
-            controller, index: 0, selected: true, activities: nil
+            controller, index: 0, selected: true, activities: nil, style: .inbox
         ))
         #expect(value.title == "Stabilise login")
         #expect(AgentConversationTitleStore.shared.record(agent: .codex, conversationID: conversation)?.source == .native)

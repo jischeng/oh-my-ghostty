@@ -218,10 +218,10 @@ struct VerticalTabInboxModelTests {
 
     @Test func inboxRowsAreRoomierThanTheTabsView() {
         let inbox = NativeTabRowMetrics.inbox
-        #expect(inbox.rowHeight == 38)
-        #expect(inbox.twoLineRowHeight == 58)
-        #expect(inbox.height(twoLine: false) == 38)
-        #expect(inbox.height(twoLine: true) == 58)
+        #expect(inbox.rowHeight == 42)
+        #expect(inbox.twoLineRowHeight == 64)
+        #expect(inbox.height(twoLine: false) == 42)
+        #expect(inbox.height(twoLine: true) == 64)
         #expect(inbox.subtitleFontSize == 12)
         #expect(inbox.headerHeight < inbox.rowHeight)
 

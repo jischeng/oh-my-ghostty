@@ -90,13 +90,10 @@ enum TerminalTabPresentationResolver {
 
     /// Where a presentation is shown, which decides how much it can say.
     enum Style {
-        /// Tab chrome with one line: horizontal tabs and window titles.
+        /// Tab chrome with one line: horizontal tabs, window titles, and the
+        /// Tabs view of the sidebar.
         case chrome
-        /// A sidebar row, which has a second line for the place. An Agent
-        /// tab without a session name is named after its Agent.
-        case sidebar
-        /// A sidebar row of the inbox. Plain terminal rows also show where
-        /// they are instead of following `tabs.pathDisplay`.
+        /// A row of the inbox: a session row, named, with the place below it.
         case inbox
     }
 
@@ -116,32 +113,35 @@ enum TerminalTabPresentationResolver {
         let pathTitle = agent == nil ? session.presentationTitle(pathDisplay: settings.tabPathDisplay)
             : session.agentPathTitle(pathDisplay: settings.tabPathDisplay, resumeDescriptor: descriptor)
         let location = place(session: session, descriptor: descriptor)
-        // An Agent tab is named by the user, by its conversation, or by the
-        // title the Agent gives its terminal; in a sidebar row, where the
-        // place has its own line, else by the Agent itself. A plain terminal
-        // is named only by the user. `tabTitleHasSubtitle` is the sidebar's
-        // rule without the formatting; keep the two in step.
-        // With session titles off, an Agent tab shows its path as a terminal does.
-        let namesAgents = settings.agentSessionTitleMode != .off
-        let name: String? = controller.titleOverride ?? (namesAgents ? agent : nil).flatMap { agent in
-            controller.agentConversationTitle(for: surface)
-                ?? sessionName(fromTerminalTitle: surface.title, agent: agent, directory: location)
-                ?? (style == .chrome ? nil : agent.displayName)
+        let localPane: Bool = if case .local = session.state { true } else { false }
+        let remotePane: Bool = switch session.state {
+        case .sshReady, .sshConnecting: true
+        case .local: descriptor?.scope == .remote
         }
-        let title: String
-        var breadcrumb: RemoteTabBreadcrumb?
-        if let name {
-            title = name
-        } else if let restoredTitle {
-            title = restoredTitle
-        } else if style == .inbox, case .local = session.state, let location {
-            title = location
-        } else {
-            title = agent?.normalizedTitle(pathTitle) ?? pathTitle
-            breadcrumb = session.remoteTabBreadcrumb
+        // The Tabs view and tab chrome keep their own naming: the user's name,
+        // else the place. Only an inbox row is a session row: it carries the
+        // session's name, with the place below it. `tabTitleHasSubtitle`
+        // mirrors this rule for the sidebar without building a presentation.
+        var name: String? = controller.titleOverride
+        if style == .inbox, name == nil {
+            let titles = settings.agentSessionTitleMode != .off
+            let conversation = titles ? controller.agentConversationTitle(for: surface) : nil
+            let terminal = conversation == nil && titles
+                ? agent.flatMap { sessionName(fromTerminalTitle: surface.title, agent: $0, directory: location) }
+                : nil
+            // With session titles off, an Agent tab keeps its place title.
+            name = titles ? (conversation ?? terminal ?? agent?.displayName) : nil
         }
-        let subtitle = name == nil ? nil
+        let title = name ?? restoredTitle
+            ?? (style == .inbox && localPane ? location : nil)
+            ?? (agent?.normalizedTitle(pathTitle) ?? pathTitle)
+        // Only a sidebar row in the inbox has a second line for the place.
+        let subtitle = name == nil || style != .inbox ? nil
             : namedSubtitle(location: location, session: session, agent: agent, pathTitle: pathTitle)
+        // Both tab renderers prefer the breadcrumb over the title, so a named
+        // tab carries the place only in its subtitle.
+        let breadcrumb = controller.titleOverride == nil && restoredTitle == nil && name == nil
+            && !(style == .inbox && localPane) ? session.remoteTabBreadcrumb : nil
         let displayTitle = breadcrumb?.title ?? title
         let headerTitle = subtitle.flatMap { $0.isEmpty ? nil : $0 }.map { "\(displayTitle)\n\($0)" } ?? displayTitle
         let context = GhosttyTabIconContext(
@@ -160,12 +160,11 @@ enum TerminalTabPresentationResolver {
         } else {
             nil
         }
-        // Both tab renderers prefer the breadcrumb over the title, so a named
-        // tab carries the place only in its subtitle.
         return .init(
             title: title,
             remoteBreadcrumb: breadcrumb,
             subtitle: subtitle,
+            subtitleIsRemote: subtitle != nil && remotePane,
             shortcut: settings.showShortcutLabels ? controller.tabShortcutLabel(for: index) : nil,
             icon: icons.icon(for: context) ?? .systemSymbol("terminal"),
             activity: activity,

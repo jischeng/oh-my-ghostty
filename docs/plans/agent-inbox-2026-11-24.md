@@ -306,3 +306,27 @@ session-state files. Stream T owns `Plugins/AgentConversationTitle*.swift`,
   out of `settings.json`, Chinese and English layouts.
 - **Open**: a terminal flash on rename reported by the user could not be
   reproduced in the VM and the recording was unreadable to the agent session.
+
+## Iteration 4 (2026-11-24, third look in OMG Dev)
+
+- **Renaming is a property of the inbox only.** The Tabs view, horizontal tabs,
+  window titles and AppleScript names keep the pre-inbox rules (`titleOverride`,
+  else `tabs.pathDisplay`); no second line is rendered there. The resolver's
+  `.sidebar` style is gone: `.chrome` (one line) and `.inbox` (a session row) are
+  the only two presentations.
+- **Inbox rows** are 42 pt, 64 pt with a subtitle, 6 pt apart. The name is 14 pt
+  medium, the place 12 pt secondary. Name and place form one block centred in
+  the row, and the place starts where the name starts. Section headers carry no
+  icon and are quiet secondary labels with their count on the right.
+- **A remote place leads with a cloud** at the subtitle's size, so a renamed SSH
+  row still says it is remote. An unnamed SSH row already shows `host › user`
+  with the cloud tab icon.
+- **Conversation discovery adopts resumed transcripts.** A tab that starts an
+  agent on an existing conversation keeps its old transcript and writes to it
+  immediately; `AgentConversationStore.discover` now also accepts files modified
+  after launch and picks the newest, so a resumed Codex/Claude pane gets its
+  conversation ID (and therefore its title). Two candidates touched within the
+  tolerance are still ambiguous and stay unnamed.
+- **Verified in the VM**: the Tabs view is unchanged (single-line place names,
+  original icons); the inbox shows names with the place below; a pending SSH
+  connection renders the cloud; 86 tests in 6 suites pass.

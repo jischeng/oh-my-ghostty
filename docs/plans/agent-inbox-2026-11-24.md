@@ -210,3 +210,78 @@ tests under `macos/Tests/Plugins/Vertical*.swift`.
 - `python3 -m unittest discover -s dist -p 'test_omg_test_plan.py'` and
   `python3 dist/check_omg_docs.py`.
 - Manual check in OMG Dev: ATS behaviour for `http://127.0.0.1` and a LAN host.
+
+## Iteration 2 (2026-11-24, after the first look in OMG Dev)
+
+Feedback from running the first build, and what changes. Where this section
+contradicts the text above, this section wins.
+
+### Findings
+
+- No conversation title appeared on any agent tab and the title store was never
+  written. `titleSeed` only looks at transcripts modified in the last 15
+  minutes, so a restored or idle conversation is never found.
+- Inbox rows are too tight compared with Otty, and a named tab shows no path.
+- `⌘N` labels in the inbox are out of order (they name the native index).
+- The inbox needs the same grouping and ordering choices as the Tabs view.
+- Selecting a tab moved it to the top at once.
+- Nothing tells the user an agent finished while the Tabs view is shown.
+- Settings: the AI endpoint, the agents and the Git commit models belong in one
+  place, organised as providers.
+
+### Decisions
+
+- **Subtitle rule**: a tab with a name that is not its path (a manual tab name
+  or a conversation title) shows the place below it in small text: the
+  tilde-abbreviated working directory, prefixed with the host for SSH. This
+  holds for plain terminals with a manual name too.
+- **Row metrics**: the inbox uses roomier rows than the Tabs view (single line
+  36 pt, two lines 54 pt, 12 pt subtitle). The Tabs view keeps `tabs.rowDensity`.
+- **`⌘N` in the inbox** selects the Nth tab of the displayed inbox order, and
+  the labels count 1, 2, 3 … from the top. Next/previous tab follow the same
+  order. Outside the inbox nothing changes.
+- **Inbox grouping and ordering** are their own settings with the same choices
+  as the Tabs view: grouping none / project / date (default date), ordering
+  manual / created / recently used (default recently used). Continue is shown
+  above the date sections only with date grouping. The inbox stays display-only
+  and rows are not draggable; "manual" means the native tab order.
+- **Recency** is the last interaction, not the last activation: a tab becomes
+  the most recent when the user types into it or leaves it after visiting it,
+  never by merely being selected. It is persisted with the session so Today /
+  Yesterday survive a restart.
+- **Attention badge**: while the Tabs view is shown, the inbox button carries a
+  badge when tabs need attention, failed or finished unacknowledged.
+- **Settings**: the Agents page becomes **AI**. It lists providers (installed
+  agent CLIs reached over ACP, and API connections), lets an API connection
+  fetch its model list and set per-model context window and maximum output, and
+  holds the model choice per task: commit / tag / PR messages (moved from Git)
+  and tab titles. Tab titles stay limited to API connections.
+
+### Shared contracts (iteration 2)
+
+| Key | Property | Type | Default |
+| --- | --- | --- | --- |
+| `tabs.inboxGrouping` | `tabInboxGroupingMode` | `GhosttyTabGroupingMode` | `date` |
+| `tabs.inboxOrdering` | `tabInboxOrderingMode` | `GhosttyTabOrderingMode` | `recentlyUsed` |
+
+`tabInboxSortMode` and `GhosttyTabInboxSortMode` are removed. An old
+`tabs.inboxOrdering` value of `recent` falls back to the default.
+
+```swift
+// Stream T — AgentConversationTitleCoordinator.swift (TerminalController extension)
+/// True when this tab's row and chrome show a name with the place below it.
+var tabTitleHasSubtitle: Bool { get }
+
+// Stream S — TerminalController.swift
+@Published private(set) var tabLastInteractionAt: Date
+```
+
+`AITitleGenerating`, `AITitleService.shared`, `AgentSessionTitleMode` and
+`OhMyGhosttySettings.agentSessionTitleMode` keep their names and meaning.
+
+File ownership: stream S owns `TerminalController.swift`, `Terminal/Tabs/**`
+except `TerminalTabPresentationResolver.swift`, `ChromeStrings.swift` and the
+session-state files. Stream T owns `Plugins/AgentConversationTitle*.swift`,
+`Plugins/AgentHistory*.swift` and the resolver. Stream P owns `Features/AI/**`,
+`Features/Settings/**`, `Features/Git/GitCommitAI*.swift`,
+`Features/Git/GitACP*.swift`, `docs/settings/**`.

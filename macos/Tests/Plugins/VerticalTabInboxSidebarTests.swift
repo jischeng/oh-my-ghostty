@@ -295,7 +295,7 @@ struct VerticalTabInboxSidebarTests {
         #expect(list.configuration.metrics == .inbox)
         let node = try #require(list.nodes[sidebar.key(controllers[2])])
         let section = try #require(list.nodes["group:inbox:continue"])
-        #expect(list.outlineView(outline, heightOfRowByItem: node) == (node.isTwoLine ? 54 : 36))
+        #expect(list.outlineView(outline, heightOfRowByItem: node) == (node.isTwoLine ? 58 : 38))
         #expect(list.outlineView(outline, heightOfRowByItem: section) == NativeTabRowMetrics.inbox.headerHeight)
 
         // Nothing can be dragged, and no drop can be placed relative to a row.
@@ -653,10 +653,10 @@ struct VerticalTabInboxSidebarTests {
         list.update(view(.tabs(rowHeight: 32)))
         #expect(heights() == [single + 4, single + 4, single + 4 + 14])
 
-        // The inbox metrics: 36 pt rows, 54 pt with a 12 pt subtitle.
+        // The inbox metrics: 38 pt rows, 58 pt with a 12 pt subtitle.
         list.update(view(.inbox))
-        #expect(rowHeights() == [36, 36, 54])
-        #expect(heights() == [single + 8, single + 8, single + 8 + 18])
+        #expect(rowHeights() == [38, 38, 58])
+        #expect(heights() == [single + 10, single + 10, single + 10 + 20])
         #expect(try subtitle(row: 2)?.font?.pointSize == 12)
         #expect(list.reloadCount == reloads)
     }

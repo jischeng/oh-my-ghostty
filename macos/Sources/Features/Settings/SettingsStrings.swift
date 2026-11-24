@@ -861,11 +861,20 @@ struct SettingsStrings: Equatable, Sendable {
     // MARK: AI providers, task models and conversation titles
 
     var aiProvidersSection: String { t("Providers", "提供商") }
+    /// One line under the providers: what the two groups are.
     var aiProvidersCaption: String {
-        t("Installed agents run models through their own CLI and login on this Mac. API connections call an OpenAI-compatible or Anthropic service directly; their keys are kept in a private file, never in settings.json.",
-          "已安装的 Agent 通过本机 CLI 及其登录状态运行模型。API 连接直接调用 OpenAI 兼容或 Anthropic 服务，密钥保存在私有文件中，不会写入 settings.json。")
+        t("Agents run models through their own CLI and login; API connections call a service directly.",
+          "Agent 通过本机 CLI 和自身登录运行模型；API 连接直接调用服务。")
     }
-    var aiInstalledGroup: String { t("Installed agents (ACP)", "已安装的 Agent（ACP）") }
+    /// Where API keys live, said once for the whole section.
+    var aiProvidersFootnote: String {
+        t("API keys are kept in a private file on this Mac, never in settings.json.",
+          "API 密钥保存在本机的私有文件中，不会写入 settings.json。")
+    }
+    var aiInstalledGroup: String { t("Installed", "已安装") }
+    var aiAddConnection: String { t("Add…", "添加…") }
+    var aiAddConnectionHelp: String { t("Add an API connection", "添加 API 连接") }
+    var aiAddModels: String { t("Add Models…", "添加模型…") }
     var aiConnectionsGroup: String { t("API connections", "API 连接") }
     var aiTaskModelsSection: String { t("Models per Task", "任务模型") }
     var aiCommitModelsGroup: String { t("Commit, tag and PR messages", "提交、标签与 PR 信息") }
@@ -883,9 +892,14 @@ struct SettingsStrings: Equatable, Sendable {
         count == 1 ? t("1 model", "1 个模型") : t("\(count) models", "\(count) 个模型")
     }
 
-    /// One line for an API connection in a list: kind, model count and whether it is off.
+    /// One line for an API connection in a list: what it is and what is missing.
     func aiProviderSummary(_ provider: AIProvider) -> String {
-        var parts = [aiProviderKindTitle(provider.kind), aiModelCount(provider.models.count)]
+        var parts = [aiProviderKindTitle(provider.kind)]
+        if provider.baseURL.isEmpty {
+            parts.append(t("No address yet", "尚未填写地址"))
+        } else {
+            parts.append(aiModelCount(provider.models.count))
+        }
         if !provider.enabled { parts.append(t("Off", "已停用")) }
         return parts.joined(separator: " · ")
     }
@@ -910,8 +924,8 @@ struct SettingsStrings: Equatable, Sendable {
 
     var agentSessionTitleLabel: String { t("Conversation Titles", "会话标题") }
     var agentSessionTitleCaption: String {
-        t("Off hides agent-reported titles. Agent Reported shows only the title the CLI records. Generate asks the title model below when the CLI reports none; without one it behaves like Agent Reported.",
-          "“关闭”不显示 Agent 上报的标题；“Agent 上报”只显示 CLI 记录的标题；“生成”在 CLI 未上报标题时向下方的标题模型请求标题；未选择模型时等同于“Agent 上报”。")
+        t("Generate asks the model below only when the agent reports no title.",
+          "“生成”仅在 Agent 未上报标题时向下方的模型请求标题。")
     }
 
     func agentSessionTitleModeTitle(_ mode: AgentSessionTitleMode) -> String {
@@ -924,8 +938,12 @@ struct SettingsStrings: Equatable, Sendable {
 
     var aiTitleModelLabel: String { t("Title Model", "标题模型") }
     var aiTitleModelUnset: String {
-        t("Not set: tabs show only titles the agent reports. API connections only; OMG sends the first prompt of a conversation, with likely secrets removed.",
-          "未设置：标签只显示 Agent 上报的标题。仅支持 API 连接；OMG 会发送对话的第一条提示词，并尽量移除其中的敏感信息。")
+        t("Not set: only titles the agent reports are shown.",
+          "未选择：仅显示 Agent 上报的标题。")
+    }
+    var aiTitleModelCaption: String {
+        t("API connections only. OMG sends the first prompt with likely secrets removed.",
+          "仅支持 API 连接。发送前会尽量移除首条提示词中的敏感信息。")
     }
 
     static func aiBaseURLPlaceholder(_ kind: AIEndpointProtocol) -> String {

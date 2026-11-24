@@ -14,13 +14,6 @@ enum TabInboxSection: String, CaseIterable {
 
     var groupID: String { "inbox:\(rawValue)" }
 
-    var symbol: String {
-        switch self {
-        case .continue: "play.circle"
-        case .today, .yesterday, .earlier: "calendar"
-        }
-    }
-
     func title(_ strings: ChromeStrings) -> String {
         switch self {
         case .continue: strings.inboxContinue
@@ -251,7 +244,7 @@ enum TabInboxModel {
             return TabInboxSection.allCases.compactMap { section -> GhosttyTabGroupPresentation? in
                 guard let indices = sections[section], !indices.isEmpty else { return nil }
                 return GhosttyTabGroupPresentation(
-                    id: section.groupID, title: section.title(strings), icon: .systemSymbol(section.symbol),
+                    id: section.groupID, title: section.title(strings), icon: nil,
                     tabs: organized(indices), count: indices.count
                 )
             }

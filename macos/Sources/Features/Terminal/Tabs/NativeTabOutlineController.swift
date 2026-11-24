@@ -16,6 +16,14 @@ struct NativeTabRowMetrics: Equatable {
     var subtitleLineHeight: CGFloat = 14
     /// Gap between the title and the subtitle below it.
     var subtitleSpacing: CGFloat = 0
+    /// Rows of a group start at the list's edge instead of under its header,
+    /// and a header without an icon of its own shows none.
+    var flattensGroups = false
+    /// The subtitle starts under the icon and runs the width of the row.
+    var subtitleSpansRow = false
+    /// A row with a name and a subtitle sets the name slightly heavier.
+    var emphasizesNames = false
+    var shortcutFontSize: CGFloat = 10
 
     /// What a row gains for its subtitle.
     var subtitleBlockHeight: CGFloat { subtitleSpacing + subtitleLineHeight }
@@ -28,9 +36,12 @@ struct NativeTabRowMetrics: Equatable {
         .init(rowHeight: rowHeight, headerHeight: rowHeight)
     }
 
-    /// The inbox: 36 pt rows, 54 pt with a 12 pt subtitle.
-    static let inbox = Self(rowHeight: 36, headerHeight: 30, subtitleFontSize: 12,
-                            subtitleLineHeight: 15, subtitleSpacing: 3)
+    /// The inbox: 38 pt rows, 58 pt with a subtitle, laid out flat so a name
+    /// and the place below it have the whole row.
+    static let inbox = Self(rowHeight: 38, headerHeight: 30, titleFontSize: 14, headerFontSize: 12,
+                            subtitleFontSize: 12, subtitleLineHeight: 16, subtitleSpacing: 4,
+                            flattensGroups: true, subtitleSpansRow: true, emphasizesNames: true,
+                            shortcutFontSize: 11)
 }
 
 /// AppKit presentation over the existing native-window tab model.
@@ -262,6 +273,7 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
         // Flat <-> grouped transitions always take the reload path below, so
         // existing cell views pick up the new leading inset.
         outline.reservesDisclosureSpace = roots.contains { $0.tab == nil }
+        outline.flattensGroupRows = value.metrics.flattensGroups
         outline.rowHeight = value.metrics.rowHeight
         if structure != nextStructure {
             structure = nextStructure
@@ -660,12 +672,17 @@ final class NativeTabOutline: NSOutlineView {
     /// column even for level-0 leaves. A flat tab list has no disclosure
     /// buttons, so give its cells the full row width instead.
     var reservesDisclosureSpace = true
+    /// Tab rows inside a group take the full row width, as in a flat list;
+    /// only the group's header keeps the disclosure gutter.
+    var flattensGroupRows = false
     /// Matches the trailing inset so icons and shortcuts sit evenly inside the row highlight.
     static let flatLeadingInset: CGFloat = 4
     override func frameOfCell(atColumn column: Int, row: Int) -> NSRect {
         let frame = super.frameOfCell(atColumn: column, row: row)
-        guard !reservesDisclosureSpace, row >= 0, column >= 0, column < tableColumns.count,
+        guard row >= 0, column >= 0, column < tableColumns.count,
               tableColumns[column] === outlineTableColumn else { return frame }
+        let isFlattenedTab = flattensGroupRows && (item(atRow: row) as? NativeTabNode)?.tab != nil
+        guard !reservesDisclosureSpace || isFlattenedTab else { return frame }
         let minX = rect(ofRow: row).minX + Self.flatLeadingInset
         return NSRect(x: minX, y: frame.minY, width: frame.maxX - minX, height: frame.height)
     }
@@ -851,6 +868,9 @@ final class NativeTabCell: NSTableCellView {
     private var canClose = false
     private var stackCenterY: NSLayoutConstraint?
     private var subtitleTop: NSLayoutConstraint?
+    /// The subtitle under the title, or under the icon across the whole row.
+    private var subtitleUnderTitle: [NSLayoutConstraint] = []
+    private var subtitleAcrossRow: [NSLayoutConstraint] = []
     private var layoutChanged: (() -> Void)?
     /// Subtitle visibility last rendered for the configured tab.
     private var renderedTwoLine: Bool?
@@ -928,8 +948,6 @@ final class NativeTabCell: NSTableCellView {
             stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
             trailingConstraint,
             centerY,
-            subtitle.leadingAnchor.constraint(equalTo: label.leadingAnchor),
-            subtitle.trailingAnchor.constraint(equalTo: label.trailingAnchor),
             subtitleTop,
             icon.widthAnchor.constraint(equalToConstant: TabIconMetrics.footprint),
             icon.heightAnchor.constraint(equalToConstant: TabIconMetrics.footprint),
@@ -938,11 +956,26 @@ final class NativeTabCell: NSTableCellView {
             closeButton.widthAnchor.constraint(equalToConstant: 20),
             closeButton.heightAnchor.constraint(equalToConstant: 20)
         ])
+        subtitleUnderTitle = [
+            subtitle.leadingAnchor.constraint(equalTo: label.leadingAnchor),
+            subtitle.trailingAnchor.constraint(equalTo: label.trailingAnchor)
+        ]
+        let acrossTrailing = subtitle.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -9)
+        acrossTrailing.priority = .defaultHigh
+        subtitleAcrossRow = [subtitle.leadingAnchor.constraint(equalTo: icon.leadingAnchor, constant: 2), acrossTrailing]
+        applySubtitlePlacement()
         // Do not register these as NSTableCellView's standard outlets: source
         // list cell layout can reposition them around our stack constraints.
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    private func applySubtitlePlacement() {
+        NSLayoutConstraint.deactivate(metrics.subtitleSpansRow ? subtitleUnderTitle : subtitleAcrossRow)
+        NSLayoutConstraint.activate(metrics.subtitleSpansRow ? subtitleAcrossRow : subtitleUnderTitle)
+        // The directory's tail matters most when it runs the width of the row.
+        subtitle.lineBreakMode = metrics.subtitleSpansRow ? .byTruncatingHead : .byTruncatingMiddle
+    }
 
     // Row configuration keeps the native interaction callbacks explicit.
     // swiftlint:disable:next function_parameter_count
@@ -957,6 +990,8 @@ final class NativeTabCell: NSTableCellView {
             self.metrics = metrics
             subtitle.font = .systemFont(ofSize: metrics.subtitleFontSize)
             subtitleTop?.constant = metrics.subtitleSpacing
+            shortcut.font = .systemFont(ofSize: metrics.shortcutFontSize)
+            applySubtitlePlacement()
         }
         let changedController = configuredTab?.controller !== tab?.controller
         if tab == nil || changedController {
@@ -979,6 +1014,10 @@ final class NativeTabCell: NSTableCellView {
             selectAction = nil
             label.stringValue = title ?? ""
             label.font = .systemFont(ofSize: self.metrics.headerFontSize, weight: .semibold)
+            let theme = OMGNativeTheme.resolve(for: self)
+            // A flat list reads its headers as quiet section labels.
+            label.textColor = self.metrics.flattensGroups ? theme.secondary : theme.foreground
+            icon.isHidden = self.metrics.flattensGroups && groupIcon == nil
             icon.configure(controller: nil, icon: groupIcon ?? .systemSymbol("folder"), selected: false, activity: nil)
             // Section headers reuse the trailing slot for their tab count.
             shortcut.stringValue = count.map { "\($0)" } ?? ""
@@ -1035,10 +1074,14 @@ final class NativeTabCell: NSTableCellView {
         guard let tab = configuredTab, let presentation,
               let value = presentation(tab) else { return }
         let selected = self.selected
-        label.font = .systemFont(ofSize: metrics.titleFontSize)
         shortcut.stringValue = value.shortcut ?? ""
         let title = value.remoteBreadcrumb?.title ?? value.title
         let detail = value.showsSubtitle ? value.subtitle : nil
+        label.font = .systemFont(ofSize: metrics.titleFontSize,
+                                 weight: detail != nil && metrics.emphasizesNames ? .medium : .regular)
+        // A name is read from its start; a path keeps its host and its tail.
+        label.lineBreakMode = detail != nil ? .byTruncatingTail : .byTruncatingMiddle
+        if icon.isHidden { icon.isHidden = false }
         toolTip = AgentLogoStyle.toolTip(title: detail.map { "\(title)\n\($0)" } ?? title, activity: value.activity)
         icon.configure(controller: tab.controller, icon: value.icon, selected: selected, activity: value.activity)
         label.stringValue = title

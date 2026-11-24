@@ -491,9 +491,19 @@ extension TerminalController {
     /// This is `TerminalTabPresentationResolver.resolve` returning a subtitle,
     /// without building one: a few dictionary lookups, no path formatting.
     /// The sidebar asks for every row on every refresh to pick the row height.
-    var tabTitleHasSubtitle: Bool {
+    var tabTitleHasSubtitle: Bool { tabTitleHasSubtitle(activities: nil) }
+
+    /// - Parameter activities: The plugin status store the row resolves its
+    ///   Agent with, when it has one.
+    func tabTitleHasSubtitle(activities: TabActivityStore?) -> Bool {
         guard let surface = focusedSurface ?? surfaceTree.first else { return false }
-        return titleOverride != nil || agentConversationTitle(for: surface) != nil
+        // A tab named by the user, and every Agent tab while session titles
+        // are on: a sidebar row always names an Agent tab.
+        if titleOverride != nil { return true }
+        guard OhMyGhosttySettings.shared.agentSessionTitleMode != .off else { return false }
+        return agentResumeDescriptor(for: surface) != nil
+            || (focusedAgentActivity() ?? activities?.activity(for: tabSessionID))
+                .flatMap { SupportedAgent(rawValue: $0.source) } != nil
     }
 
     /// Starts looking up conversation titles for this tab's panes. Calling it

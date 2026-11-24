@@ -51,48 +51,112 @@ enum TerminalTabPresentationResolver {
         return .init(parts: parts, paneCount: controller.surfaceTree.count)
     }
 
+    /// Where a presentation is shown, which decides how much it can say.
+    enum Style {
+        /// Tab chrome with one line: horizontal tabs and window titles.
+        case chrome
+        /// A sidebar row, which has a second line for the place. An Agent
+        /// tab without a session name is named after its Agent.
+        case sidebar
+        /// A sidebar row of the inbox. Plain terminal rows also show where
+        /// they are instead of following `tabs.pathDisplay`.
+        case inbox
+    }
+
     static func resolve(_ controller: TerminalController, index: Int, selected: Bool,
                         activities: TabActivityStore?,
-                        icons: AnyGhosttyTabIconProvider = .init(CompositeGhosttyTabIconProvider(overrides: []))) -> GhosttyTabPresentation? {
+                        icons: AnyGhosttyTabIconProvider = .init(CompositeGhosttyTabIconProvider(overrides: [])),
+                        style: Style = .chrome) -> GhosttyTabPresentation? {
         guard let surface = controller.focusedSurface ?? controller.surfaceTree.first else { return nil }
         let settings = OhMyGhosttySettings.shared
         let session = controller.paneSessionContext(for: surface) ?? .init(workingDirectory: surface.pwd, terminalTitle: surface.title)
         let activity = controller.focusedAgentActivity() ?? activities?.activity(for: controller.tabSessionID)
         let descriptor = controller.agentResumeDescriptor(for: surface)
         let agent = activity.flatMap { SupportedAgent(rawValue: $0.source) } ?? descriptor?.agent
-        // A manual tab name wins over the conversation's own title.
-        let conversationTitle = controller.titleOverride == nil ? controller.agentConversationTitle(for: surface) : nil
         let restoredTitle = agent == nil ? controller.restoredTitleFallback(for: surface, terminalTitle: surface.title) : nil
         let pathTitle = agent == nil ? session.presentationTitle(pathDisplay: settings.tabPathDisplay)
             : session.agentPathTitle(pathDisplay: settings.tabPathDisplay, resumeDescriptor: descriptor)
-        let base = controller.titleOverride ?? conversationTitle ?? restoredTitle ?? pathTitle
-        // Title normalisation strips what an Agent adds to a terminal title;
-        // a conversation title is not one.
-        let title = conversationTitle ?? agent?.normalizedTitle(base) ?? base
-        // A manual tab name or a conversation title is a name that is not the
-        // path, so the place moves below it. `tabTitleHasSubtitle` is the same
+        let location = place(session: session, descriptor: descriptor)
+        // An Agent tab is named by the user, by its conversation, or by the
+        // title the Agent gives its terminal; in a sidebar row, where the
+        // place has its own line, else by the Agent itself. A plain terminal
+        // is named only by the user. `tabTitleHasSubtitle` is the sidebar's
         // rule without the formatting; keep the two in step.
-        let isNamed = controller.titleOverride != nil || conversationTitle != nil
-        let showsPath = !isNamed && restoredTitle == nil
-        let subtitle = isNamed
-            ? namedSubtitle(session: session, descriptor: descriptor, agent: agent, pathTitle: pathTitle) : nil
+        // With session titles off, an Agent tab shows its path as a terminal does.
+        let namesAgents = settings.agentSessionTitleMode != .off
+        let name: String? = controller.titleOverride ?? (namesAgents ? agent : nil).flatMap { agent in
+            controller.agentConversationTitle(for: surface)
+                ?? sessionName(fromTerminalTitle: surface.title, agent: agent, directory: location)
+                ?? (style == .chrome ? nil : agent.displayName)
+        }
+        let title: String
+        var breadcrumb: RemoteTabBreadcrumb?
+        if let name {
+            title = name
+        } else if let restoredTitle {
+            title = restoredTitle
+        } else if style == .inbox, case .local = session.state, let location {
+            title = location
+        } else {
+            title = agent?.normalizedTitle(pathTitle) ?? pathTitle
+            breadcrumb = session.remoteTabBreadcrumb
+        }
+        let subtitle = name == nil ? nil
+            : namedSubtitle(location: location, session: session, agent: agent, pathTitle: pathTitle)
         let context = GhosttyTabIconContext(tabID: controller.tabSessionID, title: title, activity: activity,
                                            defaultIcon: session.workspace?.icon ?? .systemSymbol(session.tabIconSystemName))
         // Both tab renderers prefer the breadcrumb over the title, so a named
         // tab carries the place only in its subtitle.
-        return .init(title: title, remoteBreadcrumb: showsPath ? session.remoteTabBreadcrumb : nil,
+        return .init(title: title, remoteBreadcrumb: breadcrumb,
                      subtitle: subtitle,
                      shortcut: settings.showShortcutLabels ? controller.tabShortcutLabel(for: index) : nil,
                      icon: icons.icon(for: context) ?? .systemSymbol("terminal"), activity: activity,
                      selected: selected, hovered: false)
     }
 
+    /// The name an Agent gave its session through the terminal title, such as
+    /// Claude Code's topic or a Codex thread name, without the decoration
+    /// around it.
+    ///
+    /// A terminal title is also what the shell leaves behind: the command
+    /// line that started the Agent. So a title only counts when it carries
+    /// the decoration that Agent is known to add; anything else is nil.
+    static func sessionName(fromTerminalTitle raw: String, agent: SupportedAgent, directory: String?) -> String? {
+        let title = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name: Substring
+        switch agent {
+        case .claude:
+            // "<spinner or status glyph> <topic>". A path or an option also
+            // starts with a symbol, but not one that stands alone.
+            guard let glyph = title.first, !glyph.isLetter, !glyph.isNumber, !"/~.-_$".contains(glyph),
+                  title.dropFirst().first == " " else { return nil }
+            name = title.dropFirst(2)
+        case .codex:
+            // "<thread name> | <project folder>".
+            guard let separator = title.range(of: " | ", options: .backwards) else { return nil }
+            name = title[..<separator.lowerBound]
+        case .pi, .omp:
+            // "π - <session name>"; `normalizedTitle` knows the prefixes.
+            let stripped = agent.normalizedTitle(title)
+            guard stripped != title else { return nil }
+            name = Substring(stripped)
+        default:
+            return nil
+        }
+        let cleaned = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let folder = directory.map { ($0 as NSString).lastPathComponent }
+        guard cleaned.count >= 2, cleaned.lowercased() != agent.displayName.lowercased(),
+              cleaned != folder, cleaned != directory else { return nil }
+        return AgentConversationTitleStore.displayTitle(
+            cleaned, columns: AgentConversationTitleStore.maximumTitleColumns)
+    }
+
     /// What a named tab shows below its name. Never empty, so every named tab
     /// has two lines: the place, else what the row showed before it had a
     /// name, else the Agent.
-    static func namedSubtitle(session: PaneSessionContext, descriptor: AgentResumeDescriptor?,
+    static func namedSubtitle(location: String?, session: PaneSessionContext,
                               agent: SupportedAgent?, pathTitle: String) -> String {
-        if let location = place(session: session, descriptor: descriptor) { return location }
+        if let location { return location }
         let previous = session.remoteTabBreadcrumb?.title ?? pathTitle
         if !previous.isEmpty { return previous }
         return agent?.displayName ?? "Terminal"

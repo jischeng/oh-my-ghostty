@@ -108,8 +108,8 @@ struct NativeAISettingsTests {
                 _ = try find(NSButton.self, "settings.ai.agent." + agent.rawValue, in: view)
             }
             _ = try find(NSButton.self, "settings.ai.provider." + provider.id.uuidString, in: view)
-            for identifier in ["settings.ai.provider.add", "settings.ai.commit.add-agent-models",
-                               "settings.ai.commit.add-api-models", "settings.ai.title.choose-model",
+            for identifier in ["settings.ai.provider.add", "settings.ai.commit.add-models",
+                               "settings.ai.title.choose-model",
                                "settings.ai.title.clear-model"] {
                 _ = try find(NSButton.self, identifier, in: view)
             }

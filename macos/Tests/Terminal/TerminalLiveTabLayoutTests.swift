@@ -317,13 +317,25 @@ struct TerminalLiveTabLayoutTests {
                 TerminalTabPresentationResolver.resolve(controller, index: 0, selected: true, activities: nil)
             )
             // The sidebar picks the row height from the cheap predicate.
-            #expect(controller.tabTitleHasSubtitle == (value.subtitle != nil))
+            let row = try #require(TerminalTabPresentationResolver.resolve(
+                controller, index: 0, selected: true, activities: nil, style: .sidebar))
+            #expect(controller.tabTitleHasSubtitle == (row.subtitle != nil))
             return value
         }
-        // A conversation without a stored title names its tab as before.
+        // A conversation without a stored title names its tab as before in
+        // tab chrome, which has one line.
         #expect(try resolved().title == path)
         #expect(try resolved().subtitle == nil)
         #expect(controller.tabAgentConversationTitle == nil)
+        // A sidebar row has a second line, so it names the Agent and puts the
+        // place below; the inbox row is the same.
+        for style in [TerminalTabPresentationResolver.Style.sidebar, .inbox] {
+            let row = try #require(TerminalTabPresentationResolver.resolve(
+                controller, index: 0, selected: true, activities: nil, style: style))
+            #expect(row.title == "Claude Code")
+            #expect(row.subtitle == "/tmp/project")
+            #expect(row.remoteBreadcrumb == nil)
+        }
 
         // The title belongs to the conversation; the tab's own tracker relays it.
         let store = AgentConversationTitleStore.shared
@@ -439,11 +451,64 @@ struct TerminalLiveTabLayoutTests {
         #expect(Resolver.place(session: bare, descriptor: remoteAgent) == "/srv/app")
 
         // Never empty: what the row showed before, else the Agent, else a word.
-        #expect(Resolver.namedSubtitle(session: bare, descriptor: nil, agent: .codex, pathTitle: "Terminal")
+        #expect(Resolver.namedSubtitle(location: nil, session: bare, agent: .codex, pathTitle: "Terminal")
             == "Terminal")
-        #expect(Resolver.namedSubtitle(session: bare, descriptor: nil, agent: .codex, pathTitle: "")
+        #expect(Resolver.namedSubtitle(location: nil, session: bare, agent: .codex, pathTitle: "")
             == SupportedAgent.codex.displayName)
-        #expect(Resolver.namedSubtitle(session: bare, descriptor: nil, agent: nil, pathTitle: "") == "Terminal")
+        #expect(Resolver.namedSubtitle(location: nil, session: bare, agent: nil, pathTitle: "") == "Terminal")
+    }
+
+    @Test func aTerminalTitleNamesASessionOnlyWithTheAgentsOwnDecoration() {
+        typealias Resolver = TerminalTabPresentationResolver
+        func name(_ title: String, _ agent: SupportedAgent, in directory: String? = "~/code/project") -> String? {
+            Resolver.sessionName(fromTerminalTitle: title, agent: agent, directory: directory)
+        }
+        // Claude Code leads its topic with a spinner or status glyph.
+        #expect(name("✳ Fix the login flow", .claude) == "Fix the login flow")
+        #expect(name("⠂ Fix the login flow", .claude) == "Fix the login flow")
+        #expect(name("✳ Claude Code", .claude) == nil)
+        // Codex appends the project after the thread name.
+        #expect(name("Write the DBX guide | project", .codex) == "Write the DBX guide")
+        #expect(name("编写南天门DBX链接文档 | chengjisheng", .codex, in: "~") == "编写南天门DBX链接文档")
+        #expect(name("π - Refactor parser", .pi) == "Refactor parser")
+        // What the shell leaves behind is the command line, not a name.
+        #expect(name("claude --resume 1234", .claude) == nil)
+        #expect(name("cd ~/code/project; claude", .claude) == nil)
+        #expect(name("/tmp/run-agent.sh", .claude) == nil)
+        #expect(name("~/code/project", .claude) == nil)
+        #expect(name("-zsh", .claude) == nil)
+        #expect(name("codex --yolo", .codex) == nil)
+        #expect(name("pi", .pi) == nil)
+        #expect(name("", .codex) == nil)
+        // The place alone is not a name either.
+        #expect(name("project | project", .codex) == nil)
+        // Agents without a known decoration are never named this way.
+        #expect(name("✳ Something", .opencode) == nil)
+    }
+
+    @Test func inboxRowsShowWhereAPlainTerminalIs() throws {
+        let fixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { fixture.close() }
+        let controller = try fixture.tab()
+        let surface = try #require(controller.surfaceTree.first)
+        surface.runtimeDescriptor = nil
+        surface.pwd = NSHomeDirectory() + "/code/project"
+        func row(_ style: TerminalTabPresentationResolver.Style) throws -> GhosttyTabPresentation {
+            try #require(TerminalTabPresentationResolver.resolve(
+                controller, index: 0, selected: true, activities: nil, style: style))
+        }
+        // The inbox shows the directory itself; the Tabs view and tab chrome
+        // keep following tabs.pathDisplay.
+        #expect(try row(.inbox).title == "~/code/project")
+        #expect(try row(.inbox).subtitle == nil)
+        #expect(try row(.sidebar).title == row(.chrome).title)
+        #expect(try row(.sidebar).subtitle == nil)
+        // A manual name is the title in every style, with the place below it.
+        controller.titleOverride = "Scratch"
+        for style in [TerminalTabPresentationResolver.Style.chrome, .sidebar, .inbox] {
+            #expect(try row(style).title == "Scratch")
+            #expect(try row(style).subtitle == "~/code/project")
+        }
     }
 
     @Test func aBoundConversationIsLookedUpAndNamesItsTab() async throws {

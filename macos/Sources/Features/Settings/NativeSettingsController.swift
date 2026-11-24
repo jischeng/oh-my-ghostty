@@ -35,6 +35,8 @@ final class NativeSettingsController: NSViewController, NSTableViewDataSource, N
     /// Seams of the AI page: where API keys are kept, how API connections are called
     /// and how the models of installed agents are discovered.
     var aiCredentials: AICredentialStore = .shared
+    /// An API connection added from the AI page and not edited yet; leaving it untouched discards it.
+    var aiConnectionDraft: UUID?
     var aiHTTPClient = AIHTTPClient()
     var aiAgentCatalog: AIAgentModelCatalog = .shared
     var hostChoices: @Sendable () async -> [SSHRegistrationChoice] = { await SSHConfigurationCatalog.choices(live: []) }

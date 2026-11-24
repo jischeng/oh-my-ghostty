@@ -21,7 +21,7 @@ extension NativeSettingsController {
             }
             link?.setAccessibilityIdentifier("settings.ai.agent." + agent.rawValue)
         }
-        form.addCustomRow(aiGroupHeader(strings.aiConnectionsGroup))
+        form.addCustomRow(aiGroupHeader(strings.aiConnectionsGroup) { [weak self] in self?.addConnection() })
         for provider in settings.aiProviders {
             let id = provider.id
             let link = form.link(provider.name, subtitle: strings.aiProviderSummary(provider)) { [weak self] in
@@ -29,22 +29,58 @@ extension NativeSettingsController {
             }
             link?.setAccessibilityIdentifier("settings.ai.provider." + id.uuidString)
         }
-        let add = SettingsActionButton(text("Add…", "添加…")) { [weak self] in
-            guard let self, let provider = self.settings.addAIProvider(name: self.strings.aiNewConnectionName) else {
-                return
-            }
-            self.showAIProvider(provider.id)
-        }
-        add.isEnabled = settings.aiProviders.count < AIProvider.maxProviders
-        add.setAccessibilityIdentifier("settings.ai.provider.add")
-        form.row(text("Add an API connection", "添加 API 连接"),
-                 subtitle: text("Any OpenAI-compatible or Anthropic endpoint, including a local server.",
-                                "任意 OpenAI 兼容或 Anthropic 端点，包括本地服务。"),
-                 control: add)
+        form.note(strings.aiProvidersFootnote)
     }
 
-    /// Small caption that splits one settings group into named parts.
-    private func aiGroupHeader(_ title: String) -> NSView {
+    /// A new connection starts as a draft with nothing in it. Leaving it
+    /// untouched discards it, so the list never collects empty connections.
+    private func addConnection() {
+        guard settings.aiProviders.count < AIProvider.maxProviders,
+              let provider = settings.addAIProvider(name: strings.aiNewConnectionName) else { return }
+        showAIProvider(provider.id)
+        aiConnectionDraft = provider.id
+    }
+
+    /// Called when an edited connection page is left.
+    private func discardPristineConnection(_ id: UUID) {
+        guard aiConnectionDraft == id else { return }
+        aiConnectionDraft = nil
+        guard let provider = settings.aiProvider(id),
+              provider.baseURL.isEmpty, provider.models.isEmpty,
+              provider.name == strings.aiNewConnectionName,
+              !aiCredentials.hasAPIKey(for: id) else { return }
+        try? settings.removeAIProvider(id)
+    }
+
+    /// The two ways to add a commit route, behind one button.
+    private func showAddModelsMenu() {
+        let menu = NSMenu()
+        let agent = NSMenuItem(title: text("Agent Models…", "Agent 模型…"), action: nil, keyEquivalent: "")
+        agent.action = #selector(addAgentModelsFromPage)
+        agent.target = self
+        let api = NSMenuItem(title: text("API Models…", "API 模型…"), action: nil, keyEquivalent: "")
+        api.action = #selector(addProviderModelsFromPage)
+        api.target = self
+        menu.addItem(agent)
+        menu.addItem(api)
+        guard let button = view.window.flatMap({ $0.contentView }) else {
+            menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+            return
+        }
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: button)
+    }
+
+    @objc private func addAgentModelsFromPage() {
+        GitCommitAISettingsPanel.presentAddModels(settings: settings, from: view.window)
+    }
+
+    @objc private func addProviderModelsFromPage() {
+        GitCommitAISettingsPanel.presentAddProviderModels(settings: settings, from: view.window)
+    }
+
+    /// Small caption that splits one settings group into named parts, with an
+    /// optional trailing action such as adding a connection.
+    private func aiGroupHeader(_ title: String, action: (() -> Void)? = nil) -> NSView {
         let label = NSTextField(labelWithString: title)
         label.font = .systemFont(ofSize: 11, weight: .semibold)
         label.textColor = .secondaryLabelColor
@@ -53,24 +89,36 @@ extension NativeSettingsController {
         header.addSubview(label)
         NSLayoutConstraint.activate([
             label.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 16),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: header.trailingAnchor, constant: -16),
             label.topAnchor.constraint(equalTo: header.topAnchor, constant: 10),
             label.bottomAnchor.constraint(equalTo: header.bottomAnchor, constant: -6),
         ])
+        if let action {
+            let button = SettingsActionButton(text("+", "＋"), action: action)
+            button.setAccessibilityLabel(strings.aiAddConnectionHelp)
+            button.setAccessibilityIdentifier("settings.ai.provider.add")
+            button.translatesAutoresizingMaskIntoConstraints = false
+            header.addSubview(button)
+            NSLayoutConstraint.activate([
+                button.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -16),
+                button.centerYAnchor.constraint(equalTo: label.centerYAnchor),
+                label.trailingAnchor.constraint(lessThanOrEqualTo: button.leadingAnchor, constant: -8),
+            ])
+        } else {
+            label.trailingAnchor.constraint(lessThanOrEqualTo: header.trailingAnchor, constant: -16).isActive = true
+        }
         return header
     }
 
-    /// CLI state from the last Agent check and the number of models last discovered.
+    /// CLI state from the last Agent check, then the model count once known.
     private func aiAgentSummary(_ agent: GitCommitAgent, snapshot: AgentIntegrationSnapshot?) -> String {
-        var parts: [String] = []
-        if let cli = SupportedAgent(rawValue: agent.rawValue).flatMap({ snapshot?.cli[$0] }) {
-            parts.append(cli.path == nil ? text("CLI not detected", "未发现 CLI")
-                         : cli.displayVersion ?? text("Installed", "已安装"))
-        }
+        let cli = SupportedAgent(rawValue: agent.rawValue).flatMap { snapshot?.cli[$0] }
+        // The version often repeats the Agent ("2.1.331 (Claude Code)"); the row already says who it is.
+        let version = cli?.displayVersion?.replacingOccurrences(
+            of: " (" + agent.title + ")", with: "", options: .anchored)
+        var parts = [cli?.path == nil ? text("Not installed", "未安装")
+                     : version ?? text("Installed", "已安装")]
         if let models = aiAgentCatalog.entry(agent).models {
             parts.append(strings.aiModelCount(models.count))
-        } else {
-            parts.append(text("Models not loaded yet", "尚未加载模型"))
         }
         return parts.joined(separator: " · ")
     }
@@ -93,7 +141,10 @@ extension NativeSettingsController {
         }
         let route = "ai-provider:" + id.uuidString
         push(provider.name, route: route,
-             previous: { [weak self] in self?.select(.agents) },
+             previous: { [weak self] in
+                 self?.select(.agents)
+                 self?.discardPristineConnection(id)
+             },
              build: { [weak self] form in
                  guard let self else { return }
                  let page = AIProviderPage(controller: self, provider: id, route: route)
@@ -107,19 +158,9 @@ extension NativeSettingsController {
     private func aiTaskModels(_ form: NativeSettingsForm) {
         form.section(strings.aiTaskModelsSection)
         form.addCustomRow(aiGroupHeader(strings.aiCommitModelsGroup))
-        let addAgentModels = SettingsActionButton(text("Add Agent Models…", "添加 Agent 模型…")) { [weak self] in
-            guard let self else { return }
-            GitCommitAISettingsPanel.presentAddModels(settings: self.settings, from: self.view.window)
-        }
-        addAgentModels.setAccessibilityIdentifier("settings.ai.commit.add-agent-models")
-        let addAPIModels = SettingsActionButton(text("Add API Models…", "添加 API 模型…")) { [weak self] in
-            guard let self else { return }
-            GitCommitAISettingsPanel.presentAddProviderModels(settings: self.settings, from: self.view.window)
-        }
-        addAPIModels.setAccessibilityIdentifier("settings.ai.commit.add-api-models")
-        let addButtons = NSStackView(views: [addAgentModels, addAPIModels])
-        addButtons.spacing = 8
-        let models = form.row(text("Models", "模型"), control: addButtons)
+        let addModels = SettingsActionButton(strings.aiAddModels) { [weak self] in self?.showAddModelsMenu() }
+        addModels.setAccessibilityIdentifier("settings.ai.commit.add-models")
+        let models = form.row(text("Models", "模型"), control: addModels)
         let coordinator = GitCommitAIRoutesTable.Coordinator(settings: settings)
         let routes = GitCommitAIRoutesTable.makeNativeView(coordinator: coordinator)
         routes.hasVerticalScroller = false
@@ -170,7 +211,8 @@ extension NativeSettingsController {
         clear.setAccessibilityIdentifier("settings.ai.title.clear-model")
         let titleButtons = NSStackView(views: [choose, clear])
         titleButtons.spacing = 8
-        let titleModel = form.row(strings.aiTitleModelLabel, subtitle: aiTitleModelSummary(), control: titleButtons)
+        let titleModel = form.row(strings.aiTitleModelLabel, subtitle: aiTitleModelSummary(),
+                                  control: titleButtons, help: strings.aiTitleModelCaption)
         let syncTitleModel = { [weak self, weak clear, weak titlePopup] in
             guard let self else { return }
             titleModel?.setSubtitle(self.aiTitleModelSummary())
@@ -418,11 +460,6 @@ final class AIProviderPage {
 
     private func text(_ en: String, _ zh: String) -> String { strings.t(en, zh) }
 
-    private var urlHint: String {
-        text("The root of the API, such as https://api.openai.com or http://localhost:11434/v1.",
-             "API 的根地址，例如 https://api.openai.com 或 http://localhost:11434/v1。")
-    }
-
     func build(in form: NativeSettingsForm) {
         guard let provider = settings.aiProvider(id) else { return }
         buildConnection(provider, in: form)
@@ -431,10 +468,9 @@ final class AIProviderPage {
         form.section(text("Manage", "管理"))
         let remove = SettingsActionButton(text("Remove…", "移除…")) { [weak self] in self?.confirmRemoval() }
         remove.setAccessibilityIdentifier("settings.ai.provider.remove")
-        form.row(text("Remove this connection", "移除此连接"),
-                 subtitle: text("Also deletes its stored API key and the model choices that use it.",
-                                "同时删除已保存的 API 密钥，以及使用它的模型选择。"),
-                 control: remove)
+        form.row(text("Remove this connection", "移除此连接"), control: remove,
+                 help: text("Also deletes its stored API key and the model choices that use it.",
+                            "同时删除已保存的 API 密钥，以及使用它的模型选择。"))
 
         // Delivered after the change, so `sync` reads the settings as they are by then.
         subscription = settings.$aiProviders.receive(on: RunLoop.main).sink { [weak self] _ in self?.sync() }
@@ -463,7 +499,7 @@ final class AIProviderPage {
         urlField.placeholderString = SettingsStrings.aiBaseURLPlaceholder(provider.kind)
         urlField.commit = { [weak self] in self?.commitURL($0) }
         urlField.setAccessibilityIdentifier("settings.ai.provider.base-url")
-        urlRow = form.row(text("Base URL", "基础 URL"), subtitle: urlHint, control: urlField)
+        urlRow = form.row(text("Base URL", "基础 URL"), control: urlField)
 
         keyField.commit = { [weak self] in self?.commitKey($0) }
         keyField.setAccessibilityLabel(text("API key", "API 密钥"))
@@ -481,15 +517,14 @@ final class AIProviderPage {
             self.settings.updateAIProvider(self.id) { $0.enabled = value }
         }
         enabled.setAccessibilityIdentifier("settings.ai.provider.enabled")
-        form.row(text("Enabled", "启用"),
-                 subtitle: text("When off, tasks skip this connection's models.", "停用后，各任务会跳过此连接的模型。"),
-                 control: enabled)
+        form.row(text("Enabled", "启用"), control: enabled,
+                 help: text("When off, tasks skip this connection's models.", "停用后，各任务会跳过此连接的模型。"))
     }
 
     private func buildModels(_ provider: AIProvider, in form: NativeSettingsForm) {
         form.section(text("Models", "模型"),
-                     caption: text("Limits are in tokens; 128k and 200,000 are accepted. Leave a limit blank for the default: OMG asks for up to 1,024 output tokens for a tab title and 4,096 for a Git message, and checks the prompt size only when a context window is set.",
-                                   "限制以 token 为单位，可输入 128k 或 200,000。留空则使用默认值：OMG 为标签标题最多请求 1,024 个输出 token，为 Git 信息最多请求 4,096 个；仅在设置了上下文窗口时才检查提示词大小。"))
+                     caption: text("Limits are in tokens and accept 128k. Left blank, OMG asks for 1,024 output tokens for a tab title and 4,096 for a Git message.",
+                                   "限制以 token 为单位，可输入 128k。留空时，OMG 为标签标题请求 1,024 个输出 token，为 Git 信息请求 4,096 个。"))
         fetchButton.title = text("Fetch Models", "获取模型")
         fetchButton.invoke = { [weak self] in self?.fetchModels() }
         fetchButton.setAccessibilityIdentifier("settings.ai.provider.fetch-models")
@@ -508,9 +543,8 @@ final class AIProviderPage {
         addButton.setAccessibilityIdentifier("settings.ai.provider.add-model")
         let addControls = NSStackView(views: [addField, addButton])
         addControls.spacing = 8
-        form.row(text("Add a model ID", "手动添加模型 ID"),
-                 subtitle: text("For services that do not list their models.", "适用于不提供模型列表的服务。"),
-                 control: addControls)
+        form.row(text("Add a model ID", "添加模型 ID"), control: addControls,
+                 help: text("For services that do not list their models.", "适用于不提供模型列表的服务。"))
 
         form.addChild(list)
         _ = list.view
@@ -550,14 +584,14 @@ final class AIProviderPage {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             settings.updateAIProvider(id) { $0.baseURL = "" }
-            urlRow?.setSubtitle(urlHint)
+            urlRow?.setSubtitle("")
             return
         }
         do {
             let normalized = try AIEndpoint.validatedBaseURL(trimmed).absoluteString
             settings.updateAIProvider(id) { $0.baseURL = normalized }
             urlField.stringValue = normalized
-            urlRow?.setSubtitle(urlHint)
+            urlRow?.setSubtitle("")
         } catch {
             // The stored URL stays as it was; the row says what to fix.
             urlRow?.setSubtitle(strings.aiBaseURLProblem(error as? AIEndpointError ?? .invalidURL))

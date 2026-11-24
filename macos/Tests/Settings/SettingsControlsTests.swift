@@ -281,11 +281,13 @@ struct SettingsControlsTests {
         #expect(value == "first")
     }
 
-    @Test func agentIsAStandalonePageAndHasConsistentName() {
+    @Test func aiIsAStandalonePageThatKeepsItsIdentifier() {
         #expect(OhMyGhosttySettingsTab.navigationOrder.filter { $0 == .agents }.count == 1)
+        // Deep links and the notification payload still address the page as `agents`.
+        #expect(OhMyGhosttySettingsTab.agents.rawValue == "agents")
         for language in [OhMyGhosttyLanguage.english, .simplifiedChinese] {
             let strings = SettingsStrings(language: language)
-            #expect(strings.tabTitle(.agents) == "Agent")
+            #expect(strings.tabTitle(.agents) == "AI")
             #expect(strings.agentIntegrationSection == "Agent")
         }
     }

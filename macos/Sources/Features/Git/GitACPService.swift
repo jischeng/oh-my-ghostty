@@ -56,7 +56,7 @@ struct GitACPSessionStore {
     }
 
     static func key(repository: GitRepositoryIdentity, route: GitCommitAIRoute, style: String) -> String {
-        let data = Data([repository.stateKey, route.agent.rawValue, route.model, style].joined(separator: "\0").utf8)
+        let data = Data([repository.stateKey, route.agent?.rawValue ?? "", route.model, style].joined(separator: "\0").utf8)
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }
@@ -85,6 +85,8 @@ actor GitACPService {
     }
 
     func generate(repository: GitRepositoryIdentity, route: GitCommitAIRoute, style: String, prompt: String) async throws -> String {
+        // Routes through an API connection never reach ACP; the route loop sends them over HTTP.
+        guard let agent = route.agent else { throw GitCommitAIError("Invalid ACP response.") }
         let key = GitACPSessionStore.key(repository: repository, route: route, style: style)
         guard busy.insert(key).inserted else { throw GitCommitAIError("This ACP session is busy. Try again shortly.") }
         defer { busy.remove(key) }
@@ -110,7 +112,7 @@ actor GitACPService {
                     sessions.removeValue(forKey: oldest.key)
                     await oldest.value.connection.stop()
                 }
-                let new = try await connect(agent: route.agent)
+                let new = try await connect(agent: agent)
                 do {
                     guard new.models.ids.contains(route.model) else {
                         throw GitCommitAIError("The configured model is not advertised by this ACP adapter. Add it again from the model list.")
@@ -136,7 +138,7 @@ actor GitACPService {
             session.bytes += prompt.utf8.count
             session.lastUsed = Date()
             sessions[key] = session
-            let record: [String: Any] = ["agent": route.agent.rawValue, "model": route.model,
+            let record: [String: Any] = ["agent": agent.rawValue, "model": route.model,
                 "sessionId": session.id, "message": result, "createdAt": Date().timeIntervalSince1970]
             let data = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])
             let file = session.directory.appendingPathComponent("turn-\(session.turns).json")

@@ -9,7 +9,7 @@ protocol AITitleGenerating: Sendable {
 /// Generates conversation titles with a bounded background channel: at most two
 /// requests in flight, a short queue, and a breaker that pauses after repeated failures.
 actor AITitleService: AITitleGenerating {
-    /// Resolves the configured endpoint from settings and the credential store; nil disables generation.
+    /// Resolves the tab-title model from settings and the credential store; nil disables generation.
     typealias EndpointProvider = @Sendable () async -> AIEndpoint?
 
     struct Limits: Sendable {
@@ -47,18 +47,15 @@ actor AITitleService: AITitleGenerating {
         self.limits = limits
     }
 
-    /// Reads the endpoint OMG is configured to use, outside the settings actor.
+    /// Reads the model chosen for tab titles (`ai.routes.title`) with its API connection
+    /// and key, outside the settings actor. No choice, or a disabled connection, is nil.
     @Sendable
     nonisolated static func configuredEndpoint() async -> AIEndpoint? {
         await MainActor.run {
             let settings = OhMyGhosttySettings.shared
             guard settings.agentSessionTitleMode == .generate else { return nil }
-            return AIEndpoint.configured(
-                kind: settings.aiEndpointProtocol,
-                baseURL: settings.aiEndpointBaseURL,
-                model: settings.aiEndpointModel,
-                apiKey: AICredentialStore.shared.apiKey()
-            )
+            return AIProviderDirectory(providers: settings.aiProviders, credentials: .shared)
+                .titleEndpoint(settings.aiTitleRoute)
         }
     }
 
@@ -99,22 +96,30 @@ actor AITitleService: AITitleGenerating {
         note(outcome, for: endpoint)
         switch outcome {
         case .success(let title): return title
-        case .failure: return nil
+        case .failure, .cancelled: return nil
         }
     }
 
     private enum Outcome: Sendable {
         case success(String?)
         case failure(AIHTTPError?)
+        /// The caller gave up; that says nothing about the endpoint's health.
+        case cancelled
     }
 
     private func send(_ message: String, endpoint: AIEndpoint) async -> Outcome {
         do {
-            let title = try await client.complete(user: message, endpoint: endpoint)
+            let title = try await client.complete(
+                user: message,
+                endpoint: endpoint,
+                maxOutputTokens: endpoint.maxOutputTokens ?? AIHTTPClient.Options.title.maxOutputTokens
+            )
             guard !Task.isCancelled else { return .success(nil) }
             return .success(title)
         } catch let error as AIHTTPError {
             return .failure(error)
+        } catch is CancellationError {
+            return .cancelled
         } catch {
             return .failure(nil)
         }
@@ -137,6 +142,8 @@ actor AITitleService: AITitleGenerating {
     private func note(_ outcome: Outcome, for endpoint: AIEndpoint) {
         guard sameConfiguration(currentEndpoint, endpoint) else { return }
         switch outcome {
+        case .cancelled:
+            break
         case .success:
             consecutiveFailures = 0
             authBlocked = false

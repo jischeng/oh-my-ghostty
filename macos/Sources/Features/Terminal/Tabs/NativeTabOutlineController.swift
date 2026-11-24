@@ -2,6 +2,37 @@ import AppKit
 import Combine
 import SwiftUI
 
+/// Row geometry of the tab list. The Tabs view follows the row density
+/// setting; the inbox has roomier rows.
+struct NativeTabRowMetrics: Equatable {
+    /// Height of a tab row with a title only.
+    var rowHeight: CGFloat
+    /// Height of a section header row.
+    var headerHeight: CGFloat
+    var titleFontSize: CGFloat = 13
+    var headerFontSize: CGFloat = 11
+    var subtitleFontSize: CGFloat = 11
+    /// Height of the subtitle's line of text at `subtitleFontSize`.
+    var subtitleLineHeight: CGFloat = 14
+    /// Gap between the title and the subtitle below it.
+    var subtitleSpacing: CGFloat = 0
+
+    /// What a row gains for its subtitle.
+    var subtitleBlockHeight: CGFloat { subtitleSpacing + subtitleLineHeight }
+    var twoLineRowHeight: CGFloat { rowHeight + subtitleBlockHeight }
+
+    func height(twoLine: Bool) -> CGFloat { twoLine ? twoLineRowHeight : rowHeight }
+
+    /// The Tabs view: every row follows `tabs.rowDensity`.
+    static func tabs(rowHeight: CGFloat) -> Self {
+        .init(rowHeight: rowHeight, headerHeight: rowHeight)
+    }
+
+    /// The inbox: 36 pt rows, 54 pt with a 12 pt subtitle.
+    static let inbox = Self(rowHeight: 36, headerHeight: 30, subtitleFontSize: 12,
+                            subtitleLineHeight: 15, subtitleSpacing: 3)
+}
+
 /// AppKit presentation over the existing native-window tab model.
 /// Stable nodes keep selection-only updates from rebuilding the outline.
 struct NativeTabOutlineConfiguration {
@@ -9,7 +40,7 @@ struct NativeTabOutlineConfiguration {
     let selectedID: ObjectIdentifier?
     let layoutState: VerticalTabWindowLayoutState
     let controller: TerminalController
-    let rowHeight: CGFloat
+    let metrics: NativeTabRowMetrics
     /// False while the rows show a display-only order (the inbox): no row can
     /// be dragged and no drop can be placed relative to a row.
     var allowsReordering = true
@@ -180,7 +211,7 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
     }
 
     func update(_ value: NativeTabOutlineConfiguration) {
-        let rowHeightChanged = configuration.rowHeight != value.rowHeight
+        let metricsChanged = configuration.metrics != value.metrics
         configuration = value
         outline.setAccessibilityLabel(ChromeStrings.current.tabs)
         updating = true
@@ -231,7 +262,7 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
         // Flat <-> grouped transitions always take the reload path below, so
         // existing cell views pick up the new leading inset.
         outline.reservesDisclosureSpace = roots.contains { $0.tab == nil }
-        outline.rowHeight = value.rowHeight
+        outline.rowHeight = value.metrics.rowHeight
         if structure != nextStructure {
             structure = nextStructure
             let newRoots = roots.map(\.key)
@@ -268,7 +299,7 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
                 outline.collapseItem(item)
             }
         }
-        if rowHeightChanged, outline.numberOfRows > 0 {
+        if metricsChanged, outline.numberOfRows > 0 {
             noteHeights(IndexSet(integersIn: 0..<outline.numberOfRows))
         } else {
             noteHeights(IndexSet(resized.map { outline.row(forItem: $0) }.filter { $0 >= 0 }))
@@ -319,12 +350,10 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
 
     func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? { NativeTabRowView() }
 
-    static func rowHeight(base: CGFloat, twoLine: Bool) -> CGFloat {
-        twoLine ? base + NativeTabCell.subtitleLineHeight : base
-    }
-
     func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
-        Self.rowHeight(base: configuration.rowHeight, twoLine: (item as? NativeTabNode)?.isTwoLine == true)
+        let metrics = configuration.metrics
+        guard let node = item as? NativeTabNode else { return metrics.rowHeight }
+        return node.tab == nil ? metrics.headerHeight : metrics.height(twoLine: node.isTwoLine)
     }
 
     private func noteHeights(_ rows: IndexSet) {
@@ -378,7 +407,7 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
 
     private func configure(_ cell: NativeTabCell, item: NativeTabNode) {
         cell.configure(tab: item.tab, title: item.title, presentation: configuration.presentation,
-                       groupIcon: item.icon, count: item.count,
+                       groupIcon: item.icon, count: item.count, metrics: configuration.metrics,
                        canClose: configuration.groups.reduce(0) { $0 + $1.tabs.count } > 1,
                        selected: item.tab?.id == configuration.selectedID,
                        select: { [weak self, weak item] in
@@ -605,7 +634,7 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
             update(NativeTabOutlineConfiguration(
                 groups: groups, selectedID: configuration.layoutState.tabSnapshot.selectedID,
                 layoutState: configuration.layoutState, controller: configuration.controller,
-                rowHeight: configuration.rowHeight, showsSubtitle: configuration.showsSubtitle,
+                metrics: configuration.metrics, showsSubtitle: configuration.showsSubtitle,
                 presentation: configuration.presentation
             ))
         }
@@ -804,8 +833,7 @@ private final class NativeTabRowView: NativeHoverRowView {
 /// AppKit cells observe their own title changes instead of invalidating the list.
 @MainActor
 final class NativeTabCell: NSTableCellView {
-    /// Height a row gains for its subtitle line.
-    static let subtitleLineHeight: CGFloat = 14
+    private var metrics = NativeTabRowMetrics.tabs(rowHeight: 28)
     private let icon = NativeTabIconView()
     private let label = NSTextField(labelWithString: "")
     private let subtitle = NSTextField(labelWithString: "")
@@ -822,6 +850,7 @@ final class NativeTabCell: NSTableCellView {
     private var refreshScheduled = false
     private var canClose = false
     private var stackCenterY: NSLayoutConstraint?
+    private var subtitleTop: NSLayoutConstraint?
     private var layoutChanged: (() -> Void)?
     /// Subtitle visibility last rendered for the configured tab.
     private var renderedTwoLine: Bool?
@@ -848,10 +877,10 @@ final class NativeTabCell: NSTableCellView {
         super.init(frame: frame)
         closeButton.title = ""
         label.lineBreakMode = .byTruncatingMiddle
-        label.font = .systemFont(ofSize: 13)
+        label.font = .systemFont(ofSize: metrics.titleFontSize)
         // Middle truncation keeps both the host and the directory tail.
         subtitle.lineBreakMode = .byTruncatingMiddle
-        subtitle.font = .systemFont(ofSize: 11)
+        subtitle.font = .systemFont(ofSize: metrics.subtitleFontSize)
         subtitle.textColor = .secondaryLabelColor
         subtitle.isHidden = true
         shortcut.font = .systemFont(ofSize: 10)
@@ -889,6 +918,8 @@ final class NativeTabCell: NSTableCellView {
         addSubview(subtitle)
         let centerY = stack.centerYAnchor.constraint(equalTo: centerYAnchor)
         stackCenterY = centerY
+        let subtitleTop = subtitle.topAnchor.constraint(equalTo: label.bottomAnchor, constant: metrics.subtitleSpacing)
+        self.subtitleTop = subtitleTop
         // AppKit briefly sizes newly attached cells below their icon footprint.
         // Keep their content intact without unsatisfiable required constraints.
         let trailingConstraint = stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -9)
@@ -899,7 +930,7 @@ final class NativeTabCell: NSTableCellView {
             centerY,
             subtitle.leadingAnchor.constraint(equalTo: label.leadingAnchor),
             subtitle.trailingAnchor.constraint(equalTo: label.trailingAnchor),
-            subtitle.topAnchor.constraint(equalTo: label.bottomAnchor),
+            subtitleTop,
             icon.widthAnchor.constraint(equalToConstant: TabIconMetrics.footprint),
             icon.heightAnchor.constraint(equalToConstant: TabIconMetrics.footprint),
             status.widthAnchor.constraint(equalToConstant: 14),
@@ -918,9 +949,15 @@ final class NativeTabCell: NSTableCellView {
     func configure(tab: GhosttyOrganizedTab?, title: String?,
                    presentation: @escaping (GhosttyOrganizedTab) -> GhosttyTabPresentation?,
                    groupIcon: GhosttyTabIcon? = nil, count: Int? = nil,
+                   metrics: NativeTabRowMetrics? = nil,
                    canClose: Bool, selected: Bool, select: @escaping () -> Void,
                    close: @escaping () -> Void, layoutChanged: (() -> Void)? = nil) {
         closeButton.setAccessibilityLabel(ChromeStrings.current.closeTab)
+        if let metrics, metrics != self.metrics {
+            self.metrics = metrics
+            subtitle.font = .systemFont(ofSize: metrics.subtitleFontSize)
+            subtitleTop?.constant = metrics.subtitleSpacing
+        }
         let changedController = configuredTab?.controller !== tab?.controller
         if tab == nil || changedController {
             observations.removeAll()
@@ -941,7 +978,7 @@ final class NativeTabCell: NSTableCellView {
             self.presentation = nil
             selectAction = nil
             label.stringValue = title ?? ""
-            label.font = .systemFont(ofSize: 11, weight: .semibold)
+            label.font = .systemFont(ofSize: self.metrics.headerFontSize, weight: .semibold)
             icon.configure(controller: nil, icon: groupIcon ?? .systemSymbol("folder"), selected: false, activity: nil)
             // Section headers reuse the trailing slot for their tab count.
             shortcut.stringValue = count.map { "\($0)" } ?? ""
@@ -998,7 +1035,7 @@ final class NativeTabCell: NSTableCellView {
         guard let tab = configuredTab, let presentation,
               let value = presentation(tab) else { return }
         let selected = self.selected
-        label.font = .systemFont(ofSize: 13)
+        label.font = .systemFont(ofSize: metrics.titleFontSize)
         shortcut.stringValue = value.shortcut ?? ""
         let title = value.remoteBreadcrumb?.title ?? value.title
         let detail = value.showsSubtitle ? value.subtitle : nil
@@ -1024,7 +1061,7 @@ final class NativeTabCell: NSTableCellView {
         subtitle.stringValue = text ?? ""
         if subtitle.isHidden != (text == nil) { subtitle.isHidden = text == nil }
         // Title and subtitle stay centred in the row as one block.
-        let offset = text == nil ? 0 : -Self.subtitleLineHeight / 2
+        let offset = text == nil ? 0 : -metrics.subtitleBlockHeight / 2
         if stackCenterY?.constant != offset { stackCenterY?.constant = offset }
     }
 

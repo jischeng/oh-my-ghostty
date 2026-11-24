@@ -82,6 +82,9 @@ final class TerminalRestorableState: TerminalRestorable {
     var tabCreatedAt: Date? {
         internalState.tabCreatedAt
     }
+    var tabLastInteractionAt: Date? {
+        internalState.tabLastInteractionAt
+    }
 
     /// Internal State we use to perform unit tests
     ///
@@ -178,7 +181,8 @@ class TerminalWindowRestoration: NSObject, NSWindowRestoration {
             appDelegate.ghostty,
             withSurfaceTree: state.surfaceTree,
             tabSessionID: state.tabSessionID,
-            tabCreatedAt: state.tabCreatedAt)
+            tabCreatedAt: state.tabCreatedAt,
+            tabLastInteractionAt: state.tabLastInteractionAt)
         guard let window = c.window else {
             completionHandler(nil, TerminalRestoreError.windowDidNotLoad)
             return

@@ -144,7 +144,7 @@ struct GitCommitComposer: View {
     }
 
     private func requestGeneration(from window: NSWindow?) {
-        guard !settings.gitCommitAIRoutes.isEmpty else { SettingsNavigation.open(.git); return }
+        guard !settings.gitCommitAIRoutes.isEmpty else { SettingsNavigation.open(.agents); return }
         guard !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             startGeneration()
             return
@@ -185,19 +185,20 @@ struct GitCommitComposer: View {
         noticeExpires = false
         noticeID = UUID()
         let customPrompt = settings.gitCommitAIPrompt
+        let generator = GitCommitAIService(providers: settings.aiProviderDirectory())
         generation = Task { @MainActor in
             defer {
                 if generationID == id { generationID = nil; generation = nil }
             }
             do {
-                let result = try await GitCommitAIService().generate(repository: repository, routes: routes, customPrompt: customPrompt)
+                let result = try await generator.generate(repository: repository, routes: routes, customPrompt: customPrompt)
                 guard !Task.isCancelled, generationID == id else { return }
                 guard draftRevision == revision else {
                     notice = GitL10n.text("Your draft changed during generation. It was not replaced; generate again.")
                     return
                 }
                 message = result.message
-                notice = (result.attempt > 1 ? GitL10n.text("Generated using fallback: ") : GitL10n.text("Generated using: ")) + result.route.title
+                notice = (result.attempt > 1 ? GitL10n.text("Generated using fallback: ") : GitL10n.text("Generated using: ")) + result.routeTitle
                 noticeExpires = true
                 noticeID = UUID()
             } catch {

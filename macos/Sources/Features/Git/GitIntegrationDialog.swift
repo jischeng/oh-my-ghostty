@@ -310,9 +310,10 @@ final class GitIntegrationDialogController: NSViewController, NSTextViewDelegate
     @objc private func generate() {
         guard !didFinish, !isBusy, valid else { return }
         let settings = OhMyGhosttySettings.shared
-        guard !settings.gitCommitAIRoutes.isEmpty else { SettingsNavigation.open(.git); return }
+        guard !settings.gitCommitAIRoutes.isEmpty else { SettingsNavigation.open(.agents); return }
         let routes = settings.gitCommitAIRoutes
         let style = settings.gitCommitAIPrompt
+        let providers = settings.aiProviderDirectory()
         let expectedRevision = revision
         setBusy(true)
         statusField.stringValue = ""
@@ -329,10 +330,10 @@ final class GitIntegrationDialogController: NSViewController, NSTextViewDelegate
                 Style: \(style)
                 \(GitCommitAIService.contextJSON(patch: Data(patch.utf8), history: Data()))
                 """
-                let generator = GitCommitAIService { route, text in
+                let generator = GitCommitAIService(invoke: { route, text in
                     try await GitACPService.shared.generate(repository: self.repository, route: route,
                         style: "operation/" + self.kind.rawValue + "/" + style, prompt: text)
-                }
+                }, providers: providers)
                 let result = try await generator.generate(routes: routes, prompt: prompt)
                 guard !Task.isCancelled, revision == expectedRevision,
                       try await service.resolve(value.source) == value.sourceSHA,

@@ -28,12 +28,25 @@ struct AIEndpoint: Equatable, Sendable {
     let baseURL: URL
     let model: String
     let apiKey: String?
+    /// Output budget requested for this model, in tokens; nil uses the caller's default.
+    let maxOutputTokens: UInt?
+    /// Size of the model's context window, in tokens; nil when unknown.
+    let contextWindow: Int?
 
-    init(kind: AIEndpointProtocol, baseURL: URL, model: String, apiKey: String? = nil) {
+    init(
+        kind: AIEndpointProtocol,
+        baseURL: URL,
+        model: String,
+        apiKey: String? = nil,
+        maxOutputTokens: UInt? = nil,
+        contextWindow: Int? = nil
+    ) {
         self.kind = kind
         self.baseURL = baseURL
         self.model = model
         self.apiKey = apiKey
+        self.maxOutputTokens = maxOutputTokens
+        self.contextWindow = contextWindow
     }
 
     /// The endpoint described by user-entered values, or nil while it is incomplete or invalid.
@@ -41,12 +54,15 @@ struct AIEndpoint: Equatable, Sendable {
         kind: AIEndpointProtocol,
         baseURL: String,
         model: String,
-        apiKey: String?
+        apiKey: String?,
+        maxOutputTokens: UInt? = nil,
+        contextWindow: Int? = nil
     ) -> AIEndpoint? {
         let model = model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !model.isEmpty, let url = try? validatedBaseURL(baseURL) else { return nil }
         let key = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return AIEndpoint(kind: kind, baseURL: url, model: model, apiKey: key?.isEmpty == false ? key : nil)
+        return AIEndpoint(kind: kind, baseURL: url, model: model, apiKey: key?.isEmpty == false ? key : nil,
+                          maxOutputTokens: maxOutputTokens, contextWindow: contextWindow)
     }
 
     /// Validates a user-entered base URL. A pasted request URL is cut back to its base.

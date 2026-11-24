@@ -58,19 +58,46 @@ struct AgentHistoryRemoteAccess: Sendable {
     /// batch command over SSH. Existing directories are checked first so that
     /// missing agent directories on the remote host never cause `find` to fail
     /// or exit with a non-zero status.
+    ///
+    /// - Parameter conversationID: Looks for that one conversation. A file
+    ///   whose path holds the ID is read whatever its age, and then nothing
+    ///   else is; `updatedAfter` bounds the search only when no path does.
     func discoverSessions(
         relativeRoots: [String],
         maximumSessions: Int,
-        updatedAfter: Date? = nil
+        updatedAfter: Date? = nil,
+        conversationID: AgentConversationID? = nil
     ) async throws -> [AgentHistoryRemoteChunk] {
         let safeRoots = relativeRoots.filter { !$0.isEmpty && !$0.contains("'") }
         guard !safeRoots.isEmpty else { return [] }
         let boundedLimit = min(max(maximumSessions, 1), AgentHistoryStore.maximumSessions)
         let rootsJSON = String(data: try JSONEncoder().encode(safeRoots), encoding: .utf8)!
+        let minimumModified = updatedAfter.map { String($0.timeIntervalSince1970) } ?? "-inf"
+        // An ID is letters, digits, `.`, `_` and `-`; quoted all the same.
+        let conversation = Self.shellQuote(conversationID?.rawValue ?? "")
         let script = """
-        python3 - \(Self.shellQuote(rootsJSON)) \(boundedLimit) \(updatedAfter.map { String($0.timeIntervalSince1970) } ?? "-inf") <<'OMG_HISTORY_PY'
+        python3 - \(Self.shellQuote(rootsJSON)) \(boundedLimit) \(minimumModified) \(conversation) <<'OMG_HISTORY_PY'
         import json, os, sqlite3, sys
         minimum_modified = float(sys.argv[3])
+        conversation = sys.argv[4] if len(sys.argv) > 4 else ''
+
+        def codex_thread_name(ident):
+            # Codex keeps thread names beside its sessions, one line per naming.
+            name = None
+            try:
+                with open(os.path.join(os.path.expanduser('~'), '.codex', 'session_index.jsonl'), 'rb') as index:
+                    for line in index:
+                        if ident.encode() not in line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                        except ValueError:
+                            continue
+                        if isinstance(entry, dict) and entry.get('id') == ident and isinstance(entry.get('thread_name'), str):
+                            name = entry['thread_name']
+            except OSError:
+                pass
+            return name
 
         def read_zstd_prefix(path, limit=256 * 1024):
             try:
@@ -118,16 +145,20 @@ struct AgentHistoryRemoteAccess: Sendable {
                     connection = sqlite3.connect('file:' + index + '?mode=ro', uri=True)
                     columns = "SELECT conversation_id, title, preview, workspace_uris, strftime('%s', last_modified_time) FROM conversation_summaries"
                     order = " ORDER BY last_modified_time DESC LIMIT ?"
-                    try:
-                        rows = connection.execute(columns + " WHERE nesting_depth = 0 AND (title != '' OR preview != '')" + order, (int(sys.argv[2]),))
-                    except sqlite3.OperationalError:
-                        rows = connection.execute(columns + order, (int(sys.argv[2]),))
+                    if conversation:
+                        # The one conversation a pane shows, whatever its age.
+                        rows = connection.execute(columns + " WHERE conversation_id = ?" + order, (conversation, int(sys.argv[2])))
+                    else:
+                        try:
+                            rows = connection.execute(columns + " WHERE nesting_depth = 0 AND (title != '' OR preview != '')" + order, (int(sys.argv[2]),))
+                        except sqlite3.OperationalError:
+                            rows = connection.execute(columns + order, (int(sys.argv[2]),))
                     from urllib.parse import urlparse, unquote
                     for ident, title, preview, uris, modified in rows:
                         path = os.path.join(root, ident + '.db')
                         if not os.path.isfile(path) or modified is None:
                             continue
-                        if (float(modified) if float(modified) > 0 else os.path.getmtime(path)) < minimum_modified:
+                        if not conversation and (float(modified) if float(modified) > 0 else os.path.getmtime(path)) < minimum_modified:
                             continue
                         workspaces = json.loads(uris) if uris else []
                         cwd = next((unquote(urlparse(uri).path) for uri in workspaces if uri.startswith('file://')), '')
@@ -150,15 +181,23 @@ struct AgentHistoryRemoteAccess: Sendable {
                         continue
                     try:
                         stat = os.stat(path)
-                        if stat.st_mtime < minimum_modified:
+                        # 2: the file is named after the conversation; 1: a folder above it is.
+                        named = 0
+                        if conversation:
+                            named = 2 if conversation in name else 1 if conversation in path[len(root):] else 0
+                        if not named and stat.st_mtime < minimum_modified:
                             continue
-                        candidates.append((stat.st_mtime, path, stat.st_size))
+                        candidates.append((named, stat.st_mtime, path, stat.st_size))
                     except OSError:
                         pass
                 if inspected > 200000:
                     break
+        if any(candidate[0] for candidate in candidates):
+            # A transcript named after the conversation is read whatever its
+            # age, and then no other file is.
+            candidates = [candidate for candidate in candidates if candidate[0]]
         candidates.sort(reverse=True)
-        for modified, path, size in candidates[:min(int(sys.argv[2]) * 2, 20000)]:
+        for named, modified, path, size in candidates[:min(int(sys.argv[2]) * 2, 20000)]:
             try:
                 if path.endswith('.jsonl.zst'):
                     # Bound output before buffering; reap the helper even when
@@ -194,6 +233,10 @@ struct AgentHistoryRemoteAccess: Sendable {
                     role = payload.get('role') if isinstance(payload, dict) else None
                     if kind in ('session', 'session_meta', 'title', 'title_change', 'session_info', 'ai-title', 'custom-title') or role == 'user' or kind == 'user':
                         records.append(record)
+                if named and '/.codex/' in path:
+                    name = codex_thread_name(conversation)
+                    if name:
+                        records.append(dict(type='title', title=name))
                 print(json.dumps(dict(path=path, size=size, modified=modified, records=records)))
             except OSError:
                 pass

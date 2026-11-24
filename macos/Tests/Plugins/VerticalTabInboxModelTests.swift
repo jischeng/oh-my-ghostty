@@ -3,6 +3,8 @@ import Testing
 @testable import Ghostty
 
 struct VerticalTabInboxModelTests {
+    private typealias Rows = TabInboxRows<String>
+
     private var calendar: Calendar {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 8 * 3600) ?? .current
@@ -16,9 +18,15 @@ struct VerticalTabInboxModelTests {
     }
 
     private func item(
-        _ state: TabActivityState? = nil, created: Date, activated: Date? = nil, agent: Date? = nil
+        _ state: TabActivityState? = nil, created: Date, interacted: Date? = nil, agent: Date? = nil
     ) -> TabInboxItem {
-        TabInboxItem(state: state, createdAt: created, lastActivatedAt: activated ?? created, lastAgentActivityAt: agent)
+        TabInboxItem(state: state, createdAt: created, lastInteractionAt: interacted ?? created, lastAgentActivityAt: agent)
+    }
+
+    private func arrangement(
+        _ items: [TabInboxItem], _ ordering: GhosttyTabOrderingMode, now: Date
+    ) -> [TabInboxSection: [Int]] {
+        TabInboxModel.arrangement(items: items, ordering: ordering, now: now, calendar: calendar)
     }
 
     @Test func sectionsChangeAtTheStartOfTheCalendarDay() throws {
@@ -34,32 +42,100 @@ struct VerticalTabInboxModelTests {
             (try date(25, 9), .today),
         ]
         for (created, expected) in cases {
-            #expect(TabInboxModel.section(for: item(created: created), sort: .created,
-                                          now: now, calendar: calendar) == expected)
+            for ordering in GhosttyTabOrderingMode.allCases {
+                #expect(TabInboxModel.section(for: item(created: created), ordering: ordering,
+                                              now: now, calendar: calendar) == expected)
+            }
         }
 
         // Almost a full day ago, but still the same calendar day.
         let evening = try date(24, 23, 30)
         let morning = item(created: try date(24, 0, 10))
-        #expect(TabInboxModel.section(for: morning, sort: .created, now: evening, calendar: calendar) == .today)
+        #expect(TabInboxModel.section(for: morning, ordering: .created, now: evening, calendar: calendar) == .today)
     }
 
-    @Test func continueListsTabsWaitingForTheUserFirstThenByRecency() throws {
+    @Test func recencyIsTheLatestOfCreationInteractionAndAgentActivity() throws {
+        let items = [
+            item(created: try date(22, 10), agent: try date(24, 9)),
+            item(created: try date(23, 12), interacted: try date(24, 8)),
+            item(created: try date(24, 7)),
+            // An interaction date restored from before the tab was recreated never predates it.
+            item(created: try date(24, 6), interacted: try date(20, 6)),
+        ]
+        let recency = [try date(24, 9), try date(24, 8), try date(24, 7), try date(24, 6)]
+        #expect(items.map { TabInboxModel.recency($0) } == recency)
+        #expect(items.map { TabInboxModel.date($0, ordering: .recentlyUsed) } == recency)
+        // Created and manual order bucket by the creation date.
+        #expect(items.map { TabInboxModel.date($0, ordering: .created) } == items.map(\.createdAt))
+        #expect(items.map { TabInboxModel.date($0, ordering: .manual) } == items.map(\.createdAt))
+    }
+
+    @Test func eachOrderingListsTheTabsInItsOwnOrder() throws {
+        let items = [
+            item(created: try date(22, 10), agent: try date(24, 9)),
+            item(created: try date(23, 12), interacted: try date(24, 8)),
+            item(created: try date(24, 7)),
+            item(created: try date(24, 8, 30)),
+        ]
+        // Most recently used first.
+        #expect(TabInboxModel.order(items: items, ordering: .recentlyUsed) == [0, 3, 1, 2])
+        // Newest first.
+        #expect(TabInboxModel.order(items: items, ordering: .created) == [3, 2, 1, 0])
+        // The native tab order.
+        #expect(TabInboxModel.order(items: items, ordering: .manual) == [0, 1, 2, 3])
+        for ordering in GhosttyTabOrderingMode.allCases {
+            #expect(TabInboxModel.order(items: [], ordering: ordering).isEmpty)
+        }
+    }
+
+    @Test func dateGroupingBucketsByTheOrderingDate() throws {
+        let now = try date(24, 12)
+        let items = [
+            item(created: try date(22, 10), agent: try date(24, 9)),
+            item(created: try date(23, 12), interacted: try date(24, 8)),
+            item(created: try date(24, 7)),
+            item(created: try date(24, 8, 30)),
+        ]
+        #expect(arrangement(items, .recentlyUsed, now: now) == [.today: [0, 3, 1, 2]])
+        #expect(arrangement(items, .created, now: now) == [.today: [3, 2], .yesterday: [1], .earlier: [0]])
+        // Manual keeps the native order inside the creation date's section.
+        #expect(arrangement(items, .manual, now: now) == [.today: [2, 3], .yesterday: [1], .earlier: [0]])
+    }
+
+    @Test func continueListsTabsWaitingForTheUserFirstThenByTheOrdering() throws {
         let created = try date(20, 9)
         let items = [
-            item(.working, created: created, activated: try date(24, 11, 50)),
-            item(.done, created: created, activated: try date(24, 11, 10)),
-            item(.needsAttention, created: created, activated: try date(24, 11, 5)),
-            item(.error, created: created, activated: try date(24, 11, 20)),
-            item(.needsAttention, created: created, activated: try date(24, 11, 30)),
-            item(.idle, created: created, activated: try date(24, 11, 40)),
-            item(nil, created: created, activated: try date(24, 11, 45)),
+            item(.working, created: created, interacted: try date(24, 11, 50)),
+            item(.done, created: created, interacted: try date(24, 11, 10)),
+            item(.needsAttention, created: created, interacted: try date(24, 11, 5)),
+            item(.error, created: created, interacted: try date(24, 11, 20)),
+            item(.needsAttention, created: created, interacted: try date(24, 11, 30)),
+            item(.idle, created: created, interacted: try date(24, 11, 40)),
+            item(nil, created: created, interacted: try date(24, 11, 45)),
         ]
         let now = try date(24, 12)
-        let result = TabInboxModel.arrangement(items: items, sort: .recent, now: now, calendar: calendar)
-        #expect(result[.continue] == [4, 2, 3, 1, 0])
-        #expect(result[.today] == [6, 5])
-        #expect(Set(result.keys) == [.continue, .today])
+        let recent = arrangement(items, .recentlyUsed, now: now)
+        #expect(recent[.continue] == [4, 2, 3, 1, 0])
+        #expect(recent[.today] == [6, 5])
+        #expect(Set(recent.keys) == [.continue, .today])
+
+        // Without recency the waiting tabs keep the native order per state,
+        // and the idle tabs fall back to the day they were created.
+        let manual = arrangement(items, .manual, now: now)
+        #expect(manual == [.continue: [2, 4, 3, 1, 0], .earlier: [5, 6]])
+        #expect(arrangement(items, .created, now: now) == manual)
+    }
+
+    @Test func theOrderingAlsoOrdersContinueWithinTheSameState() throws {
+        let items = [
+            item(.working, created: try date(24, 9)),
+            item(.working, created: try date(24, 8), interacted: try date(24, 11)),
+            item(.working, created: try date(24, 10)),
+        ]
+        let now = try date(24, 12)
+        #expect(arrangement(items, .recentlyUsed, now: now) == [.continue: [1, 2, 0]])
+        #expect(arrangement(items, .created, now: now) == [.continue: [2, 0, 1]])
+        #expect(arrangement(items, .manual, now: now) == [.continue: [0, 1, 2]])
     }
 
     @Test func acknowledgedOrAbsentAgentsAreNotInContinue() {
@@ -71,68 +147,100 @@ struct VerticalTabInboxModelTests {
         }
     }
 
-    @Test func recentUsesTheLatestTimestampAndCreatedIgnoresActivity() throws {
-        let now = try date(24, 12)
-        let items = [
-            item(created: try date(22, 10), agent: try date(24, 9)),
-            item(created: try date(23, 12), activated: try date(24, 8)),
-            item(created: try date(24, 7)),
-        ]
-        let expectedRecent = [try date(24, 9), try date(24, 8), try date(24, 7)]
-        #expect(items.map { TabInboxModel.sortDate($0, sort: .recent) } == expectedRecent)
-        #expect(items.map { TabInboxModel.sortDate($0, sort: .created) } == items.map(\.createdAt))
-
-        let recent = TabInboxModel.arrangement(items: items, sort: .recent, now: now, calendar: calendar)
-        #expect(recent == [.today: [0, 1, 2]])
-        let created = TabInboxModel.arrangement(items: items, sort: .created, now: now, calendar: calendar)
-        #expect(created == [.today: [2], .yesterday: [1], .earlier: [0]])
-    }
-
-    @Test func sortModeAlsoOrdersContinueWithinTheSameState() throws {
-        let items = [
-            item(.working, created: try date(24, 9), activated: try date(24, 9)),
-            item(.working, created: try date(24, 8), activated: try date(24, 11)),
-        ]
-        let now = try date(24, 12)
-        #expect(TabInboxModel.arrangement(items: items, sort: .recent, now: now, calendar: calendar)[.continue] == [1, 0])
-        #expect(TabInboxModel.arrangement(items: items, sort: .created, now: now, calendar: calendar)[.continue] == [0, 1])
-    }
-
     @Test func equalDatesKeepTheNativeTabOrder() throws {
         let same = try date(24, 9)
         let now = try date(24, 12)
         let idle = Array(repeating: item(created: same), count: 4)
-        #expect(TabInboxModel.arrangement(items: idle, sort: .recent, now: now, calendar: calendar) == [.today: [0, 1, 2, 3]])
         let waiting = [item(.done, created: same), item(.needsAttention, created: same),
                        item(.done, created: same), item(.needsAttention, created: same)]
-        #expect(TabInboxModel.arrangement(items: waiting, sort: .created, now: now, calendar: calendar)
-            == [.continue: [1, 3, 0, 2]])
+        for ordering in GhosttyTabOrderingMode.allCases {
+            #expect(TabInboxModel.order(items: idle, ordering: ordering) == [0, 1, 2, 3])
+            #expect(arrangement(idle, ordering, now: now) == [.today: [0, 1, 2, 3]])
+            #expect(arrangement(waiting, ordering, now: now) == [.continue: [1, 3, 0, 2]])
+        }
     }
 
     @Test func sectionsWithoutTabsAreOmitted() throws {
         let now = try date(24, 12)
-        #expect(TabInboxModel.arrangement(items: [], sort: .recent, now: now, calendar: calendar).isEmpty)
+        #expect(arrangement([], .recentlyUsed, now: now).isEmpty)
         let old = item(created: try date(2, 9))
-        let earlier = TabInboxModel.arrangement(items: [old], sort: .created, now: now, calendar: calendar)
-        #expect(earlier == [.earlier: [0]])
+        #expect(arrangement([old], .created, now: now) == [.earlier: [0]])
         #expect(TabInboxSection.allCases.map(\.groupID)
             == ["inbox:continue", "inbox:today", "inbox:yesterday", "inbox:earlier"])
     }
 
     @Test func heldOrderKeepsDisplayedRowsAndOnlyFollowsMembership() {
-        let displayed: [TabInboxSection: [String]] = [.today: ["a", "b", "c"], .earlier: ["d"]]
+        let displayed = [Rows(id: "inbox:today", tabs: ["a", "b", "c"]), Rows(id: "inbox:earlier", tabs: ["d"])]
         // b started working, d was closed, n and m are new tabs.
-        let fresh: [TabInboxSection: [String]] = [.continue: ["b"], .today: ["n", "c", "a"], .earlier: ["m"]]
+        let fresh = [Rows(id: "inbox:continue", tabs: ["b"]), Rows(id: "inbox:today", tabs: ["n", "c", "a"]),
+                     Rows(id: "inbox:earlier", tabs: ["m"])]
         #expect(TabInboxModel.holding(fresh: fresh, displayed: displayed)
-            == [.today: ["a", "b", "n", "c"], .earlier: ["m"]])
+            == [Rows(id: "inbox:today", tabs: ["a", "b", "n", "c"]), Rows(id: "inbox:earlier", tabs: ["m"])])
         #expect(TabInboxModel.holding(fresh: fresh, displayed: fresh) == fresh)
-        #expect(TabInboxModel.holding(fresh: fresh, displayed: [:]) == fresh)
-        #expect(TabInboxModel.holding(fresh: [:], displayed: displayed).isEmpty)
+        #expect(TabInboxModel.holding(fresh: fresh, displayed: []) == fresh)
+        #expect(TabInboxModel.holding(fresh: [], displayed: displayed).isEmpty)
+    }
+
+    @Test func heldOrderPlacesNewGroupsWhereTheFreshOrderHasThem() {
+        // A new tab whose agent works opens Continue above the sections on screen.
+        let today = [Rows(id: "inbox:today", tabs: ["a"])]
+        let withContinue = [Rows(id: "inbox:continue", tabs: ["x"]), Rows(id: "inbox:today", tabs: ["a"]),
+                            Rows(id: "inbox:earlier", tabs: ["y"])]
+        #expect(TabInboxModel.holding(fresh: withContinue, displayed: today) == withContinue)
+
+        // Project groups: a tab that changed project stays in the group it is
+        // shown in, the groups keep their places, and a new project is added.
+        let projects = [Rows(id: "inbox:project:/one", tabs: ["a", "b"]), Rows(id: "inbox:project:/two", tabs: ["c"])]
+        let moved = [Rows(id: "inbox:project:/two", tabs: ["c", "b"]), Rows(id: "inbox:project:/one", tabs: ["a"]),
+                     Rows(id: "inbox:project:/three", tabs: ["n"])]
+        #expect(TabInboxModel.holding(fresh: moved, displayed: projects)
+            == projects + [Rows(id: "inbox:project:/three", tabs: ["n"])])
+        let leading = [Rows(id: "inbox:project:/zero", tabs: ["z"])] + projects
+        #expect(TabInboxModel.holding(fresh: leading, displayed: projects) == leading)
+    }
+
+    @Test func attentionCountsTabsThatWaitForTheUser() {
+        #expect(TabInboxModel.waitsForUser(.needsAttention))
+        #expect(TabInboxModel.waitsForUser(.error))
+        #expect(TabInboxModel.waitsForUser(.done))
+        // A working agent waits for nobody, and an acknowledged one is idle.
+        #expect(!TabInboxModel.waitsForUser(.working))
+        #expect(!TabInboxModel.waitsForUser(.idle))
+        #expect(!TabInboxModel.waitsForUser(nil))
+
+        #expect(TabInboxModel.attentionCount([]) == 0)
+        #expect(TabInboxModel.attentionCount([[.working], [.idle], []]) == 0)
+        // A tab counts once, whichever of its panes waits.
+        #expect(TabInboxModel.attentionCount([
+            [.working], [.done], [.idle, .needsAttention], [], [.error, .working, .done], [.idle],
+        ]) == 3)
+    }
+
+    @Test func inboxRowsAreRoomierThanTheTabsView() {
+        let inbox = NativeTabRowMetrics.inbox
+        #expect(inbox.rowHeight == 36)
+        #expect(inbox.twoLineRowHeight == 54)
+        #expect(inbox.height(twoLine: false) == 36)
+        #expect(inbox.height(twoLine: true) == 54)
+        #expect(inbox.subtitleFontSize == 12)
+        #expect(inbox.headerHeight < inbox.rowHeight)
+
+        // The Tabs view keeps the density's row and the metrics it always had.
+        for height in [CGFloat(28), 32] {
+            let tabs = NativeTabRowMetrics.tabs(rowHeight: height)
+            #expect(tabs.rowHeight == height)
+            #expect(tabs.headerHeight == height)
+            #expect(tabs.twoLineRowHeight == height + 14)
+            #expect(tabs.subtitleFontSize == 11)
+            #expect(tabs.subtitleSpacing == 0)
+        }
     }
 
     @Test func settingsValuesAreTheDocumentedRawValues() {
         #expect(GhosttyTabSidebarViewMode.allCases.map(\.rawValue) == ["tabs", "inbox"])
-        #expect(GhosttyTabInboxSortMode.allCases.map(\.rawValue) == ["recent", "created"])
+        // The inbox shares the Tabs view's choices.
+        #expect(GhosttyTabGroupingMode.allCases.map(\.rawValue) == ["none", "project", "date"])
+        #expect(GhosttyTabOrderingMode.allCases.map(\.rawValue) == ["manual", "created", "recentlyUsed"])
     }
 
     @Test func inboxStringsAreLocalized() {
@@ -142,6 +250,13 @@ struct VerticalTabInboxModelTests {
         #expect(chinese.inbox == "收件箱")
         #expect(TabInboxSection.allCases.map { $0.title(chinese) } == ["继续", "今天", "昨天", "更早"])
         #expect(TabInboxSection.allCases.map { $0.title(english) } == ["Continue", "Today", "Yesterday", "Earlier"])
-        #expect(GhosttyTabInboxSortMode.allCases.map(chinese.inboxSortTitle) == ["最近活动", "创建时间"])
+
+        #expect(english.toggleInbox(shown: false) == "Show Inbox")
+        #expect(english.toggleInbox(shown: false, attention: 1) == "Show Inbox · 1 tab needs attention")
+        #expect(english.toggleInbox(shown: false, attention: 3) == "Show Inbox · 3 tabs need attention")
+        #expect(chinese.toggleInbox(shown: false, attention: 3) == "显示收件箱 · 3 个标签页待处理")
+        // The inbox lists those tabs itself.
+        #expect(english.toggleInbox(shown: true, attention: 3) == "Show Tabs")
+        #expect(chinese.toggleInbox(shown: true) == "显示标签页")
     }
 }

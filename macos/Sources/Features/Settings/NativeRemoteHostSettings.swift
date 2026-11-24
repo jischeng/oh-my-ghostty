@@ -230,6 +230,8 @@ extension NativeSettingsController {
         form.retained.append(token)
     }
 
+    /// The Agent half of the AI page: CLI and Hook integration, behavior and notifications.
+    /// Providers and the model choices come first, from `aiOverview`.
     func agentOverview(_ form: NativeSettingsForm) {
         form.section(text("This Mac", "此 Mac"))
         form.link(text("Installed Agents", "已安装的 Agent")) { [weak self] in self?.showAgents(target: AgentIntegrationManager.localID) }
@@ -237,16 +239,6 @@ extension NativeSettingsController {
         toggle(form, strings.agentStatusHooksLabel, \.agentStatusHooksEnabled)
         toggle(form, strings.openQuickInputOnAgentStartLabel, \.openQuickInputOnAgentStart)
         toggle(form, strings.openQuickInputOnAgentCompleteLabel, \.openQuickInputOnAgentComplete)
-        let titleModes = AgentSessionTitleMode.allCases
-        let titlePopup = SettingsPopup(
-            titles: titleModes.map { strings.agentSessionTitleModeTitle($0) },
-            selected: titleModes.firstIndex(of: settings.agentSessionTitleMode) ?? 0
-        ) { [weak settings] index in
-            guard titleModes.indices.contains(index) else { return }
-            settings?.agentSessionTitleMode = titleModes[index]
-        }
-        form.row(strings.agentSessionTitleLabel, subtitle: strings.agentSessionTitleCaption, control: titlePopup)
-        more(form, strings.aiEndpointLink) { [weak self] page in self?.aiEndpointSettings(page) }
         form.section(strings.notificationsSection)
         toggle(form, strings.notifyTaskCompleteLabel, \.notifyTaskComplete)
         toggle(form, strings.notifyAttentionLabel, \.notifyAttention)
@@ -286,84 +278,6 @@ extension NativeSettingsController {
             page.row(self.strings.exportSSHInstallerButton, control: SettingsActionButton(self.text("Export…", "导出…")) { [weak self] in self?.exportHooks()
             })
         }
-    }
-
-    /// Endpoint for generated conversation titles. The key goes to `AICredentialStore`,
-    /// never to settings, and a plain-HTTP remote URL is refused inline.
-    private func aiEndpointSettings(_ page: NativeSettingsForm) {
-        page.section(strings.aiEndpointSection)
-        let protocols = AIEndpointProtocol.allCases
-        let baseURLField = SettingsTextField(
-            settings.aiEndpointBaseURL,
-            placeholder: SettingsStrings.aiEndpointURLPlaceholder(settings.aiEndpointProtocol)
-        ) { _ in }
-        let protocolPopup = SettingsPopup(
-            titles: protocols.map { $0.rawValue },
-            selected: protocols.firstIndex(of: settings.aiEndpointProtocol) ?? 0
-        ) { [weak self, weak baseURLField] index in
-            guard let self, protocols.indices.contains(index) else { return }
-            self.settings.aiEndpointProtocol = protocols[index]
-            baseURLField?.placeholderString = SettingsStrings.aiEndpointURLPlaceholder(protocols[index])
-        }
-        page.row(strings.aiEndpointProtocolLabel, control: protocolPopup)
-        page.row(strings.aiEndpointBaseURLLabel, control: baseURLField)
-
-        let errorLabel = NSTextField(wrappingLabelWithString: "")
-        errorLabel.font = .systemFont(ofSize: 11)
-        errorLabel.textColor = .systemRed
-        errorLabel.isHidden = true
-        func showError(_ message: String?) {
-            errorLabel.stringValue = message ?? ""
-            errorLabel.isHidden = message == nil
-        }
-        baseURLField.commit = { [weak self] value in
-            guard let self else { return }
-            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else {
-                self.settings.aiEndpointBaseURL = ""
-                showError(nil)
-                return
-            }
-            do {
-                _ = try AIEndpoint.validatedBaseURL(trimmed)
-                self.settings.aiEndpointBaseURL = trimmed
-                showError(nil)
-            } catch {
-                showError(self.strings.aiEndpointInsecureURLCaption)
-            }
-        }
-        page.stack.addArrangedSubview(errorLabel)
-        errorLabel.widthAnchor.constraint(equalTo: page.stack.widthAnchor).isActive = true
-
-        let modelField = SettingsTextField(settings.aiEndpointModel, placeholder: "gpt-5-mini") { [weak self] value in
-            self?.settings.aiEndpointModel = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        page.row(strings.aiEndpointModelLabel, control: modelField)
-
-        let keyField = SettingsSecureField(AICredentialStore.shared.apiKey() ?? "", placeholder: "sk-…") { value in
-            do {
-                try AICredentialStore.shared.setAPIKey(value)
-                showError(nil)
-            } catch {
-                showError(error.localizedDescription)
-            }
-        }
-        page.row(strings.aiEndpointAPIKeyLabel, control: keyField)
-
-        page.refreshers.append { [weak self, weak protocolPopup, weak baseURLField] in
-            guard let self else { return }
-            protocolPopup?.selectItem(at: protocols.firstIndex(of: self.settings.aiEndpointProtocol) ?? 0)
-            baseURLField?.placeholderString =
-                SettingsStrings.aiEndpointURLPlaceholder(self.settings.aiEndpointProtocol)
-            guard baseURLField?.currentEditor() == nil else { return }
-            if self.settings.aiEndpointBaseURL != baseURLField?.stringValue {
-                baseURLField?.stringValue = self.settings.aiEndpointBaseURL
-            }
-        }
-
-        page.note(strings.aiEndpointCaption)
-        page.note(strings.aiEndpointMissingFieldsCaption)
-        page.note(strings.aiEndpointKeyStoredCaption)
     }
 
     func showAgents(target: String) {

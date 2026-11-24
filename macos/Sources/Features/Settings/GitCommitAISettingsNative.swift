@@ -205,11 +205,25 @@ private final class GitCommitAIRouteCell: NSTableCellView {
         self.routeID = route.id
         self.settings = settings
         orderField.stringValue = "\(index + 1)"
-        iconView.image = SupportedAgent(rawValue: route.agent.rawValue).flatMap { NSImage(named: $0.assetName) }
-            ?? NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)
-        agentField.stringValue = route.agent.title
+        var usable = true
+        switch route.target {
+        case .agent(let agent):
+            iconView.image = SupportedAgent(rawValue: agent.rawValue).flatMap { NSImage(named: $0.assetName) }
+                ?? NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)
+            agentField.stringValue = agent.title
+        case .provider(let id):
+            // An API connection that was switched off stays listed, marked, and is skipped at run time.
+            let provider = settings.aiProvider(id)
+            usable = provider?.enabled == true
+            iconView.image = NSImage(systemSymbolName: "network", accessibilityDescription: nil)
+            let name = route.sourceTitle(providers: settings.aiProviders)
+            agentField.stringValue = usable ? name
+                : name + SettingsStrings(language: settings.language).t(" (off)", "（已停用）")
+        }
+        iconView.contentTintColor = .secondaryLabelColor
+        agentField.textColor = usable ? .labelColor : .secondaryLabelColor
         modelField.stringValue = route.model
-        setAccessibilityLabel(route.title)
+        setAccessibilityLabel(route.title(providers: settings.aiProviders))
         showsDivider = index > 0
         needsDisplay = true
         let routes = settings.gitCommitAIRoutes
@@ -282,8 +296,8 @@ enum GitCommitAISettingsPanel {
         )
     }
 
-    private static func present(_ controller: GitCommitSettingsPanelController,
-                                title: String, size: NSSize, from parent: NSWindow) {
+    static func present(_ controller: GitCommitSettingsPanelController,
+                        title: String, size: NSSize, from parent: NSWindow) {
         let panel = NSPanel(contentRect: NSRect(origin: .zero, size: size),
                             styleMask: [.titled, .closable],
                             backing: .buffered,
@@ -968,7 +982,7 @@ final class GitCommitAgentTab: NSView {
 }
 
 @MainActor
-private final class GitCommitAIModelCell: NSTableCellView {
+final class GitCommitAIModelCell: NSTableCellView {
     private let checkbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
 
     override init(frame frameRect: NSRect) {

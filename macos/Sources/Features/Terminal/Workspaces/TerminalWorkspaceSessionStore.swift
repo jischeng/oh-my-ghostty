@@ -366,7 +366,8 @@ final class TerminalWorkspaceSessionStore {
         let controller = TerminalController(app, withSurfaceTree: state.surfaceTree, parent: parent,
             initialFrame: restoredFrame,
             tabLayout: restoredTabLayout,
-            tabSessionID: tab.id, tabCreatedAt: state.tabCreatedAt, workspaceID: owner.workspace,
+            tabSessionID: tab.id, tabCreatedAt: state.tabCreatedAt,
+            tabLastInteractionAt: state.tabLastInteractionAt, workspaceID: owner.workspace,
             windowSessionID: owner.window, workspaceGroupID: owner.group, workspaceCoordinator: runtime)
         controller.titleOverride = state.titleOverride
         if let focused = state.focusedSurface { controller.focusedSurface = controller.surfaceTree.first { $0.id.uuidString == focused } }

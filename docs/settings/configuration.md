@@ -41,7 +41,8 @@ The file is a flat, sorted JSON object. Only values explicitly chosen by the use
   "keyboard.quickInputHeight": 165,
   "notifications.taskComplete": false,
   "tabs.grouping": "project",
-  "tabs.inboxOrdering": "recent",
+  "tabs.inboxGrouping": "date",
+  "tabs.inboxOrdering": "recentlyUsed",
   "tabs.layout": "vertical",
   "tabs.ordering": "manual",
   "tabs.pathDisplay": "folderName",
@@ -52,39 +53,96 @@ The file is a flat, sorted JSON object. Only values explicitly chosen by the use
 
 Reload the file with **Settings > Advanced > Reload** or Ghostty's **Reload Configuration** command. `tabs.layout` applies to newly created windows because changing the NSWindow/titlebar class of an existing terminal would risk rebuilding its presentation hierarchy.
 
-## Git, SSH and Agent Integration
+## AI, Git and SSH
 
-These are separate Settings sidebar entries. SSH manages registered hosts; Agent
-Integration manages CLI/status integration installation and notifications; Plugins
+These are separate Settings sidebar entries. **AI** holds the model providers, the
+model chosen for each task, and Agent integration (CLI/status integration
+installation, behavior and notifications). SSH manages registered hosts; Plugins
 continues to manage plugin packages.
 
-Under **Git > AI Commit Messages**, add a local Claude Code, Pi, Codex or OpenCode Agent and one
-or more model IDs at a time. All four load available models from ACP sessions for multi-select;
-manual IDs must also match the adapter's advertised catalog. Drag entries (or use their arrow buttons) to change
-priority. The first entry is the main model and every entry below it is a fallback.
-The list is saved as `git.commitAI.routes`, an array of `{id, agent, model}` objects
-with UUID identities. No API keys are stored in OMG settings.
-The **Edit commit prompt** button opens a Save/Cancel editor (`git.commitAI.prompt`) for language, format
+### AI providers
+
+**AI > Providers** lists two kinds of provider in one place:
+
+- **Installed agents (ACP)**: Claude Code, Pi, Codex and OpenCode, reached through
+  their local ACP adapter with the CLI's own login. Each row shows the CLI state
+  from the last Agent check and the number of models last discovered. The detail
+  page lists the discovered models, has **Refresh**, and for Codex the control
+  that checks and installs the OMG-managed Codex ACP adapter. Discovery starts an
+  agent process, so it runs when the detail page is first opened or on Refresh,
+  never when the AI page is merely shown.
+- **API connections**: any number of named OpenAI-compatible or Anthropic
+  endpoints. Each has a name, kind, base URL, API key and an enabled switch.
+  **Fetch Models** calls the service's model list (`GET {base}/models` for
+  OpenAI-compatible endpoints, with `/v1` added when the base URL has no path;
+  `GET {base}/v1/models` for Anthropic) with the same authentication as a chat
+  request and merges the result into the connection's list. **Add a model ID**
+  covers services that do not implement the list call. Each model can carry an
+  optional context window and maximum output, in tokens; blank means the default.
+  A response larger than 4 MB is refused and at most 500 models are kept.
+
+Connections are saved as `ai.providers`. API keys are never written to
+`settings.json`: they live in `<Application Support>/AI/credentials.json`
+(`0700` directory, `0600` file), keyed by the connection id, and the settings
+page only ever shows whether a key is stored. Removing a connection deletes its
+key and every model choice that used it. Plain `http://` is accepted only for
+loopback, private-range and link-local hosts; redirects are never followed.
+
+### Models per task
+
+**AI > Models per Task** chooses the model for each job:
+
+- **Commit, tag and PR messages**: an ordered fallback list, saved as
+  `ai.routes.commit`. An entry is a model of an installed agent (`kind: agent`)
+  or of an API connection (`kind: provider`). **Add Agent Models…** opens the
+  searchable ACP multi-select; **Add API Models…** picks from the models listed
+  on enabled connections. Drag entries (or use their arrow buttons) to change
+  priority. The first entry is the main model and every entry below it is a
+  fallback. Git settings keeps the commit style prompt and links here.
+- **Tab titles**: `agents.sessionTitle.mode` and one model of an enabled API
+  connection, saved as `ai.routes.title`. Installed agents are deliberately not
+  offered: a title would cost a process start per conversation and keep the
+  prompt in a session directory. No model means no generation.
+
+An API connection route sends the same prompt as the ACP route, with the
+instructions as the system message and the Git context as the user message. It
+uses the model's maximum output when set (4096 tokens otherwise), a 75 s request
+and 90 s overall limit, and the same output checks as ACP. Nothing is cut to
+fit: when a context window is set and the prompt is estimated (about 3 bytes per
+token) to be larger, or the answer stops at the output limit, that route fails
+with the reason and the next route is tried. Failure notices name the route and
+a cause OMG wrote itself; the service's own error text and the key are never shown.
+
+Older builds read `git.commitAI.routes` (`{id, agent, model}`). OMG keeps writing
+the agent entries there, reads it only when `ai.routes.commit` is absent, and
+prefers `ai.routes.commit` when both exist. The single endpoint of the first AI
+build (`ai.endpoint.protocol`, `ai.endpoint.baseURL`, `ai.endpoint.model`) is
+converted once into an API connection that becomes the tab-title model; its API
+key moves to that connection and the old keys are removed from the file.
+
+The **Edit commit prompt** button under **Git** opens a Save/Cancel editor (`git.commitAI.prompt`) for language, format
 and style for all models and fallbacks. Leave it blank to follow recent commits.
 For example: “Use Conventional Commits, an English subject under 72 characters,
 and Chinese body bullets.” Success/model notices appear above the commit editor
 and disappear after five seconds; error notices can be dismissed manually.
 
 In Git's Changes tab, **Generate** fills the commit message without committing.
-Only staged changes and recent commit subjects are sent. The CLI runs locally even
-for an SSH repository. Local CLI does not mean local inference: data may be sent
-to any configured model service during fallback. Existing drafts require replacement
+Only staged changes and recent commit subjects are sent. The CLI or the HTTP
+request runs on this Mac even for an SSH repository. Local CLI does not mean
+local inference: data may be sent to any configured model service during fallback. Existing drafts require replacement
 confirmation, and a draft edited while generating is never overwritten. Cancel stops
 further attempts. Patches exceeding 200 KB must be split rather than silently truncated.
 Install local ACP adapters `pi-acp`, `@agentclientprotocol/claude-agent-acp` and
 `@agentclientprotocol/codex-acp` as needed; OpenCode provides `opencode acp` itself.
-In Add Models, Reload checks the stable Codex ACP npm version. If an update is
+In Add Agent Models, Reload checks the stable Codex ACP npm version, as does the
+Codex detail page under AI > Providers. If an update is
 available, users can explicitly install it for OMG; the app installs it under its
 Application Support directory, removes older OMG-managed versions after activation,
 and does not modify a global npm install. Other adapters remain user-managed. There
 is no one-shot CLI fallback. An SSH host/new pod does not need any Agent:
-only Git reads run remotely, and model calls always use the Mac's ACP adapter.
-The model and privacy notes live inside Add Models; prompt guidance lives inside
+only Git reads run remotely, and model calls always start on the Mac, through its
+ACP adapter or an API connection.
+The model and privacy notes live inside Add Agent Models; prompt guidance lives inside
 the prompt editor. There is no dedicated undo-generated-message control.
 
 Session homes and records are under OMG's channel-specific Application Support
@@ -99,8 +157,9 @@ disabled, so extension-only providers are not included.
 
 ## Git branch operations and browser links
 
-The AI settings page uses a compact action row: **Add models…** opens a searchable
-ACP model multi-select with collapsed help; **Commit style…** opens the styled
+The AI page uses a compact action row: **Add Agent Models…** opens a searchable
+ACP model multi-select with collapsed help and **Add API Models…** a picker over the
+API connections; under Git, **Custom prompt** opens the styled
 Save/Cancel prompt editor. There is no inline model-ID TextEditor and no persistent
 three-paragraph disclosure in the settings page.
 
@@ -113,14 +172,14 @@ Branches add Merge and Rebase. Commit Cherry-pick opens the same target-branch
 flow and supports a mainline parent for merge commits. Merge source → target creates
 a merge commit; Rebase target onto source preserves existing messages; Cherry-pick
 source → target lets the user edit the new commit message. Each dialog can generate
-its operation message through the configured ACP routes from the exact operation diff.
+its operation message through the configured model routes from the exact operation diff.
 Plans revalidate branch tips and the original branch, require a clean worktree, do
 not stash/reset/force-push, and leave conflicts for terminal resolution. Target stays
 checked out after success or failure.
 
 **Merge into…** in the pull/push menu opens an in-app source/target and title/
-description editor; the target branch is remembered per repository. ACP can generate
-the title/description. Creation uses local, already-authenticated `gh pr create` or
+description editor; the target branch is remembered per repository. The configured
+model routes can generate the title/description. Creation uses local, already-authenticated `gh pr create` or
 `glab mr create`; the target must exist on `origin`, and the source branch is pushed
 (with tags via `--follow-tags`) when needed after the user's confirmation. It never
 pushes the target and reports missing tools/login or a missing remote target. A remote
@@ -128,8 +187,8 @@ request may have been created if a timeout occurs, so retry guidance asks users 
 check existing requests.
 
 Commit context menus add **New Tag…**: an annotated-tag dialog whose Generate reads
-the branch's merged tag history and suggests the next minor version via ACP (with a
-deterministic fallback). Duplicate/invalid names are rejected before writing. Tags are
+the branch's merged tag history and suggests the next minor version through the
+configured model routes (with a deterministic fallback). Duplicate/invalid names are rejected before writing. Tags are
 included in pushes via `--follow-tags`. Operation failures use the same auto-dismissing
 bubble style as success notices, and the Git dialogs/settings window follow OMG's theme.
 
@@ -166,7 +225,8 @@ Window UI state is intentionally separate: `InspectorPresentationStore` owns las
 | `tabs.grouping`                   | enum    | `none`                        | `none`, `project`, `date`                                                                              | Settings > Tabs                    | Runtime                      |
 | `tabs.ordering`                   | enum    | `manual`                      | `manual`, `created`, `recentlyUsed`                                                                    | Settings > Tabs                    | Runtime                      |
 | `tabs.sidebarView`                | enum    | `tabs`                        | `tabs`, `inbox`                                                                                        | Vertical Tabs sidebar header       | Runtime                      |
-| `tabs.inboxOrdering`              | enum    | `recent`                      | `recent`, `created`                                                                                    | Vertical Tabs sidebar "…" menu     | Runtime                      |
+| `tabs.inboxGrouping`              | enum    | `date`                        | `none`, `project`, `date`                                                                              | Vertical Tabs sidebar "…" menu     | Runtime                      |
+| `tabs.inboxOrdering`              | enum    | `recentlyUsed`                | `manual`, `created`, `recentlyUsed`                                                                    | Vertical Tabs sidebar "…" menu     | Runtime                      |
 | `tabs.pathDisplay`                | enum    | `folderName`                  | `fullPath`, `folderName`                                                                               | Settings > Tabs                    | Runtime                      |
 | `tabs.showShortcutLabels`         | boolean | `true`                        | `true`, `false`                                                                                        | Settings > Tabs                    | Runtime                      |
 | `tabs.rememberSidebarWidth`       | boolean | `true`                        | `true`, `false`                                                                                        | Settings > Tabs                    | Runtime                      |
@@ -193,20 +253,20 @@ Window UI state is intentionally separate: `InspectorPresentationStore` owns las
 | `editor.wordWrap`                 | boolean | `false`                       | `true`, `false`                                                                                        | Settings > Editor                  | Runtime                      |
 | `git.autoFetchInterval`           | integer | `5`                           | `0...1440` minutes, `0` disables                                                                       | Settings > Git                     | Runtime                      |
 | `git.commitAI.prompt`             | string  | `""`                          | User-defined language, format and style                                                                | Settings > Git                     | Next generation              |
-| `git.commitAI.routes`             | array   | `[]`                          | Ordered `{id, agent, model}` entries                                                                   | Settings > Git                     | Next generation              |
-| `notifications.taskComplete`      | boolean | `true`                        | `true`, `false`                                                                                        | Settings > Agent Integration       | Runtime policy               |
-| `notifications.attention`         | boolean | `true`                        | `true`, `false`                                                                                        | Settings > Agent Integration       | Runtime policy               |
-| `notifications.sound`             | boolean | `false`                       | `true`, `false`                                                                                        | Settings > Agent Integration       | Runtime policy               |
-| `notifications.soundTone`         | enum    | `default`                     | `default`, `Basso`, `Blow`, `Bottle`, `Frog`, `Funk`, `Glass`, `Hero`, `Morse`, `Ping`, `Pop`, `Purr`, `Sosumi`, `Submarine`, `Tink` | Settings > Agent Integration       | Runtime policy               |
+| `git.commitAI.routes`             | array   | `[]`                          | Legacy mirror of the agent entries of `ai.routes.commit`, as `{id, agent, model}`                      | Settings > AI (written by OMG)     | Read only without `ai.routes.commit` |
+| `ai.providers`                    | array   | `[]`                          | `{id, name, kind, baseURL, enabled, models: [{id, contextWindow?, maxOutputTokens?}]}`; `kind` is `openai` or `anthropic` | Settings > AI > Providers          | Next request                 |
+| `ai.routes.commit`                | array   | `[]`                          | Ordered `{id, kind, agent \| provider, model}` entries; `kind` is `agent` or `provider`                | Settings > AI > Models per Task    | Next generation              |
+| `ai.routes.title`                 | object  | absent                        | `{provider, model}` of an enabled API connection                                                       | Settings > AI > Models per Task    | Next conversation title      |
+| `notifications.taskComplete`      | boolean | `true`                        | `true`, `false`                                                                                        | Settings > AI                      | Runtime policy               |
+| `notifications.attention`         | boolean | `true`                        | `true`, `false`                                                                                        | Settings > AI                      | Runtime policy               |
+| `notifications.sound`             | boolean | `false`                       | `true`, `false`                                                                                        | Settings > AI                      | Runtime policy               |
+| `notifications.soundTone`         | enum    | `default`                     | `default`, `Basso`, `Blow`, `Bottle`, `Frog`, `Funk`, `Glass`, `Hero`, `Morse`, `Ping`, `Pop`, `Purr`, `Sosumi`, `Submarine`, `Tink` | Settings > AI                      | Runtime policy               |
 | `agents.historyBackgroundIndexing` | boolean | `false`                       | `true`, `false`                                                                                        | Settings > General                 | Runtime index schedule       |
 | `agents.historyLimit`             | number  | `10000`                       | `100...50000`                                                                                          | Settings > General                 | Runtime Agent History reload |
-| `agents.statusHooks`              | boolean | `true`                        | `true`, `false`                                                                                        | Settings > Agent Integration       | Runtime ingress policy       |
+| `agents.statusHooks`              | boolean | `true`                        | `true`, `false`                                                                                        | Settings > AI                      | Runtime ingress policy       |
 | `agents.openQuickInputOnStart`    | boolean | `false`                       | `true`, `false`                                                                                        | Settings > Editor > Quick Input    | Next Agent start             |
 | `agents.openQuickInputOnComplete` | boolean | `false`                       | `true`, `false`                                                                                        | Settings > Editor > Quick Input    | Next Agent completion        |
-| `agents.sessionTitle.mode`        | enum    | `generate`                    | `off`, `native`, `generate`                                                                            | Settings > Agent > Conversation Titles | Next conversation title  |
-| `ai.endpoint.protocol`            | enum    | `openai`                      | `openai`, `anthropic`                                                                                  | Settings > Agent > AI Endpoint     | Next title request           |
-| `ai.endpoint.baseURL`             | string  | `""`                          | `https://` base URL; `http://` only for loopback, private or `.local` hosts                            | Settings > Agent > AI Endpoint     | Next title request           |
-| `ai.endpoint.model`               | string  | `""`                          | Model name understood by the endpoint                                                                  | Settings > Agent > AI Endpoint     | Next title request           |
+| `agents.sessionTitle.mode`        | enum    | `generate`                    | `off`, `native`, `generate`                                                                            | Settings > AI > Models per Task    | Next conversation title      |
 | `keyboard.inspectorPanel1`        | string  | `option+1`                    | Modifier combination plus one key                                                                      | Settings > Keyboard                | Runtime                      |
 | `keyboard.inspectorPanel2`        | string  | `option+2`                    | Modifier combination plus one key                                                                      | Settings > Keyboard                | Runtime                      |
 | `keyboard.inspectorPanel3`        | string  | `option+3`                    | Modifier combination plus one key                                                                      | Settings > Keyboard                | Runtime                      |
@@ -256,26 +316,29 @@ Settings > Editor owns the native code editor's local editing behavior. `editor.
 `tabs.sidebarView` selects what Vertical Tabs lists: the native tab order (`tabs`)
 or the inbox (`inbox`), which groups the same open tabs into Continue, Today,
 Yesterday and Earlier without reordering the native `NSWindowTabGroup`.
-`tabs.inboxOrdering` picks the inbox sort date, `recent` or `created`. Both are
-orthogonal to `tabs.grouping` and `tabs.ordering`, which keep their meaning in
-the Tabs view. The sidebar header is their only UI; there is no Settings picker.
+The inbox has its own `tabs.inboxGrouping` (`none`, `project`, `date`; default
+`date`) and `tabs.inboxOrdering` (`manual`, `created`, `recentlyUsed`; default
+`recentlyUsed`), with the same choices as `tabs.grouping` and `tabs.ordering`,
+which keep their meaning in the Tabs view. Continue is shown above the date
+sections only with date grouping, and `manual` means the native tab order: the
+inbox is display-only. An unknown stored value, such as `recent` from the first
+inbox build, falls back to the default. The sidebar header is their only UI;
+there is no Settings picker.
 
 Agent tabs can show a conversation title instead of the working directory. The
 title belongs to the conversation, not to the tab, and a manual rename always
 wins. `agents.sessionTitle.mode` chooses `off` (no conversation titles),
-`native` (only the title the Agent CLI records) or `generate` (ask the AI
-endpoint when the CLI reports none). `generate` behaves like `native` until both
-`ai.endpoint.baseURL` and `ai.endpoint.model` are set, so the default sends
-nothing anywhere. Generation is HTTP only: OMG sends the first prompt of the
-conversation, with likely secrets removed and capped at 1500 bytes, and never
-project files or terminal output. The endpoint sees at most two requests at a
-time; after three consecutive failures OMG pauses for five minutes, and a 401 or
-403 pauses until the endpoint settings change. Plain `http://` is accepted only
-for loopback, private-range and link-local hosts; ATS allows local networking and
-redirects are never followed. The API key is never written to `settings.json`:
-it lives in `<Application Support>/AI/credentials.json` with `0700`/`0600`
-permissions, and an empty key sends no authentication header. For OpenAI-style
-endpoints the request uses `max_tokens` and retries once with
+`native` (only the title the Agent CLI records) or `generate` (ask the title
+model when the CLI reports none). `generate` behaves like `native` until
+`ai.routes.title` names a model of an enabled API connection, so the default
+sends nothing anywhere. Generation is HTTP only: OMG sends the first prompt of
+the conversation, with likely secrets removed and capped at 1500 bytes, and never
+project files or terminal output. The request asks for the model's maximum
+output when one is set and for 1024 tokens otherwise. The connection sees at most
+two title requests at a time; after three consecutive failures OMG pauses for five
+minutes, and a 401 or 403 pauses until the title model or its connection changes.
+ATS allows local networking, and an empty key sends no authentication header. For
+OpenAI-style endpoints the request uses `max_tokens` and retries once with
 `max_completion_tokens` when the endpoint asks for it; Anthropic requests use
 `/v1/messages` with `anthropic-version: 2023-06-01`.
 
@@ -295,7 +358,7 @@ In the composer, unmodified `↑`/`↓` browse sent history in the configured vi
 
 `keyboard.quickInputHistoryKeepAfterQuit` defaults to `true`. History is stored locally as unencrypted JSON under the channel-specific Application Support directory's `quick-input-history/history.json` (directory mode 0700, file mode 0600). It may contain secrets or private prompts. Turning retention off deletes the saved copy and keeps only current-process history; re-enabling saves unexpired in-memory records. Clear All Quick Input History removes every scope and the saved copy after confirmation without affecting drafts/queues. Records are bounded to 50 per Pane, 1,000 overall and 8 MiB of prompt text; individual messages are limited to 1 MiB. Consecutive identical sends within a Pane refresh the timestamp instead of adding a duplicate. The history stores pasted-image paths, not image files, so a recalled path may no longer exist. Storage errors are shown in History/Settings without preventing terminal sends.
 
-Settings > Agent Integration installs the versioned, removable JSON/plugin/TOML/script/YAML integration declared by each bundled Agent manifest. Hermes uses a marker-delimited YAML block in `~/.hermes/config.yaml` and a helper that records bounded per-session state files. OMG matches a live foreground client to its per-TTY session breadcrumb before displaying status or saving restoration identity; synthetic hook-test sessions are ignored. SSH Hermes discovery requires remote TTY metadata from a fresh `omg +ssh` bootstrap. Detector-only Crush uses an explicit Host-owned Install/Update/Remove marker instead of pretending a vendor hook exists; its process/screen fallback is disabled when the marker is removed, and detector markers are reconciled per Agent each launch so a detector bundled after an upgrade is still adopted while an explicit Remove stays removed. Automatic Hook maintenance also integrates Agent CLIs it discovers but has not integrated yet, so installing an Agent CLI is enough for OMG to recognize it. `agents.statusHooks` controls both normalized event ingress and the bounded local foreground-PID fallback used when an agent does not emit `SessionStart`. Vertical Tabs use the focused pane's bundled Agent glyph/title/ring and keep other panes' attention/error/done as trailing alerts; idle has no ring. Normal `done` and unexpected-interruption `error` remain visible even on the currently focused pane; Tab selection/focus does not clear them, and only mouse click or keyboard input in the owning focused terminal acknowledges the terminal state. Horizontal Tabs keep Ghostty's native presentation. **Export SSH Installer…** writes an auditable Python 3 script that the user can explicitly transfer and run in a remote account. Remote hooks work through SSH because they write the bounded event to that remote TTY; OMG does not log in or alter remote accounts automatically.
+Settings > AI > This Mac > Installed Agents installs the versioned, removable JSON/plugin/TOML/script/YAML integration declared by each bundled Agent manifest. Hermes uses a marker-delimited YAML block in `~/.hermes/config.yaml` and a helper that records bounded per-session state files. OMG matches a live foreground client to its per-TTY session breadcrumb before displaying status or saving restoration identity; synthetic hook-test sessions are ignored. SSH Hermes discovery requires remote TTY metadata from a fresh `omg +ssh` bootstrap. Detector-only Crush uses an explicit Host-owned Install/Update/Remove marker instead of pretending a vendor hook exists; its process/screen fallback is disabled when the marker is removed, and detector markers are reconciled per Agent each launch so a detector bundled after an upgrade is still adopted while an explicit Remove stays removed. Automatic Hook maintenance also integrates Agent CLIs it discovers but has not integrated yet, so installing an Agent CLI is enough for OMG to recognize it. `agents.statusHooks` controls both normalized event ingress and the bounded local foreground-PID fallback used when an agent does not emit `SessionStart`. Vertical Tabs use the focused pane's bundled Agent glyph/title/ring and keep other panes' attention/error/done as trailing alerts; idle has no ring. Normal `done` and unexpected-interruption `error` remain visible even on the currently focused pane; Tab selection/focus does not clear them, and only mouse click or keyboard input in the owning focused terminal acknowledges the terminal state. Horizontal Tabs keep Ghostty's native presentation. **Export SSH Installer…** writes an auditable Python 3 script that the user can explicitly transfer and run in a remote account. Remote hooks work through SSH because they write the bounded event to that remote TTY; OMG does not log in or alter remote accounts automatically.
 
 Settings > Shell & Sessions > New tabs and splits controls `sessions.newTabInheritance` and `sessions.newSplitInheritance` separately. `default` opens a local shell in Ghostty's default directory. `directory` opens a local shell in the focused pane's directory; for an SSH pane this is its local pre-SSH directory. `ssh` reconnects the focused pane's SSH session on the same host and remote directory (local panes behave like `directory`). `agent` additionally starts the focused pane's Agent as a new conversation; `agentResume` resumes the same conversation ID and falls back to a new conversation when no ID is known or the Agent has no resume arguments. Agent options keep the SSH connection for remote Agents; when the pane runs no Agent, or its SSH connection cannot be replayed, they fall back to `ssh`. Resuming one conversation in two live processes makes both append to one transcript without seeing each other's turns, so a later resume may show one branch or a mixed history. Defaults keep the previous behavior: tabs inherit the directory and splits inherit SSH. Ghostty's `tab-inherit-working-directory` / `split-inherit-working-directory` still apply; when they are off, the new pane starts from the default directory.
 

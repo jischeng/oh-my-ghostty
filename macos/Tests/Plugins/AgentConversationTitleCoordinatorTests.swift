@@ -239,6 +239,47 @@ struct AgentConversationTitleCoordinatorTests {
         #expect(await fixture.generator.prompts.isEmpty)
     }
 
+    /// With scripted seeds every test above passed while no real tab ever got
+    /// a title: the app's loader ignored transcripts older than a few minutes.
+    @Test func aRestoredConversationIsTitledFromATranscriptWrittenDaysAgo() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-title-coordinator-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let id = "0f0e0d0c-1111-4222-8333-444455556666"
+        let file = root.appendingPathComponent("-repo/\(id).jsonl")
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let lines = [
+            #"{"type":"user","sessionId":"\#(id)","cwd":"/repo","message":{"role":"user","content":"Fix the flaky login test"}}"#,
+            #"{"type":"ai-title","aiTitle":"Stabilise login","sessionId":"\#(id)"}"#,
+        ]
+        try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: file)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(-9 * 86_400)], ofItemAtPath: file.path
+        )
+        let store = AgentConversationTitleStore()
+        let coordinator = Coordinator(
+            store: store,
+            generator: Generator(nil),
+            // The app's own loader, pointed at this store, with its default window.
+            loadSeed: { target in
+                await AgentHistoryStore.titleSeed(
+                    agent: target.agent, conversationID: target.conversationID,
+                    remoteHost: target.remoteHost, rootURLs: [.claude: root]
+                )
+            },
+            mode: { .native },
+            sleep: { _ in }
+        )
+        let conversation = try #require(AgentConversationID(id))
+        // A restored tab: bound, idle, read once.
+        coordinator.request(.init(agent: .claude, conversationID: conversation, remoteHost: nil),
+                            trigger: .bound, owner: UUID())
+        await coordinator.waitUntilIdle()
+        let record = store.record(agent: .claude, conversationID: conversation)
+        #expect(record?.title == "Stabilise login")
+        #expect(record?.source == .native)
+    }
+
     @Test func oneReadServesEveryTabAndStopsWithTheLastOne() async {
         // The read never gets past its first wait unless it is cancelled.
         let fixture = Fixture(seeds: Seeds(rest: Seed(native: "Stabilise login", firstPrompt: prompt)),

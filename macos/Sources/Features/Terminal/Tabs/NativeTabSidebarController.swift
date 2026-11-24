@@ -33,7 +33,7 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
     private(set) var list: NativeTabOutlineController!
     private let workspaceButton = TerminalWorkspaceHeaderButton()
     private let backgroundButton = SessionRuntimeBackgroundHeaderButton()
-    private let inboxButton = NativeActionControl()
+    private let inboxButton = TabInboxHeaderButton()
     private let optionsButton = NativeOptionsControl()
     private let backgroundPopover = NSPopover()
     private let organization = GhosttyTabOrganizationModel()
@@ -45,9 +45,13 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
     private var backgroundWidth: NSLayoutConstraint?
     private let themeObserver = OMGNativeThemeObserver()
     private(set) var refreshCount = 0
-    /// The inbox arrangement on screen. It can lag behind the fresh order
-    /// while the pointer holds the rows in place.
-    private var displayedInbox: (sort: GhosttyTabInboxSortMode, arrangement: [TabInboxSection: [ObjectIdentifier]])?
+    /// The inbox rows on screen. They can lag behind the fresh order while
+    /// the pointer holds them in place.
+    private var displayedInbox: (grouping: GhosttyTabGroupingMode, ordering: GhosttyTabOrderingMode,
+                                 rows: [TabInboxRows<ObjectIdentifier>])?
+    /// Titles and icons of the groups on screen. A held group can have left
+    /// the fresh order and keeps the header it had.
+    private var inboxHeaders: [String: TabInboxHeader] = [:]
     private(set) var inboxOrderIsPending = false
     private var inboxReleaseWorkItem: DispatchWorkItem?
 
@@ -121,7 +125,7 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
             backgroundPopover.close()
             configuration.controller.workspacePopover.close()
         }
-        if configuration.layoutState !== next.layoutState { displayedInbox = nil }
+        if configuration.layoutState !== next.layoutState { forgetInboxOrder() }
         configuration = next
         guard isViewLoaded else { return }
         if rebind { bind() }
@@ -138,9 +142,15 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
 
     private var isInbox: Bool { OhMyGhosttySettings.shared.tabSidebarViewMode == .inbox }
 
-    /// Only the recency order depends on activation and agent timestamps.
+    /// Only the recency order depends on interaction and agent timestamps.
     private var inboxFollowsRecency: Bool {
-        isInbox && OhMyGhosttySettings.shared.tabInboxSortMode == .recent
+        isInbox && OhMyGhosttySettings.shared.tabInboxOrderingMode == .recentlyUsed
+    }
+
+    /// Project groups follow each tab's directory. The inbox has its own grouping.
+    private var groupsByProject: Bool {
+        isInbox ? OhMyGhosttySettings.shared.tabInboxGroupingMode == .project
+            : configuration.layoutState.groupingMode == .project
     }
 
     private func toggleInbox() {
@@ -151,10 +161,9 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
 
     private func configureInboxButton(_ strings: ChromeStrings) {
         let shown = isInbox
-        inboxButton.configure(title: "", symbol: shown ? "tray.fill" : "tray", help: strings.toggleInbox(shown: shown),
-                              enabled: true, style: shown ? .bordered : .plain, identifier: "tabs.inbox")
-        inboxButton.setAccessibilityLabel(strings.inbox)
-        inboxButton.setAccessibilityValue(shown ? strings.selected : "")
+        // The inbox lists the waiting tabs itself; the dot is for the Tabs view.
+        let attention = shown ? 0 : TabInboxModel.attentionCount(tabs: tabs, activities: configuration.statusStore)
+        inboxButton.update(shown: shown, attention: attention, strings: strings)
     }
 
     private func applyPendingInboxOrder() {
@@ -225,30 +234,31 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
         metadataSubscriptions.removeAll()
         for tab in tabs {
             tab.objectWillChange.sink { [weak self] _ in
-                if self?.configuration.layoutState.groupingMode == .project { self?.scheduleRefresh() }
+                if self?.groupsByProject == true { self?.scheduleRefresh() }
             }.store(in: &metadataSubscriptions)
+            // Activation orders the Tabs view; the inbox follows interaction.
             tab.$tabLastActivatedAt.dropFirst().sink { [weak self] _ in
-                guard let self else { return }
-                if self.configuration.layoutState.orderingMode == .recentlyUsed || self.inboxFollowsRecency {
-                    self.scheduleRefresh()
-                }
+                if self?.configuration.layoutState.orderingMode == .recentlyUsed { self?.scheduleRefresh() }
+            }.store(in: &metadataSubscriptions)
+            tab.$tabLastInteractionAt.dropFirst().sink { [weak self] _ in
+                if self?.inboxFollowsRecency == true { self?.scheduleRefresh() }
             }.store(in: &metadataSubscriptions)
             tab.$tabLastAgentActivityAt.dropFirst().sink { [weak self] _ in
                 if self?.inboxFollowsRecency == true { self?.scheduleRefresh() }
             }.store(in: &metadataSubscriptions)
-            // Only a change of state moves a tab into or out of Continue;
-            // progress and message updates of a working agent do not.
+            // Only a change of state moves a tab into or out of Continue, or
+            // changes the inbox button's dot; progress and message updates of
+            // a working agent do not.
             tab.$agentActivities.map { Set($0.values.map(\.state)) }.removeDuplicates().dropFirst()
-                .sink { [weak self] _ in
-                    if self?.isInbox == true { self?.scheduleRefresh() }
-                }.store(in: &metadataSubscriptions)
+                .sink { [weak self] _ in self?.scheduleRefresh() }
+                .store(in: &metadataSubscriptions)
             tab.$surfaceTree.dropFirst().sink { [weak self] _ in
                 self?.tabIDs = []
                 self?.scheduleRefresh()
             }.store(in: &metadataSubscriptions)
             for surface in tab.surfaceTree {
                 surface.$pwd.dropFirst().sink { [weak self] _ in
-                    if self?.configuration.layoutState.groupingMode == .project { self?.scheduleRefresh() }
+                    if self?.groupsByProject == true { self?.scheduleRefresh() }
                 }.store(in: &metadataSubscriptions)
             }
         }
@@ -304,28 +314,38 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
         view.needsLayout = true
     }
 
+    /// The Tabs view's grouping and ordering, which also arrange the native tabs.
     private func organizationEntries(_ strings: ChromeStrings) -> [NativeMenuEntry] {
         let config = configuration
-        return [.action(strings.groupHeader, enabled: false) {}] + GhosttyTabGroupingMode.allCases.map { mode in
-            .action(strings.groupingTitle(mode), checked: config.layoutState.groupingMode == mode) { [weak controller = config.controller] in
-                controller?.setTabGroupingMode(mode)
-            }
-        } + [.separator, .action(strings.orderHeader, enabled: false) {}] + GhosttyTabOrderingMode.allCases.map { mode in
-            .action(strings.orderingTitle(mode), checked: config.layoutState.orderingMode == mode) { [weak controller = config.controller] in
-                controller?.setTabOrderingMode(mode)
-            }
-        }
+        return organizationEntries(
+            strings, grouping: config.layoutState.groupingMode, ordering: config.layoutState.orderingMode,
+            setGrouping: { [weak controller = config.controller] in controller?.setTabGroupingMode($0) },
+            setOrdering: { [weak controller = config.controller] in controller?.setTabOrderingMode($0) })
     }
 
-    /// The inbox has its own order. Grouping and ordering keep applying to the
-    /// Tabs view and are not offered while the inbox is shown.
+    /// The same choices for the inbox. They are its own settings and only
+    /// change what the list displays.
     private func inboxEntries(_ strings: ChromeStrings) -> [NativeMenuEntry] {
-        let sort = OhMyGhosttySettings.shared.tabInboxSortMode
-        var entries: [NativeMenuEntry] = [.action(strings.inboxSortHeader, enabled: false) {}]
-        for mode in GhosttyTabInboxSortMode.allCases {
-            entries.append(.action(strings.inboxSortTitle(mode), checked: sort == mode) {
-                OhMyGhosttySettings.shared.tabInboxSortMode = mode
-            })
+        let settings = OhMyGhosttySettings.shared
+        return organizationEntries(
+            strings, grouping: settings.tabInboxGroupingMode, ordering: settings.tabInboxOrderingMode,
+            setGrouping: { OhMyGhosttySettings.shared.tabInboxGroupingMode = $0 },
+            setOrdering: { OhMyGhosttySettings.shared.tabInboxOrderingMode = $0 })
+    }
+
+    private func organizationEntries(
+        _ strings: ChromeStrings, grouping: GhosttyTabGroupingMode, ordering: GhosttyTabOrderingMode,
+        setGrouping: @escaping (GhosttyTabGroupingMode) -> Void,
+        setOrdering: @escaping (GhosttyTabOrderingMode) -> Void
+    ) -> [NativeMenuEntry] {
+        var entries: [NativeMenuEntry] = [.action(strings.groupHeader, enabled: false) {}]
+        for mode in GhosttyTabGroupingMode.allCases {
+            entries.append(.action(strings.groupingTitle(mode), checked: grouping == mode) { setGrouping(mode) })
+        }
+        entries.append(.separator)
+        entries.append(.action(strings.orderHeader, enabled: false) {})
+        for mode in GhosttyTabOrderingMode.allCases {
+            entries.append(.action(strings.orderingTitle(mode), checked: ordering == mode) { setOrdering(mode) })
         }
         return entries
     }
@@ -342,26 +362,35 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
             groups: groups,
             selectedID: config.layoutState.pendingSelectedTabID ?? config.layoutState.tabSnapshot.selectedID,
             layoutState: config.layoutState, controller: config.controller,
-            rowHeight: OhMyGhosttySettings.shared.tabRowDensity.rowHeight,
+            metrics: inbox ? .inbox : .tabs(rowHeight: OhMyGhosttySettings.shared.tabRowDensity.rowHeight),
             allowsReordering: !inbox,
-            // Same rule as the resolver: a conversation title is shown, with a subtitle.
-            showsSubtitle: { $0.controller.titleOverride == nil && $0.controller.tabAgentConversationTitle != nil },
+            // The resolver's rule, without resolving the whole presentation.
+            showsSubtitle: { $0.controller.tabTitleHasSubtitle },
             presentation: { [weak self] in self?.presentation(for: $0) }
         )
     }
 
     private func inboxGroups() -> [GhosttyTabGroupPresentation] {
-        let sort = OhMyGhosttySettings.shared.tabInboxSortMode
+        let settings = OhMyGhosttySettings.shared
+        let grouping = settings.tabInboxGroupingMode
+        let ordering = settings.tabInboxOrderingMode
         let tabs = self.tabs
-        let fresh = TabInboxModel.arrangement(tabs: tabs, sort: sort, activities: configuration.statusStore)
-        var shown = fresh
-        // Rows must not jump under the pointer. An explicit change of the sort
-        // mode applies at once.
-        if let displayedInbox, displayedInbox.sort == sort, list?.isPointerHoldingOrder == true {
-            shown = TabInboxModel.holding(fresh: fresh, displayed: displayedInbox.arrangement)
+        let fresh = TabInboxModel.groups(tabs: tabs, grouping: grouping, ordering: ordering,
+                                         organization: organization, activities: configuration.statusStore)
+        let freshRows = TabInboxModel.rows(fresh)
+        var shown = freshRows
+        // Rows must not jump under the pointer. An explicit change of the
+        // grouping or ordering applies at once.
+        if let displayedInbox, displayedInbox.grouping == grouping, displayedInbox.ordering == ordering,
+           list?.isPointerHoldingOrder == true {
+            shown = TabInboxModel.holding(fresh: freshRows, displayed: displayedInbox.rows)
         }
-        displayedInbox = (sort, shown)
-        inboxOrderIsPending = shown != fresh
+        let shownIDs = Set(shown.map(\.id))
+        var headers = inboxHeaders.filter { shownIDs.contains($0.key) }
+        for group in fresh { headers[group.id] = TabInboxHeader(title: group.title, icon: group.icon) }
+        inboxHeaders = headers
+        displayedInbox = (grouping, ordering, shown)
+        inboxOrderIsPending = shown != freshRows
         inboxReleaseWorkItem?.cancel()
         inboxReleaseWorkItem = nil
         if inboxOrderIsPending {
@@ -370,18 +399,32 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
             inboxReleaseWorkItem = release
             DispatchQueue.main.asyncAfter(deadline: .now() + NativeTabListPointer.restInterval + 0.1, execute: release)
         }
-        return TabInboxModel.groups(shown, of: tabs)
+        let groups = inboxOrderIsPending ? TabInboxModel.groups(shown, headers: headers, of: tabs) : fresh
+        // `goto_tab` and the shortcut labels count the rows the user sees,
+        // held or not. A hidden sidebar shows none, so they stay native.
+        let visible = configuration.layoutState.isSidebarVisible
+        configuration.layoutState.publishInboxDisplayOrder(visible ? groups.flatMap(\.tabs).map(\.controller) : [])
+        return groups
     }
 
     private func forgetInboxOrder() {
         displayedInbox = nil
+        inboxHeaders = [:]
         inboxOrderIsPending = false
         inboxReleaseWorkItem?.cancel()
         inboxReleaseWorkItem = nil
+        configuration.layoutState.publishInboxDisplayOrder([])
+    }
+
+    /// The number `goto_tab` selects this row with: its place from the top in
+    /// the inbox, the native index in the Tabs view.
+    private func shortcutIndex(for tab: GhosttyOrganizedTab) -> Int {
+        guard configuration.controller.tabShortcutsFollowInbox else { return tab.actualIndex }
+        return configuration.layoutState.inboxDisplayOrder.position(of: tab.id) ?? tab.actualIndex
     }
 
     private func presentation(for tab: GhosttyOrganizedTab) -> GhosttyTabPresentation? {
-        TerminalTabPresentationResolver.resolve(tab.controller, index: tab.actualIndex,
+        TerminalTabPresentationResolver.resolve(tab.controller, index: shortcutIndex(for: tab),
             selected: tab.id == configuration.layoutState.tabSnapshot.selectedID,
             activities: configuration.statusStore, icons: configuration.iconProvider)
     }

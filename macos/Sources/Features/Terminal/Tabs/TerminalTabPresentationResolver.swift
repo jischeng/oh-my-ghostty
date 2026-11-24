@@ -69,18 +69,69 @@ enum TerminalTabPresentationResolver {
         // Title normalisation strips what an Agent adds to a terminal title;
         // a conversation title is not one.
         let title = conversationTitle ?? agent?.normalizedTitle(base) ?? base
-        let showsPath = controller.titleOverride == nil && conversationTitle == nil && restoredTitle == nil
-        // Never empty, so every row with a conversation title has two lines.
-        let place = session.remoteTabBreadcrumb?.title ?? pathTitle
-        let subtitle = place.isEmpty ? agent?.displayName : place
+        // A manual tab name or a conversation title is a name that is not the
+        // path, so the place moves below it. `tabTitleHasSubtitle` is the same
+        // rule without the formatting; keep the two in step.
+        let isNamed = controller.titleOverride != nil || conversationTitle != nil
+        let showsPath = !isNamed && restoredTitle == nil
+        let subtitle = isNamed
+            ? namedSubtitle(session: session, descriptor: descriptor, agent: agent, pathTitle: pathTitle) : nil
         let context = GhosttyTabIconContext(tabID: controller.tabSessionID, title: title, activity: activity,
                                            defaultIcon: session.workspace?.icon ?? .systemSymbol(session.tabIconSystemName))
-        // Both tab renderers prefer the breadcrumb over the title, so a
-        // conversation title moves the place it would have named to the subtitle.
+        // Both tab renderers prefer the breadcrumb over the title, so a named
+        // tab carries the place only in its subtitle.
         return .init(title: title, remoteBreadcrumb: showsPath ? session.remoteTabBreadcrumb : nil,
-                     subtitle: conversationTitle == nil ? nil : subtitle,
+                     subtitle: subtitle,
                      shortcut: settings.showShortcutLabels ? controller.tabShortcutLabel(for: index) : nil,
                      icon: icons.icon(for: context) ?? .systemSymbol("terminal"), activity: activity,
                      selected: selected, hovered: false)
+    }
+
+    /// What a named tab shows below its name. Never empty, so every named tab
+    /// has two lines: the place, else what the row showed before it had a
+    /// name, else the Agent.
+    static func namedSubtitle(session: PaneSessionContext, descriptor: AgentResumeDescriptor?,
+                              agent: SupportedAgent?, pathTitle: String) -> String {
+        if let location = place(session: session, descriptor: descriptor) { return location }
+        let previous = session.remoteTabBreadcrumb?.title ?? pathTitle
+        if !previous.isEmpty { return previous }
+        return agent?.displayName ?? "Terminal"
+    }
+
+    /// Where a pane is: its working directory with the home folder shortened
+    /// to `~`, after the host for an SSH pane. It does not follow
+    /// `tabs.pathDisplay`, which shortens the title of a tab without a name.
+    static func place(session: PaneSessionContext, descriptor: AgentResumeDescriptor?) -> String? {
+        func nonEmpty(_ value: String?) -> String? { value.flatMap { $0.isEmpty ? nil : $0 } }
+        let restored = nonEmpty(descriptor?.workingDirectory)
+        let remoteAgentDirectory = descriptor?.scope == .remote ? restored : nil
+        switch session.state {
+        case .sshReady(let ssh, let workingDirectory):
+            let directory = nonEmpty(workingDirectory) ?? remoteAgentDirectory
+            return directory.map { RemoteTabBreadcrumb(host: ssh.alias, directory: $0).title } ?? ssh.alias
+        case .sshConnecting(let ssh):
+            // The local directory belongs to the SSH launcher until the host
+            // reports its own.
+            return remoteAgentDirectory.map { RemoteTabBreadcrumb(host: ssh.alias, directory: $0).title } ?? ssh.alias
+        case .local:
+            guard descriptor?.scope == .remote else {
+                return (nonEmpty(session.workingDirectory) ?? restored).map { abbreviatingHome($0) }
+            }
+            // A remote Agent whose connection is down: its host and directory.
+            guard let host = descriptor?.sshReplay?.transferTarget else { return restored }
+            return restored.map { RemoteTabBreadcrumb(host: host, directory: $0).title } ?? host
+        }
+    }
+
+    private static let homeDirectory = NSHomeDirectory()
+
+    /// `~` in place of the user's home folder, without touching the file
+    /// system: a row asks on every refresh.
+    static func abbreviatingHome(_ path: String, home: String? = nil) -> String {
+        let home = home ?? homeDirectory
+        guard home.count > 1, path.hasPrefix(home) else { return path }
+        let rest = path.dropFirst(home.count)
+        guard rest.isEmpty || rest.hasPrefix("/") else { return path }
+        return "~" + rest
     }
 }

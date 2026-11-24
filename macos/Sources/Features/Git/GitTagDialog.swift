@@ -186,6 +186,7 @@ final class GitTagDialogController: NSViewController, NSWindowDelegate, NSTextFi
 
         let routes = settings.gitCommitAIRoutes
         let style = settings.gitCommitAIPrompt
+        let providers = settings.aiProviderDirectory()
         task = Task { @MainActor in
             defer { setBusy(false) }
             do {
@@ -196,10 +197,10 @@ final class GitTagDialogController: NSViewController, NSWindowDelegate, NSTextFi
                 Increment the MINOR version of the latest version tag and reset patch (e.g. v1.6.124 -> v1.7.0).
                 Return only the tag name, nothing else.
                 """
-                let generator = GitCommitAIService { route, text in
+                let generator = GitCommitAIService(invoke: { route, text in
                     try await GitACPService.shared.generate(repository: self.repository, route: route,
                         style: "operation/tag/" + style, prompt: text)
-                }
+                }, providers: providers)
                 let result = try await generator.generate(routes: routes, prompt: prompt)
                 let candidate = result.message.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !Task.isCancelled, !didFinish else { return }

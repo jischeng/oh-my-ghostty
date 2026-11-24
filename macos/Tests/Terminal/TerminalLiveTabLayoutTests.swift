@@ -313,7 +313,12 @@ struct TerminalLiveTabLayoutTests {
             scope: .local, workingDirectory: "/tmp/project"), for: surface)
         let path = settings.tabPathDisplay == .folderName ? "project" : "/tmp/project"
         func resolved() throws -> GhosttyTabPresentation {
-            try #require(TerminalTabPresentationResolver.resolve(controller, index: 0, selected: true, activities: nil))
+            let value = try #require(
+                TerminalTabPresentationResolver.resolve(controller, index: 0, selected: true, activities: nil)
+            )
+            // The sidebar picks the row height from the cheap predicate.
+            #expect(controller.tabTitleHasSubtitle == (value.subtitle != nil))
+            return value
         }
         // A conversation without a stored title names its tab as before.
         #expect(try resolved().title == path)
@@ -325,7 +330,9 @@ struct TerminalLiveTabLayoutTests {
         #expect(store.set("Stabilise login", source: .native, agent: .claude, conversationID: conversation))
         var value = try resolved()
         #expect(value.title == "Stabilise login")
-        #expect(value.subtitle == path)
+        // The place below the name is the directory itself, whatever
+        // tabs.pathDisplay shortens an unnamed tab's title to.
+        #expect(value.subtitle == "/tmp/project")
         #expect(value.remoteBreadcrumb == nil)
         #expect(controller.presentedTerminalTitle(for: surface, terminalTitle: "live title") == "Stabilise login")
         try await waitForAppKit { controller.window?.title == "Stabilise login" }
@@ -335,11 +342,12 @@ struct TerminalLiveTabLayoutTests {
         #expect(try resolved().title == "✳ Claude Code review")
         try await waitForAppKit { controller.window?.title == "✳ Claude Code review" }
 
-        // A manual tab name always wins and leaves no subtitle.
+        // A manual tab name always wins, and is a name with the place below it too.
         controller.titleOverride = "User name"
         value = try resolved()
         #expect(value.title == "User name")
-        #expect(value.subtitle == nil)
+        #expect(value.subtitle == "/tmp/project")
+        #expect(value.remoteBreadcrumb == nil)
         #expect(controller.window?.title == "User name")
         controller.titleOverride = nil
         #expect(try resolved().title == "✳ Claude Code review")
@@ -360,6 +368,82 @@ struct TerminalLiveTabLayoutTests {
         #expect(try resolved().title == path)
         #expect(try resolved().subtitle == nil)
         try await waitForAppKit { controller.window?.title != "✳ Claude Code review" }
+    }
+
+    @Test func aManuallyNamedTerminalShowsItsDirectoryBelowTheName() throws {
+        let fixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { fixture.close() }
+        let controller = try fixture.tab()
+        let surface = try #require(controller.surfaceTree.first)
+        surface.runtimeDescriptor = nil
+        surface.pwd = NSHomeDirectory() + "/code/project"
+        func resolved() throws -> GhosttyTabPresentation {
+            let value = try #require(
+                TerminalTabPresentationResolver.resolve(controller, index: 0, selected: true, activities: nil)
+            )
+            #expect(controller.tabTitleHasSubtitle == (value.subtitle != nil))
+            return value
+        }
+        // A terminal named after its path has one line.
+        #expect(try resolved().subtitle == nil)
+        #expect(!controller.tabTitleHasSubtitle)
+
+        controller.titleOverride = "Scratch"
+        let named = try resolved()
+        #expect(named.title == "Scratch")
+        #expect(named.subtitle == "~/code/project")
+        #expect(named.remoteBreadcrumb == nil)
+        #expect(controller.tabTitleHasSubtitle)
+
+        controller.titleOverride = nil
+        #expect(try resolved().subtitle == nil)
+    }
+
+    @Test func aNamedTabsPlaceIsItsDirectoryAfterItsHost() {
+        typealias Resolver = TerminalTabPresentationResolver
+        let home = NSHomeDirectory()
+        // The home folder is shortened without asking the file system.
+        #expect(Resolver.abbreviatingHome(home + "/code/project") == "~/code/project")
+        #expect(Resolver.abbreviatingHome(home) == "~")
+        #expect(Resolver.abbreviatingHome(home + "-backup/project") == home + "-backup/project")
+        #expect(Resolver.abbreviatingHome("/tmp/project") == "/tmp/project")
+        #expect(Resolver.abbreviatingHome("/Users/me/code", home: "/Users/me") == "~/code")
+        #expect(Resolver.abbreviatingHome("/code", home: "/") == "/code")
+
+        let local = PaneSessionContext(workingDirectory: home + "/code/project", terminalTitle: "vim")
+        #expect(Resolver.place(session: local, descriptor: nil) == "~/code/project")
+        // An Agent pane whose shell reported no directory uses the conversation's.
+        let bare = PaneSessionContext(workingDirectory: nil, terminalTitle: "")
+        let agent = AgentResumeDescriptor(agent: .codex, scope: .local, workingDirectory: "/tmp/project")
+        #expect(Resolver.place(session: bare, descriptor: agent) == "/tmp/project")
+        #expect(Resolver.place(session: bare, descriptor: nil) == nil)
+
+        // An SSH pane names its host first and keeps the remote path whole.
+        var remote = PaneSessionContext(workingDirectory: home, terminalTitle: "ssh")
+        remote.observeForegroundSSH(
+            alias: "build-box", transferTarget: "me@build-box", processGroupID: 4_242,
+            currentWorkingDirectory: home, currentTerminalTitle: "ssh",
+            remoteWorkingDirectory: "/home/me/code/project"
+        )
+        #expect(Resolver.place(session: remote, descriptor: nil) == "build-box › /home/me/code/project")
+        // The local directory belongs to the launcher while the host connects.
+        var connecting = PaneSessionContext(workingDirectory: home, terminalTitle: "ssh")
+        connecting.observeForegroundSSH(
+            alias: "build-box", transferTarget: "me@build-box", processGroupID: 4_242,
+            currentWorkingDirectory: home, currentTerminalTitle: "ssh"
+        )
+        #expect(Resolver.place(session: connecting, descriptor: nil) == "build-box")
+        let remoteAgent = AgentResumeDescriptor(agent: .codex, scope: .remote, workingDirectory: "/srv/app")
+        #expect(Resolver.place(session: connecting, descriptor: remoteAgent) == "build-box › /srv/app")
+        // A remote Agent whose connection is down still names where it ran.
+        #expect(Resolver.place(session: bare, descriptor: remoteAgent) == "/srv/app")
+
+        // Never empty: what the row showed before, else the Agent, else a word.
+        #expect(Resolver.namedSubtitle(session: bare, descriptor: nil, agent: .codex, pathTitle: "Terminal")
+            == "Terminal")
+        #expect(Resolver.namedSubtitle(session: bare, descriptor: nil, agent: .codex, pathTitle: "")
+            == SupportedAgent.codex.displayName)
+        #expect(Resolver.namedSubtitle(session: bare, descriptor: nil, agent: nil, pathTitle: "") == "Terminal")
     }
 
     @Test func aBoundConversationIsLookedUpAndNamesItsTab() async throws {

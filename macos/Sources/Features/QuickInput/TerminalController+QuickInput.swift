@@ -603,6 +603,8 @@ extension TerminalController {
             terminal.sendKeyEvent(.init(key: .enter))
             terminal.sendKeyEvent(.init(key: .enter, action: .release))
             self.acknowledgeTerminalAgentState(for: surface)
+            // A Quick Input submission is typing into this tab.
+            self.noteTabTyping()
             self.quickInputModel.didSubmitAgentDraft(for: surfaceID)
             self.quickInputModel.updateHistoryLocation(
                 QuickInputHistoryLocation.from(self.paneSessionContext(for: surface)),

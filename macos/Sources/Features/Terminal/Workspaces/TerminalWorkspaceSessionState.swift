@@ -154,6 +154,8 @@ struct TerminalWorkspaceSessionState: Codable, Equatable {
     var titleOverride: String?
     var tabSessionID: String?
     var tabCreatedAt: Date?
+    /// Absent in state saved before the inbox ordered tabs by interaction.
+    var tabLastInteractionAt: Date?
     static let paneIDsPreRemappedKey = CodingUserInfoKey(
         rawValue: "omg.workspace.pane-ids-pre-remapped"
     )!
@@ -170,6 +172,7 @@ struct TerminalWorkspaceSessionState: Codable, Equatable {
         titleOverride = controller.titleOverride
         tabSessionID = controller.tabSessionID.uuidString
         tabCreatedAt = controller.tabCreatedAt
+        tabLastInteractionAt = controller.tabLastInteractionAt
     }
 
     var paneIDs: [UUID]? {

@@ -230,18 +230,50 @@ enum AgentHistoryStore {
         var firstPrompt: String?
     }
 
-    /// A conversation that is in use had its transcript written this recently.
+    /// A transcript that is not named after its conversation is looked for
+    /// among the ones written this recently.
     static let titleSeedWindow: TimeInterval = 15 * 60
     nonisolated static let maximumFirstPromptCharacters = 1_000
-    private static let maximumRemoteTitleSeedSessions = 64
+    nonisolated private static let maximumRemoteTitleSeedSessions = 64
+    /// Transcripts one lookup parses. A conversation has one file, or a live
+    /// one and an archive; the recent window of a busy store holds a few more.
+    nonisolated private static let maximumConversationCandidates = 64
 
-    /// The name a session store holds for one conversation, or nil while its
-    /// transcript is missing or was last written before `updatedAfter`.
+    /// How a lookup of one conversation ended. Logged, so that a missing tab
+    /// title can be traced to its cause.
+    enum ConversationLookup: String, Sendable {
+        /// A transcript named after the conversation was read.
+        case named
+        /// No file is named after it; it was among the recently written ones.
+        case recent
+        /// The Agent's database holds it.
+        case database
+        /// The SSH host returned it.
+        case remote
+        /// The Agent keeps no session store this build reads there.
+        case unsupported
+        /// The SSH host could not be asked.
+        case unreachable
+        /// The store holds no readable transcript of it.
+        case missing
+    }
+
+    struct ConversationMatch: Sendable {
+        let session: AgentHistorySession?
+        let lookup: ConversationLookup
+    }
+
+    /// The name a session store holds for one conversation, or nil while it
+    /// has no transcript there.
     ///
-    /// The cutoff applies before any transcript is parsed, and on the SSH host
-    /// for a remote conversation, which costs one round trip. Unlike
-    /// `session(agent:conversationID:remoteHost:)` this never walks a whole
-    /// history, and it leaves the shared session cache alone.
+    /// A conversation is found whatever its age: a restored tab shows one that
+    /// was last written days ago. Most Agents name the transcript after the
+    /// conversation, so only files whose path holds the ID are parsed, and a
+    /// database is asked for that one row. `updatedAfter` bounds the fallback
+    /// for a store whose file names do not carry the ID. A remote conversation
+    /// costs one SSH round trip with the same rules applied on the host.
+    /// Unlike `session(agent:conversationID:remoteHost:)` this never parses a
+    /// whole history, and it leaves the shared session cache alone.
     static func titleSeed(
         agent: SupportedAgent,
         conversationID: AgentConversationID,
@@ -250,24 +282,173 @@ enum AgentHistoryStore {
         rootURLs: [SupportedAgent: URL] = [:],
         remoteAccess: AgentHistoryRemoteAccess? = nil
     ) async -> TitleSeed? {
-        let sessions: [AgentHistorySession]
+        let lookupTask: Task<ConversationMatch, Never>
         if let remoteHost {
-            sessions = await loadRemote(
-                access: remoteAccess ?? AgentHistoryRemoteAccess(alias: remoteHost),
-                agents: [agent],
-                maximumSessions: maximumRemoteTitleSeedSessions,
-                updatedAfter: updatedAfter
-            )
+            let access = remoteAccess ?? AgentHistoryRemoteAccess(alias: remoteHost)
+            lookupTask = Task.detached(priority: .utility) {
+                await remoteConversationSession(
+                    access: access, agent: agent, conversationID: conversationID, recentAfter: updatedAfter
+                )
+            }
         } else {
-            sessions = await load(
-                agents: [agent],
-                rootURLs: rootURLs,
-                updatedAfter: updatedAfter,
-                usesDiskCache: false
-            )
+            lookupTask = Task.detached(priority: .utility) {
+                conversationSession(
+                    agent: agent, conversationID: conversationID, rootURLs: rootURLs, recentAfter: updatedAfter
+                )
+            }
         }
-        guard let session = sessions.first(where: { $0.conversationID == conversationID }) else { return nil }
-        return titleSeed(from: session)
+        let match = await withTaskCancellationHandler(
+            operation: { await lookupTask.value },
+            onCancel: { lookupTask.cancel() }
+        )
+        let seed = match.session.map { titleSeed(from: $0) }
+        // Never the name or the prompt themselves: only whether there is one.
+        let place = remoteHost == nil ? "local" : "remote"
+        AgentConversationTitleLog.info(
+            "seed \(agent.rawValue) \(AgentConversationTitleLog.tag(conversationID)) \(place): " +
+                "lookup=\(match.lookup.rawValue) native=\(seed?.native != nil) prompt=\(seed?.firstPrompt != nil)"
+        )
+        return seed
+    }
+
+    /// One local conversation, read from the files named after it or from the
+    /// Agent's database, without walking the rest of its history.
+    nonisolated static func conversationSession(
+        agent: SupportedAgent,
+        conversationID: AgentConversationID,
+        rootURLs: [SupportedAgent: URL] = [:],
+        recentAfter: Date
+    ) -> ConversationMatch {
+        if agent == .antigravity {
+            let stored = antigravitySessions(rootURL: rootURLs[agent], conversationID: conversationID)
+                .first { $0.conversationID == conversationID }
+            return .init(session: stored, lookup: stored == nil ? .missing : .database)
+        }
+        if usesDatabaseHistory(agent) {
+            let stored = databaseSession(agent: agent, conversationID: conversationID, rootURL: rootURLs[agent])
+            return .init(session: stored, lookup: stored == nil ? .missing : .database)
+        }
+        let stores = sources(for: agent, rootURL: rootURLs[agent])
+        guard !stores.isEmpty else { return .init(session: nil, lookup: .unsupported) }
+
+        let needle = conversationID.rawValue
+        // Rank 2: the file is named after the conversation. Rank 1: a folder
+        // above it is, as for a store that keeps each conversation in its own.
+        var named: [(rank: Int, candidate: Candidate)] = []
+        var recent: [Candidate] = []
+        var inspectedFiles = 0
+        let keys: [URLResourceKey] = [
+            .contentModificationDateKey, .creationDateKey, .isRegularFileKey, .isSymbolicLinkKey,
+        ]
+        sourceLoop: for source in stores {
+            guard let enumerator = FileManager.default.enumerator(
+                at: source.root, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]
+            ) else { continue }
+            let rootPath = source.root.path
+            for case let url as URL in enumerator {
+                guard !Task.isCancelled else { break sourceLoop }
+                inspectedFiles += 1
+                guard inspectedFiles <= maximumFiles else { break sourceLoop }
+                guard isTranscript(url) else { continue }
+                let path = url.path
+                let rank: Int
+                if url.lastPathComponent.contains(needle) {
+                    rank = 2
+                } else if path.hasPrefix(rootPath), path.dropFirst(rootPath.count).contains(needle) {
+                    rank = 1
+                } else {
+                    rank = 0
+                }
+                guard let values = try? url.resourceValues(forKeys: Set(keys)),
+                      values.isRegularFile == true, values.isSymbolicLink != true else { continue }
+                let modified = values.contentModificationDate ?? values.creationDate ?? .distantPast
+                // Without a name to go by, only a file in use can be the one.
+                guard rank > 0 || modified >= recentAfter else { continue }
+                let filenameID = source.entryPattern.flatMap { pattern in
+                    id(from: relativePath(of: url, under: source.root), pattern: pattern)
+                        .flatMap(AgentConversationID.init)
+                }
+                let candidate = Candidate(source: source, url: url, filenameID: filenameID, updatedAt: modified)
+                if rank > 0 {
+                    named.append((rank, candidate))
+                } else {
+                    recent.append(candidate)
+                }
+            }
+        }
+
+        let lookup: ConversationLookup = named.isEmpty ? .recent : .named
+        let ordered: [Candidate]
+        if named.isEmpty {
+            ordered = recent.sorted { $0.updatedAt > $1.updatedAt }
+        } else {
+            named.sort { lhs, rhs in
+                if lhs.rank != rhs.rank { return lhs.rank > rhs.rank }
+                return lhs.candidate.updatedAt > rhs.candidate.updatedAt
+            }
+            ordered = named.map { $0.candidate }
+        }
+        for candidate in ordered.prefix(maximumConversationCandidates) {
+            guard !Task.isCancelled else { break }
+            guard var found = session(from: candidate), found.conversationID == conversationID else { continue }
+            if agent == .codex, found.nativeTitle == nil {
+                found.nativeTitle = codexThreadName(
+                    conversationID: conversationID,
+                    index: candidate.source.root.deletingLastPathComponent()
+                        .appendingPathComponent("session_index.jsonl")
+                )
+            }
+            return .init(session: found, lookup: lookup)
+        }
+        return .init(session: nil, lookup: .missing)
+    }
+
+    /// Codex keeps the names of its threads outside their rollouts, in
+    /// `session_index.jsonl` beside the sessions folder: one line for each
+    /// naming, so the last line of a conversation is its current name.
+    nonisolated static func codexThreadName(conversationID: AgentConversationID, index: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: index) else { return nil }
+        defer { try? handle.close() }
+        // The index holds an ID, a name and a date for each thread.
+        guard let data = try? handle.read(upToCount: 16 * 1_024 * 1_024) else { return nil }
+        let needle = Data(conversationID.rawValue.utf8)
+        var name: String?
+        for line in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
+            guard line.range(of: needle) != nil,
+                  let entry = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                  entry["id"] as? String == conversationID.rawValue,
+                  let value = entry["thread_name"] as? String else { continue }
+            name = collapsedTitle(value)
+        }
+        return name
+    }
+
+    /// One conversation on an SSH host, in a single round trip.
+    nonisolated private static func remoteConversationSession(
+        access: AgentHistoryRemoteAccess,
+        agent: SupportedAgent,
+        conversationID: AgentConversationID,
+        recentAfter: Date
+    ) async -> ConversationMatch {
+        let roots = relativeRoots(for: agent)
+        guard !roots.isEmpty else { return .init(session: nil, lookup: .unsupported) }
+        let chunks: [AgentHistoryRemoteChunk]
+        do {
+            chunks = try await access.discoverSessions(
+                relativeRoots: roots,
+                maximumSessions: maximumRemoteTitleSeedSessions,
+                updatedAfter: recentAfter,
+                conversationID: conversationID
+            )
+        } catch {
+            return .init(session: nil, lookup: .unreachable)
+        }
+        // The host applied the cutoff, and not to a file named after the conversation.
+        let stored = remoteSessions(
+            from: chunks, access: access, agents: [agent],
+            maximumSessions: maximumRemoteTitleSeedSessions, updatedAfter: nil
+        ).first { $0.conversationID == conversationID }
+        return .init(session: stored, lookup: stored == nil ? .missing : .remote)
     }
 
     nonisolated static func titleSeed(from session: AgentHistorySession) -> TitleSeed {
@@ -761,7 +942,10 @@ enum AgentHistoryStore {
         }.prefix(maximumSessions))
     }
 
-    nonisolated private static func antigravitySessions(rootURL: URL?) -> [AgentHistorySession] {
+    /// - Parameter conversationID: Reads that one conversation, whatever its age.
+    nonisolated private static func antigravitySessions(
+        rootURL: URL?, conversationID: AgentConversationID? = nil
+    ) -> [AgentHistorySession] {
         let root = rootURL ?? URL(fileURLWithPath:
             ("~/.gemini/antigravity-cli/conversations" as NSString).expandingTildeInPath)
         let index = root.deletingLastPathComponent().appendingPathComponent("conversation_summaries.db")
@@ -788,10 +972,16 @@ enum AgentHistoryStore {
         let order = " ORDER BY last_modified_time DESC LIMIT 10000"
         // A swarm's workers talk to each other, not to the user: they have a
         // parent, or no prompt to title or preview them by.
-        let conversations = columns + " WHERE nesting_depth = 0 AND (title != '' OR preview != '')" + order
+        let only = conversationID == nil ? "" : " AND conversation_id = ?1"
+        let conversations = columns + " WHERE nesting_depth = 0 AND (title != '' OR preview != '')" + only + order
+        let fallback = columns + (conversationID == nil ? "" : " WHERE conversation_id = ?1") + order
         guard sqlite3_prepare_v2(database, conversations, -1, &statement, nil) == SQLITE_OK ||
-            sqlite3_prepare_v2(database, columns + order, -1, &statement, nil) == SQLITE_OK else { return [] }
+            sqlite3_prepare_v2(database, fallback, -1, &statement, nil) == SQLITE_OK else { return [] }
         defer { sqlite3_finalize(statement) }
+        if let conversationID {
+            let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+            sqlite3_bind_text(statement, 1, conversationID.rawValue, -1, transient)
+        }
         func value(_ column: Int32) -> String {
             sqlite3_column_text(statement, column).map { String(cString: $0) } ?? ""
         }
@@ -1093,7 +1283,20 @@ enum AgentHistoryStore {
             maximumSessions: maximumSessions,
             updatedAfter: updatedAfter
         ) else { return [] }
+        return remoteSessions(
+            from: chunks, access: access, agents: agents,
+            maximumSessions: maximumSessions, updatedAfter: updatedAfter
+        )
+    }
 
+    /// Sessions described by what a host sent back, newest first.
+    nonisolated private static func remoteSessions(
+        from chunks: [AgentHistoryRemoteChunk],
+        access: AgentHistoryRemoteAccess,
+        agents: [SupportedAgent],
+        maximumSessions: Int,
+        updatedAfter: Date?
+    ) -> [AgentHistorySession] {
         var sessionsByID: [String: AgentHistorySession] = [:]
         for chunk in chunks.sorted(by: { $0.file.modifiedAt > $1.file.modifiedAt }) {
             guard !Task.isCancelled, sessionsByID.count < maximumSessions else { break }

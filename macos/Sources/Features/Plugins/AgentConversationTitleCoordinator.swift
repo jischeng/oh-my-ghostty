@@ -28,7 +28,7 @@ final class AgentConversationTitleCoordinator {
         var key: Key { .init(agent: agent, conversationID: conversationID) }
     }
 
-    enum Trigger: Equatable, Sendable {
+    enum Trigger: String, Equatable, Sendable {
         /// A pane became bound to the conversation.
         case bound
         /// The Agent started a turn.
@@ -119,11 +119,16 @@ final class AgentConversationTitleCoordinator {
     ///
     /// - Parameter owner: Identifies the caller to `release(owner:)`.
     func request(_ target: Target, trigger: Trigger, owner: UUID) {
-        guard isEnabled, mode() != .off else { return }
+        guard isEnabled else { return }
+        guard mode() != .off else {
+            skip(target, trigger, "titles are off")
+            return
+        }
         let key = target.key
         if flights[key] != nil {
             flights[key]?.owners.insert(owner)
             if trigger == .done { flights[key]?.sawCompletedTurn = true }
+            skip(target, trigger, "already being read")
             return
         }
         let source = store.record(agent: target.agent, conversationID: target.conversationID)?.source
@@ -133,15 +138,45 @@ final class AgentConversationTitleCoordinator {
             // The one planned second look: the Agent may have named the
             // conversation while it worked. A generated title can still be
             // replaced by the Agent's own, never by another generated one.
-            guard source != .native, completedTurnReads.insert(key).inserted else { return }
+            guard source != .native else {
+                skip(target, trigger, "has the Agent's title")
+                return
+            }
+            guard completedTurnReads.insert(key).inserted else {
+                skip(target, trigger, "had its look after a turn")
+                return
+            }
             delays = [.zero]
         case .bound, .working:
-            guard source == nil || source == .prompt else { return }
-            if let settled = settledAt[key], now().timeIntervalSince(settled) < settleInterval { return }
+            guard source == nil || source == .prompt else {
+                skip(target, trigger, "has a \(source?.rawValue ?? "stored") title")
+                return
+            }
+            if let settled = settledAt[key], now().timeIntervalSince(settled) < settleInterval {
+                skip(target, trigger, "read recently, the Agent named nothing")
+                return
+            }
             // Only a turn that just started can be ahead of its transcript.
             delays = trigger == .working ? retryDelays : Array(retryDelays.prefix(1))
         }
+        AgentConversationTitleLog.info(
+            "requested \(Self.describe(target)) trigger=\(trigger.rawValue) " +
+                "stored=\(source?.rawValue ?? "none") reads=\(delays.count)"
+        )
         start(target, delays: delays, owners: [owner])
+    }
+
+    /// An Agent, the start of a conversation ID and where its transcript is.
+    /// Host names stay out of the log.
+    nonisolated private static func describe(_ target: Target) -> String {
+        "\(target.agent.rawValue) \(AgentConversationTitleLog.tag(target.conversationID)) " +
+            (target.remoteHost == nil ? "local" : "remote")
+    }
+
+    private func skip(_ target: Target, _ trigger: Trigger, _ reason: String) {
+        AgentConversationTitleLog.debug(
+            "skipped \(Self.describe(target)) trigger=\(trigger.rawValue): \(reason)"
+        )
     }
 
     /// Forgets a caller. Work nobody else asked for is cancelled.
@@ -213,17 +248,34 @@ final class AgentConversationTitleCoordinator {
             if graceLeft <= 0 { break }
         }
         // No transcript yet: the next turn asks again.
-        guard let prompt else { return }
+        guard let prompt else {
+            AgentConversationTitleLog.info(
+                "no title \(Self.describe(target)): nothing to read after \(delays.count) look(s)"
+            )
+            return
+        }
         settledAt[target.key] = now()
         await generate(target, prompt: prompt)
     }
 
     private func generate(_ target: Target, prompt: String) async {
-        guard mode() == .generate else { return }
+        let currentMode = mode()
+        guard currentMode == .generate else {
+            AgentConversationTitleLog.info(
+                "not generated \(Self.describe(target)): mode is \(currentMode.rawValue), the prompt stands in"
+            )
+            return
+        }
         let source = store.record(agent: target.agent, conversationID: target.conversationID)?.source
         guard source == nil || source == .prompt else { return }
         // Only the opening prompt leaves the process; the service redacts and bounds it.
-        guard let title = await generator.title(forFirstPrompt: prompt) else { return }
+        guard let title = await generator.title(forFirstPrompt: prompt) else {
+            // The service tells apart an endpoint that is not set, paused or failing.
+            AgentConversationTitleLog.info(
+                "not generated \(Self.describe(target)): the endpoint gave no title, the prompt stands in"
+            )
+            return
+        }
         store.set(title, source: .generated, agent: target.agent,
                   conversationID: target.conversationID, remoteHost: target.remoteHost)
     }
@@ -258,6 +310,9 @@ final class AgentConversationTitleTracker {
     private var subscriptions = Set<AnyCancellable>()
     private var targets: [UUID: Target] = [:]
     private var states: [UUID: TabActivityState] = [:]
+    /// Why each Agent pane without a readable conversation has none, as last
+    /// logged, so the reason is reported when it changes and not on every signal.
+    private var unreadable: [UUID: String] = [:]
     private var shownTitle: String?
     private var evaluationScheduled = false
 
@@ -317,20 +372,32 @@ final class AgentConversationTitleTracker {
         guard let controller else { return }
         var nextTargets: [UUID: Target] = [:]
         var nextStates: [UUID: TabActivityState] = [:]
+        var nextUnreadable: [UUID: String] = [:]
         for surface in controller.surfaceTree {
             if let state = controller.agentActivity(for: surface)?.state {
                 nextStates[surface.id] = state
             }
+            guard let descriptor = controller.agentResumeDescriptor(for: surface) else { continue }
             // The same rule the Inspector uses for when a pane's conversation
             // may be read: never the old side of a connection handoff.
-            guard let descriptor = controller.agentResumeDescriptor(for: surface),
-                  let session = controller.paneSessionContext(for: surface),
+            guard let session = controller.paneSessionContext(for: surface),
                   let binding = PaneAgentHistoryService.Binding.current(descriptor: descriptor, session: session)
-            else { continue }
+            else {
+                // Without an ID there is no conversation to title: the Agent
+                // has not reported one, or reports none at all.
+                let reason = descriptor.conversationID == nil
+                    ? "the pane has no conversation ID" : "its connection is not ready"
+                nextUnreadable[surface.id] = "\(descriptor.agent.rawValue) \(descriptor.scope.rawValue): \(reason)"
+                continue
+            }
             nextTargets[surface.id] = Target(
                 agent: binding.agent, conversationID: binding.conversationID, remoteHost: binding.remoteHost
             )
         }
+        for (surfaceID, reason) in nextUnreadable where unreadable[surfaceID] != reason {
+            AgentConversationTitleLog.info("no lookup \(reason)")
+        }
+        unreadable = nextUnreadable
         for (surfaceID, target) in nextTargets {
             let state = nextStates[surfaceID]
             let newlyBound = targets[surfaceID] != target
@@ -416,6 +483,17 @@ extension TerminalController {
     /// The conversation title of the pane that names this tab.
     var tabAgentConversationTitle: String? {
         agentConversationTitle(for: focusedSurface ?? surfaceTree.first)
+    }
+
+    /// True when this tab's row and chrome show a name with the place below
+    /// it: the tab has a manual name or its pane a conversation title.
+    ///
+    /// This is `TerminalTabPresentationResolver.resolve` returning a subtitle,
+    /// without building one: a few dictionary lookups, no path formatting.
+    /// The sidebar asks for every row on every refresh to pick the row height.
+    var tabTitleHasSubtitle: Bool {
+        guard let surface = focusedSurface ?? surfaceTree.first else { return false }
+        return titleOverride != nil || agentConversationTitle(for: surface) != nil
     }
 
     /// Starts looking up conversation titles for this tab's panes. Calling it

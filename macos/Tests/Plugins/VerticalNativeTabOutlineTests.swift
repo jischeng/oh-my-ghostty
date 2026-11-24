@@ -75,7 +75,7 @@ struct VerticalNativeTabOutlineTests {
             groups: GhosttyTabOrganizationModel().groups(
                 tabs: first.tabControllers, grouping: .none, ordering: .manual),
             selectedID: selected?.windowController.map(ObjectIdentifier.init),
-            layoutState: first.tabLayoutState, controller: first, rowHeight: 32, presentation: { _ in nil })
+            layoutState: first.tabLayoutState, controller: first, metrics: .tabs(rowHeight: 32), presentation: { _ in nil })
         let controller = NativeTabOutlineController(config)
         _ = controller.view
         controller.update(config)
@@ -107,7 +107,7 @@ struct VerticalNativeTabOutlineTests {
         let second = try fixture.tab(parent: first)
         let config = NativeTabOutlineConfiguration(
             groups: GhosttyTabOrganizationModel().groups(tabs: [first, second], grouping: .none, ordering: .manual),
-            selectedID: ObjectIdentifier(first), layoutState: first.tabLayoutState, controller: first, rowHeight: 32,
+            selectedID: ObjectIdentifier(first), layoutState: first.tabLayoutState, controller: first, metrics: .tabs(rowHeight: 32),
             presentation: { tab in
                 .init(title: "Tab \(tab.actualIndex)", remoteBreadcrumb: nil, shortcut: "\(tab.actualIndex)",
                       icon: .systemSymbol("terminal"), activity: nil, selected: tab.controller === first, hovered: false)
@@ -177,7 +177,7 @@ struct VerticalNativeTabOutlineTests {
         var groups = model.groups(tabs: ordered, grouping: .none, ordering: .manual)
         func makeView() -> NativeTabOutlineConfiguration {
             NativeTabOutlineConfiguration(groups: groups, selectedID: ObjectIdentifier(ordered[0]),
-                                 layoutState: state, controller: ordered[0], rowHeight: 32,
+                                 layoutState: state, controller: ordered[0], metrics: .tabs(rowHeight: 32),
                                  presentation: { _ in nil })
         }
         let coordinator = NativeTabOutlineController(makeView())
@@ -257,7 +257,7 @@ struct VerticalNativeTabOutlineTests {
             NativeTabOutlineConfiguration(
                 groups: [.init(id: "test", title: nil, icon: nil, tabs: tabs)],
                 selectedID: ObjectIdentifier(first), layoutState: state, controller: first,
-                rowHeight: 32,
+                metrics: .tabs(rowHeight: 32),
                 presentation: { tab in
                     presentationCalls += 1
                     let title: String
@@ -412,7 +412,7 @@ struct VerticalNativeTabOutlineTests {
         func view(selected: Int) -> NativeTabOutlineConfiguration {
             NativeTabOutlineConfiguration(
                 groups: groups, selectedID: ObjectIdentifier(controllers[selected]),
-                layoutState: state, controller: controllers[0], rowHeight: 32,
+                layoutState: state, controller: controllers[0], metrics: .tabs(rowHeight: 32),
                 presentation: { _ in nil }
             )
         }

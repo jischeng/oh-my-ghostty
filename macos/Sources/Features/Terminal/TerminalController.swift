@@ -339,6 +339,17 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     @Published private(set) var tabLastActivatedAt: Date
     /// When an Agent in this tab last changed state. Not persisted.
     @Published private(set) var tabLastAgentActivityAt: Date?
+    /// When the user last typed into this tab or left it after visiting it.
+    /// Selecting the tab does not change it. Persisted with the session.
+    @Published private(set) var tabLastInteractionAt: Date
+    var tabInteraction = TabInteractionTracker()
+
+    /// The only writer of `tabLastInteractionAt`. The rules for calling it
+    /// are in TerminalController+TabInbox.swift.
+    func recordTabInteraction(at date: Date) {
+        guard tabLastInteractionAt != date else { return }
+        tabLastInteractionAt = date
+    }
 
     /// The real AppKit tabs in this controller's tab group, in display order.
     private(set) var tabControllers: [TerminalController] = []
@@ -381,6 +392,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             if wasSelected != isSelected {
                 syncSurfaceTreeOcclusionState()
             }
+            noteTabSelectionChanged(from: oldValue, to: selectedTabID)
         }
     }
 
@@ -589,6 +601,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
          tabLayout: Ghostty.Config.MacOSTabLayout? = nil,
          tabSessionID: UUID? = nil,
          tabCreatedAt: Date? = nil,
+         tabLastInteractionAt: Date? = nil,
          workspaceID: UUID? = nil,
          windowSessionID: UUID? = nil,
          workspaceGroupID: UUID? = nil,
@@ -653,8 +666,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let inheritedGroup = parentController?.workspaceID == resolvedWorkspaceID ? parentController?.workspaceGroupID : nil
         self.workspaceGroupID = workspaceGroupID ?? inheritedGroup ?? UUID()
         let now = Date()
-        self.tabCreatedAt = tabCreatedAt ?? now
+        let createdAt = tabCreatedAt ?? now
+        self.tabCreatedAt = createdAt
         self.tabLastActivatedAt = now
+        // State saved before this field existed has no interaction date.
+        self.tabLastInteractionAt = tabLastInteractionAt ?? createdAt
 
         let sessionBase = tree == nil
             ? Self.injectingSessionID(self.tabSessionID, into: resolvedBase)
@@ -2070,6 +2086,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         eventTimestamp: TimeInterval? = nil
     ) {
         guard surfaceTree.contains(where: { $0 === surface }) else { return }
+        noteTabInteractionFromUserInput()
         if let eventTimestamp,
            let arrived = agentCompletionArrivedUptime[surface.id] {
             let effective = eventTimestamp == 0
@@ -5861,7 +5878,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard let tabEnum = tabEnumAny as? ghostty_action_goto_tab_e else { return }
         let tabIndex: Int32 = tabEnum.rawValue
         if workspaceCoordinator.hasNonNativeFullscreen(in: windowSessionID) {
-            let tabs = tabControllers
+            let tabs = tabsInShortcutOrder(tabControllers)
             guard !tabs.isEmpty, let selected = tabs.firstIndex(where: { $0 === self }) else { return }
             let index: Int
             switch tabIndex {
@@ -5877,7 +5894,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
 
         guard let tabGroup = window.tabGroup else { return }
-        let tabbedWindows = workspaceTabWindows
+        // While the inbox is shown, numbers, last, next and previous all
+        // count its rows.
+        let tabbedWindows = tabWindowsInShortcutOrder(workspaceTabWindows)
         guard !tabbedWindows.isEmpty else { return }
 
         // This will be the index we want to actual go to
@@ -5929,13 +5948,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     static func selectTab(digit: Int, in window: NSWindow?) -> Bool {
         guard let controller = window?.windowController as? TerminalController else { return false }
         if controller.workspaceCoordinator.hasNonNativeFullscreen(in: controller.windowSessionID) {
-            let tabs = controller.tabControllers
+            let tabs = controller.tabsInShortcutOrder(controller.tabControllers)
             let index = digit == 9 ? tabs.count - 1 : digit - 1
             guard tabs.indices.contains(index) else { return false }
             return controller.workspaceCoordinator.selectNonNativeTab(tabs[index])
         }
         guard let tabGroup = window?.tabGroup else { return false }
-        let tabbedWindows = controller.workspaceTabWindows
+        let tabbedWindows = controller.tabWindowsInShortcutOrder(controller.workspaceTabWindows)
         guard tabbedWindows.count > 1 else { return false }
         let targetIndex = digit == 9 ? (tabbedWindows.count - 1) : (digit - 1)
         guard targetIndex >= 0, targetIndex < tabbedWindows.count else { return false }

@@ -30,6 +30,34 @@ struct AgentConversationTitleRecord: Codable, Equatable, Sendable {
     var updatedAt: Date
 }
 
+/// Where conversation titles report what they decided, so a tab that keeps
+/// its folder name can be explained afterwards:
+///
+///     log stream --level debug --predicate 'category == "agent-titles"'
+///
+/// A line names the Agent, the start of the conversation ID and the decision.
+/// It never holds a prompt or a title.
+enum AgentConversationTitleLog {
+    nonisolated static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "oh-my-ghostty", category: "agent-titles"
+    )
+
+    /// A conversation as a log line names it.
+    nonisolated static func tag(_ conversationID: AgentConversationID) -> String {
+        String(conversationID.rawValue.prefix(8))
+    }
+
+    /// A decision: a lookup started, what it found, what was stored.
+    nonisolated static func info(_ message: String) {
+        logger.info("\(message, privacy: .public)")
+    }
+
+    /// A request that needed nothing; there is one for every Agent state change.
+    nonisolated static func debug(_ message: String) {
+        logger.debug("\(message, privacy: .public)")
+    }
+}
+
 /// Titles of Agent conversations, keyed by `(agent, conversationID)`.
 ///
 /// A title belongs to the conversation, not to the tab or pane showing it, so
@@ -186,6 +214,11 @@ final class AgentConversationTitleStore: ObservableObject {
         )
         records = bounded(next)
         persist()
+        let archive = fileURL == nil ? "memory" : (writesArchive ? "file" : "read-only")
+        AgentConversationTitleLog.info(
+            "stored \(agent.rawValue) \(AgentConversationTitleLog.tag(conversationID)) " +
+                "source=\(source.rawValue) archive=\(archive)"
+        )
         titleChanges.send(key)
         return true
     }
@@ -235,7 +268,7 @@ final class AgentConversationTitleStore: ObservableObject {
     }
 
     nonisolated private static func report(_ error: Error) {
-        Logger(subsystem: Bundle.main.bundleIdentifier ?? "oh-my-ghostty", category: "agent-titles")
+        AgentConversationTitleLog.logger
             .error("Title storage failed: \(error.localizedDescription, privacy: .private)")
     }
 

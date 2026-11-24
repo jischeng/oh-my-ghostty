@@ -102,7 +102,7 @@ MODULES = {
     "ai": Module(
         ("macos/Sources/Features/AI/**",),
         ("macos/Tests/AI/*.swift",),
-        ("agents", "quick-input", "tabs", "terminal"),
+        ("agents", "git", "quick-input", "settings", "tabs", "terminal"),
     ),
     "control": Module(
         ("macos/Sources/Features/Control/**",),

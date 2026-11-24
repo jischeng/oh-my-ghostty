@@ -209,10 +209,10 @@ final class VerticalTabWindowLayoutState: ObservableObject {
         tabPresentation.updateTabs(controllers, selectedID: selectedID)
     }
 
-    /// The order the inbox shows right now, published by the sidebar that
-    /// displays it, also while the pointer holds the rows in place. Empty
-    /// when no sidebar shows the inbox. Not `@Published`: it is written
-    /// during a sidebar refresh and must not schedule another one.
+    /// The visible top-to-bottom order the inbox shows right now, published by
+    /// the sidebar that displays it (including while the pointer holds rows in
+    /// place). Empty when no sidebar shows the inbox. Not `@Published`: it is
+    /// written during a sidebar refresh and must not schedule another one.
     private(set) var inboxDisplayOrder = TabInboxDisplayOrder()
 
     func publishInboxDisplayOrder(_ tabs: [TerminalController]) {

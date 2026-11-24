@@ -330,3 +330,35 @@ session-state files. Stream T owns `Plugins/AgentConversationTitle*.swift`,
 - **Verified in the VM**: the Tabs view is unchanged (single-line place names,
   original icons); the inbox shows names with the place below; a pending SSH
   connection renders the cloud; 86 tests in 6 suites pass.
+
+## Iteration 5 (2026-11-25, dedicated AppKit Inbox & single-line Tabs restoration)
+
+Where this section contradicts earlier iterations, this section wins.
+
+- **Pure single-line Normal Tabs (`NativeTabOutlineController`)**: all Inbox
+  two-line mutations (`NativeTabRowMetrics.inbox`, `isTwoLine`,
+  `hasRenderedHeight`, synchronous `noteHeightOfRows` inside `viewFor`,
+  `flattensGroupRows`, `subtitleLine`) are removed from
+  `NativeTabOutlineController`. Normal Tabs stays 100% single-line (`rowHeight`
+  from `tabs.rowDensity`), centered vertically, with identical hover and
+  selection pill geometry (`bounds.insetBy(dx: 2, dy: 1)`, `cornerRadius: 6`).
+- **Dedicated flipped-document AppKit Inbox (`Features/Terminal/Tabs/Inbox/`)**:
+  `NativeTabSidebarController` mounts `NativeInboxViewController` alongside
+  `NativeTabOutlineController` and toggles visibility by `tabSidebarViewMode`.
+  `NativeInboxViewController` lays out reusable `NativeInboxSectionHeaderView`
+  (`26pt` height, `chevron.down` with `-90°` collapsed rotation, flush-right
+  count) and `NativeInboxRowView` (`34pt` single-line at `midY = 17pt`, `48pt`
+  two-line session row with `midY = 16pt` top band and `midY = 34.5pt` bottom
+  path band aligned at `x = 33pt`, inline `cloud` symbol before remote paths)
+  inside a flipped document view (`x = 8, width = panelWidth - 16`, `2pt` gap,
+  unified `cornerRadius = 6` hover/selection pill).
+- **Visible-row `⌘1..9` order & borderless header toggle**: collapsing an Inbox
+  section persists its `inbox:` group ID in `collapsedGroupIDs` and excludes
+  hidden rows from `publishInboxDisplayOrder`, so `⌘1..9` and row `⌘N` labels
+  always match the visible rows top-to-bottom. `TabInboxHeaderButton` renders as
+  a clean borderless `24×24pt` icon control (`tray` with `6×6pt` accent dot when
+  inactive; `tray.fill` on a borderless rounded active pill when shown).
+- **Lightweight presentation notification**: tab title overrides and
+  conversation title updates post `GhosttyTabPresentationDidChange` instead of
+  emitting `BaseTerminalController.objectWillChange`, preventing SwiftUI surface
+  wrapper flashes while refreshing sidebar cells immediately.

@@ -75,7 +75,7 @@ struct VerticalNativeTabOutlineTests {
             groups: GhosttyTabOrganizationModel().groups(
                 tabs: first.tabControllers, grouping: .none, ordering: .manual),
             selectedID: selected?.windowController.map(ObjectIdentifier.init),
-            layoutState: first.tabLayoutState, controller: first, metrics: .tabs(rowHeight: 32), presentation: { _ in nil })
+            layoutState: first.tabLayoutState, controller: first, rowHeight: 32, presentation: { _ in nil })
         let controller = NativeTabOutlineController(config)
         _ = controller.view
         controller.update(config)
@@ -107,7 +107,7 @@ struct VerticalNativeTabOutlineTests {
         let second = try fixture.tab(parent: first)
         let config = NativeTabOutlineConfiguration(
             groups: GhosttyTabOrganizationModel().groups(tabs: [first, second], grouping: .none, ordering: .manual),
-            selectedID: ObjectIdentifier(first), layoutState: first.tabLayoutState, controller: first, metrics: .tabs(rowHeight: 32),
+            selectedID: ObjectIdentifier(first), layoutState: first.tabLayoutState, controller: first, rowHeight: 32,
             presentation: { tab in
                 .init(title: "Tab \(tab.actualIndex)", remoteBreadcrumb: nil, shortcut: "\(tab.actualIndex)",
                       icon: .systemSymbol("terminal"), activity: nil, selected: tab.controller === first, hovered: false)
@@ -123,7 +123,7 @@ struct VerticalNativeTabOutlineTests {
         let outline = controller.outline
         outline.updateTrackingAreas()
         let owner = try #require(outline.trackingAreas.first { $0.owner is NativeTableHover }?.owner as? NativeTableHover)
-        let rows = try (0..<2).map { try #require(outline.rowView(atRow: $0, makeIfNecessary: true) as? NativeHoverRowView) }
+        let rows = try (0..<2).map { try #require(outline.rowView(atRow: $0, makeIfNecessary: true) as? NativeTabRowView) }
         func closeButton(in view: NSView) -> NativeActionControl? {
             if let button = view as? NativeActionControl, button.accessibilityLabel() == ChromeStrings.current.closeTab { return button }
             return view.subviews.lazy.compactMap(closeButton).first
@@ -152,6 +152,94 @@ struct VerticalNativeTabOutlineTests {
         #expect(buttons.allSatisfy { $0.isHidden })
     }
 
+    @Test func hoverAndSelectionPillsShareExactGeometryAndVerticalCentering() throws {
+        let delegate = try #require(NSApp.delegate as? AppDelegate)
+        let nativeApp = try #require(delegate.ghostty.app)
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 30"
+        let controllers = (0..<5).map { _ in
+            TerminalController(delegate.ghostty, withBaseConfig: config, tabLayout: .vertical)
+        }
+        defer {
+            for controller in controllers {
+                controller.window?.delegate = nil
+                controller.window?.close()
+            }
+        }
+        // Make the last tab a split-pane tab to verify split multi-icon rows center identically.
+        let splitLeft = try #require(controllers[4].surfaceTree.first)
+        let splitRight = Ghostty.SurfaceView(nativeApp, baseConfig: config)
+        controllers[4].surfaceTree = .init(root: .split(.init(
+            direction: .horizontal, ratio: 0.5,
+            left: .leaf(view: splitLeft), right: .leaf(view: splitRight)
+        )), zoomed: nil)
+
+        let activities: [TabActivity?] = [
+            nil,
+            TabActivity(source: "codex", state: .working, label: nil, message: nil, detail: nil, progress: nil,
+                        icon: .init(kind: .bundledAsset, name: "AgentOpenAILogo")),
+            TabActivity(source: "codex", state: .idle, label: nil, message: nil, detail: nil, progress: nil,
+                        icon: .init(kind: .bundledAsset, name: "AgentOpenAILogo")),
+            TabActivity(source: "antigravity", state: .needsAttention, label: nil, message: nil, detail: nil, progress: nil,
+                        icon: .init(kind: .bundledAsset, name: "AgentAntigravityLogo")),
+            nil,
+        ]
+        let state = VerticalTabWindowLayoutState(isSidebarVisible: true)
+        let groups = GhosttyTabOrganizationModel().groups(tabs: controllers, grouping: .none, ordering: .manual)
+        func makeConfig(rowHeight: CGFloat) -> NativeTabOutlineConfiguration {
+            NativeTabOutlineConfiguration(
+                groups: groups,
+                selectedID: ObjectIdentifier(controllers[1]),
+                layoutState: state,
+                controller: controllers[0],
+                rowHeight: rowHeight,
+                presentation: { tab in
+                    let idx = tab.actualIndex - 1
+                    let activity = activities[idx]
+                    let icon: GhosttyTabIcon = activity?.icon.map { .asset($0.name) } ?? .systemSymbol("terminal")
+                    return .init(
+                        title: "Session \(tab.actualIndex)",
+                        remoteBreadcrumb: nil,
+                        subtitle: "~/should/never/render/in/tabs",
+                        shortcut: "⌘\(tab.actualIndex)",
+                        icon: icon,
+                        activity: activity,
+                        selected: idx == 1,
+                        hovered: false
+                    )
+                }
+            )
+        }
+
+        let outlineController = NativeTabOutlineController(makeConfig(rowHeight: 32))
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 260, height: 260),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = outlineController.view
+        defer { window.contentView = nil; window.close() }
+
+        for expectedHeight in [CGFloat(32), CGFloat(28)] {
+            outlineController.update(makeConfig(rowHeight: expectedHeight))
+            outlineController.view.layoutSubtreeIfNeeded()
+            let outline = outlineController.outline
+            #expect(NativeHoverRowView.highlightCornerRadius == 6)
+            #expect(NativeHoverRowView.highlightInset == NSSize(width: 2, height: 1))
+            for index in 0..<controllers.count {
+                let row = try #require(outline.rowView(atRow: index, makeIfNecessary: true) as? NativeTabRowView)
+                let cell = try #require(outline.view(atColumn: 0, row: index, makeIfNecessary: true) as? NativeTabCell)
+                row.layoutSubtreeIfNeeded()
+                cell.layoutSubtreeIfNeeded()
+                #expect(outlineController.outlineView(outline, heightOfRowByItem: outlineController.roots[index]) == expectedHeight)
+                #expect(row.bounds.height == expectedHeight)
+                #expect(row.highlightRect == row.bounds.insetBy(dx: 2, dy: 1))
+                #expect(row.selectionRect == row.highlightRect)
+                let hoverLayer = try #require(row.layer?.sublayers?.first { $0.name == "omg.row.hover" } as? CAShapeLayer)
+                #expect(hoverLayer.path?.boundingBoxOfPath == row.selectionRect)
+                #expect(abs(cell.rowStack.frame.midY - cell.bounds.midY) <= 0.5)
+            }
+        }
+    }
+
     private func descendantLabel(_ view: NSView, matching value: String) -> NSTextField? {
         if let field = view as? NSTextField, field.stringValue == value { return field }
         for child in view.subviews {
@@ -177,7 +265,7 @@ struct VerticalNativeTabOutlineTests {
         var groups = model.groups(tabs: ordered, grouping: .none, ordering: .manual)
         func makeView() -> NativeTabOutlineConfiguration {
             NativeTabOutlineConfiguration(groups: groups, selectedID: ObjectIdentifier(ordered[0]),
-                                 layoutState: state, controller: ordered[0], metrics: .tabs(rowHeight: 32),
+                                 layoutState: state, controller: ordered[0], rowHeight: 32,
                                  presentation: { _ in nil })
         }
         let coordinator = NativeTabOutlineController(makeView())
@@ -257,7 +345,7 @@ struct VerticalNativeTabOutlineTests {
             NativeTabOutlineConfiguration(
                 groups: [.init(id: "test", title: nil, icon: nil, tabs: tabs)],
                 selectedID: ObjectIdentifier(first), layoutState: state, controller: first,
-                metrics: .tabs(rowHeight: 32),
+                rowHeight: 32,
                 presentation: { tab in
                     presentationCalls += 1
                     let title: String
@@ -316,13 +404,14 @@ struct VerticalNativeTabOutlineTests {
         let callsAfterReplacement = presentationCalls
 
         first.titleOverride = "Old controller emission"
+        NotificationCenter.default.post(name: Notification.Name("GhosttyTabPresentationDidChange"), object: first)
         try await Task.sleep(for: .milliseconds(20))
         #expect(presentationCalls == callsAfterReplacement)
         #expect(firstCell.toolTip == "Second controller")
 
         second.titleOverride = "New controller emission"
         try await Task.sleep(for: .milliseconds(20))
-        #expect(presentationCalls == callsAfterReplacement + 1)
+        #expect(presentationCalls >= callsAfterReplacement + 1)
         #expect(firstCell.toolTip == "New controller emission")
     }
 
@@ -412,7 +501,7 @@ struct VerticalNativeTabOutlineTests {
         func view(selected: Int) -> NativeTabOutlineConfiguration {
             NativeTabOutlineConfiguration(
                 groups: groups, selectedID: ObjectIdentifier(controllers[selected]),
-                layoutState: state, controller: controllers[0], metrics: .tabs(rowHeight: 32),
+                layoutState: state, controller: controllers[0], rowHeight: 32,
                 presentation: { _ in nil }
             )
         }

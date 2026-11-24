@@ -249,4 +249,42 @@ struct VerticalTabInboxInteractionTests {
         #expect(TerminalRestorableState(from: original).tabLastInteractionAt == used)
         #expect(TerminalRestorableState(from: legacy).tabLastInteractionAt == created)
     }
+
+    @Test func presentationNotificationRefreshesInboxRowWithoutStampingInteractionDate() async throws {
+        let created = Date(timeIntervalSince1970: 1_790_000_000)
+        let controller = try terminal(created: created)
+        defer { close([controller]) }
+        let tab = GhosttyOrganizedTab(controller: controller, actualIndex: 1)
+        let row = NativeInboxRowView(frame: NSRect(x: 0, y: 0, width: 234, height: 34))
+        row.configure(tab: tab, selected: true, canClose: false) { item in
+            let name = item.controller.titleOverride
+            return GhosttyTabPresentation(
+                title: name ?? "~/code/project",
+                remoteBreadcrumb: nil,
+                subtitle: name == nil ? nil : "~/code/project",
+                shortcut: "⌘1",
+                icon: .systemSymbol("terminal"),
+                activity: nil,
+                selected: true,
+                hovered: false
+            )
+        }
+        row.layoutSubtreeIfNeeded()
+        #expect(row.preferredHeight == 34)
+        #expect(!row.showsSubtitle)
+        #expect(controller.tabLastInteractionAt == created)
+
+        controller.titleOverride = "Fix sidebar pills"
+        NotificationCenter.default.post(
+            name: Notification.Name("GhosttyTabPresentationDidChange"),
+            object: controller
+        )
+        try await Task.sleep(for: .milliseconds(30))
+        row.layoutSubtreeIfNeeded()
+        #expect(row.showsSubtitle)
+        #expect(row.preferredHeight == 48)
+        #expect(row.titleLabel.stringValue == "Fix sidebar pills")
+        #expect(row.subtitleLabel.stringValue == "~/code/project")
+        #expect(controller.tabLastInteractionAt == created)
+    }
 }

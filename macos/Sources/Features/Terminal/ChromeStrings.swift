@@ -60,6 +60,7 @@ struct ChromeStrings: Equatable, Sendable {
 
     // Tab sidebar menus
     var renameTab: String { t("Rename Tab…", "重命名标签页…") }
+    var moveToWorkspace: String { t("Move to Workspace", "移到工作区") }
     var moveTabToNewWindow: String { t("Move Tab to New Window", "将标签页移到新窗口") }
     var closeOtherTabs: String { t("Close Other Tabs", "关闭其他标签页") }
     var closeTab: String { t("Close Tab", "关闭标签页") }

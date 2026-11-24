@@ -41,9 +41,11 @@ The file is a flat, sorted JSON object. Only values explicitly chosen by the use
   "keyboard.quickInputHeight": 165,
   "notifications.taskComplete": false,
   "tabs.grouping": "project",
+  "tabs.inboxOrdering": "recent",
   "tabs.layout": "vertical",
   "tabs.ordering": "manual",
   "tabs.pathDisplay": "folderName",
+  "tabs.sidebarView": "tabs",
   "tabs.sidebarWidth": 300
 }
 ```
@@ -163,6 +165,8 @@ Window UI state is intentionally separate: `InspectorPresentationStore` owns las
 | `tabs.sidebarWidth`               | number  | `240`                         | `176...480`                                                                                            | Settings > Tabs                    | Next committed/default width |
 | `tabs.grouping`                   | enum    | `none`                        | `none`, `project`, `date`                                                                              | Settings > Tabs                    | Runtime                      |
 | `tabs.ordering`                   | enum    | `manual`                      | `manual`, `created`, `recentlyUsed`                                                                    | Settings > Tabs                    | Runtime                      |
+| `tabs.sidebarView`                | enum    | `tabs`                        | `tabs`, `inbox`                                                                                        | Vertical Tabs sidebar header       | Runtime                      |
+| `tabs.inboxOrdering`              | enum    | `recent`                      | `recent`, `created`                                                                                    | Vertical Tabs sidebar "…" menu     | Runtime                      |
 | `tabs.pathDisplay`                | enum    | `folderName`                  | `fullPath`, `folderName`                                                                               | Settings > Tabs                    | Runtime                      |
 | `tabs.showShortcutLabels`         | boolean | `true`                        | `true`, `false`                                                                                        | Settings > Tabs                    | Runtime                      |
 | `tabs.rememberSidebarWidth`       | boolean | `true`                        | `true`, `false`                                                                                        | Settings > Tabs                    | Runtime                      |
@@ -199,6 +203,10 @@ Window UI state is intentionally separate: `InspectorPresentationStore` owns las
 | `agents.statusHooks`              | boolean | `true`                        | `true`, `false`                                                                                        | Settings > Agent Integration       | Runtime ingress policy       |
 | `agents.openQuickInputOnStart`    | boolean | `false`                       | `true`, `false`                                                                                        | Settings > Editor > Quick Input    | Next Agent start             |
 | `agents.openQuickInputOnComplete` | boolean | `false`                       | `true`, `false`                                                                                        | Settings > Editor > Quick Input    | Next Agent completion        |
+| `agents.sessionTitle.mode`        | enum    | `generate`                    | `off`, `native`, `generate`                                                                            | Settings > Agent > Conversation Titles | Next conversation title  |
+| `ai.endpoint.protocol`            | enum    | `openai`                      | `openai`, `anthropic`                                                                                  | Settings > Agent > AI Endpoint     | Next title request           |
+| `ai.endpoint.baseURL`             | string  | `""`                          | `https://` base URL; `http://` only for loopback, private or `.local` hosts                            | Settings > Agent > AI Endpoint     | Next title request           |
+| `ai.endpoint.model`               | string  | `""`                          | Model name understood by the endpoint                                                                  | Settings > Agent > AI Endpoint     | Next title request           |
 | `keyboard.inspectorPanel1`        | string  | `option+1`                    | Modifier combination plus one key                                                                      | Settings > Keyboard                | Runtime                      |
 | `keyboard.inspectorPanel2`        | string  | `option+2`                    | Modifier combination plus one key                                                                      | Settings > Keyboard                | Runtime                      |
 | `keyboard.inspectorPanel3`        | string  | `option+3`                    | Modifier combination plus one key                                                                      | Settings > Keyboard                | Runtime                      |
@@ -244,6 +252,32 @@ Appearance controls resolve each value as `OMG override > Ghostty config > built
 Vertical tabs and the Right Inspector use the active terminal background color and background opacity. There is no independent Sidebar or Inspector theme. Both sidebars open/close immediately like Quick Input; content width, visibility and right titlebar accessory update together without slide/fade animations or delayed collapse. Inspector native content stays lazily mounted after its first opening, but hidden content cannot receive clicks or appear in accessibility navigation. Transparency is painted only on background layers; window alpha, terminal glyphs, cursors, and icons remain opaque.
 
 Settings > Editor owns the native code editor's local editing behavior. `editor.keymapPreset` defaults to `idea` and may be changed to `vscode`; the setting resolves to the native `EditorKeymap.Profile` consumed by the editor command router. `editor.syntaxTheme` defaults to `followTerminal`, inheriting the resolved OMG colors and background effects. Other presets use independent editor appearance controls. `editor.backgroundMode` is retained only for reading older configuration files. `editor.fontSize`, `editor.tabWidth`, and `editor.wordWrap` are runtime settings consumed by the native editor view.
+
+`tabs.sidebarView` selects what Vertical Tabs lists: the native tab order (`tabs`)
+or the inbox (`inbox`), which groups the same open tabs into Continue, Today,
+Yesterday and Earlier without reordering the native `NSWindowTabGroup`.
+`tabs.inboxOrdering` picks the inbox sort date, `recent` or `created`. Both are
+orthogonal to `tabs.grouping` and `tabs.ordering`, which keep their meaning in
+the Tabs view. The sidebar header is their only UI; there is no Settings picker.
+
+Agent tabs can show a conversation title instead of the working directory. The
+title belongs to the conversation, not to the tab, and a manual rename always
+wins. `agents.sessionTitle.mode` chooses `off` (no conversation titles),
+`native` (only the title the Agent CLI records) or `generate` (ask the AI
+endpoint when the CLI reports none). `generate` behaves like `native` until both
+`ai.endpoint.baseURL` and `ai.endpoint.model` are set, so the default sends
+nothing anywhere. Generation is HTTP only: OMG sends the first prompt of the
+conversation, with likely secrets removed and capped at 1500 bytes, and never
+project files or terminal output. The endpoint sees at most two requests at a
+time; after three consecutive failures OMG pauses for five minutes, and a 401 or
+403 pauses until the endpoint settings change. Plain `http://` is accepted only
+for loopback, private-range and link-local hosts; ATS allows local networking and
+redirects are never followed. The API key is never written to `settings.json`:
+it lives in `<Application Support>/AI/credentials.json` with `0700`/`0600`
+permissions, and an empty key sends no authentication header. For OpenAI-style
+endpoints the request uses `max_tokens` and retries once with
+`max_completion_tokens` when the endpoint asks for it; Anthropic requests use
+`/v1/messages` with `anthropic-version: 2023-06-01`.
 
 `tabs.pathDisplay` applies to the path portion of every Vertical Tab label. Local and SSH panes use the same policy: `fullPath` preserves the current full-path presentation, while `folderName` displays only the final folder component. SSH keeps its alias prefix, for example `cloud /home/user/code` becomes `cloud code`.
 

@@ -32,7 +32,10 @@ final class TerminalWorkspacePickerModel: ObservableObject {
     }
 
     var currentID: UUID? { controller?.workspaceID }
-    var movingTabTitle: String { controller?.titleOverride ?? controller?.window?.title ?? WorkspaceL10n.text("Current tab", "当前标签") }
+    var movingTabTitle: String {
+        controller?.titleOverride ?? controller?.tabAgentConversationTitle ?? controller?.window?.title
+            ?? WorkspaceL10n.text("Current tab", "当前标签")
+    }
     var filtered: [TerminalWorkspace] {
         store.workspaces.filter {
             (page != .move || $0.id != currentID) && (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query))

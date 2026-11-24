@@ -945,6 +945,72 @@ struct OhMyGhosttySettingsTests {
         #expect(!savedText.contains("local-machine-only-repo"))
     }
 
+    @Test func tabSidebarAndConversationTitleSettingsDefaultAndPersist() throws {
+        let (settings, url) = temporarySettings()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        #expect(settings.tabSidebarViewMode == .tabs)
+        #expect(settings.tabInboxSortMode == .recent)
+        #expect(settings.agentSessionTitleMode == .generate)
+        #expect(settings.aiEndpointProtocol == .openAI)
+        #expect(settings.aiEndpointBaseURL.isEmpty)
+        #expect(settings.aiEndpointModel.isEmpty)
+
+        let sidebar = OhMyGhosttySettings.descriptors.first { $0.id == "tabs.sidebarView" }
+        #expect(sidebar?.defaultValue == "tabs")
+        #expect(sidebar?.allowedValues == ["tabs", "inbox"])
+        let ordering = OhMyGhosttySettings.descriptors.first { $0.id == "tabs.inboxOrdering" }
+        #expect(ordering?.defaultValue == "recent")
+        #expect(ordering?.allowedValues == ["recent", "created"])
+        #expect(OhMyGhosttySettings.descriptors.first { $0.id == "agents.sessionTitle.mode" }?
+            .allowedValues == ["off", "native", "generate"])
+        #expect(OhMyGhosttySettings.descriptors.first { $0.id == "ai.endpoint.protocol" }?
+            .allowedValues == ["openai", "anthropic"])
+        #expect(OhMyGhosttySettings.descriptors.first { $0.id == "ai.endpoint.baseURL" }?
+            .defaultValue == "")
+        #expect(OhMyGhosttySettings.descriptors.first { $0.id == "ai.endpoint.model" }?
+            .defaultValue == "")
+
+        settings.tabSidebarViewMode = .inbox
+        settings.tabInboxSortMode = .created
+        settings.agentSessionTitleMode = .native
+        settings.aiEndpointProtocol = .anthropic
+        settings.aiEndpointBaseURL = "  https://api.example.com  "
+        settings.aiEndpointModel = "claude-test"
+
+        let object = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+        )
+        #expect(object["tabs.sidebarView"] as? String == "inbox")
+        #expect(object["tabs.inboxOrdering"] as? String == "created")
+        #expect(object["agents.sessionTitle.mode"] as? String == "native")
+        #expect(object["ai.endpoint.protocol"] as? String == "anthropic")
+        #expect(object["ai.endpoint.baseURL"] as? String == "https://api.example.com")
+        #expect(object["ai.endpoint.model"] as? String == "claude-test")
+        #expect(object["apiKey"] == nil)
+
+        let restored = OhMyGhosttySettings(fileURL: url)
+        #expect(restored.tabSidebarViewMode == .inbox)
+        #expect(restored.tabInboxSortMode == .created)
+        #expect(restored.agentSessionTitleMode == .native)
+        #expect(restored.aiEndpointProtocol == .anthropic)
+        #expect(restored.aiEndpointBaseURL == "https://api.example.com")
+        #expect(restored.aiEndpointModel == "claude-test")
+    }
+
+    @Test func invalidInboxAndEndpointValuesFallBackToDefaults() throws {
+        let (settings, url) = temporarySettings()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try #"{"tabs.sidebarView":"grid","tabs.inboxOrdering":"alphabetical","agents.sessionTitle.mode":"always","ai.endpoint.protocol":"gemini","ai.endpoint.baseURL":"   ","ai.endpoint.model":5}"#
+            .write(to: url, atomically: true, encoding: .utf8)
+        settings.reloadFromDisk()
+        #expect(settings.tabSidebarViewMode == .tabs)
+        #expect(settings.tabInboxSortMode == .recent)
+        #expect(settings.agentSessionTitleMode == .generate)
+        #expect(settings.aiEndpointProtocol == .openAI)
+        #expect(settings.aiEndpointBaseURL.isEmpty)
+        #expect(settings.aiEndpointModel.isEmpty)
+    }
+
     @Test func testingEnvironmentIsolatesDefaultSettingsFileURLFromRealHomeDirectory() {
         #expect(OMGApplicationEnvironment.isRunningTests)
         let realConfigPath = FileManager.default.homeDirectoryForCurrentUser

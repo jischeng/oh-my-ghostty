@@ -13,6 +13,12 @@ struct AgentHistorySession: Identifiable, Equatable, Codable, Sendable {
     var remoteHost: String?
     var isActive: Bool
     var previewSnippet: String?
+    /// The Agent's own name for the conversation, when it recorded one.
+    /// `title` falls back to the opening prompt, the folder and the ID, so it
+    /// cannot tell a name from a stand-in.
+    var nativeTitle: String?
+    /// The cleaned opening prompt, bounded, when the scan read one.
+    var firstPrompt: String?
 
     var id: String { "\(agent.rawValue):\(conversationID.rawValue)" }
 
@@ -121,7 +127,8 @@ enum AgentHistoryStore {
         rootURLs: [SupportedAgent: URL] = [:],
         maximumSessions: Int = AgentHistoryStore.maximumSessions,
         cacheURL: URL? = nil,
-        updatedAfter: Date? = nil
+        updatedAfter: Date? = nil,
+        usesDiskCache: Bool = true
     ) async -> [AgentHistorySession] {
         let diskTask = Task.detached(priority: .utility) {
             scan(
@@ -129,7 +136,8 @@ enum AgentHistoryStore {
                 rootURLs: rootURLs,
                 maximumSessions: maximumSessions,
                 cacheURL: cacheURL,
-                updatedAfter: updatedAfter
+                updatedAfter: updatedAfter,
+                usesDiskCache: usesDiskCache
             )
         }
         return await withTaskCancellationHandler(
@@ -210,6 +218,98 @@ enum AgentHistoryStore {
             agents: [agent],
             maximumSessions: maximumSessions
         ).first(where: { $0.conversationID == conversationID })
+    }
+
+    // MARK: Conversation titles
+
+    /// What a session store calls a conversation, with where the name came from.
+    struct TitleSeed: Equatable, Sendable {
+        /// The Agent's own name for the conversation.
+        var native: String?
+        /// The cleaned opening prompt, bounded.
+        var firstPrompt: String?
+    }
+
+    /// A conversation that is in use had its transcript written this recently.
+    static let titleSeedWindow: TimeInterval = 15 * 60
+    nonisolated static let maximumFirstPromptCharacters = 1_000
+    private static let maximumRemoteTitleSeedSessions = 64
+
+    /// The name a session store holds for one conversation, or nil while its
+    /// transcript is missing or was last written before `updatedAfter`.
+    ///
+    /// The cutoff applies before any transcript is parsed, and on the SSH host
+    /// for a remote conversation, which costs one round trip. Unlike
+    /// `session(agent:conversationID:remoteHost:)` this never walks a whole
+    /// history, and it leaves the shared session cache alone.
+    static func titleSeed(
+        agent: SupportedAgent,
+        conversationID: AgentConversationID,
+        remoteHost: String? = nil,
+        updatedAfter: Date = Date().addingTimeInterval(-AgentHistoryStore.titleSeedWindow),
+        rootURLs: [SupportedAgent: URL] = [:],
+        remoteAccess: AgentHistoryRemoteAccess? = nil
+    ) async -> TitleSeed? {
+        let sessions: [AgentHistorySession]
+        if let remoteHost {
+            sessions = await loadRemote(
+                access: remoteAccess ?? AgentHistoryRemoteAccess(alias: remoteHost),
+                agents: [agent],
+                maximumSessions: maximumRemoteTitleSeedSessions,
+                updatedAfter: updatedAfter
+            )
+        } else {
+            sessions = await load(
+                agents: [agent],
+                rootURLs: rootURLs,
+                updatedAfter: updatedAfter,
+                usesDiskCache: false
+            )
+        }
+        guard let session = sessions.first(where: { $0.conversationID == conversationID }) else { return nil }
+        return titleSeed(from: session)
+    }
+
+    nonisolated static func titleSeed(from session: AgentHistorySession) -> TitleSeed {
+        let prompt = session.firstPrompt.flatMap { text -> String? in
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        var native = collapsedTitle(session.nativeTitle)
+        // A store that names a conversation after its opening prompt has not named it.
+        if native != nil, native == collapsedTitle(prompt) { native = nil }
+        return .init(native: native, firstPrompt: prompt)
+    }
+
+    /// The name an Agent gave a conversation: a title record of its store, or
+    /// for Claude Code the user's `/rename` (`custom-title`), else the title it
+    /// generated itself (`ai-title`). Of each kind the last record wins.
+    nonisolated private static func nativeTitle(
+        in records: [[String: Any]], agent: SupportedAgent, explicitTitle: String?
+    ) -> String? {
+        guard RecordFamily(agent) == .claude else { return collapsedTitle(explicitTitle) }
+        var custom: String?
+        var generated: String?
+        for record in records {
+            switch record["type"] as? String {
+            case "custom-title":
+                // Clearing the name is a rename too.
+                custom = collapsedTitle(record["customTitle"] as? String)
+            case "ai-title":
+                generated = collapsedTitle(record["aiTitle"] as? String) ?? generated
+            default:
+                break
+            }
+        }
+        return custom ?? generated ?? collapsedTitle(explicitTitle)
+    }
+
+    /// One line of at most 140 characters, as `normalizedTitle` keeps of a
+    /// title; nil when there is no text.
+    nonisolated private static func collapsedTitle(_ rawValue: String?) -> String? {
+        guard let rawValue else { return nil }
+        let collapsed = rawValue.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return collapsed.isEmpty ? nil : String(collapsed.prefix(140))
     }
 
     static func transcript(
@@ -464,7 +564,7 @@ enum AgentHistoryStore {
     }
 
     private struct DiskCache: Codable {
-        static let currentVersion = 8
+        static let currentVersion = 9
         var version: Int = currentVersion
         struct Entry: Codable {
             let session: AgentHistorySession
@@ -484,12 +584,16 @@ enum AgentHistoryStore {
         rootURLs: [SupportedAgent: URL],
         maximumSessions: Int,
         cacheURL: URL? = nil,
-        updatedAfter: Date? = nil
+        updatedAfter: Date? = nil,
+        usesDiskCache: Bool = true
     ) -> [AgentHistorySession] {
         guard maximumSessions > 0 else { return [] }
         let resolvedCacheURL = cacheURL ?? defaultCacheURL()
         var diskCache: DiskCache = {
-            if let data = try? Data(contentsOf: resolvedCacheURL),
+            // A lookup bounded by `updatedAfter` parses a handful of files.
+            // Decoding and rewriting every cached session would dwarf it.
+            if usesDiskCache,
+               let data = try? Data(contentsOf: resolvedCacheURL),
                let decoded = try? JSONDecoder().decode(DiskCache.self, from: data),
                decoded.version == DiskCache.currentVersion {
                 return decoded
@@ -632,11 +736,12 @@ enum AgentHistoryStore {
             sessionsByID[session.id] = session
         }
 
-        if cacheUpdated && !Task.isCancelled {
+        // A lookup that skipped the shared cache leaves it as it was.
+        if usesDiskCache, cacheUpdated && !Task.isCancelled {
             if let data = try? JSONEncoder().encode(diskCache) {
                 try? OMGPrivateFileWriter.writeAtomically(data, to: resolvedCacheURL)
             }
-        } else {
+        } else if usesDiskCache {
             OMGPrivateFileWriter.tightenPermissionsIfPresent(at: resolvedCacheURL)
         }
 
@@ -700,11 +805,14 @@ enum AgentHistoryStore {
             let modified = seconds > 0 ? Date(timeIntervalSince1970: seconds) :
                 ((try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date ?? Date())
             let preview = value(2)
-            let title = value(1).isEmpty ? preview : value(1)
+            let name = value(1)
+            let title = name.isEmpty ? preview : name
             sessions.append(.init(agent: .antigravity, conversationID: id,
                 title: normalizedTitle(title, workingDirectory: cwd, conversationID: id),
                 workingDirectory: cwd, updatedAt: modified,
-                sourcePath: path, isActive: false, previewSnippet: preview.isEmpty ? nil : preview))
+                sourcePath: path, isActive: false, previewSnippet: preview.isEmpty ? nil : preview,
+                nativeTitle: name.isEmpty ? nil : name,
+                firstPrompt: preview.isEmpty ? nil : String(preview.prefix(maximumFirstPromptCharacters))))
         }
         return sessions
     }
@@ -839,7 +947,9 @@ enum AgentHistoryStore {
             updatedAt: candidate.updatedAt,
             sourcePath: candidate.url.path,
             isActive: false,
-            previewSnippet: previewSnippet.isEmpty ? nil : previewSnippet
+            previewSnippet: previewSnippet.isEmpty ? nil : previewSnippet,
+            nativeTitle: nativeTitle(in: records, agent: agent, explicitTitle: explicitTitle),
+            firstPrompt: userTitle.map { String($0.prefix(maximumFirstPromptCharacters)) }
         )
     }
 
@@ -1078,7 +1188,9 @@ enum AgentHistoryStore {
                 sourcePath: chunk.file.path,
                 remoteHost: access.alias,
                 isActive: false,
-                previewSnippet: previewSnippet.isEmpty ? nil : previewSnippet
+                previewSnippet: previewSnippet.isEmpty ? nil : previewSnippet,
+                nativeTitle: nativeTitle(in: records, agent: matchedAgent, explicitTitle: explicitTitle),
+                firstPrompt: userTitle.map { String($0.prefix(maximumFirstPromptCharacters)) }
             )
             if let existing = sessionsByID[session.id],
                existing.updatedAt >= session.updatedAt {
@@ -1229,7 +1341,7 @@ enum AgentHistoryStore {
             for line in tail.split(separator: 0x0A).dropFirst() {
                 guard let record = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
                       let kind = record["type"] as? String,
-                      ["session_info", "title", "title_change"].contains(kind) else { continue }
+                      ["session_info", "title", "title_change", "ai-title", "custom-title"].contains(kind) else { continue }
                 data.append(0x0A)
                 data.append(contentsOf: line)
             }

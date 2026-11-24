@@ -337,6 +337,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     lazy var workspacePopover = WorkspacePopoverPresentation(controller: self)
     let tabCreatedAt: Date
     @Published private(set) var tabLastActivatedAt: Date
+    /// When an Agent in this tab last changed state. Not persisted.
+    @Published private(set) var tabLastAgentActivityAt: Date?
 
     /// The real AppKit tabs in this controller's tab group, in display order.
     private(set) var tabControllers: [TerminalController] = []
@@ -755,6 +757,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             }
         synchronizePaneSessionContexts()
         startAgentProcessPolling()
+        startAgentConversationTitleTracking()
         workspaceCoordinator.register(self)
         DispatchQueue.main.async { [weak self] in self?.workspaceCoordinator.sessions.capture() }
     }
@@ -2152,6 +2155,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // Hydration changes presentation only. It must never dispatch queued
         // input or repeat completion notifications and composer actions.
         guard !restoring else { return }
+        if previousState != nextState { tabLastAgentActivityAt = Date() }
         if let surface = surfaceTree.first(where: { $0.id == surfaceID }) {
             AgentActivityNotification.deliver(previous: previousActivity, next: next[surfaceID], surface: surface)
         }
@@ -2537,7 +2541,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         for surface: Ghostty.SurfaceView,
         terminalTitle: String
     ) -> String {
-        restoredTitleFallback(for: surface, terminalTitle: terminalTitle)
+        agentConversationTitle(for: surface)
+            ?? restoredTitleFallback(for: surface, terminalTitle: terminalTitle)
             ?? paneSessionContext(for: surface)?.presentationTitle ?? terminalTitle
     }
 

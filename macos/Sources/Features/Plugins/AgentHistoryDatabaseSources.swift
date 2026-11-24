@@ -229,14 +229,19 @@ extension AgentHistoryStore {
             let directory = validWorkingDirectory(row.text(2))
             var title = row.text(1)
             // OpenCode names an untitled session after its creation time.
-            if title?.hasPrefix("New session - ") != false {
-                title = openCodeFirstPrompt(database, session: id.rawValue) ?? title
+            let isPlaceholder = title?.hasPrefix("New session - ") != false
+            var prompt: String?
+            if isPlaceholder {
+                prompt = openCodeFirstPrompt(database, session: id.rawValue)
+                title = prompt ?? title
             }
             sessions.append(.init(
                 agent: .opencode, conversationID: id,
                 title: normalizedTitle(title, workingDirectory: directory, conversationID: id),
                 workingDirectory: directory, updatedAt: Date(timeIntervalSince1970: updated / 1_000),
-                sourcePath: path, isActive: false, previewSnippet: nil
+                sourcePath: path, isActive: false, previewSnippet: nil,
+                nativeTitle: isPlaceholder ? nil : title,
+                firstPrompt: prompt.map { String($0.prefix(maximumFirstPromptCharacters)) }
             ))
             return sessions.count < limit
         }
@@ -324,12 +329,15 @@ extension AgentHistoryStore {
             guard let id = row.text(0).flatMap(AgentConversationID.init), let updated = row.double(3) else { return true }
             let directory = validWorkingDirectory(row.text(2))
             let prompt = hermesMessages(database, session: id.rawValue, limit: 1).first { $0.role == .user }?.text
-            let title = row.text(1).flatMap { $0.isEmpty ? nil : $0 } ?? prompt
+            let name = row.text(1).flatMap { $0.isEmpty ? nil : $0 }
+            let title = name ?? prompt
             sessions.append(.init(
                 agent: .hermes, conversationID: id,
                 title: normalizedTitle(title, workingDirectory: directory, conversationID: id),
                 workingDirectory: directory, updatedAt: Date(timeIntervalSince1970: updated),
-                sourcePath: path, isActive: false, previewSnippet: nil
+                sourcePath: path, isActive: false, previewSnippet: nil,
+                nativeTitle: name,
+                firstPrompt: prompt.map { String($0.prefix(maximumFirstPromptCharacters)) }
             ))
             return sessions.count < limit
         }
@@ -426,12 +434,15 @@ extension AgentHistoryStore {
                   let prompt = chat.messages.first?.text else { continue }
             let directory = validWorkingDirectory(chat.workingDirectory)
             // Cursor names a chat itself once it has something to go on.
-            let title = chat.name.flatMap { $0.isEmpty || $0 == "New Agent" ? nil : $0 } ?? prompt
+            let name = chat.name.flatMap { $0.isEmpty || $0 == "New Agent" ? nil : $0 }
+            let title = name ?? prompt
             sessions.append(.init(
                 agent: .cursor, conversationID: id,
                 title: normalizedTitle(title, workingDirectory: directory, conversationID: id),
                 workingDirectory: directory, updatedAt: store.updated,
-                sourcePath: store.url.path, isActive: false, previewSnippet: String(prompt.prefix(1_000))
+                sourcePath: store.url.path, isActive: false, previewSnippet: String(prompt.prefix(1_000)),
+                nativeTitle: name,
+                firstPrompt: String(prompt.prefix(maximumFirstPromptCharacters))
             ))
         }
         return sessions

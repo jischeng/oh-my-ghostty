@@ -10,8 +10,17 @@ struct NativeTabOutlineConfiguration {
     let layoutState: VerticalTabWindowLayoutState
     let controller: TerminalController
     let rowHeight: CGFloat
+    /// False while the rows show a display-only order (the inbox): no row can
+    /// be dragged and no drop can be placed relative to a row.
+    var allowsReordering = true
+    /// A cheap answer to "does this tab's row have a subtitle", asked for every
+    /// tab on every update. Without it the full presentation is resolved.
+    var showsSubtitle: ((GhosttyOrganizedTab) -> Bool)?
     let presentation: (GhosttyOrganizedTab) -> GhosttyTabPresentation?
 
+    func isTwoLine(_ tab: GhosttyOrganizedTab) -> Bool {
+        showsSubtitle?(tab) ?? (presentation(tab)?.showsSubtitle == true)
+    }
 }
 
 @MainActor
@@ -20,6 +29,9 @@ final class NativeTabNode: NSObject {
     var title: String?
     var icon: GhosttyTabIcon?
     var tab: GhosttyOrganizedTab?
+    var count: Int?
+    /// The row shows a subtitle below its title and is taller for it.
+    var isTwoLine = false
     var children: [NativeTabNode] = []
     init(key: String) { self.key = key }
 }
@@ -39,6 +51,17 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
     private(set) var reloadCount = 0
     private(set) var moveCount = 0
     private(set) var membershipUpdateCount = 0
+    private(set) var heightUpdateCount = 0
+    private var pointer: NativeTabListPointer?
+    private var pendingHeightNodes: [NativeTabNode] = []
+    /// The pointer left the list; a held display order can be applied.
+    var pointerDidLeave: (() -> Void)?
+    /// Test seam for the pointer state, which needs a real desktop pointer.
+    var holdsOrderOverride: Bool?
+
+    /// Rows should not move under an active pointer. Reordering by the user's
+    /// own drag is unaffected; this only concerns orders that change by themselves.
+    var isPointerHoldingOrder: Bool { holdsOrderOverride ?? pointer?.holdsOrder ?? false }
 
     /// Insert/delete without reloading existing cells when survivor order is
     /// unchanged (the normal new-tab/close-tab path).
@@ -122,6 +145,9 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
         outline.setAccessibilityLabel(ChromeStrings.current.tabs)
         scroll.documentView = outline
         view = scroll
+        let pointer = NativeTabListPointer(view: scroll)
+        pointer.onExit = { [weak self] in self?.pointerDidLeave?() }
+        self.pointer = pointer
     }
 
     private func activateSelectedRow() {
@@ -154,6 +180,7 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
     }
 
     func update(_ value: NativeTabOutlineConfiguration) {
+        let rowHeightChanged = configuration.rowHeight != value.rowHeight
         configuration = value
         outline.setAccessibilityLabel(ChromeStrings.current.tabs)
         updating = true
@@ -165,6 +192,7 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
         var nextNodes: [String: NativeTabNode] = [:]
         var nextRoots: [NativeTabNode] = []
         var nextStructure: [String] = []
+        var resized: [NativeTabNode] = []
         func node(_ key: String) -> NativeTabNode {
             let result = nodes[key] ?? NativeTabNode(key: key)
             nextNodes[key] = result
@@ -172,8 +200,17 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
         }
         for group in value.groups {
             let children = group.tabs.map { tab -> NativeTabNode in
-                let item = node("tab:\(tab.controller.tabSessionID)")
+                let key = "tab:\(tab.controller.tabSessionID)"
+                let known = nodes[key] != nil
+                let item = node(key)
                 item.tab = tab
+                // New rows get their height from the delegate on insertion;
+                // rows already in the outline need an explicit height update.
+                let twoLine = value.isTwoLine(tab)
+                if item.isTwoLine != twoLine {
+                    item.isTwoLine = twoLine
+                    if known { resized.append(item) }
+                }
                 nextStructure.append("\(group.id)/\(item.key)")
                 return item
             }
@@ -181,6 +218,7 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
                 let item = node("group:\(group.id)")
                 item.title = title
                 item.icon = group.icon
+                item.count = group.count
                 item.children = children
                 nextRoots.append(item)
                 nextStructure.append(item.key)
@@ -230,6 +268,11 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
                 outline.collapseItem(item)
             }
         }
+        if rowHeightChanged, outline.numberOfRows > 0 {
+            noteHeights(IndexSet(integersIn: 0..<outline.numberOfRows))
+        } else {
+            noteHeights(IndexSet(resized.map { outline.row(forItem: $0) }.filter { $0 >= 0 }))
+        }
         if let selected = nodes.values.first(where: {
             $0.tab.map { ObjectIdentifier($0.controller) == value.selectedID } ?? false
         }) {
@@ -276,6 +319,50 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
 
     func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? { NativeTabRowView() }
 
+    static func rowHeight(base: CGFloat, twoLine: Bool) -> CGFloat {
+        twoLine ? base + NativeTabCell.subtitleLineHeight : base
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
+        Self.rowHeight(base: configuration.rowHeight, twoLine: (item as? NativeTabNode)?.isTwoLine == true)
+    }
+
+    private func noteHeights(_ rows: IndexSet) {
+        guard !rows.isEmpty else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            outline.noteHeightOfRows(withIndexesChanged: rows)
+        }
+        heightUpdateCount += 1
+        // Rows moved without a pointer event; re-evaluate the hovered row.
+        outline.refreshHover()
+    }
+
+    /// A cell refreshes itself when its tab changes. When that adds or removes
+    /// the subtitle, its row height follows without a sidebar refresh.
+    private func rowLayoutChanged(_ item: NativeTabNode?) {
+        guard let item else { return }
+        pendingHeightNodes.append(item)
+        guard pendingHeightNodes.count == 1 else { return }
+        // Never resize rows from inside the table's own layout pass.
+        DispatchQueue.main.async { [weak self] in self?.syncPendingRowHeights() }
+    }
+
+    private func syncPendingRowHeights() {
+        let pending = pendingHeightNodes
+        pendingHeightNodes.removeAll()
+        var rows = IndexSet()
+        for node in pending {
+            guard nodes[node.key] === node, let tab = node.tab else { continue }
+            let twoLine = configuration.isTwoLine(tab)
+            guard node.isTwoLine != twoLine else { continue }
+            node.isTwoLine = twoLine
+            let row = outline.row(forItem: node)
+            if row >= 0 { rows.insert(row) }
+        }
+        noteHeights(rows)
+    }
+
     func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
         (item as? NativeTabNode)?.tab != nil
     }
@@ -291,7 +378,7 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
 
     private func configure(_ cell: NativeTabCell, item: NativeTabNode) {
         cell.configure(tab: item.tab, title: item.title, presentation: configuration.presentation,
-                       groupIcon: item.icon,
+                       groupIcon: item.icon, count: item.count,
                        canClose: configuration.groups.reduce(0) { $0 + $1.tabs.count } > 1,
                        selected: item.tab?.id == configuration.selectedID,
                        select: { [weak self, weak item] in
@@ -300,6 +387,8 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
         }, close: { [weak self, weak item] in
             guard let self, let tab = item?.tab else { return }
             self.configuration.controller.closeVerticalTab(tab.controller)
+        }, layoutChanged: { [weak self, weak item] in
+            self?.rowLayoutChanged(item)
         })
     }
 
@@ -369,7 +458,9 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
     }
 
     func outlineView(_ outlineView: NSOutlineView, pasteboardWriterForItem item: Any) -> NSPasteboardWriting? {
-        guard let tab = (item as? NativeTabNode)?.tab else { return nil }
+        // Without a writer AppKit never starts a drag, so a display-only
+        // order cannot switch the user's tab ordering to manual.
+        guard configuration.allowsReordering, let tab = (item as? NativeTabNode)?.tab else { return nil }
         let writer = NSPasteboardItem()
         writer.setString(tab.controller.tabSessionID.uuidString, forType: Self.tabType)
         return writer
@@ -415,6 +506,7 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
     func outlineView(_ outlineView: NSOutlineView, draggingSession session: NSDraggingSession,
                      willBeginAt screenPoint: NSPoint, forItems draggedItems: [Any]) {
         outline.dragBegan()
+        guard configuration.allowsReordering else { return }
         configuration.controller.beginManualTabDrag()
     }
 
@@ -427,7 +519,7 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
     }
 
     func resolveDrop(sourceID id: UUID, item: Any?, index: Int) -> (TerminalController, Int)? {
-        guard index >= 0,
+        guard configuration.allowsReordering, index >= 0,
               let group = configuration.groups.first(where: { $0.tabs.contains { $0.controller.tabSessionID == id } }),
               let source = group.tabs.first(where: { $0.controller.tabSessionID == id }) else { return nil }
         let children: [NativeTabNode]
@@ -464,6 +556,9 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
 
     func outlineView(_ outlineView: NSOutlineView, validateDrop info: NSDraggingInfo,
                      proposedItem item: Any?, proposedChildIndex index: Int) -> NSDragOperation {
+        // Every drop here is placed relative to a row, which has no native
+        // position in a display-only order.
+        guard configuration.allowsReordering else { return [] }
         let (item, index) = insertionProposal(item: item, index: index, point: outline.convert(info.draggingLocation, from: nil))
         outline.setDropItem(item, dropChildIndex: index)
         if drop(info, item: item, index: index) != nil { return .move }
@@ -478,6 +573,7 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
 
     func outlineView(_ outlineView: NSOutlineView, acceptDrop info: NSDraggingInfo,
                      item: Any?, childIndex index: Int) -> Bool {
+        guard configuration.allowsReordering else { return false }
         let (item, index) = insertionProposal(item: item, index: index, point: outline.convert(info.draggingLocation, from: nil))
         guard let (source, insertion) = drop(info, item: item, index: index) else {
             guard let (target, placement) = destination(item: item, index: index) else { return false }
@@ -509,7 +605,8 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
             update(NativeTabOutlineConfiguration(
                 groups: groups, selectedID: configuration.layoutState.tabSnapshot.selectedID,
                 layoutState: configuration.layoutState, controller: configuration.controller,
-                rowHeight: configuration.rowHeight, presentation: configuration.presentation
+                rowHeight: configuration.rowHeight, showsSubtitle: configuration.showsSubtitle,
+                presentation: configuration.presentation
             ))
         }
         return true
@@ -545,6 +642,8 @@ final class NativeTabOutline: NSOutlineView {
     }
     private lazy var hover = NativeTableHover(table: self)
     override func updateTrackingAreas() { super.updateTrackingAreas(); hover.update() }
+    /// Rows can move or resize under a resting pointer.
+    func refreshHover() { hover.update() }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         hover.update()
@@ -638,6 +737,52 @@ final class NativeTabOutline: NSOutlineView {
     }
 }
 
+/// Whether the pointer is active over the tab list. An order that changes by
+/// itself waits until the pointer leaves, or rests, before it moves rows.
+@MainActor
+final class NativeTabListPointer: NSObject {
+    /// A resting pointer stops holding the order: it is usually parked over
+    /// the sidebar while the user types in the terminal.
+    static let restInterval: TimeInterval = 3
+    private weak var view: NSView?
+    private var inside = false
+    private var lastMovement: TimeInterval = 0
+    var onExit: (() -> Void)?
+
+    init(view: NSView) {
+        self.view = view
+        super.init()
+        view.addTrackingArea(NSTrackingArea(
+            rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeInKeyWindow, .inVisibleRect],
+            owner: self))
+    }
+
+    var holdsOrder: Bool {
+        guard inside else { return false }
+        // Moving the list to another native tab window can drop the exit event.
+        guard let view, let window = view.window, window.isVisible, !view.isHiddenOrHasHiddenAncestor,
+              view.visibleRect.contains(view.convert(window.mouseLocationOutsideOfEventStream, from: nil)) else {
+            inside = false
+            return false
+        }
+        return ProcessInfo.processInfo.systemUptime - lastMovement < Self.restInterval
+    }
+
+    private func moved() {
+        inside = true
+        lastMovement = ProcessInfo.processInfo.systemUptime
+    }
+
+    // NSObject does not inherit NSResponder's Objective-C selector mapping.
+    @objc(mouseEntered:) func mouseEntered(with event: NSEvent) { moved() }
+    @objc(mouseMoved:) func mouseMoved(with event: NSEvent) { moved() }
+    @objc(mouseExited:) func mouseExited(with event: NSEvent) {
+        guard inside else { return }
+        inside = false
+        onExit?()
+    }
+}
+
 private final class NativeTabRowView: NativeHoverRowView {
     override func hoverStateDidChange(_ hovered: Bool) {
         guard numberOfColumns > 0 else { return }
@@ -659,8 +804,11 @@ private final class NativeTabRowView: NativeHoverRowView {
 /// AppKit cells observe their own title changes instead of invalidating the list.
 @MainActor
 final class NativeTabCell: NSTableCellView {
+    /// Height a row gains for its subtitle line.
+    static let subtitleLineHeight: CGFloat = 14
     private let icon = NativeTabIconView()
     private let label = NSTextField(labelWithString: "")
+    private let subtitle = NSTextField(labelWithString: "")
     private let shortcut = NSTextField(labelWithString: "")
     private let status = NSImageView()
     private let closeButton = NativeActionControl()
@@ -673,6 +821,10 @@ final class NativeTabCell: NSTableCellView {
     private var selectAction: (() -> Void)?
     private var refreshScheduled = false
     private var canClose = false
+    private var stackCenterY: NSLayoutConstraint?
+    private var layoutChanged: (() -> Void)?
+    /// Subtitle visibility last rendered for the configured tab.
+    private var renderedTwoLine: Bool?
     override func viewDidMoveToSuperview() {
         super.viewDidMoveToSuperview()
         updateHoverAppearance()
@@ -697,6 +849,11 @@ final class NativeTabCell: NSTableCellView {
         closeButton.title = ""
         label.lineBreakMode = .byTruncatingMiddle
         label.font = .systemFont(ofSize: 13)
+        // Middle truncation keeps both the host and the directory tail.
+        subtitle.lineBreakMode = .byTruncatingMiddle
+        subtitle.font = .systemFont(ofSize: 11)
+        subtitle.textColor = .secondaryLabelColor
+        subtitle.isHidden = true
         shortcut.font = .systemFont(ofSize: 10)
         shortcut.textColor = .secondaryLabelColor
         closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: ChromeStrings.current.closeTab)
@@ -723,6 +880,15 @@ final class NativeTabCell: NSTableCellView {
         addSubview(stack)
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         label.setContentHuggingPriority(.init(1), for: .horizontal)
+        // The subtitle hangs below the title outside the stack, so the icon,
+        // status and trailing slot stay on the title line and a single-line
+        // row keeps its exact layout.
+        subtitle.translatesAutoresizingMaskIntoConstraints = false
+        subtitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        subtitle.setContentHuggingPriority(.init(1), for: .horizontal)
+        addSubview(subtitle)
+        let centerY = stack.centerYAnchor.constraint(equalTo: centerYAnchor)
+        stackCenterY = centerY
         // AppKit briefly sizes newly attached cells below their icon footprint.
         // Keep their content intact without unsatisfiable required constraints.
         let trailingConstraint = stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -9)
@@ -730,7 +896,10 @@ final class NativeTabCell: NSTableCellView {
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
             trailingConstraint,
-            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            centerY,
+            subtitle.leadingAnchor.constraint(equalTo: label.leadingAnchor),
+            subtitle.trailingAnchor.constraint(equalTo: label.trailingAnchor),
+            subtitle.topAnchor.constraint(equalTo: label.bottomAnchor),
             icon.widthAnchor.constraint(equalToConstant: TabIconMetrics.footprint),
             icon.heightAnchor.constraint(equalToConstant: TabIconMetrics.footprint),
             status.widthAnchor.constraint(equalToConstant: 14),
@@ -748,15 +917,18 @@ final class NativeTabCell: NSTableCellView {
     // swiftlint:disable:next function_parameter_count
     func configure(tab: GhosttyOrganizedTab?, title: String?,
                    presentation: @escaping (GhosttyOrganizedTab) -> GhosttyTabPresentation?,
-                   groupIcon: GhosttyTabIcon? = nil,
+                   groupIcon: GhosttyTabIcon? = nil, count: Int? = nil,
                    canClose: Bool, selected: Bool, select: @escaping () -> Void,
-                   close: @escaping () -> Void) {
+                   close: @escaping () -> Void, layoutChanged: (() -> Void)? = nil) {
         closeButton.setAccessibilityLabel(ChromeStrings.current.closeTab)
         let changedController = configuredTab?.controller !== tab?.controller
         if tab == nil || changedController {
             observations.removeAll()
             surfaceObservations.removeAll()
+            // A recycled cell starts over; only a change of the same tab is reported.
+            renderedTwoLine = nil
         }
+        self.layoutChanged = layoutChanged
         configuredTab = tab
         self.presentation = presentation
         self.selected = selected
@@ -771,10 +943,13 @@ final class NativeTabCell: NSTableCellView {
             label.stringValue = title ?? ""
             label.font = .systemFont(ofSize: 11, weight: .semibold)
             icon.configure(controller: nil, icon: groupIcon ?? .systemSymbol("folder"), selected: false, activity: nil)
-            shortcut.stringValue = ""
+            // Section headers reuse the trailing slot for their tab count.
+            shortcut.stringValue = count.map { "\($0)" } ?? ""
+            shortcut.textColor = OMGNativeTheme.resolve(for: self).secondary
             status.isHidden = true
+            setSubtitle(nil)
             toolTip = nil
-            setAccessibilityLabel(title ?? "")
+            setAccessibilityLabel(count.map { "\(title ?? "") (\($0))" } ?? title ?? "")
             return
         }
         if changedController {
@@ -826,18 +1001,31 @@ final class NativeTabCell: NSTableCellView {
         label.font = .systemFont(ofSize: 13)
         shortcut.stringValue = value.shortcut ?? ""
         let title = value.remoteBreadcrumb?.title ?? value.title
-        toolTip = AgentLogoStyle.toolTip(title: title, activity: value.activity)
+        let detail = value.showsSubtitle ? value.subtitle : nil
+        toolTip = AgentLogoStyle.toolTip(title: detail.map { "\(title)\n\($0)" } ?? title, activity: value.activity)
         icon.configure(controller: tab.controller, icon: value.icon, selected: selected, activity: value.activity)
         label.stringValue = title
         let theme = OMGNativeTheme.resolve(for: self)
         label.textColor = theme.foreground
+        subtitle.textColor = theme.secondary
         shortcut.textColor = theme.secondary
+        setSubtitle(detail)
+        if let renderedTwoLine, renderedTwoLine != (detail != nil) { layoutChanged?() }
+        renderedTwoLine = detail != nil
         let badge = AgentStatusBadge.resolve(value.activity)
         status.isHidden = badge == nil
         status.image = badge.flatMap { NSImage(systemSymbolName: $0.symbol, accessibilityDescription: nil) }
         status.contentTintColor = badge?.color
         status.toolTip = value.activity.map(AgentLogoStyle.localizedStatus)
         setAccessibilityLabel(value.title)
+    }
+
+    private func setSubtitle(_ text: String?) {
+        subtitle.stringValue = text ?? ""
+        if subtitle.isHidden != (text == nil) { subtitle.isHidden = text == nil }
+        // Title and subtitle stay centred in the row as one block.
+        let offset = text == nil ? 0 : -Self.subtitleLineHeight / 2
+        if stackCenterY?.constant != offset { stackCenterY?.constant = offset }
     }
 
     @objc private func closeTab() { closeAction?() }

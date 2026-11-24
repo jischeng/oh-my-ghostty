@@ -256,6 +256,16 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(result["root_modules"], ["settings"])
         self.assertTrue(result["run_swift"])
 
+    def test_ai_channel_selects_ai_and_its_dependents(self):
+        result = self.plan(paths=["macos/Sources/Features/AI/AITitleService.swift"])
+        self.assertEqual(result["root_modules"], ["ai"])
+        self.assertEqual(result["modules"], ["agents", "ai", "quick-input", "tabs", "terminal"])
+        self.assertIn("GhosttyTests/AITitleServiceTests", result["only_testing"])
+        self.assertEqual(result["unknown_paths"], [])
+        tests = self.plan(paths=["macos/Tests/AI/AIHTTPClientTests.swift"])
+        self.assertEqual(tests["root_modules"], ["ai"])
+        self.assertIn(planner.SMOKE_SUITE, tests["only_testing"])
+
     def test_mobile_access_controller_selects_settings_module(self):
         result = self.plan(paths=["macos/Sources/Features/Mobile/MobileAccessController.swift"])
         self.assertEqual(result["root_modules"], ["settings"])

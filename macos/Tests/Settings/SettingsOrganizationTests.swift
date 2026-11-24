@@ -24,6 +24,16 @@ struct SettingsOrganizationTests {
             #expect(entries.first { $0.settingIDs.contains("keyboard.quickInputOpacity") }?.tab == .controls)
             #expect(entries.first { $0.settingIDs.contains("keyboard.quickInput") }?.tab == .keyboard)
             #expect(entries.first { $0.settingIDs.contains("appearance.tabIconSize") }?.tab == .tabs)
+            #expect(entries.first { $0.settingIDs.contains("tabs.sidebarView") }?.tab == .tabs)
+            #expect(entries.first { $0.settingIDs.contains("tabs.inboxOrdering") }?.tab == .tabs)
+            #expect(entries.first { $0.settingIDs.contains("agents.sessionTitle.mode") }?.tab == .agents)
+            for key in ["ai.endpoint.protocol", "ai.endpoint.baseURL", "ai.endpoint.model"] {
+                #expect(entries.first { $0.settingIDs.contains(key) }?.tab == .agents)
+            }
+            #expect(entries.contains { $0.matches("inbox") && $0.tab == .tabs })
+            #expect(entries.contains { $0.matches("anthropic") && $0.tab == .agents })
+            #expect(entries.contains { $0.matches("收件箱") && $0.tab == .tabs })
+            #expect(entries.contains { $0.matches("会话标题") && $0.tab == .agents })
             let focus = entries.first { $0.settingIDs.contains("terminal.focusedSplitBorderPosition") }
             #expect(focus?.tab == .appearance)
             #expect(focus?.anchor == SettingsStrings(language: language).focusedSplitBorderSection)

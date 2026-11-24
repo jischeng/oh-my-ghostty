@@ -67,6 +67,32 @@
       "minimum": 100,
       "type": "number"
     },
+    "agents.sessionTitle.mode": {
+      "category": "plugins",
+      "default": "generate",
+      "description": "Conversation titles for agent tabs: off, agent-reported only, or generated through the AI endpoint when the agent reports none.",
+      "enum": ["off", "native", "generate"],
+      "type": "string"
+    },
+    "ai.endpoint.baseURL": {
+      "category": "plugins",
+      "default": "",
+      "description": "Base URL of the AI endpoint. Empty disables generated titles; the API key is stored outside settings.json.",
+      "type": "string"
+    },
+    "ai.endpoint.model": {
+      "category": "plugins",
+      "default": "",
+      "description": "Model name sent to the AI endpoint.",
+      "type": "string"
+    },
+    "ai.endpoint.protocol": {
+      "category": "plugins",
+      "default": "openai",
+      "description": "Wire protocol of the AI endpoint: OpenAI-compatible chat completions or Anthropic messages.",
+      "enum": ["openai", "anthropic"],
+      "type": "string"
+    },
     "agents.openQuickInputOnComplete": {
       "category": "keyboard",
       "default": false,
@@ -545,6 +571,13 @@
       "enum": ["none", "project", "date"],
       "type": "string"
     },
+    "tabs.inboxOrdering": {
+      "category": "tabs",
+      "default": "recent",
+      "description": "Order inbox tabs by most recent activity or by creation time.",
+      "enum": ["recent", "created"],
+      "type": "string"
+    },
     "tabs.layout": {
       "apply": "new-window",
       "category": "tabs",
@@ -572,6 +605,13 @@
       "default": true,
       "description": "Use the last committed sidebar width as the next window default.",
       "type": "boolean"
+    },
+    "tabs.sidebarView": {
+      "category": "tabs",
+      "default": "tabs",
+      "description": "Show the Vertical Tabs sidebar as the tab list or as the inbox.",
+      "enum": ["tabs", "inbox"],
+      "type": "string"
     },
     "tabs.showShortcutLabels": {
       "category": "tabs",

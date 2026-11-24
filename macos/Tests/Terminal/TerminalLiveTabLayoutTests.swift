@@ -297,6 +297,140 @@ struct TerminalLiveTabLayoutTests {
         #expect(value.title == "User name")
     }
 
+    @Test func conversationTitleNamesTheTabAndMovesThePathToTheSubtitle() async throws {
+        let settings = OhMyGhosttySettings.shared
+        let savedMode = settings.agentSessionTitleMode
+        settings.agentSessionTitleMode = .native
+        defer { settings.agentSessionTitleMode = savedMode }
+        let fixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { fixture.close() }
+        let controller = try fixture.tab()
+        let surface = try #require(controller.surfaceTree.first)
+        surface.runtimeDescriptor = nil
+        surface.pwd = ""
+        let conversation = try #require(AgentConversationID(UUID().uuidString))
+        controller.adoptAgentResumeDescriptor(.init(agent: .claude, conversationID: conversation,
+            scope: .local, workingDirectory: "/tmp/project"), for: surface)
+        let path = settings.tabPathDisplay == .folderName ? "project" : "/tmp/project"
+        func resolved() throws -> GhosttyTabPresentation {
+            try #require(TerminalTabPresentationResolver.resolve(controller, index: 0, selected: true, activities: nil))
+        }
+        // A conversation without a stored title names its tab as before.
+        #expect(try resolved().title == path)
+        #expect(try resolved().subtitle == nil)
+        #expect(controller.tabAgentConversationTitle == nil)
+
+        // The title belongs to the conversation; the tab's own tracker relays it.
+        let store = AgentConversationTitleStore.shared
+        #expect(store.set("Stabilise login", source: .native, agent: .claude, conversationID: conversation))
+        var value = try resolved()
+        #expect(value.title == "Stabilise login")
+        #expect(value.subtitle == path)
+        #expect(value.remoteBreadcrumb == nil)
+        #expect(controller.presentedTerminalTitle(for: surface, terminalTitle: "live title") == "Stabilise login")
+        try await waitForAppKit { controller.window?.title == "Stabilise login" }
+
+        // It is shown as the Agent wrote it, not cleaned like a terminal title.
+        #expect(store.set("✳ Claude Code review", source: .native, agent: .claude, conversationID: conversation))
+        #expect(try resolved().title == "✳ Claude Code review")
+        try await waitForAppKit { controller.window?.title == "✳ Claude Code review" }
+
+        // A manual tab name always wins and leaves no subtitle.
+        controller.titleOverride = "User name"
+        value = try resolved()
+        #expect(value.title == "User name")
+        #expect(value.subtitle == nil)
+        #expect(controller.window?.title == "User name")
+        controller.titleOverride = nil
+        #expect(try resolved().title == "✳ Claude Code review")
+
+        // Turning titles off restores the path title everywhere.
+        settings.agentSessionTitleMode = .off
+        value = try resolved()
+        #expect(value.title == path)
+        #expect(value.subtitle == nil)
+        try await waitForAppKit { controller.window?.title != "✳ Claude Code review" }
+        settings.agentSessionTitleMode = .native
+        try await waitForAppKit { controller.window?.title == "✳ Claude Code review" }
+
+        // Another conversation in the same pane does not inherit the title.
+        let next = try #require(AgentConversationID(UUID().uuidString))
+        controller.adoptAgentResumeDescriptor(.init(agent: .claude, conversationID: next,
+            scope: .local, workingDirectory: "/tmp/project"), for: surface)
+        #expect(try resolved().title == path)
+        #expect(try resolved().subtitle == nil)
+        try await waitForAppKit { controller.window?.title != "✳ Claude Code review" }
+    }
+
+    @Test func aBoundConversationIsLookedUpAndNamesItsTab() async throws {
+        let settings = OhMyGhosttySettings.shared
+        let savedMode = settings.agentSessionTitleMode
+        settings.agentSessionTitleMode = .native
+        defer { settings.agentSessionTitleMode = savedMode }
+        let fixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { fixture.close() }
+        let controller = try fixture.tab()
+        let surface = try #require(controller.surfaceTree.first)
+        surface.runtimeDescriptor = nil
+        let conversation = try #require(AgentConversationID(UUID().uuidString))
+        let coordinator = AgentConversationTitleCoordinator(
+            store: .shared,
+            generator: SilentTitleGenerator(),
+            loadSeed: { target in
+                guard target.agent == .codex, target.conversationID == conversation,
+                      target.remoteHost == nil else { return nil }
+                return AgentHistoryStore.TitleSeed(native: "Stabilise login", firstPrompt: "Fix the login test")
+            },
+            mode: { .native },
+            sleep: { _ in }
+        )
+        // The app's own coordinator stays out of tests; this one stands in for it.
+        let tracker = AgentConversationTitleTracker(controller: controller, coordinator: coordinator)
+        controller.adoptAgentResumeDescriptor(.init(agent: .codex, conversationID: conversation,
+            scope: .local, workingDirectory: "/tmp/project"), for: surface)
+        try await waitForAppKit { controller.window?.title == "Stabilise login" }
+        withExtendedLifetime(tracker) {}
+        let value = try #require(TerminalTabPresentationResolver.resolve(
+            controller, index: 0, selected: true, activities: nil
+        ))
+        #expect(value.title == "Stabilise login")
+        #expect(AgentConversationTitleStore.shared.record(agent: .codex, conversationID: conversation)?.source == .native)
+        await coordinator.waitUntilIdle()
+        #expect(coordinator.inFlightCount == 0)
+    }
+
+    @Test func agentStateChangesStampTheTab() throws {
+        let enabled = OhMyGhosttySettings.shared.agentStatusHooksEnabled
+        OhMyGhosttySettings.shared.agentStatusHooksEnabled = true
+        defer { OhMyGhosttySettings.shared.agentStatusHooksEnabled = enabled }
+        let fixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { fixture.close() }
+        let controller = try fixture.tab()
+        let surface = try #require(controller.surfaceTree.first)
+        #expect(controller.tabLastAgentActivityAt == nil)
+
+        let start = Date()
+        surface.contextSignal = .init(action: .start, id: "omg-program-status",
+            metadata: "state=idle:app=antigravity")
+        #expect(controller.agentActivities[surface.id]?.state == .idle)
+        surface.contextSignal = .init(action: .start, id: "omg-program-status",
+            metadata: "state=working:app=antigravity")
+        #expect(controller.agentActivities[surface.id]?.state == .working)
+        let working = try #require(controller.tabLastAgentActivityAt)
+        #expect(working >= start)
+
+        // Repeating a state is not activity.
+        surface.contextSignal = .init(action: .start, id: "omg-program-status",
+            metadata: "state=working:app=antigravity")
+        #expect(controller.tabLastAgentActivityAt == working)
+
+        surface.contextSignal = .init(action: .start, id: "omg-program-status",
+            metadata: "state=done:app=antigravity")
+        #expect(controller.agentActivities[surface.id]?.state == .done)
+        let done = try #require(controller.tabLastAgentActivityAt)
+        #expect(done >= working)
+    }
+
     @Test func horizontalTabsUseNativeAgentStatusAndSharedPresentation() async throws {
         let fixture = try TerminalWorkspaceRefactorTests.Fixture()
         defer { fixture.close() }
@@ -464,4 +598,8 @@ struct TerminalLiveTabLayoutTests {
         #expect(decoded.windows?[source.windowSessionID]?.tabLayout == "horizontal")
         #expect(fixture.coordinator.tabLayout(in: source.windowSessionID, fallback: .vertical) == .horizontal)
     }
+}
+
+private struct SilentTitleGenerator: AITitleGenerating {
+    func title(forFirstPrompt prompt: String) async -> String? { nil }
 }

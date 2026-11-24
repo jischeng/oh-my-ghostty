@@ -60,13 +60,25 @@ enum TerminalTabPresentationResolver {
         let activity = controller.focusedAgentActivity() ?? activities?.activity(for: controller.tabSessionID)
         let descriptor = controller.agentResumeDescriptor(for: surface)
         let agent = activity.flatMap { SupportedAgent(rawValue: $0.source) } ?? descriptor?.agent
+        // A manual tab name wins over the conversation's own title.
+        let conversationTitle = controller.titleOverride == nil ? controller.agentConversationTitle(for: surface) : nil
         let restoredTitle = agent == nil ? controller.restoredTitleFallback(for: surface, terminalTitle: surface.title) : nil
-        let base = controller.titleOverride ?? restoredTitle ?? (agent == nil ? session.presentationTitle(pathDisplay: settings.tabPathDisplay)
-            : session.agentPathTitle(pathDisplay: settings.tabPathDisplay, resumeDescriptor: descriptor))
-        let title = agent?.normalizedTitle(base) ?? base
+        let pathTitle = agent == nil ? session.presentationTitle(pathDisplay: settings.tabPathDisplay)
+            : session.agentPathTitle(pathDisplay: settings.tabPathDisplay, resumeDescriptor: descriptor)
+        let base = controller.titleOverride ?? conversationTitle ?? restoredTitle ?? pathTitle
+        // Title normalisation strips what an Agent adds to a terminal title;
+        // a conversation title is not one.
+        let title = conversationTitle ?? agent?.normalizedTitle(base) ?? base
+        let showsPath = controller.titleOverride == nil && conversationTitle == nil && restoredTitle == nil
+        // Never empty, so every row with a conversation title has two lines.
+        let place = session.remoteTabBreadcrumb?.title ?? pathTitle
+        let subtitle = place.isEmpty ? agent?.displayName : place
         let context = GhosttyTabIconContext(tabID: controller.tabSessionID, title: title, activity: activity,
                                            defaultIcon: session.workspace?.icon ?? .systemSymbol(session.tabIconSystemName))
-        return .init(title: title, remoteBreadcrumb: controller.titleOverride == nil && restoredTitle == nil ? session.remoteTabBreadcrumb : nil,
+        // Both tab renderers prefer the breadcrumb over the title, so a
+        // conversation title moves the place it would have named to the subtitle.
+        return .init(title: title, remoteBreadcrumb: showsPath ? session.remoteTabBreadcrumb : nil,
+                     subtitle: conversationTitle == nil ? nil : subtitle,
                      shortcut: settings.showShortcutLabels ? controller.tabShortcutLabel(for: index) : nil,
                      icon: icons.icon(for: context) ?? .systemSymbol("terminal"), activity: activity,
                      selected: selected, hovered: false)

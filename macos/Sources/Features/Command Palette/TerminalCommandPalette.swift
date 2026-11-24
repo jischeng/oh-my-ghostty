@@ -207,6 +207,8 @@ struct TerminalCommandPaletteView: View {
                 let displayTitle: String
                 if let override = controller.titleOverride, !override.isEmpty {
                     displayTitle = override
+                } else if let conversation = controller.agentConversationTitle(for: surface) {
+                    displayTitle = conversation
                 } else if !terminalTitle.isEmpty {
                     displayTitle = terminalTitle
                 } else {

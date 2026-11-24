@@ -89,6 +89,23 @@ final class SettingsTextField: NSTextField, NSTextFieldDelegate {
     func controlTextDidEndEditing(_ obj: Notification) { commit?(stringValue) }
 }
 
+/// Password-style field for values that must not be shown on screen, such as the
+/// AI endpoint API key. Mirrors `SettingsTextField`.
+final class SettingsSecureField: NSSecureTextField, NSTextFieldDelegate {
+    var commit: ((String) -> Void)?
+    init(_ value: String, placeholder: String = "", commit: @escaping (String) -> Void) {
+        super.init(frame: .zero)
+        stringValue = value
+        placeholderString = placeholder
+        self.commit = commit
+        delegate = self
+        bezelStyle = .roundedBezel
+        widthAnchor.constraint(equalToConstant: 220).isActive = true
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    func controlTextDidEndEditing(_ obj: Notification) { commit?(stringValue) }
+}
+
 final class SettingsNumberField: NSStackView, NSTextFieldDelegate {
     let field = NSTextField()
     let stepper = NSStepper()

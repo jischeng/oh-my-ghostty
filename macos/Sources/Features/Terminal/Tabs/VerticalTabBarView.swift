@@ -647,11 +647,17 @@ struct CompositeGhosttyTabIconProvider: GhosttyTabIconProviding {
 struct GhosttyTabPresentation {
     let title: String
     let remoteBreadcrumb: RemoteTabBreadcrumb?
+    /// Non-nil exactly when `title` is a conversation title: what the tab
+    /// would otherwise have shown (directory, or `host › dir` for SSH). Rows
+    /// render it as a second line.
+    var subtitle: String?
     let shortcut: String?
     let icon: GhosttyTabIcon
     let activity: TabActivity?
     let selected: Bool
     let hovered: Bool
+
+    var showsSubtitle: Bool { subtitle.map { !$0.isEmpty } ?? false }
 }
 
 struct GhosttyOrganizedTab: Identifiable {
@@ -665,6 +671,9 @@ struct GhosttyTabGroupPresentation: Identifiable {
     let title: String?
     let icon: GhosttyTabIcon?
     var tabs: [GhosttyOrganizedTab]
+    /// Shown at the trailing edge of the section header. The Tabs view's
+    /// project and date groups leave it nil.
+    var count: Int?
 }
 
 @MainActor

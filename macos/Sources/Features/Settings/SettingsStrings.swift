@@ -858,6 +858,54 @@ struct SettingsStrings: Equatable, Sendable {
         tone == .systemDefault ? t("System Default", "系统默认") : tone.rawValue
     }
 
+    // MARK: Conversation titles and the AI endpoint
+
+    var agentSessionTitleLabel: String { t("Conversation Titles", "会话标题") }
+    var agentSessionTitleCaption: String {
+        t("Off hides agent-reported titles. Agent Reported shows only the title the CLI records. Generate asks the AI endpoint below for a title when the CLI reports none; without an endpoint it behaves like Agent Reported.",
+          "“关闭”不显示 Agent 上报的标题；“Agent 上报”只显示 CLI 记录的标题；“生成”在 CLI 未上报标题时向下方 AI 端点请求标题；未配置端点时等同于“Agent 上报”。")
+    }
+
+    func agentSessionTitleModeTitle(_ mode: AgentSessionTitleMode) -> String {
+        switch mode {
+        case .off: t("Off", "关闭")
+        case .native: t("Agent Reported", "Agent 上报")
+        case .generate: t("Generate", "生成")
+        }
+    }
+
+    var aiEndpointLink: String { t("AI Endpoint", "AI 端点") }
+    var aiEndpointSection: String { t("AI Endpoint", "AI 端点") }
+    var aiEndpointProtocolLabel: String { t("Protocol", "协议") }
+    var aiEndpointBaseURLLabel: String { t("Base URL", "基础 URL") }
+    var aiEndpointModelLabel: String { t("Model", "模型") }
+    var aiEndpointAPIKeyLabel: String { t("API Key", "API 密钥") }
+    static func aiEndpointURLPlaceholder(_ kind: AIEndpointProtocol) -> String {
+        switch kind {
+        case .openAI: "https://api.openai.com"
+        case .anthropic: "https://api.anthropic.com"
+        }
+    }
+    var aiEndpointCaption: String {
+        t("OMG sends the first prompt of a conversation, with likely secrets removed, to this endpoint to generate a tab title. No project files or terminal output are sent. The API key is stored outside settings.json in a private file.",
+          "OMG 会把一段对话的第一条提示词（已尽量移除敏感信息）发送到此端点以生成标签页标题，不会发送项目文件或终端输出。API 密钥保存在 settings.json 之外的私有文件中。")
+    }
+    var aiEndpointMissingFieldsCaption: String {
+        t("A base URL and a model are required before OMG sends anything.",
+          "必须填写基础 URL 和模型后，OMG 才会发送请求。")
+    }
+    var aiEndpointInsecureURLCaption: String {
+        t("Use https://, or plain http:// only for a loopback, private or .local host.",
+          "请使用 https://；http:// 仅适用于回环地址、私有网段或 .local 主机。")
+    }
+    var aiEndpointKeyStoredCaption: String {
+        t("Leave empty to send no authentication header and to delete the stored key.",
+          "留空则不发送认证头，并删除已保存的密钥。")
+    }
+    var aiEndpointKeySaveFailed: String {
+        t("The API key could not be saved.", "无法保存 API 密钥。")
+    }
+
     // MARK: Native Session Runtime
 
     var runtimeTitle: String { t("Persistent terminal sessions", "持久终端会话") }

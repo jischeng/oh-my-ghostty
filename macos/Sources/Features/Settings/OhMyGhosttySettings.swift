@@ -335,6 +335,16 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Canonical tab ordering policy.",
             requiresNewWindow: false, category: "tabs"),
         .init(
+            id: "tabs.sidebarView", type: .enumeration, defaultValue: "tabs",
+            allowedValues: GhosttyTabSidebarViewMode.allCases.map(\.rawValue), minimum: nil, maximum: nil,
+            description: "Show the Vertical Tabs sidebar as the tab list or as the inbox.",
+            requiresNewWindow: false, category: "tabs"),
+        .init(
+            id: "tabs.inboxOrdering", type: .enumeration, defaultValue: "recent",
+            allowedValues: GhosttyTabInboxSortMode.allCases.map(\.rawValue), minimum: nil, maximum: nil,
+            description: "Order inbox tabs by most recent activity or by creation time.",
+            requiresNewWindow: false, category: "tabs"),
+        .init(
             id: "tabs.pathDisplay", type: .enumeration, defaultValue: "folderName",
             allowedValues: OhMyGhosttyTabPathDisplay.allCases.map(\.rawValue),
             minimum: nil, maximum: nil,
@@ -669,6 +679,26 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Keep the Agent History search index current while OMG runs. When off, the index is updated only when Agent History is opened.",
             requiresNewWindow: false, category: "general"),
         .init(
+            id: "agents.sessionTitle.mode", type: .enumeration, defaultValue: "generate",
+            allowedValues: AgentSessionTitleMode.allCases.map(\.rawValue), minimum: nil, maximum: nil,
+            description: "Conversation titles for agent tabs: off, agent-reported only, or generated through the AI endpoint when the agent reports none.",
+            requiresNewWindow: false, category: "plugins"),
+        .init(
+            id: "ai.endpoint.protocol", type: .enumeration, defaultValue: "openai",
+            allowedValues: AIEndpointProtocol.allCases.map(\.rawValue), minimum: nil, maximum: nil,
+            description: "Wire protocol of the AI endpoint: OpenAI-compatible chat completions or Anthropic messages.",
+            requiresNewWindow: false, category: "plugins"),
+        .init(
+            id: "ai.endpoint.baseURL", type: .string, defaultValue: "",
+            allowedValues: nil, minimum: nil, maximum: nil,
+            description: "Base URL of the AI endpoint. Empty disables generated titles; the API key is stored outside settings.json.",
+            requiresNewWindow: false, category: "plugins"),
+        .init(
+            id: "ai.endpoint.model", type: .string, defaultValue: "",
+            allowedValues: nil, minimum: nil, maximum: nil,
+            description: "Model name sent to the AI endpoint.",
+            requiresNewWindow: false, category: "plugins"),
+        .init(
             id: "sessions.localRuntimeEnabled", type: .boolean, defaultValue: "true",
             allowedValues: nil, minimum: nil, maximum: nil,
             description: "Launch new local terminals in the durable local session runtime.",
@@ -767,6 +797,12 @@ final class OhMyGhosttySettings: ObservableObject {
     }
     @Published var orderingMode: GhosttyTabOrderingMode = .manual {
         didSet { persist("tabs.ordering", orderingMode.rawValue) }
+    }
+    @Published var tabSidebarViewMode: GhosttyTabSidebarViewMode = .tabs {
+        didSet { persist("tabs.sidebarView", tabSidebarViewMode.rawValue) }
+    }
+    @Published var tabInboxSortMode: GhosttyTabInboxSortMode = .recent {
+        didSet { persist("tabs.inboxOrdering", tabInboxSortMode.rawValue) }
     }
     @Published var tabPathDisplay: OhMyGhosttyTabPathDisplay = .folderName {
         didSet { persist("tabs.pathDisplay", tabPathDisplay.rawValue) }
@@ -1146,6 +1182,18 @@ final class OhMyGhosttySettings: ObservableObject {
     @Published var agentHistoryBackgroundIndexing = false {
         didSet { persist("agents.historyBackgroundIndexing", agentHistoryBackgroundIndexing) }
     }
+    @Published var agentSessionTitleMode: AgentSessionTitleMode = .generate {
+        didSet { persist("agents.sessionTitle.mode", agentSessionTitleMode.rawValue) }
+    }
+    @Published var aiEndpointProtocol: AIEndpointProtocol = .openAI {
+        didSet { persist("ai.endpoint.protocol", aiEndpointProtocol.rawValue) }
+    }
+    @Published var aiEndpointBaseURL = "" {
+        didSet { persist("ai.endpoint.baseURL", aiEndpointBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)) }
+    }
+    @Published var aiEndpointModel = "" {
+        didSet { persist("ai.endpoint.model", aiEndpointModel.trimmingCharacters(in: .whitespacesAndNewlines)) }
+    }
     @Published var localRuntimeEnabled = true {
         didSet { persist("sessions.localRuntimeEnabled", localRuntimeEnabled) }
     }
@@ -1470,6 +1518,8 @@ final class OhMyGhosttySettings: ObservableObject {
             defaultSidebarWidth = numberValue("tabs.sidebarWidth", fallback: 240, range: 176...480)
             groupingMode = enumValue("tabs.grouping", fallback: .none)
             orderingMode = enumValue("tabs.ordering", fallback: .manual)
+            tabSidebarViewMode = enumValue("tabs.sidebarView", fallback: .tabs)
+            tabInboxSortMode = enumValue("tabs.inboxOrdering", fallback: .recent)
             tabPathDisplay = enumValue("tabs.pathDisplay", fallback: .folderName)
             showShortcutLabels = boolValue("tabs.showShortcutLabels", fallback: true)
             rememberSidebarWidth = boolValue("tabs.rememberSidebarWidth", fallback: true)
@@ -1581,6 +1631,10 @@ final class OhMyGhosttySettings: ObservableObject {
                 range: 100...50_000
             )
             agentHistoryBackgroundIndexing = boolValue("agents.historyBackgroundIndexing", fallback: false)
+            agentSessionTitleMode = enumValue("agents.sessionTitle.mode", fallback: .generate)
+            aiEndpointProtocol = enumValue("ai.endpoint.protocol", fallback: .openAI)
+            aiEndpointBaseURL = optionalStringValue("ai.endpoint.baseURL") ?? ""
+            aiEndpointModel = optionalStringValue("ai.endpoint.model") ?? ""
             localRuntimeEnabled = boolValue("sessions.localRuntimeEnabled", fallback: true)
             quickTerminalRuntimeEnabled = boolValue("sessions.quickTerminalRuntimeEnabled", fallback: false)
             keepLocalSessionsOnQuit = boolValue("sessions.keepLocalOnQuit", fallback: true)

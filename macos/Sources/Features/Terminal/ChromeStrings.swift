@@ -75,6 +75,20 @@ struct ChromeStrings: Equatable, Sendable {
     var yesterday: String { t("Yesterday", "昨天") }
     var older: String { t("Older", "更早") }
 
+    // Tab inbox
+    var inbox: String { t("Inbox", "收件箱") }
+    func toggleInbox(shown: Bool) -> String { shown ? t("Show Tabs", "显示标签页") : t("Show Inbox", "显示收件箱") }
+    /// Inbox section for tabs whose agent is working or waiting for the user.
+    var inboxContinue: String { t("Continue", "继续") }
+    var inboxEarlier: String { t("Earlier", "更早") }
+    var inboxSortHeader: String { t("SORT BY", "排序方式") }
+    func inboxSortTitle(_ mode: GhosttyTabInboxSortMode) -> String {
+        switch mode {
+        case .recent: t("Recent Activity", "最近活动")
+        case .created: t("Created Time", "创建时间")
+        }
+    }
+
     // Accessibility
     var tabs: String { t("Tabs", "标签页") }
     var rightSidebar: String { t("Right Sidebar", "右侧边栏") }

@@ -171,11 +171,12 @@ struct AgentHistoryRemoteAccess: Sendable {
                             data = data.rsplit(b'\\n', 1)[0]
                             source.seek(max(0, size - 128 * 1024))
                             tail = source.read().split(b'\\n')[1:]
-                            # Pi's explicit session name can appear at the end.
+                            # A session's name can be written at the end: Pi's
+                            # explicit one, Claude Code's own and its /rename.
                             for line in tail:
                                 try:
                                     record = json.loads(line)
-                                    if record.get('type') in ('session_info', 'title', 'title_change'):
+                                    if record.get('type') in ('session_info', 'title', 'title_change', 'ai-title', 'custom-title'):
                                         data += b'\\n' + line
                                 except (ValueError, AttributeError):
                                     pass
@@ -191,7 +192,7 @@ struct AgentHistoryRemoteAccess: Sendable {
                     kind = record.get('type')
                     payload = record.get('message') or record.get('payload') or record
                     role = payload.get('role') if isinstance(payload, dict) else None
-                    if kind in ('session', 'session_meta', 'title', 'title_change', 'session_info') or role == 'user' or kind == 'user':
+                    if kind in ('session', 'session_meta', 'title', 'title_change', 'session_info', 'ai-title', 'custom-title') or role == 'user' or kind == 'user':
                         records.append(record)
                 print(json.dumps(dict(path=path, size=size, modified=modified, records=records)))
             except OSError:

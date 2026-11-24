@@ -145,6 +145,7 @@ expansion. Shared interfaces use the broad fallback instead.
 | `agents` | Agent integration/status/history | inspector, quick-input, tabs, terminal |
 | `ssh` | SSH configuration, workspace, remote Git execution | agents, terminal, git, tabs |
 | `quick-input` | Agent Quick Input | agents |
+| `ai` | AI endpoint client and generated conversation titles | agents, quick-input, tabs, terminal |
 | `control` | Local control socket, `omg +edit` / `+view` | editor |
 | `update` | Updater, release notes, version metadata | — |
 

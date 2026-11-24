@@ -120,6 +120,11 @@ extension Ghostty {
             ghostty_surface_mouse_captured(surface)
         }
 
+        /// Whether the terminal is currently displaying the alternate screen buffer.
+        var isAlternateScreen: Bool {
+            ghostty_surface_omg_is_alternate_screen(surface)
+        }
+
         /// The PID of the foreground process group attached to the PTY.
         var foregroundPID: Int? {
             let pid = ghostty_surface_foreground_pid(surface)

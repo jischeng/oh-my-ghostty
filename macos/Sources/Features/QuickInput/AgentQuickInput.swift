@@ -1261,7 +1261,7 @@ private struct AgentQuickInputPaneDockHost<Content: View>: View {
                 AgentQuickInputComposer(
                     controller: controller,
                     model: model,
-                    surfaceID: surfaceView.id,
+                    surfaceView: surfaceView,
                     availableWidth: availableWidth,
                     availableHeight: availableHeight,
                     isDocked: isDocked
@@ -2518,13 +2518,15 @@ private struct QuickInputPillButtonStyle: ButtonStyle {
 private struct AgentQuickInputComposer: View {
     @ObservedObject var controller: TerminalController
     @ObservedObject var model: AgentQuickInputModel
-    let surfaceID: UUID
+    @ObservedObject var surfaceView: Ghostty.SurfaceView
     let availableWidth: CGFloat
     let availableHeight: CGFloat
     let isDocked: Bool
 
     @ObservedObject private var settings = OhMyGhosttySettings.shared
     @ObservedObject private var secureInput = SecureInput.shared
+    @ObservedObject private var missionControl = MissionControlPresentationMonitor.shared
+    private var surfaceID: UUID { surfaceView.id }
     private var strings: SettingsStrings { SettingsStrings(language: settings.language) }
     private var isTargetedPane: Bool {
         model.isPresented && model.targetSurfaceID == surfaceID
@@ -2541,13 +2543,20 @@ private struct AgentQuickInputComposer: View {
         QuickInputFooterLayoutMode.resolve(width: availableWidth)
     }
 
-    /// Seamless terminal-theme background for docked mode or translucent card for floating fallback.
+    /// Opaque terminal-theme color used for floating glass tint and light/dark scheme resolution.
     private var chromeBackground: Color {
         controller.quickInputAccessoryBackground(isPinned: model.isPinned)
     }
 
+    /// Exact renderer-matched background for docked mode (opaque, translucent, or clear over window glass).
+    private var dockedBackground: Color {
+        _ = missionControl.isMissionControlActive
+        return controller.quickInputDockedBackground(for: surfaceView)
+    }
+
     private var cardColorScheme: ColorScheme {
-        NSColor(chromeBackground).isLightColor ? .light : .dark
+        let reference = surfaceView.backgroundColor ?? surfaceView.derivedConfig.backgroundColor
+        return NSColor(reference).isLightColor ? .light : .dark
     }
 
     var body: some View {
@@ -2737,7 +2746,7 @@ private struct AgentQuickInputComposer: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background {
             if isDocked {
-                chromeBackground
+                dockedBackground
             } else {
                 QuickInputGlassSurface(
                     cornerRadius: AgentQuickInputMetrics.cardCornerRadius,

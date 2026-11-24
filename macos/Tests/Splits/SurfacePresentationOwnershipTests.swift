@@ -262,4 +262,60 @@ struct SurfacePresentationOwnershipTests {
             }
         }
     }
+
+    @Test func alternateScreenCommitsVisualDockResizeToPTYWhilePrimarySuppressesIt() async throws {
+        let native = try #require((NSApp.delegate as? AppDelegate)?.ghostty.app)
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sh -c 'printf \"\\033[?1049hALT-READY\"; exec /bin/sleep 60'"
+        let surface = Ghostty.SurfaceView(native, baseConfig: config)
+        let lease = SurfacePresentationLease()
+        surface.presentation.authorize(lease)
+        let outer = CGSize(width: 800, height: 600)
+        let wrapper = SurfaceScrollView(contentSize: outer, surfaceView: surface, lease: lease)
+        wrapper.frame.size = outer
+        wrapper.layoutSubtreeIfNeeded()
+
+        for _ in 0..<100 where !(surface.isAlternateScreen && surface.surfaceModel?.ttyName != nil) {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(surface.isAlternateScreen)
+        let tty = try #require(surface.surfaceModel?.ttyName)
+        let fd = open(tty, O_RDONLY | O_NOCTTY)
+        try #require(fd >= 0)
+        defer { close(fd) }
+
+        let initial = ghostty_surface_size(try #require(surface.surface))
+        var actual = winsize()
+        for _ in 0..<100 {
+            try #require(ioctl(fd, TIOCGWINSZ, &actual) == 0)
+            if actual.ws_row == initial.rows { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try #require(actual.ws_row == initial.rows)
+
+        // Dock open on alternate screen must commit smaller row count to the PTY.
+        let docked = CGSize(width: 800, height: 420)
+        surface.presentation.setVisualDockContext(outerSize: outer, dockedHeight: 180)
+        wrapper.frame.size = docked
+        wrapper.layoutSubtreeIfNeeded()
+        let shrunk = ghostty_surface_size(try #require(surface.surface))
+        #expect(shrunk.rows < initial.rows)
+        for _ in 0..<100 {
+            try #require(ioctl(fd, TIOCGWINSZ, &actual) == 0)
+            if actual.ws_row == shrunk.rows { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(actual.ws_row == shrunk.rows)
+
+        // Dock close on alternate screen must restore full row count to the PTY.
+        surface.presentation.setVisualDockContext(outerSize: outer, dockedHeight: 0)
+        wrapper.frame.size = outer
+        wrapper.layoutSubtreeIfNeeded()
+        for _ in 0..<100 {
+            try #require(ioctl(fd, TIOCGWINSZ, &actual) == 0)
+            if actual.ws_row == initial.rows { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(actual.ws_row == initial.rows)
+    }
 }

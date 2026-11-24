@@ -790,6 +790,11 @@ extension Ghostty {
             }
         }
 
+        /// Whether the terminal is currently displaying the alternate screen buffer.
+        var isAlternateScreen: Bool {
+            surfaceModel?.isAlternateScreen ?? false
+        }
+
         override func sizeDidChange(_ size: CGSize) {
             setSurfaceSize(size, live: false)
         }

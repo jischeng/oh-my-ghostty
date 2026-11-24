@@ -691,6 +691,42 @@ struct AgentQuickInputDockContainerTests {
         #expect(dragState.request(CGSize(width: 800, height: 565)) == .visualOnly(CGSize(width: 800, height: 565)))
     }
 
+    @Test func alternateScreenDockCommitsPTYResizeOnOpenDragAndClose() {
+        var state = SurfaceCoreResizeState()
+        let outer = CGSize(width: 800, height: 600)
+
+        state.setVisualDockContext(outerSize: outer, dockedHeight: 0)
+        #expect(state.request(outer, allowsVisualOnlyDock: false) == .normal(outer))
+
+        // Opening docked Quick Input on alternate screen commits so the TUI reflows.
+        state.setVisualDockContext(outerSize: outer, dockedHeight: 165)
+        #expect(
+            state.request(CGSize(width: 800, height: 435), allowsVisualOnlyDock: false)
+                == .normal(CGSize(width: 800, height: 435))
+        )
+
+        // Dragging Quick Input height on alternate screen also commits.
+        state.setVisualDockContext(outerSize: outer, dockedHeight: 220)
+        #expect(
+            state.request(CGSize(width: 800, height: 380), allowsVisualOnlyDock: false)
+                == .normal(CGSize(width: 800, height: 380))
+        )
+
+        // Closing Quick Input restores full pane height via .normal so no blank bottom gap remains.
+        state.setVisualDockContext(outerSize: outer, dockedHeight: 0)
+        #expect(state.request(outer, allowsVisualOnlyDock: false) == .normal(outer))
+
+        // Opening on alternate screen, exiting to primary screen, then closing must still commit
+        // the restored full height because committedSize was shrunk while on alternate screen.
+        state.setVisualDockContext(outerSize: outer, dockedHeight: 165)
+        #expect(
+            state.request(CGSize(width: 800, height: 435), allowsVisualOnlyDock: false)
+                == .normal(CGSize(width: 800, height: 435))
+        )
+        state.setVisualDockContext(outerSize: outer, dockedHeight: 0)
+        #expect(state.request(outer, allowsVisualOnlyDock: true) == .normal(outer))
+    }
+
     @Test func tabOverlayFrameProbeConvertsNestedRightSplitCoordinatesToOutermostContainer() async throws {
         let outerTabContainer = AgentQuickInputDockContainer.Container(
             frame: NSRect(x: 0, y: 0, width: 900, height: 600)

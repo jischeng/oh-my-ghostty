@@ -30,11 +30,14 @@ struct SurfaceCoreResizeState {
         interactionDepth += 1
     }
 
-    mutating func request(_ size: CGSize) -> SurfaceCoreResizeAction? {
+    mutating func request(
+        _ size: CGSize,
+        allowsVisualOnlyDock: Bool = true
+    ) -> SurfaceCoreResizeAction? {
         guard requestedSize != size else { return nil }
         requestedSize = size
 
-        if isPureVisualDockChange(for: size) {
+        if allowsVisualOnlyDock, isPureVisualDockChange(for: size) {
             appliedSize = size
             hasUncommittedLiveSize = false
             return .visualOnly(size)
@@ -174,7 +177,12 @@ final class SurfacePresentationLease {}
     }
 
     func requestSize(_ size: CGSize) {
-        if let action = resizeState.request(size) { apply(action) }
+        // Alternate-screen TUIs have no Ghostty scrollback: shrinking without
+        // SIGWINCH discards rows and leaves blank rows at the bottom on close.
+        let allowsVisualOnlyDock = !(surface?.isAlternateScreen ?? false)
+        if let action = resizeState.request(size, allowsVisualOnlyDock: allowsVisualOnlyDock) {
+            apply(action)
+        }
     }
 
     func beginResize() {

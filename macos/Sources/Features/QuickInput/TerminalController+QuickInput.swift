@@ -34,6 +34,44 @@ extension TerminalController {
         )
     }
 
+    func quickInputDockedBackground(for surface: Ghostty.SurfaceView? = nil) -> Color {
+        let surfaceColor = surface?.backgroundColor
+            ?? surface?.derivedConfig.backgroundColor
+            ?? terminalBackgroundColor
+        let surfaceOpacity = surface?.derivedConfig.backgroundOpacity ?? terminalBackgroundOpacity
+        let usesWindowGlass = surface?.derivedConfig.backgroundBlur.isGlassStyle
+            ?? ghostty.config.backgroundBlur.isGlassStyle
+        let windowIsOpaque = window?.styleMask.contains(.fullScreen) == true
+            || isBackgroundOpaque
+            || MissionControlPresentationMonitor.shared.isMissionControlActive
+        return Self.quickInputDockedBackground(
+            color: surfaceColor,
+            opacity: surfaceOpacity,
+            windowIsOpaque: windowIsOpaque,
+            colorspaceIsDisplayP3: ghostty.config.windowColorspaceIsDisplayP3,
+            linearBlending: ghostty.config.usesLinearAlphaBlending,
+            usesWindowGlass: usesWindowGlass
+        )
+    }
+
+    static func quickInputDockedBackground(
+        color: Color,
+        opacity: Double,
+        windowIsOpaque: Bool,
+        colorspaceIsDisplayP3: Bool = false,
+        linearBlending: Bool = false,
+        usesWindowGlass: Bool = false
+    ) -> Color {
+        Self.chromeBackground(
+            color: color,
+            opacity: opacity,
+            windowIsOpaque: windowIsOpaque,
+            colorspaceIsDisplayP3: colorspaceIsDisplayP3,
+            linearBlending: linearBlending,
+            usesWindowGlass: usesWindowGlass
+        )
+    }
+
     func quickInputAvailableHeight(
         defaultHeight: CGFloat = AgentQuickInputMetrics.maximumHeight * 2
     ) -> CGFloat {

@@ -2069,6 +2069,13 @@ pub const CAPI = struct {
         surface.core_surface.setHibernationEligible(eligible);
     }
 
+    export fn ghostty_surface_omg_is_alternate_screen(surface: *Surface) bool {
+        const core = &surface.core_surface;
+        core.renderer_state.mutex.lockUncancelable(global.io());
+        defer core.renderer_state.mutex.unlock(global.io());
+        return core.renderer_state.terminal.screens.active_key == .alternate;
+    }
+
     export fn ghostty_surface_omg_has_link_candidate(
         surface: *Surface,
         x: f64,

@@ -966,6 +966,67 @@ struct AgentQuickInputTests {
         #expect(abs(lightSRGB.blueComponent - expectedLightColor.blueComponent) < 0.005)
     }
 
+    @Test func quickInputDockedBackgroundMatchesRenderedTerminalChromeAcrossWindowModes() throws {
+        let darkThemeColor = Color(.sRGB, red: 30.0 / 255.0, green: 30.0 / 255.0, blue: 46.0 / 255.0, opacity: 1)
+
+        // 1. Translucent non-glass window matches translucent terminal chrome (NOT 100% opaque).
+        let expectedTranslucent = TerminalController.chromeBackground(
+            color: darkThemeColor,
+            opacity: 0.72,
+            windowIsOpaque: false,
+            colorspaceIsDisplayP3: true,
+            linearBlending: false,
+            usesWindowGlass: false
+        )
+        let dockedTranslucent = TerminalController.quickInputDockedBackground(
+            color: darkThemeColor,
+            opacity: 0.72,
+            windowIsOpaque: false,
+            colorspaceIsDisplayP3: true,
+            linearBlending: false,
+            usesWindowGlass: false
+        )
+        let expectedTranslucentNS = try #require(NSColor(expectedTranslucent).usingColorSpace(.sRGB))
+        let dockedTranslucentNS = try #require(NSColor(dockedTranslucent).usingColorSpace(.sRGB))
+        #expect(dockedTranslucentNS.alphaComponent < 0.99)
+        #expect(abs(dockedTranslucentNS.alphaComponent - expectedTranslucentNS.alphaComponent) < 0.005)
+        #expect(abs(dockedTranslucentNS.redComponent - expectedTranslucentNS.redComponent) < 0.005)
+        #expect(abs(dockedTranslucentNS.greenComponent - expectedTranslucentNS.greenComponent) < 0.005)
+        #expect(abs(dockedTranslucentNS.blueComponent - expectedTranslucentNS.blueComponent) < 0.005)
+
+        // 2. macOS liquid glass window stays clear so TerminalGlassView is not double-tinted.
+        let dockedGlass = TerminalController.quickInputDockedBackground(
+            color: darkThemeColor,
+            opacity: 0.72,
+            windowIsOpaque: false,
+            colorspaceIsDisplayP3: true,
+            usesWindowGlass: true
+        )
+        #expect(dockedGlass == .clear)
+
+        // 3. Opaque / fullscreen window paints exact quantized opaque terminal color even with glass enabled.
+        let expectedOpaque = TerminalController.chromeBackground(
+            color: darkThemeColor,
+            opacity: 0.72,
+            windowIsOpaque: true,
+            colorspaceIsDisplayP3: true,
+            usesWindowGlass: true
+        )
+        let dockedOpaque = TerminalController.quickInputDockedBackground(
+            color: darkThemeColor,
+            opacity: 0.72,
+            windowIsOpaque: true,
+            colorspaceIsDisplayP3: true,
+            usesWindowGlass: true
+        )
+        let expectedOpaqueNS = try #require(NSColor(expectedOpaque).usingColorSpace(.sRGB))
+        let dockedOpaqueNS = try #require(NSColor(dockedOpaque).usingColorSpace(.sRGB))
+        #expect(dockedOpaqueNS.alphaComponent == 1.0)
+        #expect(abs(dockedOpaqueNS.redComponent - expectedOpaqueNS.redComponent) < 0.005)
+        #expect(abs(dockedOpaqueNS.greenComponent - expectedOpaqueNS.greenComponent) < 0.005)
+        #expect(abs(dockedOpaqueNS.blueComponent - expectedOpaqueNS.blueComponent) < 0.005)
+    }
+
     @Test @MainActor
     func keyWindowResignAndRegainPreservesCompanionQuickInputFocusWithoutLateDEC1004() async throws {
         let app = try #require(NSApp.delegate as? AppDelegate).ghostty

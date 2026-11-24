@@ -285,3 +285,24 @@ session-state files. Stream T owns `Plugins/AgentConversationTitle*.swift`,
 `Plugins/AgentHistory*.swift` and the resolver. Stream P owns `Features/AI/**`,
 `Features/Settings/**`, `Features/Git/GitCommitAI*.swift`,
 `Features/Git/GitACP*.swift`, `docs/settings/**`.
+
+## Iteration 3 (2026-11-24, second look in OMG Dev)
+
+- **Naming**: an agent tab is named by the user, its conversation, the title the
+  agent gives its terminal, else the agent itself. A terminal title counts only
+  with the decoration its agent adds (a leading glyph for Claude Code, a
+  trailing ` | folder` for Codex, the `π - ` prefix for Pi), so command lines
+  never become names. Plain terminal rows in the inbox show the directory;
+  the Tabs view and tab chrome keep following `tabs.pathDisplay`.
+- **Rows**: inbox rows are 38 pt, 58 pt with a subtitle, and the subtitle runs
+  under the icon across the row. Groups are flat, with no section icons.
+- **AI page**: providers read as two groups, the connection group carries a
+  plus, a new connection is a draft discarded when left untouched, rows say one
+  fact each, and the commit route list has a single Add Models entry.
+- **Verified in the VM**: real rows for Claude and Codex agents (including a
+  resumed conversation without an ID, named from the terminal title), rename
+  recency on leave, `⌘N` order, model fetch from a loopback mock
+  (`http://127.0.0.1:8089`), failure text when the endpoint is down, key kept
+  out of `settings.json`, Chinese and English layouts.
+- **Open**: a terminal flash on rename reported by the user could not be
+  reproduced in the VM and the recording was unreadable to the agent session.

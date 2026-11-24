@@ -245,6 +245,11 @@ struct VerticalNativeTabOutlineTests {
             }
         }
 
+        // An untitled surface names itself after 0.5 s. Title every surface now
+        // so that timer cannot fire inside a counted refresh window below.
+        for surface in [firstSurface, secondSurface] + Array(second.surfaceTree) { surface.setTitle("Titled") }
+        try await Task.sleep(for: .milliseconds(100))
+
         let state = VerticalTabWindowLayoutState(isSidebarVisible: true)
         let tabs = [GhosttyOrganizedTab(controller: first, actualIndex: 1)]
         var presentationCalls = 0

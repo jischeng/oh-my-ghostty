@@ -1,12 +1,13 @@
 import AppKit
 
-/// The sidebar header's inbox toggle. Uses a clean borderless 24×24pt icon style
-/// matching sibling header controls (`tray` when inactive with a 6×6pt accent dot
-/// when tabs wait for the user; `tray.fill` with a subtle borderless rounded pill
-/// when active).
+/// The sidebar header's inbox toggle. Matches sibling 24×24pt header icon controls
+/// (`12pt .medium` symbol scaled into a centered 14×14pt slot, `tray` with a 6×6pt
+/// accent dot when inactive and tabs wait for the user, `tray.fill` on a subtle
+/// borderless neutral active pill with `theme.foreground` glyph when shown).
 final class TabInboxHeaderButton: NativeActionControl {
     static let badgeDiameter: CGFloat = 6
-    static let pillCornerRadius: CGFloat = 6
+    static let pillCornerRadius: CGFloat = 5
+    static let maxGlyphSlot: CGFloat = 14
 
     private(set) var isShown = false
 
@@ -33,12 +34,28 @@ final class TabInboxHeaderButton: NativeActionControl {
         if changed { needsDisplay = true }
     }
 
+    override var glyphRect: NSRect {
+        let size = image?.withSymbolConfiguration(.init(pointSize: 12, weight: .medium))?.size
+            ?? image?.size
+            ?? .zero
+        let maxEdge = max(size.width, size.height)
+        let scale = maxEdge > 0 ? min(1, Self.maxGlyphSlot / maxEdge) : 0
+        let width = size.width * scale
+        let height = size.height * scale
+        return NSRect(
+            x: (bounds.width - width) / 2,
+            y: (bounds.height - height) / 2,
+            width: width,
+            height: height
+        )
+    }
+
     /// At the glyph's top trailing corner, inside the 24pt control.
     var badgeRect: NSRect {
         let glyph = glyphRect
         let diameter = Self.badgeDiameter
         return NSRect(
-            x: min(glyph.maxX - diameter / 2, bounds.maxX - diameter - 1),
+            x: min(glyph.maxX - diameter / 2 + 1, bounds.maxX - diameter - 1),
             y: max(glyph.minY - diameter / 2, bounds.minY + 1),
             width: diameter,
             height: diameter
@@ -57,14 +74,14 @@ final class TabInboxHeaderButton: NativeActionControl {
             fill = .clear
         } else if isShown {
             if pressed {
-                fill = theme.accent.withAlphaComponent(0.28)
+                fill = theme.foreground.withAlphaComponent(0.17)
             } else if isHovered && showsHover {
-                fill = theme.accent.withAlphaComponent(0.23)
+                fill = theme.foreground.withAlphaComponent(0.13)
             } else {
-                fill = theme.selectedFill
+                fill = theme.hoverFill
             }
         } else if pressed {
-            fill = theme.selectedFill
+            fill = theme.foreground.withAlphaComponent(0.14)
         } else if isHovered && showsHover {
             fill = theme.hoverFill
         } else {
@@ -79,14 +96,7 @@ final class TabInboxHeaderButton: NativeActionControl {
             shape.lineWidth = 0.5
             shape.stroke()
         }
-        let glyphColor: NSColor
-        if !isEnabled {
-            glyphColor = theme.disabled
-        } else if isShown {
-            glyphColor = theme.accent
-        } else {
-            glyphColor = theme.foreground
-        }
+        let glyphColor: NSColor = isEnabled ? theme.foreground : theme.disabled
         if let image {
             let tinted = NSImage(size: image.size, flipped: false) { rect in
                 image.draw(in: rect)

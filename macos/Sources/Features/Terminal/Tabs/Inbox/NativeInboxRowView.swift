@@ -3,11 +3,15 @@ import Combine
 
 private let tabPresentationDidChangeNotification = Notification.Name("GhosttyTabPresentationDidChange")
 
-/// Subtle 18×18pt circular close control rendered at the trailing edge of a hovered Inbox row.
+/// Subtle 18×18pt close control rendered at the trailing edge of a hovered Inbox row.
+/// Shows a plain `xmark` glyph on row hover and paints a subtle circular backing only
+/// when the pointer is directly over (or pressing) the close button itself.
 @MainActor
 final class NativeInboxCloseButton: NSView {
     var isHovered = false { didSet { if oldValue != isHovered { needsDisplay = true } } }
     var isPressed = false { didSet { if oldValue != isPressed { needsDisplay = true } } }
+
+    var showsHoverDisc: Bool { isHovered || isPressed }
 
     override var isFlipped: Bool { true }
 
@@ -22,13 +26,15 @@ final class NativeInboxCloseButton: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         let theme = OMGNativeTheme.resolve(for: self)
-        let bgAlpha: CGFloat = isPressed ? 0.20 : (isHovered ? 0.14 : 0.06)
-        theme.foreground.withAlphaComponent(bgAlpha).setFill()
-        NSBezierPath(ovalIn: bounds).fill()
+        if showsHoverDisc {
+            let bgAlpha: CGFloat = isPressed ? 0.16 : 0.10
+            theme.foreground.withAlphaComponent(bgAlpha).setFill()
+            NSBezierPath(ovalIn: bounds).fill()
+        }
 
         guard let base = NSImage(systemSymbolName: "xmark", accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 9.5, weight: .semibold)) else { return }
-        let tint = isHovered || isPressed ? theme.foreground : theme.secondary
+        let tint = showsHoverDisc ? theme.foreground : theme.secondary
         let tinted = NSImage(size: base.size, flipped: false) { rect in
             base.draw(in: rect)
             tint.withAlphaComponent(1).setFill()
@@ -257,8 +263,7 @@ final class NativeInboxRowView: NSView {
         hasRemoteBreadcrumb = detail == nil && value.remoteBreadcrumb != nil
 
         let displayTitle = value.remoteBreadcrumb?.title ?? value.title
-        let waiting = TabInboxModel.waitsForUser(value.activity?.state)
-        let titleWeight: NSFont.Weight = (isSelected || waiting || showsSubtitle) ? .medium : .regular
+        let titleWeight: NSFont.Weight = (isSelected || value.selected) ? .medium : .regular
         titleLabel.font = .systemFont(ofSize: 13, weight: titleWeight)
         titleLabel.lineBreakMode = showsSubtitle ? .byTruncatingTail : .byTruncatingMiddle
         titleLabel.stringValue = displayTitle
@@ -419,37 +424,13 @@ final class NativeInboxRowView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         guard isSelected || isHovered, !bounds.isEmpty else { return }
         let theme = OMGNativeTheme.resolve(for: self)
-        let pill = NSBezierPath(
+        let fill = isSelected ? theme.selectedFill : theme.hoverFill
+        fill.setFill()
+        NSBezierPath(
             roundedRect: highlightRect,
             xRadius: Self.cornerRadius,
             yRadius: Self.cornerRadius
-        )
-        if isSelected && isHovered {
-            theme.accent.withAlphaComponent(0.23).setFill()
-            pill.fill()
-            let border = NSBezierPath(
-                roundedRect: highlightRect.insetBy(dx: 0.5, dy: 0.5),
-                xRadius: max(0, Self.cornerRadius - 0.5),
-                yRadius: max(0, Self.cornerRadius - 0.5)
-            )
-            theme.accent.withAlphaComponent(0.30).setStroke()
-            border.lineWidth = 0.5
-            border.stroke()
-        } else if isSelected {
-            theme.selectedFill.setFill()
-            pill.fill()
-            let border = NSBezierPath(
-                roundedRect: highlightRect.insetBy(dx: 0.5, dy: 0.5),
-                xRadius: max(0, Self.cornerRadius - 0.5),
-                yRadius: max(0, Self.cornerRadius - 0.5)
-            )
-            theme.accent.withAlphaComponent(0.26).setStroke()
-            border.lineWidth = 0.5
-            border.stroke()
-        } else if isHovered {
-            theme.hoverFill.setFill()
-            pill.fill()
-        }
+        ).fill()
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {

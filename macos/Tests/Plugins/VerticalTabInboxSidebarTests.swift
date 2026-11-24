@@ -384,6 +384,10 @@ struct VerticalTabInboxSidebarTests {
         #expect(toggle.controlStyle == .plain)
         #expect(!toggle.isBordered)
         #expect(!toggle.isShown)
+        #expect(abs(toggle.glyphRect.midX - toggle.bounds.midX) <= 0.01)
+        #expect(abs(toggle.glyphRect.midY - toggle.bounds.midY) <= 0.01)
+        #expect(toggle.glyphRect.width <= TabInboxHeaderButton.maxGlyphSlot + 0.01)
+        #expect(toggle.glyphRect.height <= TabInboxHeaderButton.maxGlyphSlot + 0.01)
         #expect(toggle.toolTip == strings.toggleInbox(shown: false))
         #expect(titles() == entries)
         // The Tabs view: no grouping, manual order.
@@ -787,13 +791,21 @@ struct VerticalTabInboxSidebarTests {
         #expect(row1.subtitleLabel.isHidden)
         #expect(row1.remoteCloudView.isHidden)
 
-        // Hover swaps ⌘N to 18×18 circular close button on the exact same centerline.
+        // Hover swaps ⌘N to 18×18 close button on the exact same centerline,
+        // keeping its hover disc hidden until the pointer enters the ✕ button itself.
         inbox.updateHover(at: NSPoint(x: row1.frame.midX, y: row1.frame.midY))
         row1.layoutSubtreeIfNeeded()
         #expect(row1.isHovered)
         #expect(row1.shortcutLabel.isHidden)
         #expect(!row1.closeButton.isHidden)
+        #expect(!row1.closeButton.showsHoverDisc)
         #expect(row1.closeButton.frame == NSRect(x: expectedWidth - 26, y: 8, width: 18, height: 18))
+        inbox.updateHover(at: NSPoint(
+            x: row1.frame.minX + row1.closeButton.frame.midX,
+            y: row1.frame.minY + row1.closeButton.frame.midY
+        ))
+        #expect(row1.isCloseHovered)
+        #expect(row1.closeButton.showsHoverDisc)
 
         // Row 2: 2-line 48pt local named session row (top midY = 16pt, bottom midY = 34.5pt at x = 33pt)
         let row2 = try #require(inbox.rowView(for: controllers[1]))
@@ -802,6 +814,7 @@ struct VerticalTabInboxSidebarTests {
         #expect(row2.frame.height == 48)
         #expect(row2.frame.minY - row1.frame.maxY == 2, "2pt vertical gap between rows")
         #expect(row2.isSelected)
+        #expect(row2.titleLabel.font == .systemFont(ofSize: 13, weight: .medium))
         #expect(row2.iconView.frame == NSRect(x: 8, y: 7, width: 18, height: 18))
         #expect(row2.iconView.frame.midY == 16)
         #expect(row2.titleLabel.frame.minX == 33)
@@ -813,9 +826,11 @@ struct VerticalTabInboxSidebarTests {
         #expect(row2.subtitleLabel.frame.minX == row2.titleLabel.frame.minX)
         #expect(abs(row2.subtitleLabel.frame.midY - 34.5) <= 0.5)
 
-        // Row 3: 2-line 48pt remote SSH named session row (inline cloud before subtitle)
+        // Row 3: 2-line 48pt remote SSH named session row (unselected uses .regular, inline cloud before subtitle)
         let row3 = try #require(inbox.rowView(for: controllers[2]))
         #expect(row3.frame.height == 48)
+        #expect(!row3.isSelected)
+        #expect(row3.titleLabel.font == .systemFont(ofSize: 13, weight: .regular))
         #expect(!row3.subtitleCloudView.isHidden)
         #expect(row3.subtitleCloudView.frame.minX == 33)
         #expect(abs(row3.subtitleCloudView.frame.midY - 34.5) <= 0.5)

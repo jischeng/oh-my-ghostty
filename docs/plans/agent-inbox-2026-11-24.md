@@ -349,15 +349,18 @@ Where this section contradicts earlier iterations, this section wins.
   (`26pt` height, `chevron.down` with `-90°` collapsed rotation, flush-right
   count) and `NativeInboxRowView` (`34pt` single-line at `midY = 17pt`, `48pt`
   two-line session row with `midY = 16pt` top band and `midY = 34.5pt` bottom
-  path band aligned at `x = 33pt`, inline `cloud` symbol before remote paths)
-  inside a flipped document view (`x = 8, width = panelWidth - 16`, `2pt` gap,
-  unified `cornerRadius = 6` hover/selection pill).
+  path band aligned at `x = 33pt`, `.regular` unselected / `.medium` selected
+  `13pt` titles, button-only `✕` hover backing, inline `cloud` symbol before
+  remote paths) inside a flipped document view (`x = 8, width = panelWidth - 16`,
+  `2pt` gap, unified borderless `cornerRadius = 6` `theme.selectedFill` /
+  `theme.hoverFill` pill matching `NativeTabRowView`).
 - **Visible-row `⌘1..9` order & borderless header toggle**: collapsing an Inbox
   section persists its `inbox:` group ID in `collapsedGroupIDs` and excludes
   hidden rows from `publishInboxDisplayOrder`, so `⌘1..9` and row `⌘N` labels
   always match the visible rows top-to-bottom. `TabInboxHeaderButton` renders as
-  a clean borderless `24×24pt` icon control (`tray` with `6×6pt` accent dot when
-  inactive; `tray.fill` on a borderless rounded active pill when shown).
+  a clean borderless `24×24pt` icon control (`12pt .medium` symbol centered in a
+  `14×14pt` slot: `tray` with `6×6pt` accent dot when inactive; `tray.fill` on a
+  subtle neutral active pill with `theme.foreground` glyph when shown).
 - **Lightweight presentation notification**: tab title overrides and
   conversation title updates post `GhosttyTabPresentationDidChange` instead of
   emitting `BaseTerminalController.objectWillChange`, preventing SwiftUI surface

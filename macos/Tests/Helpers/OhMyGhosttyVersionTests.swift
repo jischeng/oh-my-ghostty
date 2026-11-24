@@ -6,7 +6,7 @@ struct OhMyGhosttyVersionTests {
     @Test func appBundlePublishesReleaseMetadata() {
         let versions = OhMyGhosttyVersion()
 
-        #expect(versions.omg == "0.23.2")
+        #expect(versions.omg == "0.24.0")
         #expect(versions.ghostty == "1.4.1-dev")
         #expect(versions.ghosttyRevision == "7a8ff4d992edd2aad7537e5bef73ec911aa126bf")
     }
@@ -18,7 +18,7 @@ struct OhMyGhosttyVersionTests {
         #expect(bundle.bundleIdentifier == "com.jischeng.omg.debug")
         #expect(bundle.bundleURL.lastPathComponent == "OMG.app")
         #expect(info["CFBundleExecutable"] as? String == "omg")
-        #expect(info["CFBundleVersion"] as? String == "67")
+        #expect(info["CFBundleVersion"] as? String == "68")
         #expect(info["SUPublicEDKey"] as? String ==
             "5oid6CANuDnOWeNWfNljTv/mzdKBVGMw1o5j7naHwYY=")
         #expect(OhMyGhosttyVersion.updateFeedURL?.absoluteString ==

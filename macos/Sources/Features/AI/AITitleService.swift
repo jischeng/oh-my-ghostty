@@ -11,6 +11,8 @@ protocol AITitleGenerating: Sendable {
 actor AITitleService: AITitleGenerating {
     /// Resolves the tab-title model from settings and the credential store; nil disables generation.
     typealias EndpointProvider = @Sendable () async -> AIEndpoint?
+    /// The language the title is written in: the app's display language.
+    typealias LanguageProvider = @Sendable () async -> OhMyGhosttyLanguage
 
     struct Limits: Sendable {
         var maxInFlight = 2
@@ -26,6 +28,7 @@ actor AITitleService: AITitleGenerating {
 
     private let client: AIHTTPClient
     private let endpoints: EndpointProvider
+    private let language: LanguageProvider
     private let limits: Limits
     private let clock = ContinuousClock()
 
@@ -40,10 +43,12 @@ actor AITitleService: AITitleGenerating {
     init(
         client: AIHTTPClient = AIHTTPClient(),
         endpoints: @escaping EndpointProvider = AITitleService.configuredEndpoint,
+        language: @escaping LanguageProvider = AITitleService.configuredLanguage,
         limits: Limits = .default
     ) {
         self.client = client
         self.endpoints = endpoints
+        self.language = language
         self.limits = limits
     }
 
@@ -57,6 +62,12 @@ actor AITitleService: AITitleGenerating {
             return AIProviderDirectory(providers: settings.aiProviders, credentials: .shared)
                 .titleEndpoint(settings.aiTitleRoute)
         }
+    }
+
+    /// The Settings display language, read on the main actor like the endpoint.
+    @Sendable
+    nonisolated static func configuredLanguage() async -> OhMyGhosttyLanguage {
+        await MainActor.run { OhMyGhosttySettings.shared.language }
     }
 
     /// Redacts, bounds and tags the first prompt so the endpoint only ever sees quoted text.
@@ -92,7 +103,8 @@ actor AITitleService: AITitleGenerating {
               acquireSlot(endpoint) else { return nil }
         defer { releaseSlot() }
 
-        let outcome = await send(message, endpoint: endpoint)
+        let system = AIHTTPClient.systemPrompt(language: await language())
+        let outcome = await send(message, system: system, endpoint: endpoint)
         note(outcome, for: endpoint)
         switch outcome {
         case .success(let title): return title
@@ -107,9 +119,10 @@ actor AITitleService: AITitleGenerating {
         case cancelled
     }
 
-    private func send(_ message: String, endpoint: AIEndpoint) async -> Outcome {
+    private func send(_ message: String, system: String, endpoint: AIEndpoint) async -> Outcome {
         do {
             let title = try await client.complete(
+                system: system,
                 user: message,
                 endpoint: endpoint,
                 maxOutputTokens: endpoint.maxOutputTokens ?? AIHTTPClient.Options.title.maxOutputTokens

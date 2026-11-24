@@ -49,19 +49,19 @@ struct AITitleSanitizerTests {
         #expect(AITitleSanitizer.sanitize("Release plan:") == "Release plan")
     }
 
-    @Test func capsAtFortyDisplayColumnsWithCJKCountingDouble() {
+    @Test func capsAtTwentyFourDisplayColumnsWithCJKCountingDouble() {
         let ascii = String(repeating: "a", count: 60)
         let capped = AITitleSanitizer.sanitize(ascii)
-        #expect(capped == String(repeating: "a", count: 39) + "…")
-        #expect(AITitleSanitizer.width(capped ?? "") == 40)
+        #expect(capped == String(repeating: "a", count: 23) + "…")
+        #expect(AITitleSanitizer.width(capped ?? "") == 24)
 
         let cjk = String(repeating: "会", count: 30)
         let cappedCJK = AITitleSanitizer.sanitize(cjk)
-        #expect(cappedCJK == String(repeating: "会", count: 19) + "…")
-        #expect(cappedCJK?.count == 20)
+        #expect(cappedCJK == String(repeating: "会", count: 11) + "…")
+        #expect(cappedCJK?.count == 12)
 
-        // 40 columns of CJK is exactly the limit and is not truncated.
-        #expect(AITitleSanitizer.sanitize(String(repeating: "会", count: 20)) == String(repeating: "会", count: 20))
+        // 24 columns of CJK is exactly the limit and is not truncated.
+        #expect(AITitleSanitizer.sanitize(String(repeating: "会", count: 12)) == String(repeating: "会", count: 12))
         #expect(AITitleSanitizer.sanitize("会", maxWidth: 1) == nil)
         #expect(AITitleSanitizer.sanitize("abc", maxWidth: 0) == nil)
         #expect(AITitleSanitizer.sanitize("abcdef", maxWidth: 4) == "abc…")

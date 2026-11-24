@@ -30,6 +30,28 @@ struct AITitleServiceTests {
         #expect(user?.contains("Fix the inbox sorting") == true)
     }
 
+    @Test func theTitleLanguageFollowsTheAppLanguage() async {
+        let recorder = AIRequestRecorder()
+        let client = AIHTTPClient { request in
+            recorder.record(request)
+            return (AITestData.openAI("收件箱排序"), AITestData.response(200))
+        }
+        func system(_ language: OhMyGhosttyLanguage) async -> String? {
+            let service = AITitleService(client: client, endpoints: { AITestData.endpoint },
+                                         language: { language })
+            _ = await service.title(forFirstPrompt: "Fix the inbox sorting")
+            let messages = (recorder.bodies.last?["messages"] as? [[String: Any]]) ?? []
+            return messages.first?["content"] as? String
+        }
+        // The app is in Chinese, so an English prompt still yields a Chinese title.
+        let chinese = await system(.simplifiedChinese)
+        #expect(chinese?.contains("Simplified Chinese") == true)
+        #expect(chinese?.contains("3 to 8 words") == false)
+        let english = await system(.english)
+        #expect(english?.contains("Reply in English") == true)
+        #expect(english?.contains("Simplified Chinese") == false)
+    }
+
     @Test func theModelOutputBudgetIsUsedWhenItIsSet() async {
         let recorder = AIRequestRecorder()
         let client = AIHTTPClient { request in

@@ -157,7 +157,7 @@ struct AIHTTPClient: Sendable {
         if let status = first.status, !(200..<300).contains(status) {
             // Newer OpenAI models renamed `max_tokens`; retry once and remember the endpoint's choice.
             guard status == 400, field == .maxTokens,
-                  String(decoding: first.body, as: UTF8.self).contains("max_completion_tokens") else {
+                  (String(bytes: first.body, encoding: .utf8) ?? "").contains("max_completion_tokens") else {
                 throw AIHTTPError.httpStatus(status, detail: Self.detail(first.body))
             }
             retryState.rememberCompletionTokens(baseURL: endpoint.baseURL, model: endpoint.model)
@@ -174,7 +174,11 @@ struct AIHTTPClient: Sendable {
 
     /// A short, single-line excerpt of an error body for the settings page.
     static func detail(_ body: Data) -> String? {
-        let text = String(decoding: body.prefix(4096), as: UTF8.self)
+        guard let decoded = String(bytes: body.prefix(4096), encoding: .utf8)
+                ?? String(bytes: body, encoding: .utf8) else {
+            return nil
+        }
+        let text = decoded
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty else { return nil }

@@ -118,7 +118,7 @@ struct AgentStatusPluginTests {
     @Test func bundledAgentCatalogDefinesHooksAndResume() {
         let expected: [SupportedAgent: (String, String, Int)] = [
             .codex: ("codex", "AgentOpenAI", 7),
-            .claude: ("claude", "AgentClaude", 10),
+            .claude: ("claude", "AgentClaude", 13),
             .pi: ("pi", "AgentPi", 7),
             .qoder: ("qodercli", "AgentQoder", 7),
             .reasonix: ("reasonix", "AgentReasonixGlyph", 8),
@@ -620,6 +620,24 @@ struct AgentStatusPluginTests {
         #expect(LocalAgentProcessDetector.detect(
             in: "/usr/local/bin/node /opt/claude-code/cli.js\n"
         ) == .claude)
+        #expect(LocalAgentProcessDetector.detect(
+            in: "/Users/test/.local/share/claude/versions/2.1.331 --dangerously-skip-permissions --resume s1\n"
+        ) == .claude)
+        #expect(LocalAgentProcessDetector.detect(
+            in: "/opt/claude-code/versions/v2.1.331\n"
+        ) == .claude)
+        #expect(LocalAgentProcessDetector.detect(
+            in: "claude --dangerously-skip-permissions\n"
+        ) == .claude)
+        #expect(LocalAgentProcessDetector.detect(
+            in: "-claude --resume s1\n"
+        ) == .claude)
+        #expect(LocalAgentProcessDetector.detect(
+            in: "/usr/bin/login -flp test /Users/test/.local/share/claude/versions/2.1.331\n"
+        ) == .claude)
+        #expect(LocalAgentProcessDetector.detect(
+            in: "/bin/cat /Users/test/.local/share/claude/versions/2.1.331\n"
+        ) == nil)
         #expect(LocalAgentProcessDetector.detect(
             in: "/Users/test/.local/bin/qodercli\n"
         ) == .qoder)
@@ -2763,6 +2781,287 @@ struct AgentStatusPluginTests {
         let piURL = home.appendingPathComponent(".pi/agent/extensions/omg-agent-status.ts")
         let piSource = try String(contentsOf: piURL, encoding: .utf8)
         #expect(piSource.contains("hadWaiting ? \"attention_resolved\" : undefined"))
+    }
+
+    @Test func claudeHooksV15PassOwnerPIDHandleStopFailureAskUserQuestionSubagentStopAndUpgradeFromV14() async throws {
+        #expect(AgentHookInstaller.hookVersion == 15)
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let claudeURL = home.appendingPathComponent(".claude/settings.json")
+        try FileManager.default.createDirectory(
+            at: claudeURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+
+        // Seed a realistic `_omg_agent_status_v14` configuration alongside user hooks.
+        let legacyV14: [String: Any] = [
+            "theme": "dark",
+            "hooks": [
+                "PreToolUse": [
+                    ["matcher": "CustomTool", "hooks": [["type": "command", "command": "echo keep-user-pretool"]]],
+                    ["_omg_agent_status": 14, "hooks": [["type": "command", "command": ": _omg_agent_status; : _omg_agent_status_v14; true"]]],
+                ],
+                "SessionStart": [
+                    ["_omg_agent_status": 13, "hooks": [["type": "command", "command": ": _omg_agent_status; : _omg_agent_status_v13; true"]]],
+                ],
+            ],
+        ]
+        try JSONSerialization.data(withJSONObject: legacyV14, options: [.prettyPrinted]).write(to: claudeURL)
+
+        let installer = AgentHookInstaller(homeURL: home)
+        #expect(installer.installationState(.claude) == .updateAvailable)
+
+        // Verify AgentIntegrationManager automatic stale-hook repair upgrades `_v13`/`_v14` -> `_v15`.
+        let suiteName = "omg.test.claude.v15.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let manager = await MainActor.run {
+            AgentIntegrationManager(
+                defaults: defaults,
+                homeURL: home,
+                connectionTargets: { [] },
+                integrationRevision: "test/hooks-15"
+            )
+        }
+        await manager.refresh(target: "local", automatic: true, hooksOnly: true)
+        #expect(installer.installationState(.claude) == .current)
+
+        let root = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: claudeURL)) as? [String: Any]
+        )
+        let hooks = try #require(root["hooks"] as? [String: Any])
+        let preToolEntries = try #require(hooks["PreToolUse"] as? [[String: Any]])
+        // Preserves user hook + installs BOTH `_v15` PreToolUse entries (working + AskUserQuestion|ExitPlanMode).
+        #expect(preToolEntries.contains { $0["matcher"] as? String == "CustomTool" })
+        let omgPreTool = preToolEntries.filter { $0[AgentHookInstaller.marker] as? Int == 15 }
+        #expect(omgPreTool.count == 2)
+        #expect(omgPreTool.contains { $0["matcher"] == nil })
+        #expect(omgPreTool.contains { $0["matcher"] as? String == "AskUserQuestion|ExitPlanMode" })
+        #expect(hooks["StopFailure"] != nil)
+
+        func hookCommand(event: String, matcher: String? = nil) throws -> String {
+            let entries = try #require(hooks[event] as? [[String: Any]])
+            let owned = try #require(entries.first {
+                $0[AgentHookInstaller.marker] as? Int == 15 &&
+                    ($0["matcher"] as? String) == matcher
+            })
+            let commands = try #require(owned["hooks"] as? [[String: Any]])
+            let cmd = try #require(commands.first?["command"] as? String)
+            #expect(cmd.contains("_omg_agent_status_v15"))
+            return cmd
+        }
+
+        let helper = home.appendingPathComponent("mock-omgd")
+        try "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$OMG_TEST_REPORT\"\n"
+            .write(to: helper, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+
+        // Spawn via a Python parent that calls `start_new_session=True` (`setsid()`) and nested `/bin/sh`,
+        // matching Claude Code's `detached: true` hook execution. Verify `--pid` resolves the Python owner PID!
+        func runDetachedHook(_ command: String, stdin: String) throws -> (ownerPID: String, args: [String]?) {
+            let capture = home.appendingPathComponent("capture-\(UUID().uuidString)")
+            let runner = """
+            import os, shlex, subprocess, sys
+            cmd = sys.argv[1]
+            payload = sys.argv[2]
+            subprocess.run(
+                ["/bin/sh", "-c", "/bin/sh -c " + shlex.quote(cmd)],
+                input=payload, text=True, start_new_session=True
+            )
+            print(os.getpid(), end="")
+            """
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+            proc.arguments = ["-c", runner, command, stdin]
+            proc.currentDirectoryURL = home
+            proc.environment = [
+                "PATH": "/opt/homebrew/bin:/usr/bin:/bin",
+                "OMG_RUNTIME_BIN": helper.path,
+                "OMG_TEST_REPORT": capture.path,
+            ]
+            let out = Pipe()
+            proc.standardOutput = out
+            proc.standardError = FileHandle.nullDevice
+            try proc.run()
+            let ownerOut = try out.fileHandleForReading.readToEnd() ?? Data()
+            proc.waitUntilExit()
+            let ownerPID = String(data: ownerOut, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard FileManager.default.fileExists(atPath: capture.path) else {
+                return (ownerPID, nil)
+            }
+            let args = try String(contentsOf: capture, encoding: .utf8)
+                .split(separator: "\n").map(String.init)
+            return (ownerPID, args)
+        }
+
+        // 1. UserPromptSubmit resolves ancestor `--pid` across detached `setsid()` + nested `/bin/sh`.
+        let promptRun = try runDetachedHook(
+            hookCommand(event: "UserPromptSubmit"),
+            stdin: "{\"session_id\":\"s-claude\"}"
+        )
+        let promptArgs = try #require(promptRun.args)
+        #expect(promptArgs.prefix(4) == ["report", "claude", "working", "s-claude"])
+        if let pidFlagIndex = promptArgs.firstIndex(of: "--pid") {
+            #expect(promptArgs[pidFlagIndex + 1] == promptRun.ownerPID)
+        } else {
+            Issue.record("Expected --pid flag in Claude hook report args: \(promptArgs)")
+        }
+
+        // 2. StopFailure -> `error` for parent turn; subagent StopFailure -> scoped `end --id`.
+        let stopFailure = try runDetachedHook(
+            hookCommand(event: "StopFailure"),
+            stdin: "{\"session_id\":\"s-claude\"}"
+        )
+        #expect(stopFailure.args?.prefix(4) == ["report", "claude", "error", "s-claude"])
+        let subStopFailure = try runDetachedHook(
+            hookCommand(event: "StopFailure"),
+            stdin: "{\"session_id\":\"s-claude\",\"agent_id\":\"sub-err\"}"
+        )
+        #expect(subStopFailure.args?.prefix(4) == ["report", "claude", "end", "s-claude"])
+        #expect(subStopFailure.args?.contains("sub-err") == true)
+
+        // 3. PreToolUse `AskUserQuestion|ExitPlanMode` -> `needsAttention` (`--attention question`),
+        //    while general PreToolUse (`working`) skips `AskUserQuestion` and `ExitPlanMode` so it cannot race!
+        let askAttention = try runDetachedHook(
+            hookCommand(event: "PreToolUse", matcher: "AskUserQuestion|ExitPlanMode"),
+            stdin: "{\"session_id\":\"s-claude\",\"tool_name\":\"AskUserQuestion\"}"
+        )
+        #expect(askAttention.args?.prefix(4) == ["report", "claude", "needsAttention", "s-claude"])
+        #expect(askAttention.args?.contains("--attention") == true && askAttention.args?.contains("question") == true)
+
+        let generalSkipped = try runDetachedHook(
+            hookCommand(event: "PreToolUse", matcher: nil),
+            stdin: "{\"session_id\":\"s-claude\",\"tool_name\":\"ExitPlanMode\"}"
+        )
+        #expect(generalSkipped.args == nil)
+
+        let generalBash = try runDetachedHook(
+            hookCommand(event: "PreToolUse", matcher: nil),
+            stdin: "{\"session_id\":\"s-claude\",\"tool_name\":\"Bash\"}"
+        )
+        #expect(generalBash.args?.prefix(4) == ["report", "claude", "working", "s-claude"])
+
+        // 3b. PostToolUse & non-interrupt PostToolUseFailure on AskUserQuestion|ExitPlanMode emit
+        //     `--event attention_resolved` (and `;omg_event=attention_resolved`), while interrupted
+        //     PostToolUseFailure (`is_interrupt: true`) is skipped and normal PostToolUse (`Bash`) omits `--event`.
+        let postAskResolved = try runDetachedHook(
+            hookCommand(event: "PostToolUse"),
+            stdin: "{\"session_id\":\"s-claude\",\"tool_name\":\"AskUserQuestion\"}"
+        )
+        #expect(postAskResolved.args?.prefix(4) == ["report", "claude", "working", "s-claude"])
+        if let evIdx = postAskResolved.args?.firstIndex(of: "--event") {
+            #expect(postAskResolved.args?[evIdx + 1] == "attention_resolved")
+        } else {
+            Issue.record("Expected --event attention_resolved on PostToolUse(AskUserQuestion)")
+        }
+
+        let postBash = try runDetachedHook(
+            hookCommand(event: "PostToolUse"),
+            stdin: "{\"session_id\":\"s-claude\",\"tool_name\":\"Bash\"}"
+        )
+        #expect(postBash.args?.prefix(4) == ["report", "claude", "working", "s-claude"])
+        #expect(postBash.args?.contains("--event") != true)
+
+        let postExitPlanRejected = try runDetachedHook(
+            hookCommand(event: "PostToolUseFailure", matcher: "AskUserQuestion|ExitPlanMode"),
+            stdin: "{\"session_id\":\"s-claude\",\"tool_name\":\"ExitPlanMode\",\"is_interrupt\":false}"
+        )
+        #expect(postExitPlanRejected.args?.prefix(4) == ["report", "claude", "working", "s-claude"])
+        if let evIdx = postExitPlanRejected.args?.firstIndex(of: "--event") {
+            #expect(postExitPlanRejected.args?[evIdx + 1] == "attention_resolved")
+        } else {
+            Issue.record("Expected --event attention_resolved on non-interrupt PostToolUseFailure(ExitPlanMode)")
+        }
+
+        let postFailureInterrupted = try runDetachedHook(
+            hookCommand(event: "PostToolUseFailure", matcher: "AskUserQuestion|ExitPlanMode"),
+            stdin: "{\"session_id\":\"s-claude\",\"tool_name\":\"ExitPlanMode\",\"is_interrupt\":true}"
+        )
+        #expect(postFailureInterrupted.args == nil)
+
+        // Verify `omg_event=attention_resolved` unlocks `needsAttention -> working` in AgentContextSignalReducer
+        // for both foreground and subagent contexts.
+        var reducer = AgentContextSignalReducer()
+        _ = reducer.consume(.init(
+            action: .start,
+            id: "omg-agent-claude-99",
+            metadata: "type=app;omg_agent=claude;omg_scope=local;omg_liveness=pgid;omg_state=needsAttention;omg_attention=question"
+        ))
+        #expect(reducer.currentActivity?.state == .needsAttention)
+        _ = reducer.consume(.init(
+            action: .start,
+            id: "omg-agent-claude-99",
+            metadata: "type=app;omg_agent=claude;omg_scope=local;omg_liveness=pgid;omg_state=working;omg_event=attention_resolved"
+        ))
+        #expect(reducer.currentActivity?.state == .working)
+
+        // 4. SubagentStop safety: even with empty `{}` stdin, NEVER emits unscoped parent `end`!
+        let subStopEmpty = try runDetachedHook(
+            hookCommand(event: "SubagentStop"),
+            stdin: "{}"
+        )
+        #expect(subStopEmpty.args?.prefix(3) == ["report", "claude", "end"])
+        if let idIdx = subStopEmpty.args?.firstIndex(of: "--id") {
+            #expect(subStopEmpty.args?[idIdx + 1] == "subagent")
+        } else {
+            Issue.record("SubagentStop must always carry --id subagent scope")
+        }
+        let subStopCmd = try hookCommand(event: "SubagentStop")
+        #expect(subStopCmd.contains("omg_sub=${omg_sub:-subagent}"))
+        #expect(subStopCmd.contains("omg_context=$omg_sub"))
+    }
+
+    @Test @MainActor func errorValidationRetainsResumeDescriptorAndLiveAgentAcknowledgesToIdle() async throws {
+        let enabled = OhMyGhosttySettings.shared.agentStatusHooksEnabled
+        OhMyGhosttySettings.shared.agentStatusHooksEnabled = true
+        defer { OhMyGhosttySettings.shared.agentStatusHooksEnabled = enabled }
+
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let coordinator = TerminalWorkspaceCoordinator(store: TerminalWorkspaceStore(fileURL: nil))
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let controller = TerminalController(app, withBaseConfig: config, workspaceCoordinator: coordinator)
+        _ = controller.window
+        let ephemeral = Process()
+        ephemeral.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        ephemeral.arguments = ["30"]
+        try ephemeral.run()
+        let ephemeralPID = Int(ephemeral.processIdentifier)
+        defer {
+            if ephemeral.isRunning { ephemeral.terminate() }
+            controller.window?.delegate = nil
+            controller.window?.close()
+        }
+
+        let surface = try #require(controller.surfaceTree.first)
+        // Simulate a live Claude foreground process group detected on the pane alongside a
+        // transient child PID hook that exits during `working`.
+        let livePGID = Int(getpgrp())
+        controller.applyDetectedAgent(.claude, processGroupID: livePGID, surfaceID: surface.id)
+        surface.contextSignal = .init(
+            action: .start,
+            id: "omg-agent-claude-\(ephemeralPID)",
+            metadata: "type=app;omg_agent=claude;omg_scope=local;omg_liveness=pid;omg_state=working;omg_conversation=conv-keep-1"
+        )
+        #expect(controller.agentResumeDescriptor(for: surface)?.agent == .claude)
+        #expect(controller.agentResumeDescriptor(for: surface)?.conversationID?.rawValue == "conv-keep-1")
+
+        ephemeral.terminate()
+        ephemeral.waitUntilExit()
+        for _ in 0..<50 where controller.agentActivities[surface.id]?.state != .error {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(controller.agentActivities[surface.id]?.state == .error)
+        // Resume descriptor MUST NOT be wiped on `.error` while the pane remains open!
+        #expect(controller.agentResumeDescriptor(for: surface)?.agent == .claude)
+        #expect(controller.agentResumeDescriptor(for: surface)?.conversationID?.rawValue == "conv-keep-1")
+
+        // Acknowledging `.error` while Claude's process group is still alive transitions to `.idle`
+        // instead of `.clear` so the live Claude session never vanishes.
+        controller.acknowledgeTerminalAgentState(for: surface)
+        #expect(controller.agentActivities[surface.id]?.source == "claude")
+        #expect(controller.agentActivities[surface.id]?.state == .idle)
+        #expect(controller.agentResumeDescriptor(for: surface)?.conversationID?.rawValue == "conv-keep-1")
     }
 
     private func assertUnrelatedHooksPreserved(at url: URL) throws {

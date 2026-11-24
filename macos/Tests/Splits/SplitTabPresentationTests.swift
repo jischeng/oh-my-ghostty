@@ -310,4 +310,206 @@ struct SplitTabPresentationTests {
         let png = try #require(bitmap.representation(using: .png, properties: [:]))
         try png.write(to: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("omg-pane-icons-preview.png"))
     }
+
+    @Test func splitTabPresentationResolvesLeftAgyAndRightClaudeAcrossStatesAndResumeFallback() throws {
+        let enabled = OhMyGhosttySettings.shared.agentStatusHooksEnabled
+        OhMyGhosttySettings.shared.agentStatusHooksEnabled = true
+        defer { OhMyGhosttySettings.shared.agentStatusHooksEnabled = enabled }
+
+        let fixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { fixture.close() }
+        let controller = try fixture.tab()
+        let left = try #require(controller.surfaceTree.first)
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let right = try #require(controller.newSplit(at: left, direction: .right, baseConfig: config))
+        controller.focusedSurface = left
+
+        // Left pane hosts live Antigravity (`idle`); right pane initially has only a
+        // persisted Claude resume descriptor (`agentActivity == nil`).
+        left.contextSignal = .init(
+            action: .start,
+            id: "omg-program-status",
+            metadata: "state=idle:app=antigravity"
+        )
+        controller.adoptAgentResumeDescriptor(
+            .init(
+                agent: .claude,
+                conversationID: AgentConversationID("conv-claude-split"),
+                scope: .local,
+                workingDirectory: "/tmp"
+            ),
+            for: right
+        )
+        #expect(controller.agentActivity(for: left)?.source == "antigravity")
+        #expect(controller.agentActivity(for: right) == nil)
+
+        // Split icon composition must show BOTH `AgentAntigravity` (left, focused) and
+        // `AgentClaude` (right, idle fallback from resume descriptor) instead of `"terminal"`.
+        let theme = OMGNativeTheme(background: .black, foreground: .white)
+        let fallbackIcons = TerminalTabPresentationResolver.iconPresentation(
+            controller: controller,
+            icon: .asset(SupportedAgent.antigravity.glyphAssetName),
+            selected: true,
+            activity: controller.preferredAgentActivity()
+        )
+        #expect(fallbackIcons.parts.count == 2)
+        #expect(fallbackIcons.parts[0].icon == .asset(SupportedAgent.antigravity.glyphAssetName))
+        #expect(fallbackIcons.parts[0].focused)
+        #expect(fallbackIcons.parts[1].icon == .asset(SupportedAgent.claude.glyphAssetName))
+        #expect(!fallbackIcons.parts[1].focused)
+        #expect(fallbackIcons.parts[1].color(theme: theme) == theme.secondary)
+
+        // Split hover menu must also resolve per-pane agent icons rather than hardcoded `"terminal"`.
+        let menuEntries = NativeTabIconView.previewMenuEntries(for: controller)
+        #expect(menuEntries.count == 3)
+        if case let .action(_, symbolLeft, _, checkedLeft, _) = menuEntries[1],
+           case let .action(titleRight, symbolRight, _, checkedRight, _) = menuEntries[2] {
+            #expect(symbolLeft == SupportedAgent.antigravity.glyphAssetName)
+            #expect(checkedLeft)
+            #expect(symbolRight == SupportedAgent.claude.glyphAssetName)
+            #expect(!checkedRight)
+            #expect(titleRight == SupportedAgent.claude.displayName)
+        } else {
+            Issue.record("Expected two pane action entries in split preview menu")
+        }
+
+        // Initial multi-pane tooltip includes both Antigravity and Claude Code.
+        let idlePresentation = try #require(
+            TerminalTabPresentationResolver.resolve(controller, index: 1, selected: true, activities: nil)
+        )
+        #expect(idlePresentation.activity?.source == "antigravity")
+        #expect(idlePresentation.activity?.state == .idle)
+        #expect(idlePresentation.toolTip?.contains("Antigravity") == true)
+        #expect(idlePresentation.toolTip?.contains("Claude Code") == true)
+
+        // Unfocused right `claude` transitions across working -> needsAttention -> error -> done
+        // while left `agy` remains focused and `idle`.
+        let transitions: [(String, TabActivityState, String?)] = [
+            ("state=working:app=claude-code", .working, nil),
+            ("state=blocked:kind=question:app=claude-code", .needsAttention, "questionmark.circle.fill"),
+            ("state=error:app=claude-code", .error, "xmark.circle.fill"),
+            ("state=done:app=claude-code", .done, "checkmark.circle.fill"),
+        ]
+        for (payload, expectedState, expectedBadgeSymbol) in transitions {
+            right.contextSignal = .init(action: .start, id: "omg-program-status", metadata: payload)
+            let resolved = try #require(
+                TerminalTabPresentationResolver.resolve(controller, index: 1, selected: true, activities: nil)
+            )
+            #expect(resolved.activity?.source == "claude")
+            #expect(resolved.activity?.state == expectedState)
+            #expect(AgentStatusBadge.resolve(resolved.activity)?.symbol == expectedBadgeSymbol)
+            #expect(resolved.toolTip?.contains("Antigravity · \(WorkspaceL10n.text("Idle", "空闲"))") == true)
+            #expect(resolved.toolTip?.contains("Claude Code · \(AgentLogoStyle.localizedStatus(try #require(resolved.activity)))") == true)
+            // Tab Inbox must also place the split tab in `.continue` via `preferredAgentActivity()`.
+            let inboxItem = TabInboxModel.item(for: controller)
+            #expect(inboxItem.state == expectedState)
+            #expect(TabInboxModel.isContinue(inboxItem.state))
+        }
+
+        // Conversation titles integrate with both split panes (tab row title/subtitle/tooltip + hover menu).
+        let savedTitleMode = OhMyGhosttySettings.shared.agentSessionTitleMode
+        OhMyGhosttySettings.shared.agentSessionTitleMode = .native
+        defer { OhMyGhosttySettings.shared.agentSessionTitleMode = savedTitleMode }
+        let agyConv = try #require(AgentConversationID("conv-agy-split"))
+        let claudeConv = try #require(AgentConversationID("conv-claude-split"))
+        controller.adoptAgentResumeDescriptor(
+            .init(agent: .antigravity, conversationID: agyConv, scope: .local, workingDirectory: "/tmp/repo"),
+            for: left
+        )
+        AgentConversationTitleStore.shared.set(
+            "Coordinate status fix", source: .native, agent: .antigravity, conversationID: agyConv
+        )
+        AgentConversationTitleStore.shared.set(
+            "Audit Claude hooks", source: .native, agent: .claude, conversationID: claudeConv
+        )
+        let titledPresentation = try #require(
+            TerminalTabPresentationResolver.resolve(controller, index: 1, selected: true, activities: nil)
+        )
+        #expect(titledPresentation.title == "Coordinate status fix")
+        #expect(titledPresentation.showsSubtitle)
+        #expect(titledPresentation.toolTip?.contains("Coordinate status fix") == true)
+        #expect(titledPresentation.toolTip?.contains("Claude Code") == true)
+        let titledMenu = NativeTabIconView.previewMenuEntries(for: controller)
+        if case let .action(leftMenuTitle, _, _, _, _) = titledMenu[1],
+           case let .action(rightMenuTitle, _, _, _, _) = titledMenu[2] {
+            #expect(leftMenuTitle == "Coordinate status fix")
+            #expect(rightMenuTitle == "Audit Claude hooks")
+        } else {
+            Issue.record("Expected conversation titles in split preview menu")
+        }
+
+        // Cross-workspace header attention indicator must also surface unfocused split `error`/`needsAttention`
+        // from `controller.agentActivities` even when `TabActivityStore` is empty.
+        right.contextSignal = .init(action: .start, id: "omg-program-status", metadata: "state=error:app=claude-code")
+        let otherWorkspace = try #require(fixture.store.create(name: "Other", symbol: "briefcase", color: "blue"))
+        let otherTab = try fixture.tab(workspace: otherWorkspace)
+        let headerState = TerminalWorkspaceHeaderState.resolve(controller: otherTab, activities: TabActivityStore())
+        #expect(headerState.needsAttention)
+    }
+
+    @Test func nativeActionPopoverRendersLeadingIconAndTrailingCheckmarkWhenChecked() throws {
+        func optionButtons(in view: NSView) -> [NativeActionControl] {
+            (view as? NativeActionControl).map { [$0] } ?? view.subviews.flatMap { optionButtons(in: $0) }
+        }
+
+        let entries: [NativeMenuEntry] = [
+            .action("Antigravity", symbol: SupportedAgent.antigravity.glyphAssetName, checked: true) {},
+            .action("Claude Code", symbol: SupportedAgent.claude.glyphAssetName, checked: false) {},
+            .action("Plain Checked", symbol: nil, checked: true) {},
+            .action("Explicit Checkmark", symbol: "checkmark", checked: true) {},
+        ]
+        let popover = NativeActionPopoverController(entries: entries)
+        let window = NSWindow(
+            contentRect: .init(origin: .zero, size: popover.preferredContentSize),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentViewController = popover
+        defer {
+            window.contentViewController = nil
+            window.close()
+        }
+        popover.view.layoutSubtreeIfNeeded()
+
+        let buttons = optionButtons(in: popover.view)
+        #expect(buttons.count == 4)
+
+        // 0: Checked with custom icon -> keeps leading agent icon AND renders trailing checkmark!
+        #expect(buttons[0].image != nil)
+        #expect(buttons[0].trailingSymbol == "checkmark")
+        #expect(buttons[0].trailingImage != nil)
+        #expect(buttons[0].glyphRect.width > 0)
+        #expect(buttons[0].trailingGlyphRect.width > 0)
+        #expect(buttons[0].glyphRect.maxX < buttons[0].trailingGlyphRect.minX)
+
+        // 1: Unchecked with custom icon -> leading agent icon only, no trailing checkmark.
+        #expect(buttons[1].image != nil)
+        #expect(buttons[1].trailingSymbol == nil)
+        #expect(buttons[1].trailingImage == nil)
+
+        // 2: Checked without custom symbol -> leading checkmark only, no duplicate trailing checkmark.
+        #expect(buttons[2].image != nil)
+        #expect(buttons[2].trailingSymbol == nil)
+        #expect(buttons[2].trailingImage == nil)
+
+        // 3: Checked with symbol == "checkmark" -> leading checkmark only, no duplicate trailing checkmark.
+        #expect(buttons[3].image != nil)
+        #expect(buttons[3].trailingSymbol == nil)
+        #expect(buttons[3].trailingImage == nil)
+
+        // Trailing checkmark reserves extra horizontal intrinsic width compared to unchecked same-text control.
+        let uncheckedSameText = NativeActionControl()
+        uncheckedSameText.configure(
+            title: "Antigravity",
+            symbol: SupportedAgent.antigravity.glyphAssetName,
+            help: nil,
+            enabled: true,
+            style: .plain,
+            identifier: nil
+        )
+        #expect(buttons[0].intrinsicContentSize.width > uncheckedSameText.intrinsicContentSize.width)
+    }
 }

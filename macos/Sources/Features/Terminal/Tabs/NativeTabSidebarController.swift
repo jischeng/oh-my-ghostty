@@ -207,6 +207,7 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
             SessionRuntimeBackgroundStore.shared.objectWillChange.eraseToAnyPublisher(),
             // A conversation title adds or replaces a row's title and subtitle.
             AgentConversationTitleStore.shared.objectWillChange.eraseToAnyPublisher(),
+            NotificationCenter.default.publisher(for: .omgDockAttentionDidChange).map { _ in () }.eraseToAnyPublisher(),
         ]
         Publishers.MergeMany(changes).sink { [weak self] _ in self?.scheduleRefresh() }.store(in: &subscriptions)
         // Today and Yesterday move at midnight without any tab changing.

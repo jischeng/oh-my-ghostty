@@ -120,7 +120,9 @@ final class NativeActionPopoverController: NSViewController {
         }
         for (index, button) in buttons {
             guard case let .action(title, symbol, enabled, checked, _) = entries[index] else { continue }
-            button.configure(title: title, symbol: checked ? "checkmark" : symbol, help: nil, enabled: enabled,
+            let leadingSymbol = symbol ?? (checked ? "checkmark" : nil)
+            button.trailingSymbol = (checked && symbol != nil && symbol != "checkmark") ? "checkmark" : nil
+            button.configure(title: title, symbol: leadingSymbol, help: nil, enabled: enabled,
                              style: .plain, identifier: "native.action.option.\(index)")
             button.setAccessibilityValue(checked ? "selected" : "")
             button.applyTheme(surface.theme)

@@ -225,10 +225,11 @@ extension AgentProgramStatus {
     /// `Title`). TAP-only agents drive Tier 1 activity directly.
     mutating func consumeTAP(_ body: String, fallbackAgent: SupportedAgent? = nil) -> Bool {
         let resolvedFallback = fallbackAgent ?? inheritedAgent(for: "", fallback: nil)
-        guard let tap = AgentTAPStatus.parse(body, fallbackAgent: resolvedFallback) else {
+        guard let tap = AgentTAPStatus.parse(body, fallbackAgent: resolvedFallback),
+              let tapAgent = tap.agent else {
             return false
         }
-        let recordID = tap.agent.map { "tap/\($0.rawValue)" } ?? "tap"
+        let recordID = "tap/\(tapAgent.rawValue)"
         if tap.state == .working {
             for index in records.indices
             where !records[index].acknowledged &&
@@ -237,14 +238,14 @@ extension AgentProgramStatus {
             }
         }
         let acknowledged = records.first { $0.id == recordID }.map {
-            $0.acknowledged && $0.agent == tap.agent && $0.state == tap.state &&
+            $0.acknowledged && $0.agent == tapAgent && $0.state == tap.state &&
                 (tap.state == .done || tap.state == .error)
         } ?? false
         records.removeAll { $0.id == recordID }
         if records.count >= 32 { records.removeFirst() }
         records.append(.init(
             id: recordID,
-            agent: tap.agent,
+            agent: tapAgent,
             state: tap.state,
             phase: nil,
             attention: tap.attention,

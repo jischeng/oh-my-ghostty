@@ -533,7 +533,7 @@ struct GhosttyTabStyle {
     }
 }
 
-enum GhosttyTabIcon {
+enum GhosttyTabIcon: Equatable {
     case systemSymbol(String)
     case asset(String)
     case image(NSImage)
@@ -654,6 +654,7 @@ struct GhosttyTabPresentation {
     let shortcut: String?
     let icon: GhosttyTabIcon
     let activity: TabActivity?
+    var toolTip: String?
     let selected: Bool
     let hovered: Bool
 

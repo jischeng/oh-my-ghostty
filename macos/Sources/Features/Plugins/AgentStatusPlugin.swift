@@ -11,8 +11,14 @@ enum LocalAgentProcessDetector {
         for line in commandLines.split(separator: "\n") {
             let tokens = line.split(whereSeparator: \.isWhitespace).map(String.init)
             guard let executable = tokens.first else { continue }
-            if let agent = exactAgent(executable) { return agent }
-            let basename = URL(fileURLWithPath: executable).lastPathComponent.lowercased()
+            let normalizedExec: String
+            if !executable.contains("/"), executable.hasPrefix("-"), !executable.hasPrefix("--") {
+                normalizedExec = String(executable.dropFirst())
+            } else {
+                normalizedExec = executable
+            }
+            if let agent = exactAgent(normalizedExec) { return agent }
+            let basename = URL(fileURLWithPath: normalizedExec).lastPathComponent.lowercased()
             if ["login", "env", "sh", "bash", "zsh", "fish", "python", "python3"].contains(basename),
                let agent = tokens.dropFirst().compactMap(exactAgent).last {
                 return agent
@@ -32,12 +38,38 @@ enum LocalAgentProcessDetector {
     }
 
     private static func exactAgent(_ token: String) -> SupportedAgent? {
+        guard !token.isEmpty, !token.hasPrefix("-") else { return nil }
         let name = URL(fileURLWithPath: token).lastPathComponent.lowercased()
-        return SupportedAgent.allCases.first { agent in
+        if let direct = SupportedAgent.allCases.first(where: { agent in
             agent.definition.process.executables.contains {
                 $0.lowercased() == name
             }
+        }) {
+            return direct
         }
+        guard token.contains("/") else { return nil }
+        let components = token.lowercased().split(separator: "/").map(String.init)
+        guard components.count >= 3,
+              components[components.count - 2] == "versions",
+              looksLikeVersionSegment(components[components.count - 1]) else {
+            return nil
+        }
+        let vendorDir = components[components.count - 3]
+        return SupportedAgent.allCases.first { agent in
+            agent.definition.process.executables.contains { $0.lowercased() == vendorDir } ||
+                agent.definition.process.runtimeMarkers.contains {
+                    !$0.contains("/") && $0.lowercased() == vendorDir
+                }
+        }
+    }
+
+    private static func looksLikeVersionSegment(_ value: String) -> Bool {
+        let stripped = value.hasPrefix("v") ? value.dropFirst() : value[...]
+        guard let first = stripped.first, first.isASCII && first.isNumber else {
+            return false
+        }
+        let allowed = Set("0123456789abcdefghijklmnopqrstuvwxyz._+-".utf8)
+        return stripped.utf8.count <= 64 && stripped.utf8.allSatisfy(allowed.contains)
     }
 }
 
@@ -320,7 +352,7 @@ enum AgentHookRemoteAction: String {
 
 struct AgentHookInstaller {
     static let marker = "_omg_agent_status"
-    static let hookVersion = 14
+    static let hookVersion = 15
     static let detectorMarkerVersion = 1
     static let didChangeNotification = Notification.Name(
         "com.oh-my-ghostty.agentIntegrationDidChange"
@@ -708,13 +740,26 @@ def validate_json(path, agent):
 def install_json(path, agent):
     root, hooks = load_hooks(path, agent)
     named = SPEC[agent].get("dialect") == "antigravity"
-    if named: hooks["enabled"] = True
+    if named:
+        hooks["enabled"] = True
+    else:
+        for existing_event in list(hooks.keys()):
+            existing_entries = hooks.get(existing_event)
+            if isinstance(existing_entries, list) and all(isinstance(entry, dict) for entry in existing_entries):
+                cleaned = [entry for entry in (remove_omg(value) for value in existing_entries) if entry is not None]
+                if cleaned:
+                    hooks[existing_event] = cleaned
+                else:
+                    del hooks[existing_event]
+    cleaned_events = set()
     for item in SPEC[agent]["entries"]:
         event = item["event"]
-        existing = hooks.get(event, [])
-        if not isinstance(existing, list):
-            raise ValueError(str(path) + " " + event + " is not an array")
-        hooks[event] = [entry for entry in (remove_omg(value) for value in existing) if entry is not None]
+        if event not in cleaned_events:
+            cleaned_events.add(event)
+            existing = hooks.get(event, [])
+            if not isinstance(existing, list):
+                raise ValueError(str(path) + " " + event + " is not an array")
+            hooks[event] = [entry for entry in (remove_omg(value) for value in existing) if entry is not None]
         hooks[event].append(item["entry"])
     root["omg-agent-status" if named else "hooks"] = hooks
     if SPEC[agent].get("dialect") in ("cursor", "copilot") and "version" not in root:
@@ -1465,11 +1510,17 @@ else:
             return false
         }
         if agent == .antigravity, hooks["enabled"] as? Bool == false { return false }
-        return Self.hookEvents(agent).allSatisfy { event, _, _ in
+        return Self.hookEvents(agent).allSatisfy { event, state, matcher in
             guard let entries = hooks[event] as? [[String: Any]] else {
                 return false
             }
-            return entries.contains(where: Self.isCurrentOMGEntry)
+            let expected = Self.jsonHookEntry(
+                agent: agent,
+                event: event,
+                state: state,
+                matcher: matcher
+            )
+            return entries.contains { Self.isCurrentOMGEntry($0, matching: expected) }
         }
     }
 
@@ -1527,10 +1578,30 @@ else:
         var root = try loadJSONObject(at: url)
         let key = agent == .antigravity ? Self.antigravityHookName : "hooks"
         var hooks = try hooksDictionary(root[key])
-        if agent == .antigravity { hooks["enabled"] = true }
+        if agent == .antigravity {
+            hooks["enabled"] = true
+        } else {
+            for existingKey in Array(hooks.keys) {
+                guard let existingEntries = hooks[existingKey] as? [[String: Any]] else {
+                    continue
+                }
+                let remaining = existingEntries.compactMap(Self.removingOMGCommands)
+                if remaining.isEmpty {
+                    hooks.removeValue(forKey: existingKey)
+                } else {
+                    hooks[existingKey] = remaining
+                }
+            }
+        }
+        var cleanedEvents = Set<String>()
         for (event, state, matcher) in Self.hookEvents(agent) {
-            let existing = try hookEntries(hooks[event], event: event)
-            var entries = existing.compactMap(Self.removingOMGCommands)
+            var entries: [[String: Any]]
+            if cleanedEvents.insert(event).inserted {
+                let existing = try hookEntries(hooks[event], event: event)
+                entries = existing.compactMap(Self.removingOMGCommands)
+            } else {
+                entries = try hookEntries(hooks[event], event: event)
+            }
             entries.append(Self.jsonHookEntry(
                 agent: agent,
                 event: event,
@@ -1762,6 +1833,26 @@ else:
         return hooks.contains(where: isLegacyOMGCommand)
     }
 
+    private static func isCurrentOMGEntry(
+        _ entry: [String: Any],
+        matching expected: [String: Any]
+    ) -> Bool {
+        guard isCurrentOMGEntry(entry),
+              (entry["matcher"] as? String) == (expected["matcher"] as? String),
+              (entry["match"] as? String) == (expected["match"] as? String) else {
+            return false
+        }
+        if let expectedCommand = expected["command"] as? String {
+            return (entry["command"] as? String) == expectedCommand
+        }
+        if let expectedHooks = expected["hooks"] as? [[String: Any]],
+           let expectedCommand = expectedHooks.first?["command"] as? String,
+           let actualHooks = entry["hooks"] as? [[String: Any]] {
+            return actualHooks.contains { ($0["command"] as? String) == expectedCommand }
+        }
+        return true
+    }
+
     private static func isCurrentOMGEntry(_ entry: [String: Any]) -> Bool {
         let versionMarker = "_omg_agent_status_v\(hookVersion)"
         if (entry["command"] as? String)?.contains(versionMarker) == true {
@@ -1963,6 +2054,20 @@ else:
             "2>/dev/null || true"
     }
 
+    private static let subagentOwnerPIDPreamble =
+        "omg_owner_pid=$PPID; " +
+        "for _omg_hop in 1 2 3 4; do " +
+        "omg_ps=$(ps -o ppid=,comm= -p \"$omg_owner_pid\" 2>/dev/null) || break; " +
+        "omg_ps=${omg_ps#\"${omg_ps%%[![:space:]]*}\"}; " +
+        "omg_next_ppid=${omg_ps%%[[:space:]]*}; " +
+        "omg_comm=${omg_ps#\"$omg_next_ppid\"}; " +
+        "omg_comm=${omg_comm#\"${omg_comm%%[![:space:]]*}\"}; " +
+        "omg_base=${omg_comm##*/}; " +
+        "case \"$omg_next_ppid\" in ''|*[!0-9]*|0|1) break;; esac; " +
+        "case \"$omg_base\" in -*) break;; sh|bash|dash|zsh|ksh|env) omg_owner_pid=$omg_next_ppid;; *) break;; esac; " +
+        "done; " +
+        "case \"$omg_owner_pid\" in ''|*[!0-9]*|0|1) omg_owner_pid=;; esac; "
+
     private static func subagentAwareHookCommand(
         agent: SupportedAgent,
         event: String?,
@@ -1971,11 +2076,32 @@ else:
         isPromptEvent: Bool
     ) -> String {
         let field = agent.definition.hook.conversationField ?? "session_id"
+        let toolField = agent.definition.hook.toolField ?? "tool_name"
         let isSubagentStart = event == "SubagentStart"
         let isSubagentStop = event == "SubagentStop"
         let isStop = event == "Stop"
+        let isStopFailure = event == "StopFailure"
+        let isPostToolFailure = event == "PostToolUseFailure"
+        let isClaudeWorkingPreTool = agent == .claude && event == "PreToolUse" && state == .working && attentionKind == nil
+        let isClaudeAttentionResolveCandidate =
+            agent == .claude && (event == "PostToolUse" || event == "PostToolUseFailure") && state == .working
         let baseState = state?.rawValue ?? "end"
         let baseAction = state == nil ? "end" : "start"
+        let skipExpr: String
+        if isStop {
+            skipExpr = "\"1\" if d.get(\"stop_hook_active\") is True else \"\""
+        } else if isClaudeWorkingPreTool {
+            skipExpr = "\"1\" if (d.get(\"\(toolField)\") in (\"AskUserQuestion\",\"ExitPlanMode\") and not sub) else \"\""
+        } else if isPostToolFailure {
+            skipExpr = "\"1\" if d.get(\"is_interrupt\") is True else \"\""
+        } else {
+            skipExpr = "\"\""
+        }
+        let eventExpr: String = if isClaudeAttentionResolveCandidate {
+            "\"attention_resolved\" if d.get(\"\(toolField)\") in (\"AskUserQuestion\",\"ExitPlanMode\") else \"\""
+        } else {
+            "\"\""
+        }
         let py = "import json,re,sys,urllib.parse; " +
             "d=json.load(sys.stdin); d=d if isinstance(d,dict) else {}; " +
             "raw=d.get(\"\(field)\",\"\"); " +
@@ -1986,35 +2112,43 @@ else:
             "(\"agent_id\",\"parent_tool_use_id\",\"subagent_id\",\"task_id\") " +
             "if isinstance(d.get(k),str) and d[k]),\"\"); " +
             "sub=sub if re.fullmatch(r\"[A-Za-z0-9._-]{1,128}\",sub) else \"\"; " +
-            "skip=\"1\" if d.get(\"stop_hook_active\") is True else \"\"; " +
-            "print(rep+\"|\"+osc+\"|\"+sub+\"|\"+skip,end=\"\")"
+            "skip=\(skipExpr); " +
+            "ev=\(eventExpr); " +
+            "print(rep+\"|\"+osc+\"|\"+sub+\"|\"+skip+\"|\"+ev,end=\"\")"
         var setup = "omg_pair=$(env -u SDKROOT -u DEVELOPER_DIR python3 -c '\(py)' " +
-            "2>/dev/null || printf '%s' '-|||'); " +
+            "2>/dev/null || printf '%s' '-||||'); " +
             "omg_report_conv=${omg_pair%%|*}; omg_rest=${omg_pair#*|}; " +
             "omg_conversation=${omg_rest%%|*}; omg_rest=${omg_rest#*|}; " +
-            "omg_sub=${omg_rest%%|*}; omg_skip=${omg_rest#*|}; "
-        if isStop {
+            "omg_sub=${omg_rest%%|*}; omg_rest=${omg_rest#*|}; " +
+            "omg_skip=${omg_rest%%|*}; omg_ev=${omg_rest#*|}; "
+        if isStop || isClaudeWorkingPreTool || isPostToolFailure {
             setup += "test \"$omg_skip\" = 1 && exit 0; "
         }
         if isSubagentStart || isSubagentStop {
             setup += "omg_sub=${omg_sub:-subagent}; "
         }
+        if isSubagentStop {
+            setup += "test -n \"$omg_sub\" || exit 0; "
+        }
         setup += "omg_state=\(baseState); omg_action=\(baseAction); omg_phase=; "
-        if isStop {
+        if isStop || isStopFailure {
             setup += "if [ -n \"$omg_sub\" ]; then omg_state=end; omg_action=end; fi; "
         } else if state == .working {
             setup += "if [ -n \"$omg_sub\" ]; then omg_phase=background; fi; "
         }
+        if isPromptEvent {
+            setup += "if [ -z \"$omg_sub\" ]; then omg_ev=prompt; fi; "
+        }
+        setup += subagentOwnerPIDPreamble
         var runtimeBlock = "if [ -n \"${OMG_RUNTIME_BIN-}\" ]; then " +
             "set -- report \(agent.rawValue) \"$omg_state\" \"${omg_report_conv:--}\" \"$PWD\"; " +
+            "if [ -n \"$omg_owner_pid\" ] && kill -0 \"$omg_owner_pid\" 2>/dev/null; then set -- \"$@\" --pid \"$omg_owner_pid\"; fi; " +
             "if [ -n \"$omg_sub\" ]; then set -- \"$@\" --id \"$omg_sub\"; fi; " +
             "if [ -n \"$omg_phase\" ]; then set -- \"$@\" --phase \"$omg_phase\"; fi; "
         if let attentionKind {
             runtimeBlock += "set -- \"$@\" --attention \(attentionKind.rawValue); "
         }
-        if isPromptEvent {
-            runtimeBlock += "if [ -z \"$omg_sub\" ]; then set -- \"$@\" --event prompt; fi; "
-        }
+        runtimeBlock += "if [ -n \"$omg_ev\" ]; then set -- \"$@\" --event \"$omg_ev\"; fi; "
         runtimeBlock += "\"$OMG_RUNTIME_BIN\" \"$@\" >/dev/null 2>&1 && exit 0; fi; "
 
         var oscExtra = "omg_extra=; " +
@@ -2024,13 +2158,13 @@ else:
         if let attentionKind {
             oscExtra += "omg_extra=\"$omg_extra;omg_attention=\(attentionKind.rawValue)\"; "
         }
-        if isPromptEvent {
-            oscExtra += "if [ -z \"$omg_sub\" ]; then omg_extra=\"$omg_extra;omg_event=prompt\"; fi; "
-        }
+        oscExtra += "if [ -n \"$omg_ev\" ]; then omg_extra=\"$omg_extra;omg_event=$omg_ev\"; fi; "
 
         return ": \(marker); : _omg_agent_status_v\(hookVersion); " + setup + runtimeBlock +
             "omg_tty=$(ps -o tty= -p \"$PPID\" 2>/dev/null | tr -d ' '); " +
+            "case \"$omg_tty\" in ''|'??'|'?') [ -n \"$omg_owner_pid\" ] && omg_tty=$(ps -o tty= -p \"$omg_owner_pid\" 2>/dev/null | tr -d ' ');; esac; " +
             "omg_pgid=$(ps -o pgid= -p \"$PPID\" 2>/dev/null | tr -d ' '); " +
+            "if [ -n \"$omg_owner_pid\" ] && [ \"$omg_owner_pid\" != \"$PPID\" ]; then omg_pgid=$(ps -o pgid= -p \"$omg_owner_pid\" 2>/dev/null | tr -d ' '); fi; " +
             "case \"$omg_pgid\" in ''|*[!0-9]*) exit 0;; esac; " +
             "case \"$omg_tty\" in ''|*[!A-Za-z0-9/._-]*) omg_tty=tty;; esac; " +
             "omg_scope=local; test -n \"${SSH_CONNECTION-}${OMG_RUNTIME_REMOTE-}\" && omg_scope=remote; " +
@@ -2979,7 +3113,7 @@ struct AgentContextSignalReducer: Sendable {
                }),
                !existing.terminated,
                existing.activity.state == .needsAttention,
-               !unlocksAttention || phase == .background {
+               !unlocksAttention || (phase == .background && isPrompt) {
                 return nil
             }
             activities.removeAll { $0.terminated && $0.scope == scope }
@@ -3089,15 +3223,13 @@ struct AgentContextSignalReducer: Sendable {
         )
     }
 
-    mutating func acknowledgeTerminalState() -> AgentActivityUpdate? {
+    mutating func acknowledgeTerminalState(
+        liveProcessGroupID: Int? = nil
+    ) -> AgentActivityUpdate? {
         guard let index = selectedIndex else { return nil }
         let current = activities[index]
         guard current.activity.state == .done ||
                 current.activity.state == .error else { return nil }
-        if current.terminated {
-            activities.remove(at: index)
-            return currentRecord.map { .set($0.activity) } ?? .clear
-        }
         let idle = TabActivity(
             source: current.activity.source,
             state: .idle,
@@ -3107,6 +3239,24 @@ struct AgentContextSignalReducer: Sendable {
             progress: nil,
             icon: current.activity.icon
         )
+        if current.terminated {
+            if let livePGID = liveProcessGroupID, livePGID > 0 {
+                let revivedID = "omg-agent-\(current.activity.source)-\(livePGID)"
+                activities[index] = Record(
+                    id: revivedID,
+                    context: nil,
+                    activity: idle,
+                    scope: current.scope,
+                    liveness: current.scope == .local ? .processGroup(livePGID) : nil,
+                    updatedAt: Date(),
+                    terminated: false,
+                    isFallbackTier: current.isFallbackTier
+                )
+                return currentRecord.map { .set($0.activity) } ?? .set(idle)
+            }
+            activities.remove(at: index)
+            return currentRecord.map { .set($0.activity) } ?? .clear
+        }
         activities[index] = Record(
             id: current.id,
             context: current.context,

@@ -65,6 +65,13 @@ enum AgentLogoStyle {
         guard let activity else { return title }
         return "\(title)\n\(activity.label ?? activity.source) · \(localizedStatus(activity))"
     }
+
+    @MainActor
+    static func toolTip(title: String, activities: [TabActivity]) -> String {
+        guard !activities.isEmpty else { return title }
+        let lines = activities.map { "\( $0.label ?? $0.source ) · \(localizedStatus($0))" }
+        return ([title] + lines).joined(separator: "\n")
+    }
 }
 
 struct AgentStatusBadge {

@@ -890,7 +890,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
         agentResumeContextIDs[surfaceID] = snapshot.resumeContextID
         agentReducers[surfaceID] = snapshot.reducer
-        agentProgramStatuses[surfaceID] = snapshot.programStatus
+        agentProgramStatuses[surfaceID] = snapshot.programStatus.flatMap {
+            ($0.records.isEmpty || $0.activity == nil) ? nil : $0
+        }
         typedAgentHookContextIDs[surfaceID] = snapshot.typedHookContextID
         observedForegroundProcessIDs[surfaceID] = snapshot.observedForegroundProcessID
         detectedAgentInstances[surfaceID] = snapshot.detectedAgent
@@ -1695,7 +1697,17 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             }
             process.waitUntilExit()
             guard process.terminationStatus == 0 else { return nil }
-            return String(data: captured, encoding: .utf8)
+            guard var text = String(data: captured, encoding: .utf8) else { return nil }
+            if processGroupID > 1, let pid = pid_t(exactly: processGroupID) {
+                var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
+                if proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 {
+                    let executablePath = String(cString: buffer)
+                    if !executablePath.isEmpty {
+                        text += "\n\(executablePath)\n"
+                    }
+                }
+            }
+            return text
         } catch {
             return nil
         }
@@ -2083,6 +2095,26 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         TerminalFocusRouter.acknowledgeDockAttention(for: surface, in: self)
     }
 
+    private func liveAgentProcessGroupID(
+        for surface: Ghostty.SurfaceView,
+        source: String?
+    ) -> Int? {
+        guard let source, let agent = SupportedAgent(rawValue: source) else { return nil }
+        if paneSessionContexts[surface.id]?.isSSHSession == true { return nil }
+        if let detected = detectedAgentInstances[surface.id],
+           detected.agent == agent,
+           Self.processGroupExists(detected.processGroupID) {
+            return detected.processGroupID
+        }
+        guard let fgPGID = surface.surfaceModel?.foregroundPID,
+              Self.processGroupExists(fgPGID),
+              let commands = Self.processGroupCommandLines(fgPGID),
+              LocalAgentProcessDetector.detect(in: commands) == agent else {
+            return nil
+        }
+        return fgPGID
+    }
+
     func acknowledgeTerminalAgentState(
         for surface: Ghostty.SurfaceView?
     ) {
@@ -2093,9 +2125,18 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         var acknowledgedReducerUpdate: AgentActivityUpdate?
         if var reducer = agentReducers[surface.id] {
             reducerCandidate = reducer.acknowledgmentCandidate
-            acknowledgedReducerUpdate = reducer.acknowledgeTerminalState()
+            let livePGID = liveAgentProcessGroupID(
+                for: surface,
+                source: reducer.currentActivity?.source
+            )
+            acknowledgedReducerUpdate = reducer.acknowledgeTerminalState(
+                liveProcessGroupID: livePGID
+            )
             if acknowledgedReducerUpdate != nil {
                 agentReducers[surface.id] = reducer
+            }
+            if acknowledgedReducerUpdate == .clear {
+                observedForegroundProcessIDs.removeValue(forKey: surface.id)
             }
         }
         guard acknowledgedProgram || acknowledgedReducerUpdate != nil else { return }
@@ -2271,7 +2312,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                     setAcknowledgedAgentStatus(ack, for: id)
                 }
                 agentReducers[id] = reducer
-                agentProgramStatuses[id] = status.records.isEmpty ? nil : status
+                agentProgramStatuses[id] = (status.records.isEmpty || status.activity == nil) ? nil : status
                 let activity = AgentProgramStatus.preferredActivity(
                     program: status.activity,
                     fallback: reducer.currentActivity
@@ -2332,7 +2373,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
            nextProgramActivity?.phase != .background,
            var reducer = agentReducers[surface.id],
            reducer.currentActivity?.state == .done || reducer.currentActivity?.state == .error {
-            if reducer.acknowledgeTerminalState() != nil {
+            let livePGID = liveAgentProcessGroupID(
+                for: surface,
+                source: reducer.currentActivity?.source
+            )
+            if reducer.acknowledgeTerminalState(liveProcessGroupID: livePGID) != nil {
                 agentReducers[surface.id] = reducer
             }
             updateAcknowledgedAgentStatus(for: surface.id) { $0.reducer = nil }
@@ -2340,7 +2385,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                   nextProgramActivity?.state == .idle,
                   var reducer = agentReducers[surface.id] {
             let candidate = reducer.acknowledgmentCandidate
-            if reducer.acknowledgeTerminalState() != nil {
+            let livePGID = liveAgentProcessGroupID(
+                for: surface,
+                source: reducer.currentActivity?.source
+            )
+            if reducer.acknowledgeTerminalState(liveProcessGroupID: livePGID) != nil {
                 agentReducers[surface.id] = reducer
                 acknowledgedReducer = candidate
             }
@@ -2364,7 +2413,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         } else {
             status.foregroundProcessGroup = currentFG
         }
-        agentProgramStatuses[surface.id] = status.records.isEmpty ? nil : status
+        agentProgramStatuses[surface.id] = (status.records.isEmpty || status.activity == nil) ? nil : status
         updateAcknowledgedAgentStatus(for: surface.id) { ack in
             if let acknowledgedReducer { ack.reducer = acknowledgedReducer }
             if !status.hasAcknowledgedTerminalRecord ||
@@ -2414,9 +2463,6 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         if let update {
             applyAgentActivityUpdate(update, for: surfaceID)
             if update == .clear {
-                clearAgentResumeDescriptor(for: surfaceID)
-            } else if case .set(let activity) = update,
-                      activity.state == .error {
                 clearAgentResumeDescriptor(for: surfaceID)
             }
         }

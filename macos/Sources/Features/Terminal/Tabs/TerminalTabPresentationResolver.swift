@@ -22,6 +22,49 @@ struct TerminalTabIconPresentation {
 
 @MainActor
 enum TerminalTabPresentationResolver {
+    static func paneIcon(
+        for surface: Ghostty.SurfaceView,
+        in controller: TerminalController
+    ) -> GhosttyTabIcon {
+        if let requested = controller.agentActivity(for: surface)?.icon ??
+            controller.agentResumeDescriptor(for: surface)?.agent.icon {
+            return requested.kind == .bundledAsset ? .asset(requested.name) : .systemSymbol(requested.name)
+        }
+        let session = controller.paneSessionContext(for: surface)
+        return session?.workspace?.icon ?? .systemSymbol(session?.tabIconSystemName ?? "terminal")
+    }
+
+    static func paneSymbolName(
+        for surface: Ghostty.SurfaceView,
+        in controller: TerminalController
+    ) -> String {
+        switch paneIcon(for: surface, in: controller) {
+        case .systemSymbol(let name), .asset(let name): name
+        case .image: "terminal"
+        }
+    }
+
+    private static func paneSummaryActivity(
+        for surface: Ghostty.SurfaceView,
+        in controller: TerminalController
+    ) -> TabActivity? {
+        if let activity = controller.agentActivity(for: surface) {
+            return activity
+        }
+        guard let descriptor = controller.agentResumeDescriptor(for: surface) else {
+            return nil
+        }
+        return .init(
+            source: descriptor.agent.rawValue,
+            state: .idle,
+            label: descriptor.agent.displayName,
+            message: nil,
+            detail: nil,
+            progress: nil,
+            icon: descriptor.agent.icon
+        )
+    }
+
     static func iconPresentation(
         controller: TerminalController?, icon: GhosttyTabIcon, selected: Bool, activity: TabActivity?
     ) -> TerminalTabIconPresentation {
@@ -35,13 +78,7 @@ enum TerminalTabPresentationResolver {
             )
             let surface = slot.views.first { $0.id == id } ?? slot.views[0]
             let paneActivity = controller.agentActivity(for: surface)
-            let session = controller.paneSessionContext(for: surface)
-            let glyph: GhosttyTabIcon
-            if let requested = paneActivity?.icon {
-                glyph = requested.kind == .bundledAsset ? .asset(requested.name) : .systemSymbol(requested.name)
-            } else {
-                glyph = session?.workspace?.icon ?? .systemSymbol(session?.tabIconSystemName ?? "terminal")
-            }
+            let glyph = paneIcon(for: surface, in: controller)
             return TerminalTabIconPresentation.Part(
                 rect: slot.rect, icon: glyph, activity: paneActivity,
                 focused: SplitTabPane.isPaneFocused(selected: selected, surfaceID: surface.id,
@@ -57,9 +94,11 @@ enum TerminalTabPresentationResolver {
         guard let surface = controller.focusedSurface ?? controller.surfaceTree.first else { return nil }
         let settings = OhMyGhosttySettings.shared
         let session = controller.paneSessionContext(for: surface) ?? .init(workingDirectory: surface.pwd, terminalTitle: surface.title)
-        let activity = controller.focusedAgentActivity() ?? activities?.activity(for: controller.tabSessionID)
+        let focusedActivity = controller.focusedAgentActivity()
+        let activity = controller.preferredAgentActivity() ?? activities?.activity(for: controller.tabSessionID)
         let descriptor = controller.agentResumeDescriptor(for: surface)
-        let agent = activity.flatMap { SupportedAgent(rawValue: $0.source) } ?? descriptor?.agent
+        let titleActivity = focusedActivity ?? (controller.surfaceTree.isSplit ? nil : activity)
+        let agent = titleActivity.flatMap { SupportedAgent(rawValue: $0.source) } ?? descriptor?.agent
         // A manual tab name wins over the conversation's own title.
         let conversationTitle = controller.titleOverride == nil ? controller.agentConversationTitle(for: surface) : nil
         let restoredTitle = agent == nil ? controller.restoredTitleFallback(for: surface, terminalTitle: surface.title) : nil
@@ -73,14 +112,38 @@ enum TerminalTabPresentationResolver {
         // Never empty, so every row with a conversation title has two lines.
         let place = session.remoteTabBreadcrumb?.title ?? pathTitle
         let subtitle = place.isEmpty ? agent?.displayName : place
-        let context = GhosttyTabIconContext(tabID: controller.tabSessionID, title: title, activity: activity,
-                                           defaultIcon: session.workspace?.icon ?? .systemSymbol(session.tabIconSystemName))
+        let resolvedBreadcrumb = showsPath ? session.remoteTabBreadcrumb : nil
+        let resolvedSubtitle = conversationTitle == nil ? nil : subtitle
+        let displayTitle = resolvedBreadcrumb?.title ?? title
+        let headerTitle = (resolvedSubtitle.flatMap { $0.isEmpty ? nil : $0 }).map { "\(displayTitle)\n\($0)" } ?? displayTitle
+        let context = GhosttyTabIconContext(
+            tabID: controller.tabSessionID,
+            title: title,
+            activity: titleActivity,
+            defaultIcon: paneIcon(for: surface, in: controller)
+        )
+        let splitAgentSummaries: [TabActivity] = controller.surfaceTree.isSplit
+            ? controller.surfaceTree.compactMap { paneSummaryActivity(for: $0, in: controller) }
+            : []
+        let resolvedToolTip: String? = if splitAgentSummaries.count >= 2 {
+            AgentLogoStyle.toolTip(title: headerTitle, activities: splitAgentSummaries)
+        } else if splitAgentSummaries.count == 1, activity == nil {
+            AgentLogoStyle.toolTip(title: headerTitle, activity: splitAgentSummaries[0])
+        } else {
+            nil
+        }
         // Both tab renderers prefer the breadcrumb over the title, so a
         // conversation title moves the place it would have named to the subtitle.
-        return .init(title: title, remoteBreadcrumb: showsPath ? session.remoteTabBreadcrumb : nil,
-                     subtitle: conversationTitle == nil ? nil : subtitle,
-                     shortcut: settings.showShortcutLabels ? controller.tabShortcutLabel(for: index) : nil,
-                     icon: icons.icon(for: context) ?? .systemSymbol("terminal"), activity: activity,
-                     selected: selected, hovered: false)
+        return .init(
+            title: title,
+            remoteBreadcrumb: resolvedBreadcrumb,
+            subtitle: resolvedSubtitle,
+            shortcut: settings.showShortcutLabels ? controller.tabShortcutLabel(for: index) : nil,
+            icon: icons.icon(for: context) ?? .systemSymbol("terminal"),
+            activity: activity,
+            toolTip: resolvedToolTip,
+            selected: selected,
+            hovered: false
+        )
     }
 }

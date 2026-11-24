@@ -1002,7 +1002,8 @@ final class NativeTabCell: NSTableCellView {
         shortcut.stringValue = value.shortcut ?? ""
         let title = value.remoteBreadcrumb?.title ?? value.title
         let detail = value.showsSubtitle ? value.subtitle : nil
-        toolTip = AgentLogoStyle.toolTip(title: detail.map { "\(title)\n\($0)" } ?? title, activity: value.activity)
+        let headerTitle = detail.map { "\(title)\n\($0)" } ?? title
+        toolTip = value.toolTip ?? AgentLogoStyle.toolTip(title: headerTitle, activity: value.activity)
         icon.configure(controller: tab.controller, icon: value.icon, selected: selected, activity: value.activity)
         label.stringValue = title
         let theme = OMGNativeTheme.resolve(for: self)

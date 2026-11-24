@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import Testing
 @testable import Ghostty
@@ -532,14 +533,10 @@ struct TerminalLiveTabLayoutTests {
         // The app's own coordinator stays out of tests; this one stands in for it.
         let tracker = AgentConversationTitleTracker(controller: controller, coordinator: coordinator)
         var notifiedController = false
-        let token = NotificationCenter.default.addObserver(
-            forName: Notification.Name("GhosttyTabPresentationDidChange"),
-            object: controller,
-            queue: .main
-        ) { _ in
-            MainActor.assumeIsolated { notifiedController = true }
-        }
-        defer { NotificationCenter.default.removeObserver(token) }
+        let cancellable = NotificationCenter.default
+            .publisher(for: Notification.Name("GhosttyTabPresentationDidChange"), object: controller)
+            .sink { _ in notifiedController = true }
+        defer { cancellable.cancel() }
         controller.adoptAgentResumeDescriptor(.init(agent: .codex, conversationID: conversation,
             scope: .local, workingDirectory: "/tmp/project"), for: surface)
         try await waitForAppKit {

@@ -735,7 +735,7 @@ struct VerticalTabInboxSidebarTests {
                         // 1-line unnamed SSH row with remoteBreadcrumb (34pt + cloud before breadcrumb)
                         return .init(
                             title: "prod-box",
-                            remoteBreadcrumb: RemoteTabBreadcrumb(host: "prod-box", directory: "~/srv", title: "prod-box › ~/srv"),
+                            remoteBreadcrumb: RemoteTabBreadcrumb(host: "prod-box", directory: "~/srv"),
                             subtitle: nil,
                             shortcut: "⌘4",
                             icon: .systemSymbol("terminal"),

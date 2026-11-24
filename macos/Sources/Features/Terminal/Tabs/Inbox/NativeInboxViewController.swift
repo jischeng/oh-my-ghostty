@@ -382,9 +382,10 @@ final class NativeInboxViewController: NSViewController {
             clearHover()
             return
         }
-        if let row = visibleTabs.lazy
-            .compactMap({ rowViews[$0.controller.tabSessionID] })
-            .first(where: { !$0.isHidden && $0.frame.contains(point) }) {
+        for tab in visibleTabs {
+            guard let row = rowViews[tab.controller.tabSessionID],
+                  !row.isHidden,
+                  row.frame.contains(point) else { continue }
             if hoveredHeader != nil {
                 hoveredHeader?.isHovered = false
                 hoveredHeader = nil

@@ -3,6 +3,13 @@ import SwiftUI
 import Combine
 import GhosttyKit
 
+extension Notification.Name {
+    /// Posted on the main actor when a tab's manual override, surface manual
+    /// override, or conversation title changes without invalidating the SwiftUI
+    /// terminal shell via `objectWillChange`.
+    static let ghosttyTabPresentationDidChange = Notification.Name("GhosttyTabPresentationDidChange")
+}
+
 /// A base class for windows that can contain Ghostty windows. This base class implements
 /// the bare minimum functionality that every terminal window in Ghostty should implement.
 ///
@@ -156,11 +163,10 @@ class BaseTerminalController: NSWindowController,
     /// When set, this takes precedence over the computed title from the terminal.
     var titleOverride: String? {
         didSet {
+            guard oldValue != titleOverride else { return }
             applyTitleToWindow()
-            objectWillChange.send()
-            if oldValue != titleOverride {
-                sessionCheckpointStateDidChange()
-            }
+            NotificationCenter.default.post(name: .ghosttyTabPresentationDidChange, object: self)
+            sessionCheckpointStateDidChange()
         }
     }
 
@@ -586,6 +592,24 @@ class BaseTerminalController: NSWindowController,
         }
     }
 
+    /// Initial text seeded into the manual tab rename prompt: only an explicit
+    /// user override, never an automatic path, OSC, bell, status, or AI title.
+    func initialTabRenameValue() -> String {
+        if let override = titleOverride?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !override.isEmpty {
+            return override
+        }
+        if let surface = focusedSurface ?? surfaceTree.first,
+           surface.hasUserSetTitle {
+            let userTitle = surface.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !userTitle.isEmpty { return userTitle }
+        }
+        return ""
+    }
+
+    /// Clean non-AI tab title shown as placeholder while the rename field is empty.
+    func tabRenamePlaceholder() -> String? { nil }
+
     /// Prompt the user to change the tab/window title.
     func promptTabTitle() {
         guard let window else { return }
@@ -596,7 +620,8 @@ class BaseTerminalController: NSWindowController,
         alert.alertStyle = .informational
 
         let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 250, height: 24))
-        textField.stringValue = titleOverride ?? window.title
+        textField.stringValue = initialTabRenameValue()
+        textField.placeholderString = tabRenamePlaceholder()
         alert.accessoryView = textField
 
         alert.addButton(withTitle: "OK")
@@ -608,12 +633,8 @@ class BaseTerminalController: NSWindowController,
             guard let self else { return }
             guard response == .alertFirstButtonReturn else { return }
 
-            let newTitle = textField.stringValue
-            if newTitle.isEmpty {
-                self.titleOverride = nil
-            } else {
-                self.titleOverride = newTitle
-            }
+            let newTitle = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.titleOverride = newTitle.isEmpty ? nil : newTitle
         }
     }
 

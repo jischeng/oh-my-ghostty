@@ -63,6 +63,7 @@ enum AgentConversationStore {
         agent: SupportedAgent,
         workingDirectory: String,
         launchedAfter: Date,
+        excluding claimedConversationIDs: Set<AgentConversationID> = [],
         rootURL: URL? = nil
     ) -> AgentConversationID? {
         let resume = agent.definition.resume
@@ -70,7 +71,8 @@ enum AgentConversationStore {
             return discover(
                 command: command,
                 workingDirectory: workingDirectory,
-                launchedAfter: launchedAfter
+                launchedAfter: launchedAfter,
+                excluding: claimedConversationIDs
             )
         }
         guard let rootValue = resume.discover?.root ?? resume.store?.root else {
@@ -90,7 +92,8 @@ enum AgentConversationStore {
         var inspected = 0
         // A conversation this launch started, and one the Agent resumed: a
         // resumed session keeps its old transcript and writes to it again the
-        // moment it comes back.
+        // moment it comes back. Conversations already claimed by another live
+        // pane are excluded so a second pane never adopts an active sibling's ID.
         var created = Set<AgentConversationID>()
         var resumed: [(id: AgentConversationID, modified: Date)] = []
         for case let url as URL in enumerator {
@@ -121,7 +124,8 @@ enum AgentConversationStore {
             }
             guard let candidate,
                   canonical(candidate.cwd) == target,
-                  let id = AgentConversationID(candidate.id) else { continue }
+                  let id = AgentConversationID(candidate.id),
+                  !claimedConversationIDs.contains(id) else { continue }
             if createdAt >= threshold {
                 created.insert(id)
                 if created.count > 1 { return nil }
@@ -145,7 +149,8 @@ enum AgentConversationStore {
     private static func discover(
         command: AgentDefinition.ResumeSpec.CommandDiscovery,
         workingDirectory: String,
-        launchedAfter: Date
+        launchedAfter: Date,
+        excluding claimedConversationIDs: Set<AgentConversationID>
     ) -> AgentConversationID? {
         guard !workingDirectory.contains("\0"),
               workingDirectory.utf8.count <= 4_096 else { return nil }
@@ -181,8 +186,10 @@ enum AgentConversationStore {
                 guard let rawID = entry[command.idKey] as? String,
                       let rawDate = entry[command.createdAtKey] as? String,
                       let created = formatter.date(from: rawDate),
-                      created >= threshold else { return nil }
-                return AgentConversationID(rawID)
+                      created >= threshold,
+                      let id = AgentConversationID(rawID),
+                      !claimedConversationIDs.contains(id) else { return nil }
+                return id
             })
             return matches.count == 1 ? matches.first : nil
         } catch {

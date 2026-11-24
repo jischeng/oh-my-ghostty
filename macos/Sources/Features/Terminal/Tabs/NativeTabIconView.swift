@@ -116,8 +116,9 @@ final class NativeTabIconView: NSView {
             let agent = activity.flatMap { SupportedAgent(rawValue: $0.source) }
                 ?? controller.agentResumeDescriptor(for: surface)?.agent
             let rawTitle = surface.title.trimmingCharacters(in: .whitespacesAndNewlines)
-            let paneTitle: String = if let conversationTitle = controller.agentConversationTitle(for: surface) {
-                conversationTitle
+            let userTitle = surface.hasUserSetTitle ? rawTitle : ""
+            let paneTitle: String = if !userTitle.isEmpty {
+                userTitle
             } else if rawTitle.isEmpty || rawTitle == "👻" {
                 agent?.displayName ?? "Terminal"
             } else {

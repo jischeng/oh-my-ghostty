@@ -88,8 +88,8 @@ final class AgentConversationTitleStore: ObservableObject {
     static let retention: TimeInterval = 90 * 86_400
     /// Display columns kept of a native or generated title; a wide character takes two.
     nonisolated static let maximumTitleColumns = 120
-    /// Display columns kept of the opening prompt while it stands in for a title.
-    nonisolated static let promptTitleColumns = 48
+    /// Display columns kept of the opening prompt fallback; matches generated tab titles.
+    nonisolated static let promptTitleColumns = AITitleSanitizer.maxWidth
     private static let maximumArchiveBytes = 8 * 1_024 * 1_024
 
     @Published private(set) var records: [Key: Record] = [:]

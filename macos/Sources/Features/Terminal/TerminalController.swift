@@ -460,6 +460,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     var quickInputLastTerminalSurfaceID: UUID?
     private var agentResumeContextIDs: [UUID: String] = [:]
     private var paneSessionObservers: [UUID: Set<AnyCancellable>] = [:]
+    private var observedUserSurfaceTitles: [UUID: String] = [:]
     var agentReducers: [UUID: AgentContextSignalReducer] = [:]
     private var agentProgramStatuses: [UUID: AgentProgramStatus] = [:]
     private var agentRuntimeSnapshots: [UUID: [Ghostty.ContextSignal]] = [:]
@@ -946,6 +947,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             cancelRevisionHandoff(for: surfaceID)
         }
         paneSessionObservers = paneSessionObservers.filter { activeIDs.contains($0.key) }
+        observedUserSurfaceTitles = observedUserSurfaceTitles.filter { activeIDs.contains($0.key) }
         paneSessionContexts = paneSessionContexts.filter { activeIDs.contains($0.key) }
         agentActivities = agentActivities.filter { activeIDs.contains($0.key) }
         agentResumeDescriptors = agentResumeDescriptors.filter {
@@ -1028,12 +1030,18 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                descriptor.isValid {
                 agentResumeDescriptors[surface.id] = descriptor
             }
+            observedUserSurfaceTitles[surface.id] = surface.titleOverride
             var observers: Set<AnyCancellable> = []
 
             Publishers.CombineLatest(surface.$pwd, surface.$title)
                 .dropFirst()
                 .sink { [weak self, weak surface] pwd, title in
                     guard let self, let surface, self.surfaceTree.contains(surface) else { return }
+                    let currentUserTitle = surface.titleOverride
+                    if self.observedUserSurfaceTitles[surface.id] != currentUserTitle {
+                        self.observedUserSurfaceTitles[surface.id] = currentUserTitle
+                        NotificationCenter.default.post(name: .ghosttyTabPresentationDidChange, object: self)
+                    }
                     var context = paneSessionContexts[surface.id] ?? .init(
                         workingDirectory: pwd,
                         terminalTitle: title
@@ -1602,6 +1610,27 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         ), for: surface.id)
     }
 
+    private func claimedConversationIDs(
+        for agent: SupportedAgent,
+        excludingSurfaceID: UUID
+    ) -> Set<AgentConversationID> {
+        var controllers = workspaceCoordinator.liveControllers
+        for controller in NSApp.windows.compactMap({ $0.windowController as? TerminalController })
+        where !controllers.contains(where: { $0 === controller }) {
+            controllers.append(controller)
+        }
+        var claimed = Set<AgentConversationID>()
+        for controller in controllers {
+            for (paneID, descriptor) in controller.agentResumeDescriptors
+            where paneID != excludingSurfaceID && descriptor.agent == agent && descriptor.scope == .local {
+                if let conversationID = descriptor.conversationID {
+                    claimed.insert(conversationID)
+                }
+            }
+        }
+        return claimed
+    }
+
     private func scheduleConversationDiscovery(
         agent: SupportedAgent,
         surfaceID: UUID,
@@ -1619,13 +1648,15 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             conversationDiscoveryPending.remove(surfaceID)
             return
         }
+        let claimed = claimedConversationIDs(for: agent, excludingSurfaceID: surfaceID)
         DispatchQueue.global(qos: .utility).asyncAfter(
             deadline: .now() + delays[attempt]
         ) { [weak self] in
             let conversationID = AgentConversationStore.discover(
                 agent: agent,
                 workingDirectory: workingDirectory,
-                launchedAfter: launchedAt
+                launchedAfter: launchedAt,
+                excluding: claimed
             )
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
@@ -1635,7 +1666,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                       descriptor.agent == agent,
                       descriptor.scope == .local,
                       descriptor.conversationID == nil else { return }
-                guard let conversationID else {
+                let stillClaimed = self.claimedConversationIDs(for: agent, excludingSurfaceID: surfaceID)
+                guard let conversationID, !stillClaimed.contains(conversationID) else {
                     scheduleConversationDiscovery(
                         agent: agent,
                         surfaceID: surfaceID,
@@ -2600,12 +2632,28 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     // MARK: Base Controller Overrides
 
+    override func tabRenamePlaceholder() -> String? {
+        guard let resolved = TerminalTabPresentationResolver.resolve(
+            self,
+            index: 1,
+            selected: false,
+            activities: (NSApp.delegate as? AppDelegate)?.tabActivities,
+            style: .chrome
+        ) else {
+            return nil
+        }
+        return resolved.remoteBreadcrumb?.title ?? resolved.title
+    }
+
     override func presentedTerminalTitle(
         for surface: Ghostty.SurfaceView,
         terminalTitle: String
     ) -> String {
-        agentConversationTitle(for: surface)
-            ?? restoredTitleFallback(for: surface, terminalTitle: terminalTitle)
+        if surface.hasUserSetTitle {
+            let trimmed = terminalTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return restoredTitleFallback(for: surface, terminalTitle: terminalTitle)
             ?? paneSessionContext(for: surface)?.presentationTitle ?? terminalTitle
     }
 

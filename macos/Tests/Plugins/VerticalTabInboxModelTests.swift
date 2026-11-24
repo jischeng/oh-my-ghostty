@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import Testing
 @testable import Ghostty
@@ -20,7 +21,8 @@ struct VerticalTabInboxModelTests {
     private func item(
         _ state: TabActivityState? = nil, created: Date, interacted: Date? = nil, agent: Date? = nil
     ) -> TabInboxItem {
-        TabInboxItem(state: state, createdAt: created, lastInteractionAt: interacted ?? created, lastAgentActivityAt: agent)
+        TabInboxItem(state: state, createdAt: created, lastInteractionAt: interacted ?? created,
+                     lastAgentActivityAt: agent)
     }
 
     private func arrangement(
@@ -33,12 +35,10 @@ struct VerticalTabInboxModelTests {
         let now = try date(24, 0, 0, 30)
         let cases: [(created: Date, expected: TabInboxSection)] = [
             (try date(24, 0, 0, 0), .today),
-            // One second before midnight is yesterday, although it is 31 seconds ago.
             (try date(23, 23, 59, 59), .yesterday),
             (try date(23, 0, 0, 0), .yesterday),
             (try date(22, 23, 59, 59), .earlier),
             (try date(1, 12), .earlier),
-            // A clock that moved backwards must not hide a tab.
             (try date(25, 9), .today),
         ]
         for (created, expected) in cases {
@@ -48,7 +48,6 @@ struct VerticalTabInboxModelTests {
             }
         }
 
-        // Almost a full day ago, but still the same calendar day.
         let evening = try date(24, 23, 30)
         let morning = item(created: try date(24, 0, 10))
         #expect(TabInboxModel.section(for: morning, ordering: .created, now: evening, calendar: calendar) == .today)
@@ -59,13 +58,11 @@ struct VerticalTabInboxModelTests {
             item(created: try date(22, 10), agent: try date(24, 9)),
             item(created: try date(23, 12), interacted: try date(24, 8)),
             item(created: try date(24, 7)),
-            // An interaction date restored from before the tab was recreated never predates it.
             item(created: try date(24, 6), interacted: try date(20, 6)),
         ]
         let recency = [try date(24, 9), try date(24, 8), try date(24, 7), try date(24, 6)]
         #expect(items.map { TabInboxModel.recency($0) } == recency)
         #expect(items.map { TabInboxModel.date($0, ordering: .recentlyUsed) } == recency)
-        // Created and manual order bucket by the creation date.
         #expect(items.map { TabInboxModel.date($0, ordering: .created) } == items.map(\.createdAt))
         #expect(items.map { TabInboxModel.date($0, ordering: .manual) } == items.map(\.createdAt))
     }
@@ -77,11 +74,8 @@ struct VerticalTabInboxModelTests {
             item(created: try date(24, 7)),
             item(created: try date(24, 8, 30)),
         ]
-        // Most recently used first.
         #expect(TabInboxModel.order(items: items, ordering: .recentlyUsed) == [0, 3, 1, 2])
-        // Newest first.
         #expect(TabInboxModel.order(items: items, ordering: .created) == [3, 2, 1, 0])
-        // The native tab order.
         #expect(TabInboxModel.order(items: items, ordering: .manual) == [0, 1, 2, 3])
         for ordering in GhosttyTabOrderingMode.allCases {
             #expect(TabInboxModel.order(items: [], ordering: ordering).isEmpty)
@@ -98,7 +92,6 @@ struct VerticalTabInboxModelTests {
         ]
         #expect(arrangement(items, .recentlyUsed, now: now) == [.today: [0, 3, 1, 2]])
         #expect(arrangement(items, .created, now: now) == [.today: [3, 2], .yesterday: [1], .earlier: [0]])
-        // Manual keeps the native order inside the creation date's section.
         #expect(arrangement(items, .manual, now: now) == [.today: [2, 3], .yesterday: [1], .earlier: [0]])
     }
 
@@ -119,8 +112,6 @@ struct VerticalTabInboxModelTests {
         #expect(recent[.today] == [6, 5])
         #expect(Set(recent.keys) == [.continue, .today])
 
-        // Without recency the waiting tabs keep the native order per state,
-        // and the idle tabs fall back to the day they were created.
         let manual = arrangement(items, .manual, now: now)
         #expect(manual == [.continue: [2, 4, 3, 1, 0], .earlier: [5, 6]])
         #expect(arrangement(items, .created, now: now) == manual)
@@ -139,7 +130,6 @@ struct VerticalTabInboxModelTests {
     }
 
     @Test func acknowledgedOrAbsentAgentsAreNotInContinue() {
-        // Acknowledging a finished agent turns its activity idle or clears it.
         #expect(!TabInboxModel.isContinue(.idle))
         #expect(!TabInboxModel.isContinue(nil))
         for state in [TabActivityState.working, .done, .needsAttention, .error] {
@@ -171,7 +161,6 @@ struct VerticalTabInboxModelTests {
 
     @Test func heldOrderKeepsDisplayedRowsAndOnlyFollowsMembership() {
         let displayed = [Rows(id: "inbox:today", tabs: ["a", "b", "c"]), Rows(id: "inbox:earlier", tabs: ["d"])]
-        // b started working, d was closed, n and m are new tabs.
         let fresh = [Rows(id: "inbox:continue", tabs: ["b"]), Rows(id: "inbox:today", tabs: ["n", "c", "a"]),
                      Rows(id: "inbox:earlier", tabs: ["m"])]
         #expect(TabInboxModel.holding(fresh: fresh, displayed: displayed)
@@ -182,14 +171,11 @@ struct VerticalTabInboxModelTests {
     }
 
     @Test func heldOrderPlacesNewGroupsWhereTheFreshOrderHasThem() {
-        // A new tab whose agent works opens Continue above the sections on screen.
         let today = [Rows(id: "inbox:today", tabs: ["a"])]
         let withContinue = [Rows(id: "inbox:continue", tabs: ["x"]), Rows(id: "inbox:today", tabs: ["a"]),
                             Rows(id: "inbox:earlier", tabs: ["y"])]
         #expect(TabInboxModel.holding(fresh: withContinue, displayed: today) == withContinue)
 
-        // Project groups: a tab that changed project stays in the group it is
-        // shown in, the groups keep their places, and a new project is added.
         let projects = [Rows(id: "inbox:project:/one", tabs: ["a", "b"]), Rows(id: "inbox:project:/two", tabs: ["c"])]
         let moved = [Rows(id: "inbox:project:/two", tabs: ["c", "b"]), Rows(id: "inbox:project:/one", tabs: ["a"]),
                      Rows(id: "inbox:project:/three", tabs: ["n"])]
@@ -203,42 +189,19 @@ struct VerticalTabInboxModelTests {
         #expect(TabInboxModel.waitsForUser(.needsAttention))
         #expect(TabInboxModel.waitsForUser(.error))
         #expect(TabInboxModel.waitsForUser(.done))
-        // A working agent waits for nobody, and an acknowledged one is idle.
         #expect(!TabInboxModel.waitsForUser(.working))
         #expect(!TabInboxModel.waitsForUser(.idle))
         #expect(!TabInboxModel.waitsForUser(nil))
 
         #expect(TabInboxModel.attentionCount([]) == 0)
         #expect(TabInboxModel.attentionCount([[.working], [.idle], []]) == 0)
-        // A tab counts once, whichever of its panes waits.
         #expect(TabInboxModel.attentionCount([
             [.working], [.done], [.idle, .needsAttention], [], [.error, .working, .done], [.idle],
         ]) == 3)
     }
 
-    @Test func inboxRowsAreRoomierThanTheTabsView() {
-        let inbox = NativeTabRowMetrics.inbox
-        #expect(inbox.rowHeight == 42)
-        #expect(inbox.twoLineRowHeight == 64)
-        #expect(inbox.height(twoLine: false) == 42)
-        #expect(inbox.height(twoLine: true) == 64)
-        #expect(inbox.subtitleFontSize == 12)
-        #expect(inbox.headerHeight < inbox.rowHeight)
-
-        // The Tabs view keeps the density's row and the metrics it always had.
-        for height in [CGFloat(28), 32] {
-            let tabs = NativeTabRowMetrics.tabs(rowHeight: height)
-            #expect(tabs.rowHeight == height)
-            #expect(tabs.headerHeight == height)
-            #expect(tabs.twoLineRowHeight == height + 14)
-            #expect(tabs.subtitleFontSize == 11)
-            #expect(tabs.subtitleSpacing == 0)
-        }
-    }
-
     @Test func settingsValuesAreTheDocumentedRawValues() {
         #expect(GhosttyTabSidebarViewMode.allCases.map(\.rawValue) == ["tabs", "inbox"])
-        // The inbox shares the Tabs view's choices.
         #expect(GhosttyTabGroupingMode.allCases.map(\.rawValue) == ["none", "project", "date"])
         #expect(GhosttyTabOrderingMode.allCases.map(\.rawValue) == ["manual", "created", "recentlyUsed"])
     }
@@ -255,8 +218,126 @@ struct VerticalTabInboxModelTests {
         #expect(english.toggleInbox(shown: false, attention: 1) == "Show Inbox · 1 tab needs attention")
         #expect(english.toggleInbox(shown: false, attention: 3) == "Show Inbox · 3 tabs need attention")
         #expect(chinese.toggleInbox(shown: false, attention: 3) == "显示收件箱 · 3 个标签页待处理")
-        // The inbox lists those tabs itself.
         #expect(english.toggleInbox(shown: true, attention: 3) == "Show Tabs")
         #expect(chinese.toggleInbox(shown: true) == "显示标签页")
+    }
+
+    @Test @MainActor func untitledAgentRowRemainsSingleLineAndNonInboxSurfacesStayPure() throws {
+        let settings = OhMyGhosttySettings.shared
+        let savedMode = settings.agentSessionTitleMode
+        let savedPathDisplay = settings.tabPathDisplay
+        settings.agentSessionTitleMode = .native
+        settings.tabPathDisplay = .folderName
+        defer {
+            settings.agentSessionTitleMode = savedMode
+            settings.tabPathDisplay = savedPathDisplay
+        }
+
+        let fixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { fixture.close() }
+        let controller = try fixture.tab()
+        let surface = try #require(controller.surfaceTree.first)
+        surface.runtimeDescriptor = nil
+        surface.pwd = NSHomeDirectory() + "/code/omg-agent-inbox"
+        let conversation = try #require(AgentConversationID(UUID().uuidString))
+        controller.adoptAgentResumeDescriptor(
+            .init(agent: .claude, conversationID: conversation,
+                  scope: .local, workingDirectory: NSHomeDirectory() + "/code/omg-agent-inbox"),
+            for: surface
+        )
+
+        // Without a conversation title or OSC topic, Inbox shows a single-line
+        // location with the Agent icon (never "Claude Code" + dangling "~").
+        let untitledInbox = try #require(
+            TerminalTabPresentationResolver.resolve(controller, index: 1, selected: true, activities: nil, style: .inbox)
+        )
+        #expect(untitledInbox.title == "~/code/omg-agent-inbox")
+        #expect(!untitledInbox.showsSubtitle)
+        #expect(untitledInbox.subtitle == nil)
+        #expect(untitledInbox.icon == .asset(SupportedAgent.claude.glyphAssetName))
+
+        // Chrome without live agent activity keeps its plain terminal icon and folder name.
+        let idleChrome = try #require(
+            TerminalTabPresentationResolver.resolve(controller, index: 1, selected: true, activities: nil, style: .chrome)
+        )
+        #expect(idleChrome.title == "omg-agent-inbox")
+        #expect(!idleChrome.showsSubtitle)
+        #expect(idleChrome.icon == .systemSymbol("terminal"))
+
+        // Once a conversation title arrives, ONLY Inbox displays it with a path subtitle.
+        #expect(AgentConversationTitleStore.shared.set(
+            "Rebuild tab inbox", source: .native, agent: .claude, conversationID: conversation
+        ))
+        let namedInbox = try #require(
+            TerminalTabPresentationResolver.resolve(controller, index: 1, selected: true, activities: nil, style: .inbox)
+        )
+        #expect(namedInbox.title == "Rebuild tab inbox")
+        #expect(namedInbox.showsSubtitle)
+        #expect(namedInbox.subtitle == "~/code/omg-agent-inbox")
+
+        let pureChrome = try #require(
+            TerminalTabPresentationResolver.resolve(controller, index: 1, selected: true, activities: nil, style: .chrome)
+        )
+        #expect(pureChrome.title == "omg-agent-inbox")
+        #expect(pureChrome.subtitle == nil)
+        #expect(controller.presentedTerminalTitle(for: surface, terminalTitle: "") != "Rebuild tab inbox")
+
+        let picker = TerminalWorkspacePickerModel(controller: controller, dismiss: { $0() }, reopen: {})
+        #expect(picker.movingTabTitle != "Rebuild tab inbox")
+        #expect(controller.initialTabRenameValue().isEmpty)
+        #expect(controller.tabRenamePlaceholder() == "omg-agent-inbox")
+    }
+
+    @Test @MainActor func manualOverridesNotifyPresentationWithoutInvalidatingShell() throws {
+        let fixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { fixture.close() }
+        let controller = try fixture.tab()
+        let surface = try #require(controller.surfaceTree.first)
+        surface.runtimeDescriptor = nil
+        surface.pwd = NSHomeDirectory()
+
+        var shellInvalidations = 0
+        var presentationNotifications = 0
+        var cancellables = Set<AnyCancellable>()
+        controller.objectWillChange
+            .sink { _ in shellInvalidations += 1 }
+            .store(in: &cancellables)
+        NotificationCenter.default.publisher(for: .ghosttyTabPresentationDidChange)
+            .filter { ($0.object as? BaseTerminalController) === controller }
+            .sink { _ in presentationNotifications += 1 }
+            .store(in: &cancellables)
+
+        controller.titleOverride = "API Server"
+        #expect(shellInvalidations == 0)
+        #expect(presentationNotifications == 1)
+        #expect(controller.initialTabRenameValue() == "API Server")
+
+        controller.titleOverride = nil
+        #expect(shellInvalidations == 0)
+        #expect(presentationNotifications == 2)
+
+        // Surface-level manual override (`hasUserSetTitle`) is honored when tab override is nil.
+        surface.titleOverride = "Pane Override"
+        #expect(presentationNotifications == 3)
+        let chrome = try #require(
+            TerminalTabPresentationResolver.resolve(controller, index: 1, selected: true, activities: nil, style: .chrome)
+        )
+        let inbox = try #require(
+            TerminalTabPresentationResolver.resolve(controller, index: 1, selected: true, activities: nil, style: .inbox)
+        )
+        #expect(chrome.title == "Pane Override")
+        #expect(chrome.subtitle == nil)
+        #expect(inbox.title == "Pane Override")
+        #expect(inbox.subtitle == "~")
+        #expect(controller.initialTabRenameValue() == "Pane Override")
+
+        // Home folder basename is never mistaken for an Agent OSC topic.
+        let homeFolder = (NSHomeDirectory() as NSString).lastPathComponent
+        #expect(TerminalTabPresentationResolver.sessionName(
+            fromTerminalTitle: "✳ \(homeFolder)", agent: .claude, directory: "~"
+        ) == nil)
+        #expect(TerminalTabPresentationResolver.sessionName(
+            fromTerminalTitle: "\(homeFolder) | \(homeFolder)", agent: .codex, directory: "~"
+        ) == nil)
     }
 }

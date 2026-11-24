@@ -8,9 +8,9 @@ import ObjectiveC
 ///
 /// A title is looked for when a pane becomes bound to a conversation and when
 /// the Agent starts or finishes a turn. The Agent's own title is preferred;
-/// the opening prompt, cut short, stands in until one exists; and when the
-/// mode allows it and the Agent has not named the conversation, the opening
-/// prompt is summarised once by the configured endpoint.
+/// when the mode allows it and the Agent has not named the conversation after
+/// its grace window, the opening prompt is summarised once by the configured
+/// endpoint, or sanitized to a short fallback if no endpoint answers.
 ///
 /// Work is keyed by conversation, so several panes showing one conversation
 /// share one lookup, and it stops when the last tab that asked for it is gone.
@@ -64,7 +64,7 @@ final class AgentConversationTitleCoordinator {
     /// prompt has been read, before that prompt is summarised instead.
     private let nativeGraceAttempts: Int
     /// A conversation whose transcript held a prompt and no name is not read
-    /// again on every turn.
+    /// again on every turn start.
     private let settleInterval: TimeInterval
     private let isEnabled: Bool
 
@@ -72,13 +72,12 @@ final class AgentConversationTitleCoordinator {
         let token: UUID
         let task: Task<Void, Never>
         var owners: Set<UUID>
+        var generatingOwners: Set<UUID>
         /// A turn finished while the conversation was being read.
         var sawCompletedTurn = false
     }
 
     private var flights: [Key: Flight] = [:]
-    /// Conversations that had their one second look after a completed turn.
-    private var completedTurnReads = Set<Key>()
     private var settledAt: [Key: Date] = [:]
     /// The newest queued read per host. Reads of one host run in turn, so a
     /// restored window full of Agent tabs does not scan the stores in parallel
@@ -113,20 +112,32 @@ final class AgentConversationTitleCoordinator {
         self.isEnabled = isEnabled
     }
 
-    /// Asks for the title of `target`. Does nothing when the mode is off, when
-    /// the conversation already has the best title this trigger could bring,
-    /// or when it is already being read.
+    /// Asks for the title of `target`.
     ///
-    /// - Parameter owner: Identifies the caller to `release(owner:)`.
-    func request(_ target: Target, trigger: Trigger, owner: UUID) {
+    /// - Parameters:
+    ///   - owner: Identifies the caller to `release(owner:)`.
+    ///   - allowsGeneration: False while the calling tab has a manual override,
+    ///     skipping background LLM requests until the override is cleared.
+    func request(
+        _ target: Target,
+        trigger: Trigger,
+        owner: UUID,
+        allowsGeneration: Bool = true
+    ) {
         guard isEnabled else { return }
-        guard mode() != .off else {
+        let currentMode = mode()
+        guard currentMode != .off else {
             skip(target, trigger, "titles are off")
             return
         }
         let key = target.key
         if flights[key] != nil {
             flights[key]?.owners.insert(owner)
+            if allowsGeneration {
+                flights[key]?.generatingOwners.insert(owner)
+            } else {
+                flights[key]?.generatingOwners.remove(owner)
+            }
             if trigger == .done { flights[key]?.sawCompletedTurn = true }
             skip(target, trigger, "already being read")
             return
@@ -135,35 +146,38 @@ final class AgentConversationTitleCoordinator {
         let delays: [Duration]
         switch trigger {
         case .done:
-            // The one planned second look: the Agent may have named the
-            // conversation while it worked. A generated title can still be
-            // replaced by the Agent's own, never by another generated one.
-            guard source != .native else {
-                skip(target, trigger, "has the Agent's title")
-                return
-            }
-            guard completedTurnReads.insert(key).inserted else {
-                skip(target, trigger, "had its look after a turn")
-                return
-            }
+            // Every completed turn checks the transcript once without waiting so
+            // Claude `/rename` (`custom-title`) and Codex `thread_name` update live.
             delays = [.zero]
         case .bound, .working:
             guard source == nil || source == .prompt else {
                 skip(target, trigger, "has a \(source?.rawValue ?? "stored") title")
                 return
             }
-            if let settled = settledAt[key], now().timeIntervalSince(settled) < settleInterval {
+            let canUpgradePrompt = source == .prompt && currentMode == .generate && allowsGeneration
+            if !canUpgradePrompt,
+               let settled = settledAt[key],
+               now().timeIntervalSince(settled) < settleInterval {
                 skip(target, trigger, "read recently, the Agent named nothing")
                 return
             }
-            // Only a turn that just started can be ahead of its transcript.
-            delays = trigger == .working ? retryDelays : Array(retryDelays.prefix(1))
+            if canUpgradePrompt {
+                delays = [.zero]
+            } else {
+                // Only a turn that just started can be ahead of its transcript.
+                delays = trigger == .working ? retryDelays : Array(retryDelays.prefix(1))
+            }
         }
         AgentConversationTitleLog.info(
             "requested \(Self.describe(target)) trigger=\(trigger.rawValue) " +
                 "stored=\(source?.rawValue ?? "none") reads=\(delays.count)"
         )
-        start(target, delays: delays, owners: [owner])
+        start(
+            target,
+            delays: delays,
+            owners: [owner],
+            generatingOwners: allowsGeneration ? [owner] : []
+        )
     }
 
     /// An Agent, the start of a conversation ID and where its transcript is.
@@ -187,6 +201,7 @@ final class AgentConversationTitleCoordinator {
                 flights[key] = nil
             } else {
                 flights[key]?.owners.remove(owner)
+                flights[key]?.generatingOwners.remove(owner)
             }
         }
     }
@@ -198,19 +213,27 @@ final class AgentConversationTitleCoordinator {
     func waitUntilIdle() async {
         while let flight = flights.values.first {
             await flight.task.value
-            // A cancelled read is removed by `release`; one that finished
-            // removes itself before its task ends.
             await Task.yield()
         }
     }
 
-    private func start(_ target: Target, delays: [Duration], owners: Set<UUID>) {
+    private func start(
+        _ target: Target,
+        delays: [Duration],
+        owners: Set<UUID>,
+        generatingOwners: Set<UUID>
+    ) {
         let token = UUID()
         let task = Task { [weak self] in
             await self?.read(target, delays: delays)
             self?.finish(target, token: token)
         }
-        flights[target.key] = Flight(token: token, task: task, owners: owners)
+        flights[target.key] = Flight(
+            token: token,
+            task: task,
+            owners: owners,
+            generatingOwners: generatingOwners
+        )
     }
 
     private func finish(_ target: Target, token: UUID) {
@@ -218,7 +241,12 @@ final class AgentConversationTitleCoordinator {
         flights[target.key] = nil
         guard flight.sawCompletedTurn, !flight.task.isCancelled else { return }
         for owner in flight.owners {
-            request(target, trigger: .done, owner: owner)
+            request(
+                target,
+                trigger: .done,
+                owner: owner,
+                allowsGeneration: flight.generatingOwners.contains(owner)
+            )
         }
     }
 
@@ -238,16 +266,12 @@ final class AgentConversationTitleCoordinator {
                 return
             }
             guard let found = seed?.firstPrompt else { continue }
-            if prompt == nil {
-                store.set(found, source: .prompt, agent: target.agent,
-                          conversationID: target.conversationID, remoteHost: target.remoteHost)
-            } else {
+            if prompt != nil {
                 graceLeft -= 1
             }
             prompt = found
             if graceLeft <= 0 { break }
         }
-        // No transcript yet: the next turn asks again.
         guard let prompt else {
             AgentConversationTitleLog.info(
                 "no title \(Self.describe(target)): nothing to read after \(delays.count) look(s)"
@@ -255,28 +279,39 @@ final class AgentConversationTitleCoordinator {
             return
         }
         settledAt[target.key] = now()
-        await generate(target, prompt: prompt)
+        let allowsGeneration = flights[target.key].map { !$0.generatingOwners.isEmpty } ?? true
+        await resolveFromPrompt(target, prompt: prompt, allowsGeneration: allowsGeneration)
     }
 
-    private func generate(_ target: Target, prompt: String) async {
+    private func resolveFromPrompt(
+        _ target: Target,
+        prompt: String,
+        allowsGeneration: Bool
+    ) async {
+        let existing = store.record(agent: target.agent, conversationID: target.conversationID)?.source
+        guard existing == nil || existing == .prompt else { return }
         let currentMode = mode()
-        guard currentMode == .generate else {
+        if currentMode == .generate, allowsGeneration {
+            // Only the opening prompt leaves the process; the service redacts and bounds it.
+            if let title = await generator.title(forFirstPrompt: prompt) {
+                guard !Task.isCancelled else { return }
+                store.set(title, source: .generated, agent: target.agent,
+                          conversationID: target.conversationID, remoteHost: target.remoteHost)
+                return
+            }
             AgentConversationTitleLog.info(
-                "not generated \(Self.describe(target)): mode is \(currentMode.rawValue), the prompt stands in"
+                "not generated \(Self.describe(target)): the endpoint gave no title, sanitised prompt stands in"
             )
-            return
-        }
-        let source = store.record(agent: target.agent, conversationID: target.conversationID)?.source
-        guard source == nil || source == .prompt else { return }
-        // Only the opening prompt leaves the process; the service redacts and bounds it.
-        guard let title = await generator.title(forFirstPrompt: prompt) else {
-            // The service tells apart an endpoint that is not set, paused or failing.
+        } else {
+            let reason = allowsGeneration
+                ? "mode is \(currentMode.rawValue)"
+                : "tab has a manual title override"
             AgentConversationTitleLog.info(
-                "not generated \(Self.describe(target)): the endpoint gave no title, the prompt stands in"
+                "not generated \(Self.describe(target)): \(reason), sanitised prompt stands in"
             )
-            return
         }
-        store.set(title, source: .generated, agent: target.agent,
+        guard !Task.isCancelled, let fallback = AITitleSanitizer.sanitize(prompt) else { return }
+        store.set(fallback, source: .prompt, agent: target.agent,
                   conversationID: target.conversationID, remoteHost: target.remoteHost)
     }
 
@@ -310,23 +345,31 @@ final class AgentConversationTitleTracker {
     private var subscriptions = Set<AnyCancellable>()
     private var targets: [UUID: Target] = [:]
     private var states: [UUID: TabActivityState] = [:]
+    private var lastAllowsGeneration = true
     /// Why each Agent pane without a readable conversation has none, as last
     /// logged, so the reason is reported when it changes and not on every signal.
     private var unreadable: [UUID: String] = [:]
-    private var shownTitle: String?
     private var evaluationScheduled = false
 
     init(controller: TerminalController, coordinator: AgentConversationTitleCoordinator = .shared) {
         self.controller = controller
         self.coordinator = coordinator
+        self.lastAllowsGeneration = Self.allowsGeneration(in: controller)
         let changes: [AnyPublisher<Void, Never>] = [
             controller.$agentResumeDescriptors.map { _ in () }.eraseToAnyPublisher(),
             controller.$agentActivities.map { _ in () }.eraseToAnyPublisher(),
-            // A remote conversation can be read once its connection is ready.
-            // The publisher must not retain the controller that owns this object.
             NotificationCenter.default.publisher(for: .terminalPaneSessionContextsDidChange)
                 .filter { [weak controller] notification in
                     guard let controller, let sender = notification.object as? TerminalController else { return false }
+                    return sender === controller
+                }
+                .map { _ in () }
+                .eraseToAnyPublisher(),
+            NotificationCenter.default.publisher(for: .ghosttyTabPresentationDidChange)
+                .filter { [weak controller] notification in
+                    guard let controller, let sender = notification.object as? BaseTerminalController else {
+                        return false
+                    }
                     return sender === controller
                 }
                 .map { _ in () }
@@ -356,8 +399,13 @@ final class AgentConversationTitleTracker {
         }
     }
 
-    /// Published values are sent before they are stored, and one signal can
-    /// change the descriptor and the activity. Read both once they settled.
+    private static func allowsGeneration(in controller: TerminalController) -> Bool {
+        guard let override = controller.titleOverride?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+            return true
+        }
+        return override.isEmpty
+    }
+
     private func scheduleEvaluation() {
         guard !evaluationScheduled else { return }
         evaluationScheduled = true
@@ -370,6 +418,10 @@ final class AgentConversationTitleTracker {
 
     private func evaluate() {
         guard let controller else { return }
+        let allowsGeneration = Self.allowsGeneration(in: controller)
+        let generationJustAllowed = allowsGeneration && !lastAllowsGeneration
+        lastAllowsGeneration = allowsGeneration
+
         var nextTargets: [UUID: Target] = [:]
         var nextStates: [UUID: TabActivityState] = [:]
         var nextUnreadable: [UUID: String] = [:]
@@ -378,13 +430,9 @@ final class AgentConversationTitleTracker {
                 nextStates[surface.id] = state
             }
             guard let descriptor = controller.agentResumeDescriptor(for: surface) else { continue }
-            // The same rule the Inspector uses for when a pane's conversation
-            // may be read: never the old side of a connection handoff.
             guard let session = controller.paneSessionContext(for: surface),
                   let binding = PaneAgentHistoryService.Binding.current(descriptor: descriptor, session: session)
             else {
-                // Without an ID there is no conversation to title: the Agent
-                // has not reported one, or reports none at all.
                 let reason = descriptor.conversationID == nil
                     ? "the pane has no conversation ID" : "its connection is not ready"
                 nextUnreadable[surface.id] = "\(descriptor.agent.rawValue) \(descriptor.scope.rawValue): \(reason)"
@@ -400,20 +448,18 @@ final class AgentConversationTitleTracker {
         unreadable = nextUnreadable
         for (surfaceID, target) in nextTargets {
             let state = nextStates[surfaceID]
-            let newlyBound = targets[surfaceID] != target
+            let newlyBound = targets[surfaceID] != target || generationJustAllowed
             guard newlyBound || state != states[surfaceID],
                   let trigger = Self.trigger(for: state, newlyBound: newlyBound) else { continue }
-            coordinator.request(target, trigger: trigger, owner: owner)
+            coordinator.request(
+                target,
+                trigger: trigger,
+                owner: owner,
+                allowsGeneration: allowsGeneration
+            )
         }
         targets = nextTargets
         states = nextStates
-        // The window title names the conversation too, and a pane can move to
-        // another conversation without its terminal title changing.
-        let title = controller.tabAgentConversationTitle
-        if title != shownTitle {
-            shownTitle = title
-            controller.refreshPresentedTerminalTitle()
-        }
     }
 
     /// What a pane's state asks for: a conversation it just became bound to is
@@ -430,15 +476,11 @@ final class AgentConversationTitleTracker {
     }
 
     private func modeChanged() {
-        // Conversations bound while titles were off are looked up now.
         targets = [:]
         states = [:]
-        // Sent before the setting is stored; redraw once it is.
         DispatchQueue.main.async { [weak self] in
             guard let self, let controller = self.controller else { return }
-            controller.objectWillChange.send()
-            self.shownTitle = controller.tabAgentConversationTitle
-            controller.refreshPresentedTerminalTitle()
+            NotificationCenter.default.post(name: .ghosttyTabPresentationDidChange, object: controller)
         }
         scheduleEvaluation()
     }
@@ -447,11 +489,7 @@ final class AgentConversationTitleTracker {
         guard let controller, controller.agentResumeDescriptors.values.contains(where: {
             $0.agent == key.agent && $0.conversationID == key.conversationID
         }) else { return }
-        // Tab rows and tab chrome redraw on the controller's change signal;
-        // the window title is recomputed through the usual path.
-        controller.objectWillChange.send()
-        shownTitle = controller.tabAgentConversationTitle
-        controller.refreshPresentedTerminalTitle()
+        NotificationCenter.default.post(name: .ghosttyTabPresentationDidChange, object: controller)
     }
 }
 
@@ -460,9 +498,7 @@ private nonisolated(unsafe) var agentConversationTitleTrackerKey: UInt8 = 0
 extension AgentConversationTitleStore {
     /// The one rule for whether a pane shows a conversation title: the mode
     /// allows it and the pane's current resume descriptor names a conversation
-    /// that has one. Only the descriptor decides, so a new conversation in the
-    /// same pane switches title by itself, a connection handoff does not blank
-    /// it, and the title goes when the Agent ends and the descriptor is cleared.
+    /// that has one.
     func title(for descriptor: AgentResumeDescriptor?, mode: AgentSessionTitleMode) -> String? {
         guard mode != .off, let descriptor, let conversationID = descriptor.conversationID else { return nil }
         return title(agent: descriptor.agent, conversationID: conversationID)
@@ -470,9 +506,7 @@ extension AgentConversationTitleStore {
 }
 
 extension TerminalController {
-    /// The conversation title `surface` shows, if any. Tab rows, tab chrome,
-    /// the window title, the command palette and the workspace picker all ask
-    /// here; a manual tab name still wins wherever it applies.
+    /// The conversation title `surface` shows in the Inbox, if any.
     func agentConversationTitle(for surface: Ghostty.SurfaceView?) -> String? {
         AgentConversationTitleStore.shared.title(
             for: agentResumeDescriptor(for: surface),
@@ -480,32 +514,9 @@ extension TerminalController {
         )
     }
 
-    /// The conversation title of the pane that names this tab.
+    /// The conversation title of the pane that names this tab in the Inbox.
     var tabAgentConversationTitle: String? {
         agentConversationTitle(for: focusedSurface ?? surfaceTree.first)
-    }
-
-    /// True when this tab's row and chrome show a name with the place below
-    /// it: the tab has a manual name or its pane a conversation title.
-    ///
-    /// This is `TerminalTabPresentationResolver.resolve` returning a subtitle,
-    /// without building one: a few dictionary lookups, no path formatting.
-    /// The sidebar asks for every row on every refresh to pick the row height.
-    var tabTitleHasSubtitle: Bool { tabTitleHasSubtitle(activities: nil) }
-
-    /// - Parameter activities: The plugin status store the row resolves its
-    ///   Agent with, when it has one.
-    func tabTitleHasSubtitle(activities: TabActivityStore?) -> Bool {
-        guard let surface = focusedSurface ?? surfaceTree.first else { return false }
-        // A tab named by the user, and every Agent tab while session titles
-        // are on: a sidebar row always names an Agent tab. Mirrors the Agent
-        // the resolver reads: the focused pane's, else the tab's unless split.
-        if titleOverride != nil { return true }
-        guard OhMyGhosttySettings.shared.agentSessionTitleMode != .off else { return false }
-        if agentResumeDescriptor(for: surface) != nil { return true }
-        let activity = preferredAgentActivity() ?? activities?.activity(for: tabSessionID)
-        let titleActivity = focusedAgentActivity() ?? (surfaceTree.isSplit ? nil : activity)
-        return titleActivity.flatMap { SupportedAgent(rawValue: $0.source) } != nil
     }
 
     /// Starts looking up conversation titles for this tab's panes. Calling it

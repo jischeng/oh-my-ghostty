@@ -236,7 +236,7 @@ struct AIHTTPClient: Sendable {
         if let status = first.status, !(200..<300).contains(status) {
             // Newer OpenAI models renamed `max_tokens`; retry once and remember the endpoint's choice.
             guard status == 400, field == .maxTokens,
-                  Self.lossyText(first.body).contains("max_completion_tokens") else {
+                  (String(bytes: first.body, encoding: .utf8) ?? "").contains("max_completion_tokens") else {
                 throw AIHTTPError.httpStatus(status, detail: Self.detail(first.body))
             }
             retryState.rememberCompletionTokens(baseURL: endpoint.baseURL, model: endpoint.model)
@@ -281,17 +281,15 @@ struct AIHTTPClient: Sendable {
 
     /// A short, single-line excerpt of an error body for the settings page.
     static func detail(_ body: Data) -> String? {
-        let text = lossyText(body.prefix(4096))
+        guard let decoded = String(bytes: body.prefix(4096), encoding: .utf8)
+                ?? String(bytes: body, encoding: .utf8) else {
+            return nil
+        }
+        let text = decoded
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty else { return nil }
         return String(text.prefix(300))
-    }
-
-    /// Error bodies are read leniently: a cut or mis-encoded byte must not hide the rest.
-    private static func lossyText(_ data: Data) -> String {
-        // swiftlint:disable:next optional_data_string_conversion
-        String(decoding: data, as: UTF8.self)
     }
 
     private func send(

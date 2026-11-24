@@ -520,4 +520,49 @@ struct AgentHistoryTitleSeedTests {
             agent: .opencode, conversationID: conversation, remoteHost: "cloud", remoteAccess: never
         ) == nil)
     }
+
+    @Test func resumedTranscriptDiscoveryExcludesConversationsClaimedByAnotherLivePane() throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let launch = Date()
+        let claimedID = try #require(AgentConversationID("019f-claimed"))
+        let resumedID = try #require(AgentConversationID("019f-resumed"))
+
+        let claimedURL = root.appendingPathComponent("2026/11/20/rollout-claimed.jsonl")
+        let resumedURL = root.appendingPathComponent("2026/11/20/rollout-resumed.jsonl")
+        try write([try json(["type": "session_meta", "payload": ["id": claimedID.rawValue, "cwd": "/tmp/repo"]])],
+                  to: claimedURL)
+        try write([try json(["type": "session_meta", "payload": ["id": resumedID.rawValue, "cwd": "/tmp/repo"]])],
+                  to: resumedURL)
+        let yesterday = launch.addingTimeInterval(-86_400)
+        try FileManager.default.setAttributes(
+            [.creationDate: yesterday, .modificationDate: launch.addingTimeInterval(2)],
+            ofItemAtPath: claimedURL.path
+        )
+        try FileManager.default.setAttributes(
+            [.creationDate: yesterday, .modificationDate: launch.addingTimeInterval(1)],
+            ofItemAtPath: resumedURL.path
+        )
+
+        // Without exclusion, two resumed transcripts modified within 2s are ambiguous.
+        #expect(AgentConversationStore.discover(
+            agent: .codex, workingDirectory: "/tmp/repo", launchedAfter: launch, rootURL: root
+        ) == nil)
+
+        // Excluding the sibling pane's claimed ID isolates the newly resumed session.
+        #expect(AgentConversationStore.discover(
+            agent: .codex, workingDirectory: "/tmp/repo", launchedAfter: launch,
+            excluding: [claimedID], rootURL: root
+        ) == resumedID)
+
+        // If only the sibling pane's claimed transcript was touched, nothing is stolen.
+        try FileManager.default.setAttributes(
+            [.creationDate: yesterday, .modificationDate: yesterday],
+            ofItemAtPath: resumedURL.path
+        )
+        #expect(AgentConversationStore.discover(
+            agent: .codex, workingDirectory: "/tmp/repo", launchedAfter: launch,
+            excluding: [claimedID], rootURL: root
+        ) == nil)
+    }
 }

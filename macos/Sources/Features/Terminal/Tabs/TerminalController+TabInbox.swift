@@ -119,8 +119,8 @@ extension TerminalController {
 
     private func stampTabInteraction(at date: Date) {
         recordTabInteraction(at: date)
-        // Saved with the tab, like its creation date.
+        // Saved with the tab, like its creation date, at the next natural
+        // checkpoint. A keystroke never forces a session write of its own.
         invalidateRestorableState()
-        sessionCheckpointStateDidChange()
     }
 }

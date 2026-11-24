@@ -500,4 +500,320 @@ struct AgentQuickInputDockContainerTests {
         container.composerHost.scrollWheel(with: wheelAtGap)
         #expect(spy.scrollWheelCount == 0)
     }
+
+    @Test func dockedModeShrinksContentHostInFlowWithoutShadowOrOcclusion() {
+        let container = AgentQuickInputDockContainer.Container(
+            frame: NSRect(x: 0, y: 0, width: 800, height: 600)
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = container
+        defer { window.contentView = nil; window.close() }
+
+        container.update(
+            content: AnyView(Color.clear),
+            composer: AnyView(Color.clear),
+            queue: AnyView(Color.clear),
+            composerHeight: 165,
+            queueHeight: 0,
+            layoutMode: .dockedOrFloatingFallback
+        )
+        container.layoutSubtreeIfNeeded()
+
+        #expect(container.isDocked)
+        #expect(container.contentHost.frame == NSRect(x: 0, y: 165, width: 800, height: 435))
+        #expect(container.composerHost.frame == NSRect(x: 0, y: 0, width: 800, height: 165))
+        #expect(!container.composerHost.isHidden)
+        #expect(container.composerShadowLayer.isHidden)
+        #expect(container.composerShadowLayer.shadowOpacity == 0)
+        #expect(!container.occludesContentPoint(inWindow: NSPoint(x: 100, y: 40)))
+
+        // Closing restores full height cleanly.
+        container.update(
+            content: AnyView(Color.clear),
+            composer: AnyView(Color.clear),
+            queue: AnyView(Color.clear),
+            composerHeight: 0,
+            queueHeight: 0,
+            layoutMode: .dockedOrFloatingFallback
+        )
+        container.layoutSubtreeIfNeeded()
+
+        #expect(!container.isDocked)
+        #expect(container.contentHost.frame == NSRect(x: 0, y: 0, width: 800, height: 600))
+        #expect(container.composerHost.isHidden)
+    }
+
+    @Test func shortPaneFallsBackToFloatingOverlayWithoutShrinkingContentHost() {
+        let container = AgentQuickInputDockContainer.Container(
+            frame: NSRect(x: 0, y: 0, width: 800, height: 240)
+        )
+        container.update(
+            content: AnyView(Color.clear),
+            composer: AnyView(Color.clear),
+            queue: AnyView(Color.clear),
+            composerHeight: 165,
+            queueHeight: 0,
+            layoutMode: .dockedOrFloatingFallback
+        )
+        container.layoutSubtreeIfNeeded()
+
+        #expect(!container.isDocked)
+        #expect(container.contentHost.frame == NSRect(x: 0, y: 0, width: 800, height: 240))
+        #expect(container.composerHost.frame == NSRect(x: 16, y: 12, width: 768, height: 165))
+        #expect(!container.composerShadowLayer.isHidden)
+
+        // Growing past 256pt transitions smoothly into docked in-flow mode.
+        container.setFrameSize(NSSize(width: 800, height: 300))
+        container.layoutSubtreeIfNeeded()
+
+        #expect(container.isDocked)
+        // Clamped to 300 - 160 (minimumTerminalHeight) = 140pt.
+        #expect(container.contentHost.frame == NSRect(x: 0, y: 140, width: 800, height: 160))
+        #expect(container.composerHost.frame == NSRect(x: 0, y: 0, width: 800, height: 140))
+        #expect(container.composerShadowLayer.isHidden)
+    }
+
+    @Test func tabOverlayPositionsUnclippedPopoverWhenComposerLivesInPane() throws {
+        let container = AgentQuickInputDockContainer.Container(
+            frame: NSRect(x: 0, y: 0, width: 900, height: 600)
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = container
+        defer { window.contentView = nil; window.close() }
+
+        var outsideDismissCount = 0
+        let footerRect = NSRect(x: 0, y: 8, width: 420, height: 28)
+        container.update(
+            content: AnyView(Color.clear),
+            composer: AnyView(EmptyView()),
+            queue: AnyView(Color.clear),
+            composerHeight: 0,
+            queueHeight: 120,
+            queueWidth: 380,
+            composerAccessoryOrigin: CGPoint(x: 80, y: 42),
+            activeComposerFooterRect: footerRect,
+            onOutsideAccessoryMouseDown: { outsideDismissCount += 1 },
+            layoutMode: .floating
+        )
+        container.layoutSubtreeIfNeeded()
+
+        #expect(container.contentHost.frame == NSRect(x: 0, y: 0, width: 900, height: 600))
+        #expect(container.composerHost.isHidden)
+        #expect(!container.queueHost.isHidden)
+        #expect(container.queueHost.frame == NSRect(x: 80, y: 42, width: 380, height: 120))
+
+        func mouseDown(at point: NSPoint) throws -> NSEvent {
+            try #require(NSEvent.mouseEvent(
+                with: .leftMouseDown,
+                location: point,
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 1,
+                clickCount: 1,
+                pressure: 1
+            ))
+        }
+
+        // Clicking the docked pane's footer toggle strip must not dismiss the tab-level popover.
+        _ = container.handleLocalMouseDown(try mouseDown(at: NSPoint(x: 100, y: 20)))
+        #expect(outsideDismissCount == 0)
+
+        // Clicking outside dismisses the popover.
+        _ = container.handleLocalMouseDown(try mouseDown(at: NSPoint(x: 650, y: 300)))
+        #expect(outsideDismissCount == 1)
+    }
+
+    @Test func visualDockResizeStateSuppressesPTYCommitOnOpenDragAndClose() {
+        var state = SurfaceCoreResizeState()
+        let outer = CGSize(width: 800, height: 600)
+
+        // Initial mount commits normally to PTY.
+        state.setVisualDockContext(outerSize: outer, dockedHeight: 0)
+        #expect(state.request(outer) == .normal(outer))
+
+        // Opening docked Quick Input shrinks visually with zero PTY commit.
+        state.setVisualDockContext(outerSize: outer, dockedHeight: 165)
+        #expect(state.request(CGSize(width: 800, height: 435)) == .visualOnly(CGSize(width: 800, height: 435)))
+        #expect(!state.hasUncommittedLiveSize)
+        #expect(state.commitLiveSizeIfNeeded() == nil)
+
+        // Dragging Quick Input height stays visual-only.
+        state.setVisualDockContext(outerSize: outer, dockedHeight: 220)
+        #expect(state.request(CGSize(width: 800, height: 380)) == .visualOnly(CGSize(width: 800, height: 380)))
+        #expect(!state.hasUncommittedLiveSize)
+
+        // Closing Quick Input restores original height visually with zero PTY commit.
+        state.setVisualDockContext(outerSize: outer, dockedHeight: 0)
+        #expect(state.request(outer) == .visualOnly(outer))
+        #expect(!state.hasUncommittedLiveSize)
+
+        // Genuinely resizing the window/split while docked commits to the PTY.
+        state.setVisualDockContext(outerSize: outer, dockedHeight: 165)
+        #expect(state.request(CGSize(width: 800, height: 435)) == .visualOnly(CGSize(width: 800, height: 435)))
+
+        let resizedOuter = CGSize(width: 600, height: 600)
+        state.setVisualDockContext(outerSize: resizedOuter, dockedHeight: 165)
+        #expect(state.request(CGSize(width: 600, height: 435)) == .normal(CGSize(width: 600, height: 435)))
+
+        // Closing after a genuine outer resize commits the restored full pane size.
+        state.setVisualDockContext(outerSize: resizedOuter, dockedHeight: 0)
+        #expect(state.request(resizedOuter) == .normal(resizedOuter))
+
+        // Width change inside the same outer pane (e.g. in-pane inspector/editor) must NOT stay visual-only.
+        state.setVisualDockContext(outerSize: resizedOuter, dockedHeight: 165)
+        #expect(state.request(CGSize(width: 600, height: 435)) == .visualOnly(CGSize(width: 600, height: 435)))
+        #expect(state.request(CGSize(width: 380, height: 435)) == .normal(CGSize(width: 380, height: 435)))
+
+        // During-drag live resize returning to committedSize still refreshes committedOuterSize.
+        var dragState = SurfaceCoreResizeState()
+        dragState.setVisualDockContext(outerSize: CGSize(width: 800, height: 600), dockedHeight: 0)
+        #expect(dragState.request(CGSize(width: 800, height: 600)) == .normal(CGSize(width: 800, height: 600)))
+        dragState.beginInteraction(mode: .duringDrag)
+        dragState.setVisualDockContext(outerSize: CGSize(width: 800, height: 765), dockedHeight: 165)
+        #expect(dragState.request(CGSize(width: 800, height: 600)) == nil)
+        dragState.setVisualDockContext(outerSize: CGSize(width: 800, height: 700), dockedHeight: 165)
+        #expect(dragState.request(CGSize(width: 800, height: 535)) == .live(CGSize(width: 800, height: 535)))
+        dragState.setVisualDockContext(outerSize: CGSize(width: 800, height: 765), dockedHeight: 165)
+        #expect(dragState.request(CGSize(width: 800, height: 600)) == .live(CGSize(width: 800, height: 600)))
+        #expect(dragState.endInteraction() == nil)
+        // Subsequent dock height drag inside the new outerSize stays visual-only.
+        dragState.setVisualDockContext(outerSize: CGSize(width: 800, height: 765), dockedHeight: 200)
+        #expect(dragState.request(CGSize(width: 800, height: 565)) == .visualOnly(CGSize(width: 800, height: 565)))
+    }
+
+    @Test func tabOverlayFrameProbeConvertsNestedRightSplitCoordinatesToOutermostContainer() async throws {
+        let outerTabContainer = AgentQuickInputDockContainer.Container(
+            frame: NSRect(x: 0, y: 0, width: 900, height: 600)
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = outerTabContainer
+        defer { window.contentView = nil; window.close() }
+
+        var reportedRect: NSRect?
+        let innerSplitContainer = HStack(spacing: 0) {
+            Color.clear.frame(width: 450, height: 600)
+            AgentQuickInputDockContainer(
+                content: AnyView(Color.clear),
+                composer: AnyView(
+                    VStack {
+                        Spacer()
+                        HStack {
+                            Spacer().frame(width: 50)
+                            Color.clear
+                                .frame(width: 28, height: 24)
+                                .background(
+                                    QuickInputTabOverlayFrameProbe(isActive: true) { rect in
+                                        reportedRect = rect
+                                    }
+                                )
+                            Spacer()
+                        }
+                        .padding(.bottom, 8)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                ),
+                queue: AnyView(EmptyView()),
+                composerHeight: 165,
+                queueHeight: 0,
+                layoutMode: .dockedOrFloatingFallback
+            )
+            .frame(width: 450, height: 600)
+        }
+
+        outerTabContainer.update(
+            content: AnyView(innerSplitContainer),
+            composer: AnyView(EmptyView()),
+            queue: AnyView(EmptyView()),
+            composerHeight: 0,
+            queueHeight: 0,
+            layoutMode: .floating
+        )
+        outerTabContainer.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+        outerTabContainer.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+
+        let rect = try #require(reportedRect)
+        // Right pane starts at x=450, button has 50pt leading spacer -> x ≈ 500, y ≈ 8 in AppKit coordinates.
+        #expect(abs(rect.minX - 500) < 2)
+        #expect(abs(rect.minY - 8) < 2)
+        #expect(abs(rect.width - 28) < 2)
+        #expect(abs(rect.height - 24) < 2)
+    }
+
+    @Test func focusRequestIDZeroDoesNotStealFocusAfterPriorFocusHandled() async throws {
+        var draft = ""
+        let binding = Binding<String>(get: { draft }, set: { draft = $0 })
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        let external = NSTextField(frame: NSRect(x: 0, y: 150, width: 100, height: 24))
+        root.addSubview(external)
+        window.contentView = root
+        window.makeKeyAndOrderFront(nil)
+        defer { window.contentView = nil; window.close() }
+
+        let host = NSHostingView(rootView: AgentQuickInputTextEditor(
+            text: binding,
+            placeholder: "test",
+            isPresented: true,
+            focusRequestID: 1,
+            font: .systemFont(ofSize: 13),
+            onPasteImage: nil,
+            onSend: {},
+            onQueue: {},
+            onCancel: {}
+        ))
+        host.frame = NSRect(x: 0, y: 0, width: 400, height: 120)
+        root.addSubview(host)
+        root.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(60))
+        #expect(window.firstResponder is ComposerTextView)
+
+        // Move focus away to external control, then update with focusRequestID == 0 (non-focusing switch back).
+        #expect(window.makeFirstResponder(external))
+        host.rootView = AgentQuickInputTextEditor(
+            text: binding,
+            placeholder: "test",
+            isPresented: true,
+            focusRequestID: 0,
+            font: .systemFont(ofSize: 13),
+            onPasteImage: nil,
+            onSend: {},
+            onQueue: {},
+            onCancel: {}
+        )
+        root.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(60))
+        #expect(!(window.firstResponder is ComposerTextView))
+    }
+
+    @Test func footerLayoutModeCompactsAtNarrowSplitWidths() {
+        #expect(QuickInputFooterLayoutMode.resolve(width: 520) == .regular)
+        #expect(QuickInputFooterLayoutMode.resolve(width: 460) == .regular)
+        #expect(QuickInputFooterLayoutMode.resolve(width: 459) == .compact)
+        #expect(QuickInputFooterLayoutMode.resolve(width: 340) == .compact)
+        #expect(QuickInputFooterLayoutMode.resolve(width: 339) == .iconOnly)
+        #expect(QuickInputFooterLayoutMode.regular.showsSecondaryActionTitles)
+        #expect(!QuickInputFooterLayoutMode.compact.showsSecondaryActionTitles)
+        #expect(QuickInputFooterLayoutMode.compact.showsPrimaryActionTitle)
+        #expect(!QuickInputFooterLayoutMode.iconOnly.showsPrimaryActionTitle)
+    }
 }

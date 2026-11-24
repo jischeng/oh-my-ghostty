@@ -716,7 +716,7 @@ struct AgentQuickInputTests {
     }
 
     @Test @MainActor
-    func floatingQuickInputOverlaysTerminalWithZeroResizeZeroCtrlGAndZeroDEC1004FocusChatter() async throws {
+    func dockedQuickInputShrinksVisuallyWithZeroSIGWINCHZeroCtrlGAndZeroDEC1004FocusChatter() async throws {
         let app = try #require(NSApp.delegate as? AppDelegate).ghostty
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -724,10 +724,17 @@ struct AgentQuickInputTests {
         let script = root.appendingPathComponent("probe.py")
         let ready = root.appendingPathComponent("ready")
         let captured = root.appendingPathComponent("captured")
+        let winchFile = root.appendingPathComponent("winch")
         try #"""
-        import os, pathlib, tty
+        import os, pathlib, signal, tty
         tty.setraw(0)
         root = pathlib.Path(__file__).parent
+        winches = 0
+        def on_winch(signum, frame):
+            global winches
+            winches += 1
+            (root / "winch").write_text(str(winches))
+        signal.signal(signal.SIGWINCH, on_winch)
         os.write(1, b"\x1b[?1004h")
         (root / "ready").touch()
         buf = bytearray()
@@ -763,11 +770,13 @@ struct AgentQuickInputTests {
         try await Task.sleep(for: .milliseconds(100))
 
         let baselineBytes = (try? Data(contentsOf: captured))?.count ?? 0
+        let baselineWinches = Int((try? String(contentsOf: winchFile, encoding: .utf8)) ?? "0") ?? 0
         let initialSurfaceFrame = surface.frame
+        let expectedDockedHeight = initialSurfaceFrame.height - controller.quickInputModel.dockHeight
         #expect(!controller.quickInputModel.isPinned)
         #expect(surface.focused)
 
-        // 1. Open Quick Input (⌘⇧E); it floats over the full terminal viewport and transfers focus cleanly.
+        // 1. Open Quick Input (⌘⇧E); it docks in-flow below the terminal visually without SIGWINCH.
         controller.toggleQuickInput()
         #expect(controller.quickInputModel.isPresented)
         func findEditor(_ view: NSView) -> ComposerTextView? {
@@ -784,18 +793,9 @@ struct AgentQuickInputTests {
         #expect(surface.hasCompanionQuickInputFocus)
         #expect(surface.focused)
         #expect(surface.layer?.opacity == 1)
-        #expect(surface.frame == initialSurfaceFrame)
-        #expect(surface.isPointOccludedByFloatingAccessory(
+        #expect(abs(surface.frame.height - expectedDockedHeight) < 1)
+        #expect(!surface.isPointOccludedByFloatingAccessory(
             inWindow: surface.convert(NSPoint(x: 100, y: 40), to: nil)
-        ))
-        #expect(!surface.isPointOccludedByFloatingAccessory(
-            inWindow: surface.convert(NSPoint(x: 6, y: 40), to: nil)
-        ))
-        #expect(!surface.isPointOccludedByFloatingAccessory(
-            inWindow: surface.convert(NSPoint(x: 100, y: 6), to: nil)
-        ))
-        #expect(!surface.isPointOccludedByFloatingAccessory(
-            inWindow: surface.convert(NSPoint(x: 100, y: surface.bounds.height - 20), to: nil)
         ))
 
         // 2. Round-trip focus between ComposerTextView and SurfaceView (⌘⌥↑ / ⌘⌥↓).
@@ -807,19 +807,19 @@ struct AgentQuickInputTests {
         #expect(window.firstResponder === editor)
         #expect(surface.hasCompanionQuickInputFocus)
         #expect(surface.focused)
-        #expect(surface.frame == initialSurfaceFrame)
+        #expect(abs(surface.frame.height - expectedDockedHeight) < 1)
 
-        // 3. Queue a message while unpinned; queue lane floats without resizing the terminal.
+        // 3. Queue a message while unpinned; dismissing restores full surface height with zero SIGWINCH.
         controller.quickInputModel.draft = "queued while unpinned"
         controller.queueQuickInputDraft()
         window.contentView?.layoutSubtreeIfNeeded()
-        try await Task.sleep(for: .milliseconds(50))
+        try await Task.sleep(for: .milliseconds(80))
         window.contentView?.layoutSubtreeIfNeeded()
         #expect(controller.quickInputModel.state(for: surface.id)?.queue.count == 1)
         #expect(surface.frame == initialSurfaceFrame)
         #expect(surface.focused)
 
-        // 4. Open again, send a draft, and dismiss on completion with zero terminal resize.
+        // 4. Open again, send a draft, and dismiss on completion with zero SIGWINCH.
         controller.toggleQuickInput()
         window.contentView?.layoutSubtreeIfNeeded()
         controller.focusQuickInputEditor(editor, for: surface.id)
@@ -835,9 +835,13 @@ struct AgentQuickInputTests {
             try await Task.sleep(for: .milliseconds(50))
         }
         window.contentView?.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(100))
         #expect(surface.frame == initialSurfaceFrame)
         #expect(surface.layer?.opacity == 1)
         #expect(surface.focused)
+
+        let afterWinches = Int((try? String(contentsOf: winchFile, encoding: .utf8)) ?? "0") ?? 0
+        #expect(afterWinches == baselineWinches, "Docking/undocking Quick Input must emit zero SIGWINCH to the PTY")
 
         let allData = try Data(contentsOf: captured)
         let roundTripSlice = Data(allData.dropFirst(min(baselineBytes, allData.count)))
@@ -1067,7 +1071,7 @@ struct AgentQuickInputTests {
     }
 
     @Test @MainActor
-    func floatingQuickInputOccludesCardRectAndPreservesMarginMouseHover() async throws {
+    func shortPaneFloatingFallbackOccludesCardRectAndPreservesMarginMouseHover() async throws {
         let app = try #require(NSApp.delegate as? AppDelegate).ghostty
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1096,7 +1100,8 @@ struct AgentQuickInputTests {
         let controller = TerminalController(app, withBaseConfig: config)
         controller.showWindow(nil)
         let window = try #require(controller.window)
-        window.setContentSize(NSSize(width: 800, height: 600))
+        // Below minimumDockedPaneHeight (256pt) so Quick Input uses the floating overlay fallback.
+        window.setContentSize(NSSize(width: 800, height: 240))
         defer {
             controller.dismissQuickInput()
             window.delegate = nil
@@ -1125,7 +1130,7 @@ struct AgentQuickInputTests {
         let dockHit = try #require(window.contentView?.hitTest(cardPoint))
         #expect(dockHit !== surface && !dockHit.isDescendant(of: surface))
 
-        let externalField = NSTextField(frame: NSRect(x: 0, y: 560, width: 80, height: 24))
+        let externalField = NSTextField(frame: NSRect(x: 0, y: 200, width: 80, height: 24))
         window.contentView?.addSubview(externalField)
         _ = window.makeFirstResponder(externalField)
         #expect(!surface.hasCompanionQuickInputFocus)
@@ -1134,7 +1139,7 @@ struct AgentQuickInputTests {
 
         let leftMarginPoint = surface.convert(NSPoint(x: 6, y: 40), to: nil)
         let bottomMarginPoint = surface.convert(NSPoint(x: 120, y: 6), to: nil)
-        let aboveCardPoint = surface.convert(NSPoint(x: 120, y: 260), to: nil)
+        let aboveCardPoint = surface.convert(NSPoint(x: 120, y: surface.bounds.height - 20), to: nil)
         #expect(surface.isPointOccludedByFloatingAccessory(inWindow: cardPoint))
         #expect(!surface.isPointOccludedByFloatingAccessory(inWindow: leftMarginPoint))
         #expect(!surface.isPointOccludedByFloatingAccessory(inWindow: bottomMarginPoint))

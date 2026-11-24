@@ -3,6 +3,7 @@ import AppKit
 enum SurfaceCoreResizeAction: Equatable {
     case normal(CGSize)
     case live(CGSize)
+    case visualOnly(CGSize)
     case commit
 }
 
@@ -12,9 +13,17 @@ struct SurfaceCoreResizeState {
     private(set) var requestedSize: CGSize?
     private(set) var appliedSize: CGSize?
     private(set) var committedSize: CGSize?
+    private(set) var committedOuterSize: CGSize?
+    private(set) var dockOuterSize: CGSize?
+    private(set) var dockedHeight: CGFloat = 0
     private(set) var interactionDepth = 0
     private(set) var interactionMode: TerminalResizeRenderingMode?
     private(set) var hasUncommittedLiveSize = false
+
+    mutating func setVisualDockContext(outerSize: CGSize, dockedHeight: CGFloat) {
+        dockOuterSize = outerSize
+        self.dockedHeight = max(0, dockedHeight)
+    }
 
     mutating func beginInteraction(mode: TerminalResizeRenderingMode) {
         if interactionDepth == 0 { interactionMode = mode }
@@ -25,9 +34,16 @@ struct SurfaceCoreResizeState {
         guard requestedSize != size else { return nil }
         requestedSize = size
 
+        if isPureVisualDockChange(for: size) {
+            appliedSize = size
+            hasUncommittedLiveSize = false
+            return .visualOnly(size)
+        }
+
         guard interactionDepth > 0 else {
             appliedSize = size
             committedSize = size
+            committedOuterSize = dockOuterSize ?? size
             hasUncommittedLiveSize = false
             return .normal(size)
         }
@@ -36,6 +52,9 @@ struct SurfaceCoreResizeState {
         case .duringDrag:
             appliedSize = size
             hasUncommittedLiveSize = committedSize != size
+            if !hasUncommittedLiveSize {
+                committedOuterSize = dockOuterSize ?? size
+            }
             return .live(size)
         case .onRelease:
             return nil
@@ -48,6 +67,7 @@ struct SurfaceCoreResizeState {
         guard interactionMode == .duringDrag,
               hasUncommittedLiveSize else { return nil }
         committedSize = appliedSize
+        committedOuterSize = dockOuterSize ?? appliedSize
         hasUncommittedLiveSize = false
         return .commit
     }
@@ -64,15 +84,34 @@ struct SurfaceCoreResizeState {
         return finishInteraction()
     }
 
+    private func isPureVisualDockChange(for size: CGSize) -> Bool {
+        guard let outer = dockOuterSize,
+              let committedOuter = committedOuterSize,
+              let committed = committedSize else {
+            return false
+        }
+        guard abs(outer.width - committedOuter.width) < 0.5,
+              abs(outer.height - committedOuter.height) < 0.5,
+              abs(size.width - committed.width) < 0.5 else {
+            return false
+        }
+        return dockedHeight > 0 || committed == size
+    }
+
     private mutating func finishInteraction() -> SurfaceCoreResizeAction? {
         defer { interactionMode = nil }
         switch interactionMode {
         case .duringDrag:
-            return commitLiveSizeIfNeeded()
+            if let action = commitLiveSizeIfNeeded() { return action }
+            if let appliedSize, committedSize == appliedSize {
+                committedOuterSize = dockOuterSize ?? appliedSize
+            }
+            return nil
         case .onRelease:
             guard let size = requestedSize, appliedSize != size else { return nil }
             appliedSize = size
             committedSize = size
+            committedOuterSize = dockOuterSize ?? size
             hasUncommittedLiveSize = false
             return .normal(size)
         case nil:
@@ -130,6 +169,10 @@ final class SurfacePresentationLease {}
         owner = nil
     }
 
+    func setVisualDockContext(outerSize: CGSize, dockedHeight: CGFloat) {
+        resizeState.setVisualDockContext(outerSize: outerSize, dockedHeight: dockedHeight)
+    }
+
     func requestSize(_ size: CGSize) {
         if let action = resizeState.request(size) { apply(action) }
     }
@@ -168,6 +211,9 @@ final class SurfacePresentationLease {}
             }
             resizeCommit = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: work)
+        case .visualOnly(let size):
+            cancelScheduledCommit()
+            surface.liveSizeDidChange(size)
         case .commit:
             surface.commitLiveSize()
         }

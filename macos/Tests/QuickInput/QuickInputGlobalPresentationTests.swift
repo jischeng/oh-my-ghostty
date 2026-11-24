@@ -4,7 +4,7 @@ import Testing
 
 @MainActor
 struct QuickInputGlobalPresentationTests {
-    @Test func showDismissAndPinAreGlobalButDraftsRemainIndependent() {
+    @Test func visibilityIsTabScopedWhilePinHeightAndDraftsFollowTheirScopes() {
         let global = QuickInputGlobalPresentation()
         let first = AgentQuickInputModel(dockHeight: 252, globalPresentation: global)
         let second = AgentQuickInputModel(dockHeight: 252, globalPresentation: global)
@@ -13,54 +13,62 @@ struct QuickInputGlobalPresentationTests {
         first.bindGlobalTarget { firstPane }
         second.bindGlobalTarget { secondPane }
         first.present(for: firstPane)
-        #expect(first.isPresented && second.isPresented && global.isPresented)
-        #expect(second.targetSurfaceID == secondPane)
+        #expect(first.isPresented)
+        #expect(!second.isPresented)
+        #expect(first.targetSurfaceID == firstPane)
+        #expect(first.focusRequestSurfaceID == firstPane)
+
         first.draft = "first draft"
+        second.present(for: secondPane)
         second.draft = "second draft"
         first.togglePinned()
         #expect(first.isPinned && second.isPinned && global.isPinned)
         first.completeSubmission(clearDraft: true)
         #expect(first.isPresented && second.isPresented)
         #expect(first.draft.isEmpty && second.draft == "second draft")
+
         second.dismiss()
-        #expect(!first.isPresented && !second.isPresented && !global.isPresented)
+        #expect(first.isPresented)
+        #expect(!second.isPresented)
         #expect(first.isPinned && second.isPinned)
+
         let third = AgentQuickInputModel(dockHeight: 252, globalPresentation: global)
         let thirdPane = UUID()
         third.bindGlobalTarget { thirdPane }
         #expect(!third.isPresented && third.isPinned)
-        second.present(for: secondPane)
-        #expect(first.isPresented && second.isPresented && third.isPresented)
-        #expect(second.draft == "second draft")
+
         third.togglePinned()
         #expect(!first.isPinned && !second.isPinned && !third.isPinned)
-        second.completeSubmission(clearDraft: false)
-        #expect(!first.isPresented && !second.isPresented && !third.isPresented)
+        first.completeSubmission(clearDraft: false)
+        #expect(!first.isPresented)
     }
 
-    @Test func newTabInheritsVisibilityAndRemovingPaneDoesNotCloseOtherTabs() {
+    @Test func switchingSplitsWithinOpenTabMovesTargetWithoutStealingFocus() {
         let global = QuickInputGlobalPresentation()
-        let firstPane = UUID()
-        let first = AgentQuickInputModel(dockHeight: 252, globalPresentation: global)
-        first.bindGlobalTarget { firstPane }
-        first.present(for: firstPane)
-        let second = AgentQuickInputModel(dockHeight: 252, globalPresentation: global)
-        let secondPane = UUID()
-        second.bindGlobalTarget { secondPane }
-        #expect(second.isPresented && second.targetSurfaceID == secondPane)
-        second.removeState(for: secondPane)
-        #expect(global.isPresented && first.isPresented)
-        var focusedPane = UUID()
-        second.bindGlobalTarget { focusedPane }
-        #expect(second.isPresented && second.targetSurfaceID == focusedPane)
-        second.draft = "previous pane draft"
-        let previous = focusedPane
-        focusedPane = UUID()
-        second.bindGlobalTarget { focusedPane }
-        #expect(second.targetSurfaceID == focusedPane && second.draft.isEmpty)
-        #expect(second.state(for: previous)?.draft == "previous pane draft")
-        first.dismiss()
-        #expect(!second.isPresented)
+        let tab = AgentQuickInputModel(dockHeight: 252, globalPresentation: global)
+        let leftPane = UUID()
+        let rightPane = UUID()
+        var focusedPane = leftPane
+        tab.bindGlobalTarget { focusedPane }
+        tab.present(for: leftPane, requestFocus: true)
+        #expect(tab.isPresented)
+        #expect(tab.targetSurfaceID == leftPane)
+        #expect(tab.focusRequestSurfaceID == leftPane)
+        tab.draft = "left draft"
+
+        // Switching to right pane moves the docked Quick Input without stealing terminal focus.
+        focusedPane = rightPane
+        tab.bindGlobalTarget { focusedPane }
+        #expect(tab.isPresented)
+        #expect(tab.targetSurfaceID == rightPane)
+        #expect(tab.focusRequestSurfaceID == nil)
+        #expect(tab.draft.isEmpty)
+        #expect(tab.state(for: leftPane)?.draft == "left draft")
+
+        // Removing the active pane closes Quick Input cleanly on that tab.
+        tab.removeState(for: rightPane)
+        #expect(!tab.isPresented)
+        #expect(tab.targetSurfaceID == nil)
     }
 
     @Test func reopeningHistoryKeepsSelectionAndHoverIsKeyboardSelectionWithoutScrolling() {

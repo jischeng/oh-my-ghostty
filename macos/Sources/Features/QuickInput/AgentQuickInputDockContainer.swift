@@ -8,6 +8,15 @@ protocol FloatingAccessoryOcclusionContainer: AnyObject {
 /// The terminal and accessories have one native geometry owner. Hosting views
 /// render leaves only; none of their intrinsic sizes can resize this container.
 struct AgentQuickInputDockContainer: NSViewRepresentable {
+    enum LayoutMode: Equatable {
+        /// Always float composer and queue cards over the full content bounds.
+        case floating
+        /// Dock the composer in-flow below content when the pane is tall enough,
+        /// falling back to a floating card when the pane is shorter than
+        /// `AgentQuickInputMetrics.minimumDockedPaneHeight`.
+        case dockedOrFloatingFallback
+    }
+
     let content: AnyView
     let composer: AnyView
     let queue: AnyView
@@ -15,8 +24,11 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
     let queueHeight: CGFloat
     var queueWidth: CGFloat?
     var composerAccessoryOrigin: CGPoint?
+    var activeComposerFooterRect: NSRect?
     var onOutsideAccessoryMouseDown: (() -> Void)?
     var isPinned: Bool = false
+    var layoutMode: LayoutMode = .floating
+    var surfacePresentation: SurfacePresentation?
 
     func makeNSView(context: Context) -> Container { Container() }
 
@@ -29,8 +41,11 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
             queueHeight: queueHeight,
             queueWidth: queueWidth,
             composerAccessoryOrigin: composerAccessoryOrigin,
+            activeComposerFooterRect: activeComposerFooterRect,
             onOutsideAccessoryMouseDown: onOutsideAccessoryMouseDown,
-            isPinned: isPinned
+            isPinned: isPinned,
+            layoutMode: layoutMode,
+            surfacePresentation: surfacePresentation
         )
     }
 
@@ -179,9 +194,13 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
         private var requestedQueueHeight: CGFloat = 0
         private var requestedQueueWidth: CGFloat?
         private var requestedComposerAccessoryOrigin: CGPoint?
+        private var activeComposerFooterRect: NSRect?
         private var onOutsideAccessoryMouseDown: (() -> Void)?
         private var mouseDownMonitor: Any?
         private(set) var isPinned: Bool = false
+        private(set) var isDocked: Bool = false
+        private var layoutMode: LayoutMode = .floating
+        private weak var surfacePresentation: SurfacePresentation?
         private let floatingAccessoryViews = NSHashTable<NSView>.weakObjects()
 
         deinit {
@@ -196,7 +215,7 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
         }
 
         private func updateMouseDownMonitor() {
-            if window == nil {
+            if window == nil || onOutsideAccessoryMouseDown == nil {
                 if let mouseDownMonitor {
                     NSEvent.removeMonitor(mouseDownMonitor)
                     self.mouseDownMonitor = nil
@@ -227,6 +246,9 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
                pt.y < composerHost.frame.minY + 36 {
                 return event
             }
+            if let activeComposerFooterRect, activeComposerFooterRect.contains(pt) {
+                return event
+            }
             onOutsideAccessoryMouseDown()
             return event
         }
@@ -241,7 +263,7 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
 
         func occludesContentPoint(inWindow pointInWindow: NSPoint) -> Bool {
             let local = convert(pointInWindow, from: nil)
-            if !composerHost.isHidden, composerHost.frame.contains(local) {
+            if !isDocked, !composerHost.isHidden, composerHost.frame.contains(local) {
                 return true
             }
             if !queueHost.isHidden {
@@ -297,15 +319,22 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
             queueHeight: CGFloat,
             queueWidth: CGFloat? = nil,
             composerAccessoryOrigin: CGPoint? = nil,
+            activeComposerFooterRect: NSRect? = nil,
             onOutsideAccessoryMouseDown: (() -> Void)? = nil,
-            isPinned: Bool = false
+            isPinned: Bool = false,
+            layoutMode: LayoutMode = .floating,
+            surfacePresentation: SurfacePresentation? = nil
         ) {
             requestedComposerHeight = max(0, composerHeight)
             requestedQueueHeight = max(0, queueHeight)
             requestedQueueWidth = queueWidth.map { max(0, $0) }
             requestedComposerAccessoryOrigin = composerAccessoryOrigin
+            self.activeComposerFooterRect = activeComposerFooterRect
             self.onOutsideAccessoryMouseDown = onOutsideAccessoryMouseDown
+            updateMouseDownMonitor()
             self.isPinned = isPinned
+            self.layoutMode = layoutMode
+            self.surfacePresentation = surfacePresentation
             applyAccessoryFrames()
             // Preserve the Surface and ComposerTextView instances, including
             // first responder, selection, marked text and scrollback state.
@@ -328,9 +357,18 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0
                 context.allowsImplicitAnimation = false
-                let safeWidth = bounds.width
+                let safeWidth = max(0, bounds.width)
                 let safeHeight = max(0, bounds.height)
-                let contentFrame = NSRect(x: 0, y: 0, width: safeWidth, height: safeHeight)
+
+                let shouldDock = layoutMode == .dockedOrFloatingFallback
+                    && requestedComposerHeight > 0
+                    && safeWidth > 0
+                    && AgentQuickInputMetrics.shouldDockInFlow(availableHeight: safeHeight)
+                isDocked = shouldDock
+
+                let contentFrame: NSRect
+                let composerFrame: NSRect
+                let nextComposerHeight: CGFloat
 
                 let insetX = min(
                     AgentQuickInputMetrics.floatingHorizontalInset,
@@ -343,30 +381,63 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
                     safeHeight - AgentQuickInputMetrics.floatingBottomInset - topMargin
                 )
 
-                let nextComposerHeight = cardWidth > 0
-                    ? min(requestedComposerHeight, availableOverlay)
-                    : 0
-                let composerY = nextComposerHeight > 0
-                    ? min(AgentQuickInputMetrics.floatingBottomInset, max(0, safeHeight - nextComposerHeight))
-                    : 0
-                let composerFrame = NSRect(
-                    x: insetX,
-                    y: composerY,
-                    width: cardWidth,
-                    height: nextComposerHeight
-                )
+                if shouldDock {
+                    let maxDockedHeight = max(
+                        AgentQuickInputMetrics.minimumHeight,
+                        safeHeight - AgentQuickInputMetrics.minimumTerminalHeight
+                    )
+                    nextComposerHeight = min(requestedComposerHeight, maxDockedHeight)
+                    contentFrame = NSRect(
+                        x: 0,
+                        y: nextComposerHeight,
+                        width: safeWidth,
+                        height: max(0, safeHeight - nextComposerHeight)
+                    )
+                    composerFrame = NSRect(
+                        x: 0,
+                        y: 0,
+                        width: safeWidth,
+                        height: nextComposerHeight
+                    )
+                    surfacePresentation?.setVisualDockContext(
+                        outerSize: bounds.size,
+                        dockedHeight: nextComposerHeight
+                    )
+                } else {
+                    contentFrame = NSRect(x: 0, y: 0, width: safeWidth, height: safeHeight)
+                    nextComposerHeight = cardWidth > 0
+                        ? min(requestedComposerHeight, availableOverlay)
+                        : 0
+                    let composerY = nextComposerHeight > 0
+                        ? min(AgentQuickInputMetrics.floatingBottomInset, max(0, safeHeight - nextComposerHeight))
+                        : 0
+                    composerFrame = NSRect(
+                        x: insetX,
+                        y: composerY,
+                        width: cardWidth,
+                        height: nextComposerHeight
+                    )
+                    surfacePresentation?.setVisualDockContext(
+                        outerSize: bounds.size,
+                        dockedHeight: 0
+                    )
+                }
 
                 let nextQueueHeight: CGFloat
                 let queueFrame: NSRect
-                if nextComposerHeight > 0, requestedQueueHeight > 0, let origin = requestedComposerAccessoryOrigin {
-                    let rawY = composerFrame.minY + origin.y
-                    nextQueueHeight = cardWidth > 0
+                if requestedQueueHeight > 0, let origin = requestedComposerAccessoryOrigin {
+                    let rawY = nextComposerHeight > 0
+                        ? composerFrame.minY + origin.y
+                        : max(0, origin.y)
+                    let minQueueX: CGFloat = nextComposerHeight > 0 ? insetX : 8
+                    let maxAvailableWidth = max(0, safeWidth - minQueueX * 2)
+                    nextQueueHeight = maxAvailableWidth > 0
                         ? min(requestedQueueHeight, max(0, safeHeight - topMargin - rawY))
                         : 0
-                    let resolvedWidth = min(cardWidth, requestedQueueWidth ?? cardWidth)
-                    let minQueueX = insetX
-                    let maxQueueX = max(insetX, safeWidth - insetX - resolvedWidth)
-                    let queueX = min(max(minQueueX, composerFrame.minX + origin.x), maxQueueX)
+                    let resolvedWidth = min(maxAvailableWidth, requestedQueueWidth ?? maxAvailableWidth)
+                    let maxQueueX = max(minQueueX, safeWidth - minQueueX - resolvedWidth)
+                    let baseX = nextComposerHeight > 0 ? composerFrame.minX + origin.x : origin.x
+                    let queueX = min(max(minQueueX, baseX), maxQueueX)
                     queueFrame = NSRect(
                         x: queueX,
                         y: nextQueueHeight > 0 ? rawY : 0,
@@ -383,7 +454,7 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
                         : 0
                     let queueY: CGFloat = if nextQueueHeight > 0 {
                         nextComposerHeight > 0
-                            ? composerY + nextComposerHeight + AgentQuickInputMetrics.floatingStackSpacing
+                            ? composerFrame.minY + nextComposerHeight + AgentQuickInputMetrics.floatingStackSpacing
                             : min(AgentQuickInputMetrics.floatingBottomInset, max(0, safeHeight - nextQueueHeight))
                     } else {
                         0
@@ -411,7 +482,7 @@ struct AgentQuickInputDockContainer: NSViewRepresentable {
                 if queueHost.isHidden != (nextQueueHeight == 0) {
                     queueHost.isHidden = nextQueueHeight == 0
                 }
-                configureOverlayLayers(composerVisible: nextComposerHeight > 0)
+                configureOverlayLayers(composerVisible: nextComposerHeight > 0 && !shouldDock)
             }
         }
 
@@ -644,6 +715,78 @@ struct QuickInputScrollTrapBackground: NSViewRepresentable {
     }
 }
 
+/// Measures a SwiftUI view's frame in the outermost (tab-level) dock container's
+/// AppKit coordinate space, crossing nested `NSHostingView` boundaries cleanly.
+struct QuickInputTabOverlayFrameProbe: NSViewRepresentable {
+    var isActive: Bool
+    var onFrameChange: (NSRect) -> Void
+
+    func makeNSView(context: Context) -> ProbeView {
+        let view = ProbeView()
+        view.isActive = isActive
+        view.onFrameChange = onFrameChange
+        return view
+    }
+
+    func updateNSView(_ view: ProbeView, context: Context) {
+        view.isActive = isActive
+        view.onFrameChange = onFrameChange
+        view.scheduleReport()
+    }
+
+    final class ProbeView: NSView {
+        var isActive: Bool = false
+        var onFrameChange: ((NSRect) -> Void)?
+        private var lastReportedFrame: NSRect?
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToSuperview() {
+            super.viewDidMoveToSuperview()
+            scheduleReport()
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            scheduleReport()
+        }
+
+        override func layout() {
+            super.layout()
+            scheduleReport()
+        }
+
+        func scheduleReport() {
+            guard isActive else {
+                lastReportedFrame = nil
+                return
+            }
+            DispatchQueue.main.async { [weak self] in
+                self?.reportFrameIfNeeded()
+            }
+        }
+
+        func reportFrameIfNeeded() {
+            guard isActive,
+                  !isHiddenOrHasHiddenAncestor,
+                  bounds.width > 0, bounds.height > 0,
+                  let container = outermostDockContainer() else {
+                return
+            }
+            let rect = container.convert(bounds, from: self)
+            if let last = lastReportedFrame,
+               abs(last.origin.x - rect.origin.x) <= 0.5,
+               abs(last.origin.y - rect.origin.y) <= 0.5,
+               abs(last.width - rect.width) <= 0.5,
+               abs(last.height - rect.height) <= 0.5 {
+                return
+            }
+            lastReportedFrame = rect
+            onFrameChange?(rect)
+        }
+    }
+}
+
 private extension NSView {
     func enclosingDockContainer() -> AgentQuickInputDockContainer.Container? {
         var current = superview
@@ -654,6 +797,18 @@ private extension NSView {
             current = view.superview
         }
         return nil
+    }
+
+    func outermostDockContainer() -> AgentQuickInputDockContainer.Container? {
+        var outermost: AgentQuickInputDockContainer.Container?
+        var current = superview
+        while let view = current {
+            if let container = view as? AgentQuickInputDockContainer.Container {
+                outermost = container
+            }
+            current = view.superview
+        }
+        return outermost
     }
 
     func descendantScrollView() -> NSScrollView? {

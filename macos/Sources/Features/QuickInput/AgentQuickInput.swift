@@ -227,11 +227,16 @@ enum AgentQuickInputMetrics {
     static let defaultHeight: CGFloat = 165
     static let maximumHeight: CGFloat = 480
     static let minimumTerminalHeight: CGFloat = 160
+    static let minimumDockedPaneHeight: CGFloat = minimumHeight + minimumTerminalHeight
     static let floatingHorizontalInset: CGFloat = 16
     static let floatingBottomInset: CGFloat = 12
     static let floatingStackSpacing: CGFloat = 8
     static let floatingTopMargin: CGFloat = 16
     static let cardCornerRadius: CGFloat = 12
+
+    static func shouldDockInFlow(availableHeight: CGFloat) -> Bool {
+        availableHeight >= minimumDockedPaneHeight
+    }
     static let queueLaneHeight: CGFloat = 60
     static let queueCardHeight: CGFloat = 38
     static let queueFloatingHeight: CGFloat = queueCardHeight + 8
@@ -403,11 +408,7 @@ struct AgentQuickInputPaneState: Equatable, Sendable {
 
 @MainActor
 final class AgentQuickInputModel: ObservableObject {
-    @Published private(set) var isPresented = false {
-        didSet {
-            if !isSynchronizingGlobal { globalPresentation?.setPresented(isPresented) }
-        }
-    }
+    @Published private(set) var isPresented = false
     @Published private(set) var targetSurfaceID: UUID?
     @Published var draft = "" {
         didSet {
@@ -425,16 +426,19 @@ final class AgentQuickInputModel: ObservableObject {
     @Published private(set) var dockHeight: CGFloat
     @Published private(set) var editingQueueItemID: UUID?
     @Published private(set) var focusRequestID = 0
+    @Published private(set) var focusRequestSurfaceID: UUID?
     @Published private(set) var isPinned = false
     @Published var isQueueExpanded = false
     @Published var composerQueueLeadingOffset: CGFloat = 110
     @Published var composerHistoryLeadingOffset: CGFloat = 78
+    @Published var composerQueueAnchorInTab: CGPoint?
+    @Published var composerHistoryAnchorInTab: CGPoint?
+    @Published var composerFooterRectInTab: CGRect?
     let historyPresentation = QuickInputHistoryPresentation()
     private var historyNavigation = QuickInputHistoryNavigation()
     private var presentationObserver: AnyCancellable?
     private var globalObservers: Set<AnyCancellable> = []
     private var globalPresentation: QuickInputGlobalPresentation?
-    private var isSynchronizingGlobal = false
     private var currentSurfaceID: (() -> UUID?)?
 
     private var draftBeforeEditing: String?
@@ -471,9 +475,6 @@ final class AgentQuickInputModel: ObservableObject {
                 self?.pendingDockHeight = nil
                 if self?.dockHeight != CGFloat(height) { self?.dockHeight = CGFloat(height) }
             }.store(in: &globalObservers)
-            globalPresentation.$isPresented.sink { [weak self] visible in
-                self?.synchronizeGlobalPresentation(visible)
-            }.store(in: &globalObservers)
             globalPresentation.$isPinned.sink { [weak self] pinned in
                 if self?.isPinned != pinned { self?.isPinned = pinned }
             }.store(in: &globalObservers)
@@ -482,21 +483,8 @@ final class AgentQuickInputModel: ObservableObject {
 
     func bindGlobalTarget(_ currentSurfaceID: @escaping () -> UUID?) {
         self.currentSurfaceID = currentSurfaceID
-        if let globalPresentation { synchronizeGlobalPresentation(globalPresentation.isPresented) }
-    }
-
-    private func synchronizeGlobalPresentation(_ visible: Bool) {
-        isSynchronizingGlobal = true
-        defer { isSynchronizingGlobal = false }
-        if visible {
-            guard let surfaceID = currentSurfaceID?() ?? targetSurfaceID else { return }
+        if isPresented, let surfaceID = currentSurfaceID(), surfaceID != targetSurfaceID {
             present(for: surfaceID, requestFocus: false)
-        } else {
-            if isEditingQueuedItem { cancelQueuedItemEdit() }
-            isQueueExpanded = false
-            historyPresentation.close()
-            historyNavigation.edited()
-            if isPresented { isPresented = false }
         }
     }
 
@@ -655,25 +643,30 @@ final class AgentQuickInputModel: ObservableObject {
             return
         }
         if isEditingQueuedItem, targetSurfaceID != surfaceID {
-            let wasSynchronizingGlobal = isSynchronizingGlobal
-            isSynchronizingGlobal = true
             cancelQueuedItemEdit()
-            isSynchronizingGlobal = wasSynchronizingGlobal
         }
         historyNavigation.edited()
         if targetSurfaceID != surfaceID {
             historyPresentation.close()
             isQueueExpanded = false
+            composerHistoryAnchorInTab = nil
+            composerQueueAnchorInTab = nil
+            composerFooterRectInTab = nil
         }
         targetSurfaceID = surfaceID
         applyDraft(paneStates[surfaceID]?.draft ?? "")
         statusMessage = nil
         isPresented = true
-        if requestFocus { self.requestFocus() }
+        if requestFocus {
+            self.requestFocus()
+        } else {
+            focusRequestSurfaceID = nil
+        }
     }
 
     func requestFocus() {
         guard isPresented else { return }
+        focusRequestSurfaceID = targetSurfaceID
         focusRequestID &+= 1
     }
 
@@ -692,6 +685,7 @@ final class AgentQuickInputModel: ObservableObject {
             applyDraft("")
         }
         statusMessage = nil
+        focusRequestSurfaceID = nil
         isPresented = false
     }
 
@@ -851,15 +845,17 @@ final class AgentQuickInputModel: ObservableObject {
     func removeState(for surfaceID: UUID) {
         paneStates.removeValue(forKey: surfaceID)
         if targetSurfaceID == surfaceID {
-            isSynchronizingGlobal = true
-            defer { isSynchronizingGlobal = false }
             isQueueExpanded = false
             historyPresentation.close()
             historyNavigation.edited()
+            focusRequestSurfaceID = nil
             isPresented = false
             targetSurfaceID = nil
             editingQueueItemID = nil
             draftBeforeEditing = nil
+            composerHistoryAnchorInTab = nil
+            composerQueueAnchorInTab = nil
+            composerFooterRectInTab = nil
             applyDraft("")
         }
     }
@@ -1025,6 +1021,7 @@ struct AgentQuickInputDock<Content: View>: View {
 
     private func overlayConfiguration(
         availableWidth: CGFloat,
+        availableHeight: CGFloat,
         maxStackHeight: CGFloat,
         queue: [AgentQuickInputQueueItem]
     ) -> OverlayConfiguration {
@@ -1034,6 +1031,8 @@ struct AgentQuickInputDock<Content: View>: View {
 
         if showHistoryHost {
             let entries = visibleHistoryEntries
+            let origin = model.composerHistoryAnchorInTab
+                ?? CGPoint(x: model.composerHistoryLeadingOffset, y: 38)
             return OverlayConfiguration(
                 width: QuickInputHistoryLayout.stackWidth(entries: entries, availableWidth: availableWidth),
                 height: QuickInputHistoryLayout.stackHeight(
@@ -1041,11 +1040,13 @@ struct AgentQuickInputDock<Content: View>: View {
                     storageError: model.historyStore.storageError != nil,
                     maxHeight: maxStackHeight
                 ),
-                origin: CGPoint(x: model.composerHistoryLeadingOffset, y: 38),
+                origin: origin,
                 view: AnyView(historyStackOverlay(availableWidth: availableWidth, maxHeight: maxStackHeight))
             )
         }
         if showQueueHost {
+            let origin = model.composerQueueAnchorInTab
+                ?? CGPoint(x: model.composerQueueLeadingOffset, y: 38)
             return OverlayConfiguration(
                 width: QuickInputQueueStackLayout.stackWidth(
                     items: queue,
@@ -1053,7 +1054,7 @@ struct AgentQuickInputDock<Content: View>: View {
                     availableWidth: availableWidth
                 ),
                 height: QuickInputQueueStackLayout.stackHeight(itemCount: queue.count, maxHeight: maxStackHeight),
-                origin: CGPoint(x: model.composerQueueLeadingOffset, y: 38),
+                origin: origin,
                 view: AnyView(queueStackOverlay(availableWidth: availableWidth, maxHeight: maxStackHeight))
             )
         }
@@ -1062,25 +1063,37 @@ struct AgentQuickInputDock<Content: View>: View {
 
     var body: some View {
         let queue = model.targetQueue
-        let availableWidth = controller.window?.contentLayoutRect.width ?? 1_000
-        let maxStackHeight = max(80, controller.quickInputAvailableHeight() - 38)
-        let overlay = overlayConfiguration(
-            availableWidth: availableWidth,
-            maxStackHeight: maxStackHeight,
-            queue: queue
-        )
+        GeometryReader { geometry in
+            let availableWidth = geometry.size.width > 0
+                ? geometry.size.width
+                : (controller.window?.contentLayoutRect.width ?? 1_000)
+            let availableHeight = geometry.size.height > 0
+                ? geometry.size.height
+                : controller.quickInputAvailableHeight()
+            let maxStackHeight = max(80, availableHeight - 54)
+            let overlay = overlayConfiguration(
+                availableWidth: availableWidth,
+                availableHeight: availableHeight,
+                maxStackHeight: maxStackHeight,
+                queue: queue
+            )
 
-        AgentQuickInputDockContainer(
-            content: AnyView(content),
-            composer: AnyView(composer),
-            queue: overlay.view,
-            composerHeight: model.isPresented ? model.dockHeight : 0,
-            queueHeight: overlay.height,
-            queueWidth: overlay.width,
-            composerAccessoryOrigin: overlay.origin,
-            onOutsideAccessoryMouseDown: { model.collapseAccessoryStacks() },
-            isPinned: model.isPinned
-        )
+            // Tab-level overlay hosts only unclipped History/Queue popovers and
+            // per-pane floating badge anchors; the composer itself is docked per pane.
+            AgentQuickInputDockContainer(
+                content: AnyView(content),
+                composer: AnyView(EmptyView()),
+                queue: overlay.view,
+                composerHeight: 0,
+                queueHeight: overlay.height,
+                queueWidth: overlay.width,
+                composerAccessoryOrigin: overlay.origin,
+                activeComposerFooterRect: model.composerFooterRectInTab,
+                onOutsideAccessoryMouseDown: { model.collapseAccessoryStacks() },
+                isPinned: model.isPinned,
+                layoutMode: .floating
+            )
+        }
         .onAppear {
             syncQueueStackMount(expanded: shouldShowQueueStack, immediateDismiss: true)
             syncHistoryStackMount(expanded: shouldShowHistoryStack, immediateDismiss: true)
@@ -1188,13 +1201,81 @@ struct AgentQuickInputDock<Content: View>: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
     }
 
-    private var composer: some View {
-        AgentQuickInputComposer(
-            controller: controller,
-            model: model
+}
+
+struct AgentQuickInputPaneDock<Content: View>: View {
+    @Environment(\.editorTerminalController) private var controller
+    let surfaceView: Ghostty.SurfaceView
+    let availableWidth: CGFloat
+    let availableHeight: CGFloat
+    let content: Content
+
+    init(
+        surfaceView: Ghostty.SurfaceView,
+        availableWidth: CGFloat,
+        availableHeight: CGFloat,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.surfaceView = surfaceView
+        self.availableWidth = availableWidth
+        self.availableHeight = availableHeight
+        self.content = content()
+    }
+
+    var body: some View {
+        if let controller {
+            AgentQuickInputPaneDockHost(
+                controller: controller,
+                model: controller.quickInputModel,
+                surfaceView: surfaceView,
+                availableWidth: availableWidth,
+                availableHeight: availableHeight,
+                content: content
+            )
+        } else {
+            content
+        }
+    }
+}
+
+private struct AgentQuickInputPaneDockHost<Content: View>: View {
+    @ObservedObject var controller: TerminalController
+    @ObservedObject var model: AgentQuickInputModel
+    let surfaceView: Ghostty.SurfaceView
+    let availableWidth: CGFloat
+    let availableHeight: CGFloat
+    let content: Content
+
+    private var isTargetedPane: Bool {
+        model.isPresented && model.targetSurfaceID == surfaceView.id
+    }
+
+    private var isDocked: Bool {
+        AgentQuickInputMetrics.shouldDockInFlow(availableHeight: availableHeight)
+    }
+
+    var body: some View {
+        AgentQuickInputDockContainer(
+            content: AnyView(content),
+            composer: AnyView(
+                AgentQuickInputComposer(
+                    controller: controller,
+                    model: model,
+                    surfaceID: surfaceView.id,
+                    availableWidth: availableWidth,
+                    availableHeight: availableHeight,
+                    isDocked: isDocked
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .transaction { $0.animation = nil }
+            ),
+            queue: AnyView(EmptyView()),
+            composerHeight: isTargetedPane ? model.dockHeight : 0,
+            queueHeight: 0,
+            isPinned: model.isPinned,
+            layoutMode: .dockedOrFloatingFallback,
+            surfacePresentation: surfaceView.presentation
         )
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .transaction { $0.animation = nil }
     }
 }
 
@@ -1349,6 +1430,7 @@ private struct AgentQuickInputPaneQueueBadgeHost: View {
 private struct AgentQuickInputResizeHandle: View {
     @ObservedObject var controller: TerminalController
     @ObservedObject var model: AgentQuickInputModel
+    let availableHeight: CGFloat
     let color: Color
 
     var body: some View {
@@ -1356,7 +1438,16 @@ private struct AgentQuickInputResizeHandle: View {
             edge: .top,
             color: color,
             currentExtent: { model.dockHeight },
-            resize: controller.updateQuickInputHeight,
+            resize: { proposedHeight, persist in
+                let heightLimit = availableHeight > 0
+                    ? availableHeight
+                    : controller.quickInputAvailableHeight()
+                model.updateDockHeight(
+                    proposedHeight,
+                    availableHeight: heightLimit,
+                    persist: persist
+                )
+            },
             accessibilityLabel: "Resize Agent Quick Input",
             defersTerminalResize: false
         )
@@ -2345,8 +2436,48 @@ extension View {
     }
 }
 
+enum QuickInputFooterLayoutMode: Equatable {
+    case regular
+    case compact
+    case iconOnly
+
+    static let compactThreshold: CGFloat = 460
+    static let iconOnlyThreshold: CGFloat = 340
+
+    static func resolve(width: CGFloat) -> Self {
+        if width < iconOnlyThreshold { return .iconOnly }
+        if width < compactThreshold { return .compact }
+        return .regular
+    }
+
+    var showsSecondaryActionTitles: Bool {
+        self == .regular
+    }
+
+    var showsPrimaryActionTitle: Bool {
+        self != .iconOnly
+    }
+
+    var pillHorizontalPadding: CGFloat {
+        switch self {
+        case .regular: 10
+        case .compact: 7
+        case .iconOnly: 6
+        }
+    }
+
+    var containerHorizontalPadding: CGFloat {
+        switch self {
+        case .regular: 14
+        case .compact: 12
+        case .iconOnly: 10
+        }
+    }
+}
+
 private struct QuickInputPillButtonStyle: ButtonStyle {
     var isPrimary = false
+    var horizontalPadding: CGFloat = 10
     @Environment(\.isEnabled) private var isEnabled
     @State private var isHovered = false
 
@@ -2369,7 +2500,7 @@ private struct QuickInputPillButtonStyle: ButtonStyle {
             : Color.primary.opacity(0.11)
 
         return configuration.label
-            .padding(.horizontal, 10)
+            .padding(.horizontal, horizontalPadding)
             .frame(minHeight: 24)
             .foregroundStyle(isPrimary ? Color.primary : Color.secondary)
             .background(fill, in: Capsule())
@@ -2384,36 +2515,33 @@ private struct QuickInputPillButtonStyle: ButtonStyle {
     }
 }
 
-private struct QuickInputQueueButtonMinXPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat?
-    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
-        value = nextValue() ?? value
-    }
-}
-
-private struct QuickInputHistoryButtonMinXPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat?
-    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
-        value = nextValue() ?? value
-    }
-}
-
 private struct AgentQuickInputComposer: View {
     @ObservedObject var controller: TerminalController
     @ObservedObject var model: AgentQuickInputModel
+    let surfaceID: UUID
+    let availableWidth: CGFloat
+    let availableHeight: CGFloat
+    let isDocked: Bool
 
     @ObservedObject private var settings = OhMyGhosttySettings.shared
     @ObservedObject private var secureInput = SecureInput.shared
     private var strings: SettingsStrings { SettingsStrings(language: settings.language) }
+    private var isTargetedPane: Bool {
+        model.isPresented && model.targetSurfaceID == surfaceID
+    }
     private var isPasswordLocked: Bool {
         _ = secureInput.enabled
-        return controller.isQuickInputPasswordLocked(for: model.targetSurfaceID)
+        return controller.isQuickInputPasswordLocked(for: surfaceID)
     }
     private var isSendDisabled: Bool {
         isPasswordLocked && !model.isEditingQueuedItem
     }
 
-    /// Paints the terminal-theme translucent frosted glass card over the terminal.
+    private var footerMode: QuickInputFooterLayoutMode {
+        QuickInputFooterLayoutMode.resolve(width: availableWidth)
+    }
+
+    /// Seamless terminal-theme background for docked mode or translucent card for floating fallback.
     private var chromeBackground: Color {
         controller.quickInputAccessoryBackground(isPinned: model.isPinned)
     }
@@ -2424,7 +2552,7 @@ private struct AgentQuickInputComposer: View {
 
     var body: some View {
         let cardShape = RoundedRectangle(
-            cornerRadius: AgentQuickInputMetrics.cardCornerRadius,
+            cornerRadius: isDocked ? 0 : AgentQuickInputMetrics.cardCornerRadius,
             style: .continuous
         )
 
@@ -2438,15 +2566,11 @@ private struct AgentQuickInputComposer: View {
                 placeholder: model.isEditingQueuedItem
                     ? strings.quickInputEditQueuedPlaceholder
                     : strings.quickInputPlaceholder,
-                isPresented: model.isPresented,
-                focusRequestID: model.focusRequestID,
+                isPresented: isTargetedPane,
+                focusRequestID: model.focusRequestSurfaceID == surfaceID ? model.focusRequestID : 0,
                 font: editorFont,
                 textColor: OMGThemeBackground.palette(for: controller.window, config: controller.ghostty.config).foreground,
                 onPasteImage: { file, completion in
-                    guard let surfaceID = model.targetSurfaceID else {
-                        completion(Ghostty.Shell.escape(file.path))
-                        return
-                    }
                     controller.resolveImagePastePath(
                         for: file,
                         surfaceID: surfaceID,
@@ -2462,7 +2586,7 @@ private struct AgentQuickInputComposer: View {
                                           atBoundary: atBoundary, isRepeat: isRepeat)
                 },
                 onHistoryCaretMoved: model.historyCaretMoved,
-                companionSurfaceID: model.targetSurfaceID,
+                companionSurfaceID: surfaceID,
                 onEditorMouseDown: { model.collapseAccessoryStacks() }
             )
             .background(.clear)
@@ -2478,7 +2602,7 @@ private struct AgentQuickInputComposer: View {
                         symbol: "square.and.arrow.down",
                         isActive: controller.quickInputDraftImportTask != nil
                     ) {
-                        controller.importQuickInputDraftFromTerminal(for: model.targetSurfaceID)
+                        controller.importQuickInputDraftFromTerminal(for: surfaceID)
                     }
                     .disabled(isPasswordLocked)
                 }
@@ -2494,11 +2618,14 @@ private struct AgentQuickInputComposer: View {
                 }
                 .disabled(model.isEditingQueuedItem)
                 .background(
-                    GeometryReader { proxy in
-                        Color.clear.preference(
-                            key: QuickInputHistoryButtonMinXPreferenceKey.self,
-                            value: proxy.frame(in: .named("quickInputComposerCard")).minX
-                        )
+                    QuickInputTabOverlayFrameProbe(isActive: isTargetedPane) { rect in
+                        guard model.targetSurfaceID == surfaceID else { return }
+                        let anchor = CGPoint(x: rect.minX, y: rect.maxY + 6)
+                        if model.composerHistoryAnchorInTab.map({
+                            abs($0.x - anchor.x) > 0.5 || abs($0.y - anchor.y) > 0.5
+                        }) ?? true {
+                            model.composerHistoryAnchorInTab = anchor
+                        }
                     }
                 )
                 if !model.targetQueue.isEmpty {
@@ -2509,11 +2636,14 @@ private struct AgentQuickInputComposer: View {
                         action: model.toggleQueueExpanded
                     )
                     .background(
-                        GeometryReader { proxy in
-                            Color.clear.preference(
-                                key: QuickInputQueueButtonMinXPreferenceKey.self,
-                                value: proxy.frame(in: .named("quickInputComposerCard")).minX
-                            )
+                        QuickInputTabOverlayFrameProbe(isActive: isTargetedPane) { rect in
+                            guard model.targetSurfaceID == surfaceID else { return }
+                            let anchor = CGPoint(x: rect.minX, y: rect.maxY + 6)
+                            if model.composerQueueAnchorInTab.map({
+                                abs($0.x - anchor.x) > 0.5 || abs($0.y - anchor.y) > 0.5
+                            }) ?? true {
+                                model.composerQueueAnchorInTab = anchor
+                            }
                         }
                     )
                 }
@@ -2534,15 +2664,18 @@ private struct AgentQuickInputComposer: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
                 }
-                Spacer(minLength: 8)
-                HStack(spacing: 6) {
+                Spacer(minLength: 4)
+                HStack(spacing: footerMode == .regular ? 6 : 4) {
                     Button(action: controller.dismissQuickInput) {
                         QuickInputShortcutHint(
                             symbols: ["escape"],
-                            title: strings.quickInputCancelTitle
+                            title: strings.quickInputCancelTitle,
+                            showsTitle: footerMode.showsSecondaryActionTitles
                         )
                     }
-                    .buttonStyle(QuickInputPillButtonStyle())
+                    .buttonStyle(QuickInputPillButtonStyle(
+                        horizontalPadding: footerMode.pillHorizontalPadding
+                    ))
                     .help("Esc " + strings.quickInputCancelTitle)
 
                     Button(action: controller.queueQuickInputDraft) {
@@ -2550,10 +2683,13 @@ private struct AgentQuickInputComposer: View {
                             symbols: ["option", "command", "return"],
                             title: model.isEditingQueuedItem
                                 ? strings.quickInputMoveTitle
-                                : strings.quickInputQueueTitle
+                                : strings.quickInputQueueTitle,
+                            showsTitle: footerMode.showsSecondaryActionTitles
                         )
                     }
-                    .buttonStyle(QuickInputPillButtonStyle())
+                    .buttonStyle(QuickInputPillButtonStyle(
+                        horizontalPadding: footerMode.pillHorizontalPadding
+                    ))
                     .help(
                         model.isEditingQueuedItem
                             ? "⌥⌘↩ " + strings.quickInputMoveTitle
@@ -2565,10 +2701,14 @@ private struct AgentQuickInputComposer: View {
                             symbols: ["command", "return"],
                             title: model.isEditingQueuedItem
                                 ? strings.quickInputSaveTitle
-                                : strings.quickInputSendTitle
+                                : strings.quickInputSendTitle,
+                            showsTitle: footerMode.showsPrimaryActionTitle
                         )
                     }
-                    .buttonStyle(QuickInputPillButtonStyle(isPrimary: true))
+                    .buttonStyle(QuickInputPillButtonStyle(
+                        isPrimary: true,
+                        horizontalPadding: footerMode.pillHorizontalPadding
+                    ))
                     .disabled(isSendDisabled)
                     .help(
                         isSendDisabled
@@ -2582,44 +2722,48 @@ private struct AgentQuickInputComposer: View {
             }
             .font(QuickInputFooterStyle.font)
             .foregroundStyle(.secondary)
+            .background(
+                QuickInputTabOverlayFrameProbe(isActive: isTargetedPane) { rect in
+                    guard model.targetSurfaceID == surfaceID else { return }
+                    if model.composerFooterRectInTab != rect {
+                        model.composerFooterRectInTab = rect
+                    }
+                }
+            )
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, footerMode.containerHorizontalPadding)
         .padding(.top, 10)
         .padding(.bottom, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(
-            QuickInputGlassSurface(
-                cornerRadius: AgentQuickInputMetrics.cardCornerRadius,
-                themeColor: chromeBackground,
-                tintOpacity: glass.tintOpacity,
-                colorScheme: cardColorScheme,
-                backdropOpacity: glass.backdropOpacity,
-                isBackdropActive: model.isPresented
-            )
-        )
+        .background {
+            if isDocked {
+                chromeBackground
+            } else {
+                QuickInputGlassSurface(
+                    cornerRadius: AgentQuickInputMetrics.cardCornerRadius,
+                    themeColor: chromeBackground,
+                    tintOpacity: glass.tintOpacity,
+                    colorScheme: cardColorScheme,
+                    backdropOpacity: glass.backdropOpacity,
+                    isBackdropActive: isTargetedPane
+                )
+            }
+        }
+        .overlay(alignment: .top) {
+            if isDocked {
+                Rectangle()
+                    .fill(Color.primary.opacity(0.12))
+                    .frame(height: 1)
+                    .allowsHitTesting(false)
+            }
+        }
         .overlay(alignment: .top) {
             AgentQuickInputResizeHandle(
                 controller: controller,
                 model: model,
+                availableHeight: availableHeight,
                 color: .clear
             )
-        }
-        .coordinateSpace(name: "quickInputComposerCard")
-        .onPreferenceChange(QuickInputQueueButtonMinXPreferenceKey.self) { minX in
-            guard let minX else { return }
-            Task { @MainActor in
-                if abs(model.composerQueueLeadingOffset - minX) > 0.5 {
-                    model.composerQueueLeadingOffset = minX
-                }
-            }
-        }
-        .onPreferenceChange(QuickInputHistoryButtonMinXPreferenceKey.self) { minX in
-            guard let minX else { return }
-            Task { @MainActor in
-                if abs(model.composerHistoryLeadingOffset - minX) > 0.5 {
-                    model.composerHistoryLeadingOffset = minX
-                }
-            }
         }
         .contentShape(cardShape)
         .environment(\.colorScheme, cardColorScheme)

@@ -90,7 +90,9 @@ struct TerminalWorkspaceTests {
         first.togglePinned()
         first.setHeight(310)
         model.draft = "Only this pane"
-        #expect(sibling.isPresented)
+        #expect(!sibling.isPresented)
+        #expect(sibling.isPinned)
+        #expect(sibling.dockHeight == 310)
         #expect(sibling.draft.isEmpty)
         #expect(!foreign.isPresented)
         #expect(!foreign.isPinned)

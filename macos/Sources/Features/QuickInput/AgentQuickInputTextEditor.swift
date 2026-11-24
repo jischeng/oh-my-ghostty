@@ -109,6 +109,7 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
         }
         configureTypography(for: editor, coordinator: context.coordinator, force: needsTypographyRefresh)
         if isPresented,
+           focusRequestID > 0,
            focusRequestID != context.coordinator.handledFocusRequestID {
             let request = focusRequestID
             let coordinator = context.coordinator

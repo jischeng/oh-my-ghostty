@@ -31,17 +31,21 @@ struct QuickInputFooterButtonStyle: ButtonStyle {
 struct QuickInputShortcutHint: View {
     let symbols: [String]
     let title: String
+    var showsTitle: Bool = true
 
     var body: some View {
-        HStack(spacing: QuickInputFooterStyle.labelSpacing) {
+        HStack(spacing: showsTitle ? QuickInputFooterStyle.labelSpacing : 0) {
             HStack(spacing: 2) {
                 ForEach(symbols, id: \.self) { symbol in
                     Image(systemName: symbol).font(QuickInputFooterStyle.shortcutIconFont)
                 }
             }
-            Text(title).font(QuickInputFooterStyle.font)
+            if showsTitle {
+                Text(title).font(QuickInputFooterStyle.font)
+            }
         }
         .accessibilityElement(children: .combine)
+        .accessibilityLabel(title)
     }
 }
 

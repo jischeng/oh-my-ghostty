@@ -124,11 +124,17 @@ private struct TerminalSplitLeaf: View {
 
     var body: some View {
         GeometryReader { geometry in
-            EditorPaneContainer(surfaceView: surfaceView) {
-                Ghostty.InspectableSurface(
-                    surfaceView: surfaceView,
-                    presentationLease: presentationLease,
-                    isSplit: isSplit)
+            AgentQuickInputPaneDock(
+                surfaceView: surfaceView,
+                availableWidth: geometry.size.width,
+                availableHeight: geometry.size.height
+            ) {
+                EditorPaneContainer(surfaceView: surfaceView) {
+                    Ghostty.InspectableSurface(
+                        surfaceView: surfaceView,
+                        presentationLease: presentationLease,
+                        isSplit: isSplit)
+                }
             }
             .overlay(alignment: .bottomTrailing) {
                 AgentQuickInputPaneQueueOverlay(

@@ -1,10 +1,10 @@
 # Host runtime
 
 Each versioned remote host daemon owns multiple session threads, PTYs and children.
-Local sessions use a short-lived broker plus an independent holder process per
-session; each holder owns its PTY, VT state and child. Each pane has a persistent
-UUID; its saved descriptor identifies its local or SSH host and runtime revision.
-The App owns one multiplexed relay per connection/revision.
+Local sessions use a persistent per-channel broker (`host-local`) plus an independent
+holder process (`session-holder`) per session; each holder owns its PTY, VT state and
+child. Each pane has a persistent UUID; its saved descriptor identifies its local or
+SSH host and runtime revision. The App owns one multiplexed relay per connection/revision.
 
 The local H handshake carries an explicit open request. The outer protocol routes
 open/data/detach/error frames by stream ID. Remote output, resize, snapshot ACK,
@@ -27,10 +27,24 @@ The relay owns the listener and pane sockets independently from its replaceable
 host connection. `retry-local LOCAL_SOCKET --interactive` requests an immediate
 retry with explicit interactive authentication; healthy streams remain attached.
 Local startup prefers the helper from the descriptor's versioned bundle when present
-and falls back to the active binary if a pinned historical helper is absent. A broker
-can exit while its holders continue running. A later broker verifies each holder
-with its UUID, generation and private capability before adopting it. Persisted
-numeric PIDs are metadata only and are never signalled.
+and falls back to the active binary if a pinned historical helper is absent. On macOS,
+`HostIdentity` (`host.meta` and `b'V'`) also records the local wrapper mode
+(`app-bundle` vs `unbundled`), parent `+internal-runtime-host` PID, executable path and
+on-disk `(st_dev, st_ino)`. When `ensure_host_mode` (`omgd connect` or
+`omgd ensure-host --local`) finds a running local broker whose `revision` changed (with
+compatible `snapshot-revision`) or whose `+internal-runtime-host` parent wrapper became
+unhealthy after an in-place `.app` replacement (Sparkle rename/unlink or `rm -rf` +
+`ditto` inode change, even when `revision` is unchanged) while a valid `.app` bundle is
+present on disk, it requests a `b'T'` broker takeover (falling back to a verified
+`host.lock` + `omgd host-local` single-PID `SIGTERM` for pre-takeover brokers), waits
+for `host.lock` release so the old `+internal-runtime-host` `bootout`s and exits, and
+bootstraps a fresh `+internal-runtime-host` + `host-local`. Live `host-local` also
+checks its own wrapper health on poll ticks and before `b'C'` new local holder creation,
+stepping down before `SNAPSHOT` when an on-disk replacement `.app` invalidated its
+wrapper so `omgd connect` reconnects transparently. A broker can exit while its holders
+continue running; the replacement broker verifies each holder with its UUID, generation
+and private capability before adopting it. Persisted session `Record` PIDs remain
+metadata only and are never signalled.
 
 Only local C/open requests may carry a one-time launch specification with
 Ghostty's resolved argv, environment, cwd and initial terminal dimensions.
@@ -104,7 +118,9 @@ disconnect when either budget is exhausted; PTY reading and lifetime enforcement
 continue. Exceeding `MAX_STREAMS` rejects only the extra open with stream `E`
 instead of tearing down the shared host transport. Snapshot format compatibility
 hashes only the wire snapshot sources (`src/terminal/snapshot`) while keeping the
-full binary `revision` unchanged. Runtime revision upgrades never
-restart a daemon with active sessions. Host crash, escaped descendants and
-cross-core snapshot migration still have the limits documented in
+full binary `revision` unchanged. Legacy monolithic `remote` daemons are never
+restarted while sessions remain active, whereas decoupled `host-local` and
+`remote-holder` brokers support compatible `b'T'` stepdown and re-adoption of
+surviving `session-holder` processes across upgrades. Host crash, escaped descendants
+and cross-core snapshot migration still have the limits documented in
 RELEASE_PROGRESS.md.

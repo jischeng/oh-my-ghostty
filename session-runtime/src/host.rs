@@ -118,6 +118,25 @@ pub struct HostIdentity {
     pub executable: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary_mtime: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrapper_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrapper_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrapper_executable: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrapper_dev: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrapper_ino: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LocalWrapperIdentity {
+    pub wrapper_mode: Option<String>,
+    pub wrapper_pid: Option<u32>,
+    pub wrapper_executable: Option<String>,
+    pub wrapper_dev: Option<u64>,
+    pub wrapper_ino: Option<u64>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -132,6 +151,165 @@ struct HostControl {
     identity: HostIdentity,
     shutdown_requested: Arc<AtomicBool>,
     wake: WakePipe,
+}
+
+impl HostControl {
+    fn should_step_down_for_replaced_wrapper(&self) -> bool {
+        if !cfg!(target_os = "macos") || self.identity.mode != "local" {
+            return false;
+        }
+        if self.identity.wrapper_mode.as_deref() != Some("app-bundle") {
+            return false;
+        }
+        if is_local_wrapper_healthy(&self.identity, true) {
+            return false;
+        }
+        let Some(wexe) = self.identity.wrapper_executable.as_deref() else {
+            return false;
+        };
+        crate::launchd::enclosing_omg_host_app(Path::new(wexe)).is_some()
+    }
+}
+
+pub fn current_local_wrapper_identity() -> LocalWrapperIdentity {
+    #[cfg(target_os = "macos")]
+    {
+        if std::env::var("OMG_TEST_LEGACY_HOST_MODE").is_ok() {
+            return LocalWrapperIdentity::default();
+        }
+        let ppid = unsafe { libc::getppid() };
+        let uid = unsafe { libc::geteuid() };
+        if ppid > 1 {
+            if let (Some(id_env), Some(exe_env)) = (
+                std::env::var("OMG_WRAPPER_IDENTITY").ok(),
+                std::env::var("OMG_WRAPPER_EXECUTABLE").ok(),
+            ) {
+                let mut parts = id_env.split(':');
+                if let (Some(env_pid), Some(env_dev), Some(env_ino), None) = (
+                    parts.next().and_then(|s| s.parse::<i32>().ok()),
+                    parts.next().and_then(|s| s.parse::<u64>().ok()),
+                    parts.next().and_then(|s| s.parse::<u64>().ok()),
+                    parts.next(),
+                ) {
+                    if env_pid == ppid
+                        && crate::location::process_bsdinfo(ppid)
+                            .is_some_and(|info| info.uid == uid && !info.zombie)
+                        && crate::launchd::enclosing_omg_host_app(Path::new(&exe_env)).is_some()
+                    {
+                        return LocalWrapperIdentity {
+                            wrapper_mode: Some("app-bundle".into()),
+                            wrapper_pid: Some(ppid as u32),
+                            wrapper_executable: Some(exe_env),
+                            wrapper_dev: Some(env_dev),
+                            wrapper_ino: Some(env_ino),
+                        };
+                    }
+                }
+            }
+            if crate::location::process_bsdinfo(ppid)
+                .is_some_and(|info| info.uid == uid && !info.zombie)
+            {
+                if let Some(wpath) = crate::location::process_path(ppid) {
+                    if crate::launchd::enclosing_omg_host_app(&wpath).is_some() {
+                        if let Some((dev, ino)) = crate::location::file_dev_ino(&wpath) {
+                            return LocalWrapperIdentity {
+                                wrapper_mode: Some("app-bundle".into()),
+                                wrapper_pid: Some(ppid as u32),
+                                wrapper_executable: Some(wpath.to_string_lossy().into_owned()),
+                                wrapper_dev: Some(dev),
+                                wrapper_ino: Some(ino),
+                            };
+                        }
+                    }
+                }
+            }
+        }
+        LocalWrapperIdentity {
+            wrapper_mode: Some("unbundled".into()),
+            ..Default::default()
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        LocalWrapperIdentity::default()
+    }
+}
+
+pub fn is_process_local_wrapper_healthy(
+    daemon_pid: u32,
+    wrapper_mode: Option<&str>,
+    wrapper_pid: Option<u32>,
+    wrapper_executable: Option<&str>,
+    wrapper_dev: Option<u64>,
+    wrapper_ino: Option<u64>,
+    caller_has_app_bundle: bool,
+) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let uid = unsafe { libc::geteuid() };
+        let Some(daemon_info) = crate::location::process_bsdinfo(daemon_pid as i32) else {
+            return false;
+        };
+        if daemon_info.uid != uid || daemon_info.zombie {
+            return false;
+        }
+        match wrapper_mode {
+            Some("app-bundle") => {
+                let (Some(wpid), Some(wexe), Some(wdev), Some(wino)) =
+                    (wrapper_pid, wrapper_executable, wrapper_dev, wrapper_ino)
+                else {
+                    return false;
+                };
+                if wpid <= 1 || wexe.is_empty() || daemon_info.ppid != wpid as i32 {
+                    return false;
+                }
+                let Some(wrapper_info) = crate::location::process_bsdinfo(wpid as i32) else {
+                    return false;
+                };
+                if wrapper_info.uid != uid || wrapper_info.zombie {
+                    return false;
+                }
+                let wpath = Path::new(wexe);
+                let Some(live_path) = crate::location::process_path(wpid as i32) else {
+                    return false;
+                };
+                if live_path != wpath {
+                    return false;
+                }
+                crate::location::file_dev_ino(wpath) == Some((wdev, wino))
+            }
+            Some("unbundled") => !caller_has_app_bundle,
+            _ => false,
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (
+            daemon_pid,
+            wrapper_mode,
+            wrapper_pid,
+            wrapper_executable,
+            wrapper_dev,
+            wrapper_ino,
+            caller_has_app_bundle,
+        );
+        true
+    }
+}
+
+pub fn is_local_wrapper_healthy(identity: &HostIdentity, caller_has_app_bundle: bool) -> bool {
+    if identity.mode != "local" {
+        return true;
+    }
+    is_process_local_wrapper_healthy(
+        identity.pid,
+        identity.wrapper_mode.as_deref(),
+        identity.wrapper_pid,
+        identity.wrapper_executable.as_deref(),
+        identity.wrapper_dev,
+        identity.wrapper_ino,
+        caller_has_app_bundle,
+    )
 }
 
 fn mode_name(mode: RuntimeMode) -> &'static str {
@@ -205,6 +383,11 @@ fn build_host_identity(mode: RuntimeMode) -> HostIdentity {
         .and_then(current_snapshot_revision_for_exe)
         .or_else(crate::current_snapshot_revision);
     let binary_mtime = exe.as_deref().and_then(binary_mtime_for_exe);
+    let wrapper = if mode == RuntimeMode::Local {
+        current_local_wrapper_identity()
+    } else {
+        LocalWrapperIdentity::default()
+    };
     HostIdentity {
         pid: std::process::id(),
         mode: mode_name(mode).to_owned(),
@@ -212,6 +395,11 @@ fn build_host_identity(mode: RuntimeMode) -> HostIdentity {
         snapshot_revision,
         executable: exe.map(|p| p.to_string_lossy().into_owned()),
         binary_mtime,
+        wrapper_mode: wrapper.wrapper_mode,
+        wrapper_pid: wrapper.wrapper_pid,
+        wrapper_executable: wrapper.wrapper_executable,
+        wrapper_dev: wrapper.wrapper_dev,
+        wrapper_ino: wrapper.wrapper_ino,
     }
 }
 
@@ -399,7 +587,9 @@ fn serve_mode(directory: &Path, command: Vec<String>, mode: RuntimeMode) -> io::
     let mut idle_since = Instant::now();
     loop {
         wake.drain();
-        if shutdown_requested.load(Ordering::SeqCst) {
+        if shutdown_requested.load(Ordering::SeqCst)
+            || control.should_step_down_for_replaced_wrapper()
+        {
             drop(listener);
             remove_socket_if_owned(&host_sock_path, socket_identity);
             return Ok(());
@@ -492,7 +682,14 @@ fn host_connection_full(
     let mut streams: std::collections::HashMap<u64, StreamEntry> = Default::default();
     let active_execs = Arc::new(AtomicUsize::new(0));
     let mut last_heartbeat = Instant::now();
+    let legacy_test_mode = std::env::var("OMG_TEST_LEGACY_HOST_MODE").ok();
     loop {
+        if control
+            .as_ref()
+            .is_some_and(|ctrl| ctrl.shutdown_requested.load(Ordering::SeqCst))
+        {
+            return Ok(());
+        }
         if last_heartbeat.elapsed() > Duration::from_secs(45) {
             return Err(io::Error::other("host connection lease expired"));
         }
@@ -509,6 +706,9 @@ fn host_connection_full(
                     transport.push(Frame::new(b'P', 0, capabilities));
                 }
                 b'V' if f.seq == 0 && f.data.is_empty() => {
+                    if legacy_test_mode.as_deref() == Some("v0_22_1") {
+                        return Err(io::Error::other("invalid multiplex frame"));
+                    }
                     let identity = match &control {
                         Some(ctrl) => ctrl.identity.clone(),
                         None => {
@@ -523,16 +723,30 @@ fn host_connection_full(
                     let _ = transport.flush();
                 }
                 b'T' if f.seq == 0 => {
+                    if legacy_test_mode.as_deref() == Some("v0_22_1") {
+                        return Err(io::Error::other("invalid multiplex frame"));
+                    }
                     let Some(ctrl) = &control else {
                         transport.push(Frame::new(b'E', 0, b"host takeover unavailable"));
                         let _ = transport.flush();
                         continue;
                     };
-                    if ctrl.identity.mode != "remote-holder" {
+                    if legacy_test_mode.as_deref() == Some("v0_23_2")
+                        && ctrl.identity.mode != "remote-holder"
+                    {
                         transport.push(Frame::new(
                             b'E',
                             0,
                             b"host takeover requires remote-holder mode",
+                        ));
+                        let _ = transport.flush();
+                        continue;
+                    }
+                    if ctrl.identity.mode != "remote-holder" && ctrl.identity.mode != "local" {
+                        transport.push(Frame::new(
+                            b'E',
+                            0,
+                            b"host takeover requires local or remote-holder mode",
                         ));
                         let _ = transport.flush();
                         continue;
@@ -636,6 +850,19 @@ fn host_connection_full(
                 }
                 b'C' if f.seq != 0 => {
                     let request: crate::registry::OpenRequest = serde_json::from_slice(&f.data)?;
+                    if (request.create || request.recreate_if_gone)
+                        && control
+                            .as_ref()
+                            .is_some_and(|ctrl| ctrl.should_step_down_for_replaced_wrapper())
+                    {
+                        if let Some(ctrl) = &control {
+                            ctrl.shutdown_requested.store(true, Ordering::SeqCst);
+                            ctrl.wake.notify();
+                        }
+                        return Err(io::Error::other(
+                            "local runtime host wrapper replaced on disk; stepping down",
+                        ));
+                    }
                     let result = Registry::open_unlocked(&registry, &request);
                     match result {
                         Ok(s) => {

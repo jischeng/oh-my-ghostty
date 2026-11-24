@@ -196,6 +196,21 @@ installed_version=$(plutil -extract CFBundleShortVersionString raw "$target_app/
 installed_build=$(plutil -extract CFBundleVersion raw "$target_app/Contents/Info.plist")
 ghostty_version=$(plutil -extract GhosttyBaseVersion raw "$target_app/Contents/Info.plist")
 
+# If a persistent OMG Dev local runtime broker was already running across `rm -rf`
+# + `ditto`, proactively rotate it onto the newly installed `OMG Dev.app` wrapper
+# while preserving and re-adopting any surviving local `session-holder` processes.
+dev_support_root="$HOME/Library/Application Support/OMG Dev"
+dev_run_key=$(printf 'omg-local-v2\0%s' "$dev_support_root" | shasum -a 256 | awk '{print substr($1, 1, 20)}')
+dev_run_dir="$HOME/.omg/run/$dev_run_key"
+if [[ -S "$dev_run_dir/host.sock" ]]; then
+  OMG_HOST_APP_BUNDLE="$target_app" \
+  OMG_HOST_APP_BUNDLE_ID="$installed_bundle_id" \
+  OMG_APP_SUPPORT="$dev_support_root" \
+  TMPDIR="$launch_tmpdir" \
+    "$target_app/Contents/Resources/session-runtime/omgd" ensure-host --local "$dev_run_dir" \
+    || echo "warning: local runtime host rotation deferred until launch" >&2
+fi
+
 if ! git rev-parse -q --verify "refs/tags/$dev_tag" >/dev/null; then
   git tag -a "$dev_tag" \
     -m "OMG Dev $dev_version · Ghostty $ghostty_version · $head_commit"

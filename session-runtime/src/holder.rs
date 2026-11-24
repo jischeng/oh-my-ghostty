@@ -168,6 +168,8 @@ pub fn spawn(executable: &Path, request: &HolderRequest, diagnostics: Stdio) -> 
     let mut command = Command::new(executable);
     command
         .arg("session-holder")
+        .env_remove("OMG_WRAPPER_IDENTITY")
+        .env_remove("OMG_WRAPPER_EXECUTABLE")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(diagnostics);

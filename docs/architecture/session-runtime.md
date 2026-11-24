@@ -64,7 +64,7 @@ SSH handoff 保留当前 Surface、pane UUID 和本地 PTY。经过 pane capabil
 - 单 writer、多 observer；输入和 resize 都验证 writer generation。无人连接保留最后有效尺寸，不停止读取 PTY。
 - CloseSession 先在客户端持久化，再由远端持久化 UUID 关闭标记；后台重试直至远端确认。关闭是整个 pane UUID 的永久撤销，禁止后续自动 resume 或重建，因此不会因 generation 更新漏掉已经关闭的 pane。仍保留原 attached `K` 供旧版本使用，但旧 host 不支持确认时请求保持待确认。
 - Linux systemd/cgroup v2 监管模式中，每 Session 一个 cgroup、仍由同一个 omgd 的线程持有 PTY。子进程在 exec 前加入 cgroup，普通 setsid/nohup/double-fork 不改变归属。退出时清理该组并检查 populated=0；daemon SIGKILL 则由 systemd KillMode=control-group 清理整个服务。macOS 或无监管能力的主机仍只有进程组清理保证。
-- macOS 本地 host 通过 `gui/<uid>` launchd 任务启动（设置 `AssociatedBundleIdentifiers` 为所属 OMG 应用 Bundle）：应用内运行时由 `<App>.app/Contents/MacOS/omg +internal-runtime-host` 在不初始化 AppKit/GUI coalition 的前提下派生独立会话的 `host-local`、回报 pid 并作为其存活父进程等待退出（未打包测试二进制回退到 `omgd detach`）。因此 macOS TCC 将 `omgd` 与终端子进程统一归属给 OMG 应用本身，无需重复授权；同时 host 不在 GUI 的 coalition 中，Cmd-Q 后 App 完全退出、不再显示“在后台运行”，重新打开时连回同一个 host。GUI launchd 域不可用时回退到直接 `setsid` 启动。
+- macOS 本地 host 通过 `gui/<uid>` launchd 任务启动（设置 `AssociatedBundleIdentifiers` 为所属 OMG 应用 Bundle）：应用内运行时由 `<App>.app/Contents/MacOS/omg +internal-runtime-host` 在不初始化 AppKit/GUI coalition 的前提下派生独立会话的 `host-local`、回报 pid 并作为其存活父进程等待退出（未打包测试二进制回退到 `omgd detach`）。因此 macOS TCC 将 `omgd` 与终端子进程统一归属给 OMG 应用本身，无需重复授权；同时 host 不在 GUI 的 coalition 中，Cmd-Q 后 App 完全退出、不再显示“在后台运行”，重新打开时连回同一个 host。`HostIdentity`（`host.meta` 与 `b'V'`）记录本地父包装器模式、PID、可执行路径及磁盘 `(st_dev, st_ino)`；当 Sparkle 或 `install-dev.sh` 原地替换 `.app`（无论 `omgd` `revision` 是否变化）导致原包装器 vnode 失效，或新版本 `omgd` 在兼容 `snapshot-revision` 下接管时，`ensure_host_mode`（及 `host-local` 在 `b'C'` 创建新会话前与轮询周期中的自检）触发本地 `b'T'` broker 退位（对不支持 `b'V'`/`b'T'` 的旧版 `host-local` 校验 `host.lock` 与参数后回退单 PID `SIGTERM`），使旧 `+internal-runtime-host` 完成 `bootout` 并退出，随后由当前磁盘上的新 `.app` 重新引导 `+internal-runtime-host` + `host-local` 并无损收编全部存活 `session-holder`（既有终端依托内核 `responsible_path` 恢复 TCC 访问，新标签页直接继承新 `.app` 完整归属）。GUI launchd 域不可用时回退到直接 `setsid` 启动。
 - SSH 配置负责路由；host ID 加远端账号/daemon namespace 负责身份。克隆机器可能复制 host ID，不能替代 SSH 主机认证。
 
 ## VT 状态恢复：首要技术验证
@@ -99,7 +99,7 @@ Unix socket 位于用户私有目录，校验 owner/peer credentials，限制帧
 
 Linux root 账号使用 systemd 系统级临时服务；普通账号仅在用户管理器可用且已启用 linger 时使用用户临时服务。不会自动开启 linger 或请求提权；不满足条件则明确记录 process-group-only 模式。服务按 runtime directory 隔离，Delegate=yes，KillMode=control-group，Restart=no；下一次连接再启动，避免重复崩溃循环。监管模式启动失败不能偷偷降级绕过监管。未来 macOS launchd 的退出登录语义另行验证。远端 daemon 崩溃和主机重启不保证 PID 不变。本地 broker 重启通过私有控制探针核对 UUID、generation 与 capability 后收编仍存活的 holder，PID/PTY/VT 保持不变；holder 或主机丢失仍必须明确报告 Lost。
 
-远端启动和周期维护把没有 actor 的运行中记录改为 Lost；本地先验证独立 holder，仅在没有可验证 holder 时标记 Lost。失效 socket 按所属 UUID 清理，不按历史 PID 发信号；adoption 探针不 attach，也不刷新 TTL。待关闭请求保存在 App Support 的 session-runtime/pending-closes.json，App 启动及运行中重试；设置页显示未确认数量。空 relay 在 30 秒无客户端后退出，host 仍按存活 actor 和既有空闲策略管理。旧版本 daemon 保持原版本；本地 broker/holder 从 descriptor 固定版本的缓存 helper 启动，不跨版本收编；不支持新关闭能力的旧版本仍有待确认限制。高权限进程主动迁移 cgroup、通过外部服务创建任务不在自动回收保证内。
+远端启动和周期维护把没有 actor 的运行中记录改为 Lost；本地先验证独立 holder，仅在没有可验证 holder 时标记 Lost。失效 socket 按所属 UUID 清理，不按会话记录中的历史 PID 发信号；adoption 探针不 attach，也不刷新 TTL。待关闭请求保存在 App Support 的 session-runtime/pending-closes.json，App 启动及运行中重试；设置页显示未确认数量。空 relay 在 30 秒无客户端后退出，host 仍按存活 actor 和既有空闲策略管理。旧版单进程远端 daemon（`remote`）保持原版本不强制重启；独立 holder 架构的本地（`host-local`）与远端（`remote-holder`）broker 在兼容 `snapshot-revision` 下支持 `b'T'` 原地退位接管并收编存活 `session-holder`（macOS 本地同时校验父级 `+internal-runtime-host` 的磁盘 `(st_dev, st_ino)` 与路径健康度）；不支持新关闭能力的旧版本仍有待确认限制。高权限进程主动迁移 cgroup、通过外部服务创建任务不在自动回收保证内。
 
 ## 退出策略
 

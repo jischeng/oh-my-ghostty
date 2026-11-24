@@ -2247,75 +2247,15 @@ fn ensure_local_broker(binary: &Path, support: &Path, revision: &str) -> io::Res
         .join(omg_session_runtime::registry::local_run_dir_key(
             &support, revision,
         ));
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&root)?;
-    super::private(&root, true)?;
-    let _ = omg_session_runtime::registry::write_support_root_stamp(&root, &support);
+    let shell = omg_session_runtime::user_login_shell();
+    crate::ensure_host_with(
+        &root.to_string_lossy(),
+        Some(&shell),
+        binary,
+        true,
+        Some(&support),
+    )?;
     let socket = root.join("host.sock");
-    let running = match UnixStream::connect(&socket) {
-        Ok(_) => true,
-        Err(error) if holder::listener_is_gone(&error) => false,
-        Err(error) => return Err(error),
-    };
-    if !running {
-        let log_path = root.join("host.log");
-        let command = vec![
-            binary.to_string_lossy().into_owned(),
-            "host-local".into(),
-            root.to_string_lossy().into_owned(),
-            "--".into(),
-            "/bin/sh".into(),
-        ];
-        let mut extra_env = Vec::new();
-        if let Some(sup_str) = support.to_str() {
-            extra_env.push(("OMG_APP_SUPPORT", sup_str));
-        }
-        if omg_session_runtime::launchd::spawn_with_env(binary, &command, &log_path, &extra_env)?
-            .is_none()
-        {
-            use std::os::unix::process::CommandExt;
-            let log = fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(&log_path)?;
-            let mut child = std::process::Command::new(binary);
-            child
-                .args(&command[1..])
-                .env("TERM", "xterm-256color")
-                .env("OMG_APP_SUPPORT", &support)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(log);
-            unsafe {
-                child.pre_exec(|| {
-                    if libc::setsid() < 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                    libc::signal(libc::SIGHUP, libc::SIG_IGN);
-                    Ok(())
-                });
-            }
-            let mut child = child.spawn()?;
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-        }
-        let mut ready = false;
-        for _ in 0..100 {
-            if UnixStream::connect(&socket).is_ok() {
-                ready = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        if !ready {
-            return Err(io::Error::other("Local broker did not start"));
-        }
-    }
     Ok(Endpoint {
         id: hash(&socket.to_string_lossy()),
         name: "This Machine".into(),
@@ -2344,7 +2284,8 @@ fn restart_endpoint(config: &Config) -> io::Result<Endpoint> {
                 .parent()
                 .is_some_and(|dir| dir.join("revision").is_file() || dir.join("verified").is_file())
         {
-            return ensure_local_broker(&current_exe, support, &current_rev);
+            let staged = crate::stage_or_resolve_local_helper(&current_exe, Some(support))?;
+            return ensure_local_broker(&staged, support, &current_rev);
         }
     }
     let archive_path = support.join("session-runtime/endpoints.json");

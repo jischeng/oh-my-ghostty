@@ -136,7 +136,7 @@ fn is_within_grace(latest_mtime: u64, now: u64, min_age_secs: u64) -> bool {
     now.saturating_sub(latest_mtime) < min_age_secs
 }
 
-fn lock_file_is_held(path: &Path) -> bool {
+pub fn lock_file_is_held(path: &Path) -> bool {
     let Ok(file) = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
@@ -166,7 +166,7 @@ fn pid_is_alive(pid: u32) -> bool {
     io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
-fn read_lock_pid(path: &Path) -> Option<u32> {
+pub fn read_lock_pid(path: &Path) -> Option<u32> {
     let text = fs::read_to_string(path).ok()?;
     text.trim().parse::<u32>().ok().filter(|&p| p > 1)
 }

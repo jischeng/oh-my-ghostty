@@ -2,6 +2,11 @@ import Combine
 import Foundation
 
 enum OMGApplicationEnvironment {
+    /// Launch-time bundle URL and identifier captured before Sparkle can move
+    /// the running `.app` into its temporary installation cache.
+    static let initialBundleURL: URL = Bundle.main.bundleURL.standardizedFileURL
+    static let initialBundleIdentifier: String? = Bundle.main.bundleIdentifier
+
     /// XCTest can load after AppDelegate's early singleton initialization.
     /// Launch environment is available before the test bundle classes exist.
     static var isRunningTests: Bool {

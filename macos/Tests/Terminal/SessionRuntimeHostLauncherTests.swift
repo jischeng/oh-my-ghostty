@@ -163,11 +163,131 @@ struct SessionRuntimeHostLauncherTests {
         let env = SessionRuntimeHostLauncher.applyingHostBundleEnvironment(["PATH": "/usr/bin:/bin"], bundle: .main)
         if Bundle.main.bundleURL.pathExtension == "app",
            let bundleID = Bundle.main.bundleIdentifier,
-           bundleID.hasPrefix("com.jischeng.omg") {
-            #expect(env[SessionRuntimeHostLauncher.hostBundlePathEnvironmentKey] == Bundle.main.bundleURL.path)
+           SessionRuntimeHostLauncher.isValidOMGHostBundleIdentifier(bundleID) {
+            #expect(env[SessionRuntimeHostLauncher.hostBundlePathEnvironmentKey] == Bundle.main.bundleURL.standardizedFileURL.path)
             #expect(env[SessionRuntimeHostLauncher.hostBundleIDEnvironmentKey] == bundleID)
         }
         #expect(env["PATH"] == "/usr/bin:/bin")
+
+        // Dot-boundary check rejects `com.jischeng.omgevil`.
+        #expect(SessionRuntimeHostLauncher.isValidOMGHostBundleIdentifier("com.jischeng.omg"))
+        #expect(SessionRuntimeHostLauncher.isValidOMGHostBundleIdentifier("com.jischeng.omg.debug"))
+        #expect(!SessionRuntimeHostLauncher.isValidOMGHostBundleIdentifier("com.jischeng.omgevil"))
+
+        // When Sparkle moves the running bundle into its temp cache, `applyingHostBundleEnvironment`
+        // falls back to the launch-time initial bundle URL rather than exporting a Sparkle cache path.
+        let fallbackEnv = SessionRuntimeHostLauncher.applyingHostBundleEnvironment(
+            ["PATH": "/usr/bin:/bin"],
+            bundleURL: URL(fileURLWithPath: "/Users/test/Library/Caches/com.jischeng.omg/org.sparkle-project.Sparkle/Installation/99/OMG.app"),
+            bundleIdentifier: "com.jischeng.omg",
+            allowInitialBundleFallback: true,
+            fallbackBundleURL: URL(fileURLWithPath: "/Applications/OMG.app"),
+            fallbackBundleIdentifier: "com.jischeng.omg"
+        )
+        #expect(fallbackEnv[SessionRuntimeHostLauncher.hostBundlePathEnvironmentKey] == "/Applications/OMG.app")
+        #expect(fallbackEnv[SessionRuntimeHostLauncher.hostBundleIDEnvironmentKey] == "com.jischeng.omg")
+
+        // Without a valid non-ephemeral fallback, Sparkle cache and Trash paths are never exported.
+        let rejectedSparkleEnv = SessionRuntimeHostLauncher.applyingHostBundleEnvironment(
+            [:],
+            bundleURL: URL(fileURLWithPath: "/Users/test/Library/Caches/com.jischeng.omg/org.sparkle-project.Sparkle/Installation/99/OMG.app"),
+            bundleIdentifier: "com.jischeng.omg",
+            allowInitialBundleFallback: false
+        )
+        #expect(rejectedSparkleEnv[SessionRuntimeHostLauncher.hostBundlePathEnvironmentKey] == nil)
+    }
+
+    @Test func foregroundEnvironmentPreservesValidHostBundleAndDropsSparkleCacheAndLaunchdLabel() {
+        let preserved = SessionRuntimeHostLauncher.foregroundEnvironment([
+            SessionRuntimeHostLauncher.hostBundlePathEnvironmentKey: "/Applications/OMG Dev.app",
+            SessionRuntimeHostLauncher.hostBundleIDEnvironmentKey: "com.jischeng.omg.debug",
+            SessionRuntimeHostLauncher.hostLaunchdLabelEnvironmentKey: "com.jischeng.omg.debug.host.1",
+            "PATH": "/usr/bin:/bin",
+        ])
+        #expect(preserved[SessionRuntimeHostLauncher.hostBundlePathEnvironmentKey] == "/Applications/OMG Dev.app")
+        #expect(preserved[SessionRuntimeHostLauncher.hostBundleIDEnvironmentKey] == "com.jischeng.omg.debug")
+        #expect(preserved[SessionRuntimeHostLauncher.hostLaunchdLabelEnvironmentKey] == nil)
+
+        let sparkleSanitized = SessionRuntimeHostLauncher.foregroundEnvironment([
+            SessionRuntimeHostLauncher.hostBundlePathEnvironmentKey: "/Users/test/Library/Caches/com.jischeng.omg/org.sparkle-project.Sparkle/Installation/123/OMG.app",
+            SessionRuntimeHostLauncher.hostBundleIDEnvironmentKey: "com.jischeng.omg",
+        ])
+        #expect(sparkleSanitized[SessionRuntimeHostLauncher.hostBundlePathEnvironmentKey]?.contains("org.sparkle-project.Sparkle") != true)
+    }
+
+    @Test func validatedOnDiskReplacementAppBundleAcceptsInstalledBundleAndRejectsSparkleAndForeignBundles() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-replacement-bundle-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        func makeFakeApp(at appURL: URL, bundleID: String, includeOmgd: Bool = true) throws {
+            let macosURL = appURL.appendingPathComponent("Contents/MacOS", isDirectory: true)
+            let runtimeURL = appURL.appendingPathComponent("Contents/Resources/session-runtime", isDirectory: true)
+            try FileManager.default.createDirectory(at: macosURL, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: runtimeURL, withIntermediateDirectories: true)
+            let plist: [String: Any] = [
+                "CFBundleIdentifier": bundleID,
+                "CFBundleExecutable": "omg",
+            ]
+            let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+            try data.write(to: appURL.appendingPathComponent("Contents/Info.plist"))
+            let exeURL = macosURL.appendingPathComponent("omg")
+            try Data("#!/bin/sh\nexit 0\n".utf8).write(to: exeURL)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: exeURL.path)
+            if includeOmgd {
+                let omgdURL = runtimeURL.appendingPathComponent("omgd")
+                try Data("#!/bin/sh\nexit 0\n".utf8).write(to: omgdURL)
+                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: omgdURL.path)
+            }
+        }
+
+        let validApp = root.appendingPathComponent("OMG.app", isDirectory: true)
+        try makeFakeApp(at: validApp, bundleID: "com.jischeng.omg")
+        let validated = try #require(SessionRuntimeConnections.validatedOnDiskReplacementAppBundle(
+            candidateBundleURL: validApp,
+            expectedBundleIdentifier: "com.jischeng.omg"
+        ))
+        #expect(validated.bundleURL == validApp.standardizedFileURL)
+        #expect(validated.bundleIdentifier == "com.jischeng.omg")
+        #expect(validated.omgdURL.path == validApp.standardizedFileURL.appendingPathComponent("Contents/Resources/session-runtime/omgd").path)
+
+        // Mismatched expected bundle ID must be rejected.
+        #expect(SessionRuntimeConnections.validatedOnDiskReplacementAppBundle(
+            candidateBundleURL: validApp,
+            expectedBundleIdentifier: "com.jischeng.omg.debug"
+        ) == nil)
+
+        // Sparkle temporary cache path must be rejected.
+        let sparkleApp = root
+            .appendingPathComponent("org.sparkle-project.Sparkle/Installation/OMG.app", isDirectory: true)
+        try makeFakeApp(at: sparkleApp, bundleID: "com.jischeng.omg")
+        #expect(SessionRuntimeConnections.validatedOnDiskReplacementAppBundle(
+            candidateBundleURL: sparkleApp,
+            expectedBundleIdentifier: "com.jischeng.omg"
+        ) == nil)
+
+        // Foreign or non-dot-boundary bundle ID must be rejected.
+        let foreignApp = root.appendingPathComponent("Other.app", isDirectory: true)
+        try makeFakeApp(at: foreignApp, bundleID: "com.example.other")
+        #expect(SessionRuntimeConnections.validatedOnDiskReplacementAppBundle(
+            candidateBundleURL: foreignApp,
+            expectedBundleIdentifier: nil
+        ) == nil)
+        let evilPrefixApp = root.appendingPathComponent("EvilPrefix.app", isDirectory: true)
+        try makeFakeApp(at: evilPrefixApp, bundleID: "com.jischeng.omgevil")
+        #expect(SessionRuntimeConnections.validatedOnDiskReplacementAppBundle(
+            candidateBundleURL: evilPrefixApp,
+            expectedBundleIdentifier: nil
+        ) == nil)
+
+        // Missing bundled omgd must be rejected.
+        let incompleteApp = root.appendingPathComponent("Incomplete.app", isDirectory: true)
+        try makeFakeApp(at: incompleteApp, bundleID: "com.jischeng.omg", includeOmgd: false)
+        #expect(SessionRuntimeConnections.validatedOnDiskReplacementAppBundle(
+            candidateBundleURL: incompleteApp,
+            expectedBundleIdentifier: "com.jischeng.omg"
+        ) == nil)
     }
 
     @Test func spawnDetachedChildCreatesSessionLeaderAndWritesReadyPid() throws {

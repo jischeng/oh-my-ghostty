@@ -206,6 +206,81 @@ pub fn process_argv(pid: i32) -> Option<Vec<String>> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcessBsdInfo {
+    pub ppid: i32,
+    pub uid: u32,
+    pub pgid: i32,
+    pub zombie: bool,
+}
+
+pub fn process_bsdinfo(pid: i32) -> Option<ProcessBsdInfo> {
+    if pid <= 1 {
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" {
+            fn omg_process_bsdinfo(
+                pid: i32,
+                ppid_out: *mut i32,
+                uid_out: *mut u32,
+                pgid_out: *mut i32,
+                zombie_out: *mut i32,
+            ) -> i32;
+        }
+        let mut ppid = 0i32;
+        let mut uid = 0u32;
+        let mut pgid = 0i32;
+        let mut zombie = 0i32;
+        let rc = unsafe { omg_process_bsdinfo(pid, &mut ppid, &mut uid, &mut pgid, &mut zombie) };
+        if rc != 0 {
+            return None;
+        }
+        Some(ProcessBsdInfo {
+            ppid,
+            uid,
+            pgid,
+            zombie: zombie != 0,
+        })
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::symlink_metadata(format!("/proc/{pid}")).ok()?;
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let rest = stat.get(stat.rfind(')')? + 1..)?.trim_start();
+        let mut fields = rest.split_whitespace();
+        let state = fields.next()?;
+        let ppid: i32 = fields.next()?.parse().ok()?;
+        let pgid: i32 = fields.next()?.parse().ok()?;
+        Some(ProcessBsdInfo {
+            ppid,
+            uid: meta.uid(),
+            pgid,
+            zombie: state == "Z",
+        })
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
+
+pub fn file_dev_ino(path: &Path) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(path).ok()?;
+        meta.is_file().then(|| (meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 pub fn process_path(pid: i32) -> Option<PathBuf> {
     if pid <= 1 {
         return None;
@@ -574,6 +649,17 @@ mod tests {
             super::process_cwd(std::process::id() as i32).unwrap(),
             std::env::current_dir().unwrap()
         );
+        let self_pid = std::process::id() as i32;
+        let bsd = super::process_bsdinfo(self_pid).expect("process_bsdinfo for self");
+        assert_eq!(bsd.uid, unsafe { libc::geteuid() });
+        assert!(!bsd.zombie);
+        assert!(bsd.ppid >= 1);
+        assert!(super::process_bsdinfo(0).is_none());
+
+        let exe = std::env::current_exe().unwrap();
+        let (dev, ino) = super::file_dev_ino(&exe).expect("file_dev_ino for current_exe");
+        assert!(dev > 0 || ino > 0);
+        assert!(super::file_dev_ino(std::env::temp_dir().as_path()).is_none());
     }
 
     #[test]

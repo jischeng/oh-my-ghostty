@@ -3,7 +3,7 @@ use std::{
     io::{self, Read, Write},
     net::Shutdown,
     os::unix::net::UnixStream,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::Arc,
 };
@@ -200,7 +200,188 @@ fn relay_connector(
 enum HostLaunchMode {
     LegacyRemote,
     RemoteHolder { force_takeover: bool },
-    Local,
+    Local { force_takeover: bool },
+}
+
+pub(crate) fn stage_or_resolve_local_helper(
+    exe: &Path,
+    support: Option<&Path>,
+) -> io::Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    if omg_session_runtime::registry::infer_support_root_from_exe(exe).is_some() {
+        return Ok(exe.to_path_buf());
+    }
+    let Some(support) = support else {
+        return Ok(exe.to_path_buf());
+    };
+    let Some(src_dir) = exe.parent() else {
+        return Ok(exe.to_path_buf());
+    };
+    let rev_file = src_dir.join("revision");
+    let Ok(raw_rev) = std::fs::read_to_string(&rev_file) else {
+        return Ok(exe.to_path_buf());
+    };
+    let rev = raw_rev.trim();
+    if !omg_session_runtime::valid_revision(rev) {
+        return Ok(exe.to_path_buf());
+    }
+    let versions_root = support.join("session-runtime/versions");
+    let cached = versions_root.join(rev);
+    let cached_exe = cached.join("omgd");
+    if cached.join("revision").is_file() && cached_exe.is_file() {
+        return Ok(cached_exe);
+    }
+    std::fs::create_dir_all(&versions_root)?;
+    std::fs::set_permissions(&versions_root, std::fs::Permissions::from_mode(0o700))?;
+    let nonce =
+        omg_session_runtime::record::nonce().unwrap_or_else(|_| std::process::id().to_string());
+    let staging = versions_root.join(format!(".copy-{}", &nonce[..12.min(nonce.len())]));
+    let copy_res = (|| -> io::Result<()> {
+        std::fs::create_dir_all(&staging)?;
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700))?;
+        for name in [
+            "omgd",
+            "revision",
+            "snapshot-revision",
+            "verified",
+            "askpass",
+        ] {
+            let src = src_dir.join(name);
+            if src.is_file() {
+                let dst = staging.join(name);
+                std::fs::copy(&src, &dst)?;
+                let mode = if name == "omgd" || name == "askpass" {
+                    0o700
+                } else {
+                    0o600
+                };
+                std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(mode))?;
+            }
+        }
+        if !staging.join("omgd").is_file() {
+            let dst = staging.join("omgd");
+            std::fs::copy(exe, &dst)?;
+            std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o700))?;
+        }
+        match std::fs::rename(&staging, &cached) {
+            Ok(()) => Ok(()),
+            Err(err) if cached.join("revision").is_file() && cached_exe.is_file() => {
+                let _ = std::fs::remove_dir_all(&staging);
+                let _ = err;
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    })();
+    if let Err(err) = copy_res {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(err);
+    }
+    Ok(cached_exe)
+}
+
+fn local_sessions_snapshot_compatible(root: &Path, my_snapshot: Option<&str>) -> bool {
+    let Some(expected) = my_snapshot.map(omg_session_runtime::canonical_snapshot_revision) else {
+        return true;
+    };
+    if expected.is_empty() {
+        return true;
+    }
+    let sessions_dir = root.join("sessions");
+    let Ok(entries) = std::fs::read_dir(&sessions_dir) else {
+        return true;
+    };
+    for entry in entries.take(2048).flatten() {
+        let path = entry.path();
+        if !path.extension().is_some_and(|ext| ext == "json") {
+            continue;
+        }
+        let Ok(record) = omg_session_runtime::record::Record::load(&path) else {
+            continue;
+        };
+        if record.ended.is_some()
+            || omg_session_runtime::registry::is_local_session_closed(&sessions_dir, &record.id)
+        {
+            continue;
+        }
+        if let Some(rec_snap) = record.snapshot_revision.as_deref() {
+            let canonical = omg_session_runtime::canonical_snapshot_revision(rec_snap);
+            if !canonical.is_empty() && canonical != expected {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn is_verified_local_host_process(pid: u32, root: &Path) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    let uid = unsafe { libc::geteuid() };
+    let Some(info) = omg_session_runtime::location::process_bsdinfo(pid as i32) else {
+        return false;
+    };
+    if info.uid != uid || info.zombie {
+        return false;
+    }
+    if let Some(exe_path) = omg_session_runtime::location::process_path(pid as i32) {
+        if exe_path.file_name().and_then(|s| s.to_str()) != Some("omgd") {
+            return false;
+        }
+    }
+    let Some(argv) = omg_session_runtime::location::process_argv(pid as i32) else {
+        return false;
+    };
+    if argv
+        .first()
+        .and_then(|a| Path::new(a).file_name())
+        .and_then(|s| s.to_str())
+        != Some("omgd")
+    {
+        return false;
+    }
+    if argv.get(1).map(String::as_str) != Some("host-local") {
+        return false;
+    }
+    let Some(arg_root) = argv.get(2).map(Path::new) else {
+        return false;
+    };
+    arg_root == root || omg_session_runtime::registry::same_canonical_path(arg_root, root)
+}
+
+fn step_down_legacy_local_host(root: &Path, hinted_pid: Option<u32>) -> io::Result<()> {
+    let lock_path = root.join("host.lock");
+    if !omg_session_runtime::gc::lock_file_is_held(&lock_path) {
+        return Ok(());
+    }
+    let pid = omg_session_runtime::gc::read_lock_pid(&lock_path)
+        .or(hinted_pid)
+        .filter(|&p| p > 1)
+        .ok_or_else(|| io::Error::other("legacy local host holds lock without valid PID"))?;
+    if !is_verified_local_host_process(pid, root) {
+        return Err(io::Error::other(
+            "refusing to signal unverified host.lock holder",
+        ));
+    }
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+    }
+    match wait_for_host_lock_release(root, std::time::Duration::from_secs(3)) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::TimedOut => {
+            if omg_session_runtime::gc::lock_file_is_held(&lock_path)
+                && omg_session_runtime::gc::read_lock_pid(&lock_path) == Some(pid)
+                && is_verified_local_host_process(pid, root)
+            {
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                }
+            }
+            wait_for_host_lock_release(root, std::time::Duration::from_secs(2))
+        }
+        Err(err) => Err(err),
+    }
 }
 
 struct BootstrapLock(std::fs::File);
@@ -257,11 +438,13 @@ fn wait_for_socket_after_early_exit(socket: &Path) -> bool {
 }
 
 fn ensure_host_cli(args: &[String]) -> io::Result<()> {
+    let mut local = false;
     let mut remote_holder = false;
     let mut force_takeover = false;
     let mut directory: Option<&str> = None;
     for arg in args {
         match arg.as_str() {
+            "--local" => local = true,
             "--remote-holder" => remote_holder = true,
             "--force-takeover" => force_takeover = true,
             flag if flag.starts_with("--") => {
@@ -272,22 +455,46 @@ fn ensure_host_cli(args: &[String]) -> io::Result<()> {
             value => {
                 if directory.is_some() {
                     return Err(io::Error::other(
-                        "usage: omgd ensure-host [--remote-holder] [--force-takeover] DIRECTORY",
+                        "usage: omgd ensure-host [--local | --remote-holder] [--force-takeover] DIRECTORY",
                     ));
                 }
                 directory = Some(value);
             }
         }
     }
+    if local && remote_holder {
+        return Err(io::Error::other(
+            "--local and --remote-holder are mutually exclusive",
+        ));
+    }
     let directory = directory.ok_or_else(|| {
-        io::Error::other("usage: omgd ensure-host [--remote-holder] [--force-takeover] DIRECTORY")
+        io::Error::other(
+            "usage: omgd ensure-host [--local | --remote-holder] [--force-takeover] DIRECTORY",
+        )
     })?;
+    let current_exe = env::current_exe()?;
+    if local {
+        let root = Path::new(directory);
+        let support = omg_session_runtime::registry::infer_support_root_from_env()
+            .or_else(|| omg_session_runtime::registry::read_support_root_stamp(root))
+            .or_else(|| session_cli::default_support().ok())
+            .or_else(omg_session_runtime::registry::infer_support_root_from_env_or_exe);
+        let helper = stage_or_resolve_local_helper(&current_exe, support.as_deref())?;
+        let shell = omg_session_runtime::user_login_shell();
+        return ensure_host_mode(
+            directory,
+            Some(&shell),
+            &helper,
+            HostLaunchMode::Local { force_takeover },
+            support.as_deref(),
+        );
+    }
     let mode = if remote_holder {
         HostLaunchMode::RemoteHolder { force_takeover }
     } else {
         HostLaunchMode::LegacyRemote
     };
-    ensure_host_mode(directory, None, &env::current_exe()?, mode, None)
+    ensure_host_mode(directory, None, &current_exe, mode, None)
 }
 
 fn gc_remote_cli(args: &[String]) -> io::Result<()> {
@@ -375,7 +582,7 @@ fn wait_for_host_lock_release(root: &Path, timeout: std::time::Duration) -> io::
     }
 }
 
-fn ensure_host_with(
+pub(crate) fn ensure_host_with(
     directory: &str,
     shell_override: Option<&str>,
     executable: &Path,
@@ -383,7 +590,9 @@ fn ensure_host_with(
     support_override: Option<&Path>,
 ) -> io::Result<()> {
     let mode = if local {
-        HostLaunchMode::Local
+        HostLaunchMode::Local {
+            force_takeover: false,
+        }
     } else {
         HostLaunchMode::LegacyRemote
     };
@@ -404,7 +613,7 @@ fn ensure_host_mode(
     support_override: Option<&Path>,
 ) -> io::Result<()> {
     use std::os::{unix::fs::PermissionsExt, unix::process::CommandExt};
-    let local = mode == HostLaunchMode::Local;
+    let local = matches!(mode, HostLaunchMode::Local { .. });
     let root = Path::new(directory);
     std::fs::create_dir_all(root)?;
     std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))?;
@@ -453,51 +662,160 @@ fn ensure_host_mode(
     }
     let socket = root.join("host.sock");
     if UnixStream::connect(&socket).is_ok() {
-        if let HostLaunchMode::RemoteHolder { force_takeover } = mode {
-            match omg_session_runtime::host::query_host_identity(&socket) {
-                Ok(running) => {
-                    if running.mode != "remote-holder" {
+        match mode {
+            HostLaunchMode::RemoteHolder { force_takeover } => {
+                match omg_session_runtime::host::query_host_identity(&socket) {
+                    Ok(running) => {
+                        if running.mode != "remote-holder" {
+                            return Ok(());
+                        }
+                        let my_revision =
+                            omg_session_runtime::host::current_host_revision_for_exe(executable);
+                        if running.revision == my_revision {
+                            return Ok(());
+                        }
+                        let my_snapshot =
+                            omg_session_runtime::host::current_snapshot_revision_for_exe(
+                                executable,
+                            );
+                        if !omg_session_runtime::host::snapshot_revisions_compatible(
+                            running.snapshot_revision.as_deref(),
+                            my_snapshot.as_deref(),
+                        ) {
+                            return Err(io::Error::other(
+                                "incompatible snapshot-revision host running in state directory; refusing takeover",
+                            ));
+                        }
+                        if !force_takeover {
+                            let my_mtime =
+                                omg_session_runtime::host::binary_mtime_for_exe(executable);
+                            if let (Some(running_mtime), Some(my_mtime)) =
+                                (running.binary_mtime, my_mtime)
+                            {
+                                if running_mtime > my_mtime.saturating_add(1) {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        omg_session_runtime::host::request_host_takeover(
+                            &socket,
+                            &my_revision,
+                            my_snapshot.as_deref(),
+                        )?;
+                        wait_for_host_lock_release(root, std::time::Duration::from_secs(5))?;
+                    }
+                    Err(_) => {
+                        // Older host does not support identity/takeover frames; preserve it safely.
                         return Ok(());
                     }
+                }
+            }
+            HostLaunchMode::Local { force_takeover } => {
+                let lock_path = root.join("host.lock");
+                if !omg_session_runtime::gc::lock_file_is_held(&lock_path) {
+                    // Lockless test mocks never create `host.lock`, whereas a real
+                    // `host-local` always creates `host.lock`. If `host.lock` exists
+                    // unlocked (or `host.sock` just closed), a real host just exited
+                    // between the initial `connect()` probe and now: fall through to
+                    // spawn a fresh `host-local` instead of returning a dead socket.
+                    if !lock_path.exists() && UnixStream::connect(&socket).is_ok() {
+                        return Ok(());
+                    }
+                } else {
+                    let launcher_exe = env::current_exe().ok();
+                    let env_bundle = env::var_os("OMG_HOST_APP_BUNDLE").map(PathBuf::from);
+                    let env_bundle_id = env::var("OMG_HOST_APP_BUNDLE_ID").ok();
+                    let target_host_app = launcher_exe
+                        .as_deref()
+                        .and_then(|exe| {
+                            omg_session_runtime::launchd::resolve_host_app(
+                                exe,
+                                env_bundle.as_deref(),
+                                env_bundle_id.as_deref(),
+                            )
+                        })
+                        .or_else(|| {
+                            omg_session_runtime::launchd::resolve_host_app(
+                                executable,
+                                env_bundle.as_deref(),
+                                env_bundle_id.as_deref(),
+                            )
+                        });
                     let my_revision =
                         omg_session_runtime::host::current_host_revision_for_exe(executable);
-                    if running.revision == my_revision {
-                        return Ok(());
-                    }
                     let my_snapshot =
-                        omg_session_runtime::host::current_snapshot_revision_for_exe(executable);
-                    if !omg_session_runtime::host::snapshot_revisions_compatible(
-                        running.snapshot_revision.as_deref(),
-                        my_snapshot.as_deref(),
-                    ) {
-                        return Err(io::Error::other(
-                            "incompatible snapshot-revision host running in state directory; refusing takeover",
-                        ));
-                    }
-                    if !force_takeover {
-                        let my_mtime = omg_session_runtime::host::binary_mtime_for_exe(executable);
-                        if let (Some(running_mtime), Some(my_mtime)) =
-                            (running.binary_mtime, my_mtime)
-                        {
-                            if running_mtime > my_mtime.saturating_add(1) {
+                        omg_session_runtime::host::current_snapshot_revision_for_exe(executable)
+                            .or_else(omg_session_runtime::current_snapshot_revision);
+                    match omg_session_runtime::host::query_host_identity(&socket) {
+                        Ok(running) => {
+                            if running.mode != "local" {
                                 return Ok(());
+                            }
+                            let wrapper_ok = omg_session_runtime::host::is_local_wrapper_healthy(
+                                &running,
+                                target_host_app.is_some(),
+                            );
+                            let needs_wrapper_takeover = !wrapper_ok && target_host_app.is_some();
+                            let needs_revision_takeover = running.revision != my_revision;
+                            if !needs_wrapper_takeover && !needs_revision_takeover {
+                                return Ok(());
+                            }
+                            if !omg_session_runtime::host::snapshot_revisions_compatible(
+                                running.snapshot_revision.as_deref(),
+                                my_snapshot.as_deref(),
+                            ) {
+                                return Err(io::Error::other(
+                                    "incompatible snapshot-revision host running in state directory; refusing takeover",
+                                ));
+                            }
+                            if !needs_wrapper_takeover && !force_takeover {
+                                let my_mtime =
+                                    omg_session_runtime::host::binary_mtime_for_exe(executable);
+                                if let (Some(running_mtime), Some(my_mtime)) =
+                                    (running.binary_mtime, my_mtime)
+                                {
+                                    if running_mtime > my_mtime.saturating_add(1) {
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                            match omg_session_runtime::host::request_host_takeover(
+                                &socket,
+                                &my_revision,
+                                my_snapshot.as_deref(),
+                            ) {
+                                Ok(()) => {
+                                    wait_for_host_lock_release(
+                                        root,
+                                        std::time::Duration::from_secs(5),
+                                    )?;
+                                }
+                                Err(_) => {
+                                    step_down_legacy_local_host(root, Some(running.pid))?;
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            if !local_sessions_snapshot_compatible(root, my_snapshot.as_deref()) {
+                                return Err(io::Error::other(
+                                    "incompatible snapshot-revision session running in state directory; refusing takeover",
+                                ));
+                            }
+                            if omg_session_runtime::gc::lock_file_is_held(&lock_path) {
+                                step_down_legacy_local_host(root, None)?;
+                            } else {
+                                wait_for_host_lock_release(
+                                    root,
+                                    std::time::Duration::from_secs(2),
+                                )?;
                             }
                         }
                     }
-                    omg_session_runtime::host::request_host_takeover(
-                        &socket,
-                        &my_revision,
-                        my_snapshot.as_deref(),
-                    )?;
-                    wait_for_host_lock_release(root, std::time::Duration::from_secs(5))?;
-                }
-                Err(_) => {
-                    // Older host does not support identity/takeover frames; preserve it safely.
-                    return Ok(());
                 }
             }
-        } else {
-            return Ok(());
+            HostLaunchMode::LegacyRemote => {
+                return Ok(());
+            }
         }
     }
     let log = std::fs::OpenOptions::new()
@@ -533,7 +851,7 @@ fn ensure_host_mode(
                 ));
             }
         }
-        HostLaunchMode::Local => {}
+        HostLaunchMode::Local { .. } => {}
     }
     if local {
         // The relay runs inside the app; keep the persistent host out of the
@@ -574,7 +892,7 @@ fn ensure_host_mode(
     }
     eprintln!("runtime supervision unavailable; process-group cleanup only");
     let subcommand = match mode {
-        HostLaunchMode::Local => "host-local",
+        HostLaunchMode::Local { .. } => "host-local",
         HostLaunchMode::RemoteHolder { .. } => "host-remote",
         HostLaunchMode::LegacyRemote => "host",
     };

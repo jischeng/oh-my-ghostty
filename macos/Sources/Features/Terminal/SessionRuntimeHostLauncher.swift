@@ -21,6 +21,8 @@ enum SessionRuntimeHostLauncher {
     static let hostBundlePathEnvironmentKey = "OMG_HOST_APP_BUNDLE"
     static let hostBundleIDEnvironmentKey = "OMG_HOST_APP_BUNDLE_ID"
     static let hostLaunchdLabelEnvironmentKey = "OMG_RUNTIME_HOST_LABEL"
+    static let wrapperIdentityEnvironmentKey = "OMG_WRAPPER_IDENTITY"
+    static let wrapperExecutableEnvironmentKey = "OMG_WRAPPER_EXECUTABLE"
 
     struct Invocation: Equatable {
         let readyPath: String
@@ -58,19 +60,59 @@ enum SessionRuntimeHostLauncher {
         return ForegroundInvocation(command: command)
     }
 
+    static func isValidOMGHostBundleIdentifier(_ bundleID: String) -> Bool {
+        guard bundleID == "com.jischeng.omg" || bundleID.hasPrefix("com.jischeng.omg.") else {
+            return false
+        }
+        return bundleID.utf8.allSatisfy { byte in
+            (byte >= UInt8(ascii: "a") && byte <= UInt8(ascii: "z")) ||
+                (byte >= UInt8(ascii: "A") && byte <= UInt8(ascii: "Z")) ||
+                (byte >= UInt8(ascii: "0") && byte <= UInt8(ascii: "9")) ||
+                byte == UInt8(ascii: ".") ||
+                byte == UInt8(ascii: "-") ||
+                byte == UInt8(ascii: "_")
+        }
+    }
+
+    static func isEphemeralOrTrashedBundlePath(_ path: String) -> Bool {
+        path.contains("/org.sparkle-project.Sparkle/") || path.contains("/.Trash/")
+    }
+
+    static func applyingHostBundleEnvironment(
+        _ environment: [String: String],
+        bundleURL: URL,
+        bundleIdentifier: String?,
+        allowInitialBundleFallback: Bool,
+        fallbackBundleURL: URL = OMGApplicationEnvironment.initialBundleURL,
+        fallbackBundleIdentifier: String? = OMGApplicationEnvironment.initialBundleIdentifier
+    ) -> [String: String] {
+        var result = environment
+        var resolvedURL = bundleURL.standardizedFileURL
+        var resolvedID = bundleIdentifier
+        if allowInitialBundleFallback, isEphemeralOrTrashedBundlePath(resolvedURL.path) {
+            resolvedURL = fallbackBundleURL.standardizedFileURL
+            resolvedID = fallbackBundleIdentifier ?? resolvedID
+        }
+        if resolvedURL.pathExtension == "app",
+           !isEphemeralOrTrashedBundlePath(resolvedURL.path),
+           let bundleID = resolvedID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           isValidOMGHostBundleIdentifier(bundleID) {
+            result[hostBundlePathEnvironmentKey] = resolvedURL.path
+            result[hostBundleIDEnvironmentKey] = bundleID
+        }
+        return result
+    }
+
     static func applyingHostBundleEnvironment(
         _ environment: [String: String],
         bundle: Bundle = .main
     ) -> [String: String] {
-        var result = environment
-        let bundleURL = bundle.bundleURL
-        if bundleURL.pathExtension == "app",
-           let bundleID = bundle.bundleIdentifier,
-           bundleID.hasPrefix("com.jischeng.omg") {
-            result[hostBundlePathEnvironmentKey] = bundleURL.path
-            result[hostBundleIDEnvironmentKey] = bundleID
-        }
-        return result
+        applyingHostBundleEnvironment(
+            environment,
+            bundleURL: bundle.bundleURL,
+            bundleIdentifier: bundle.bundleIdentifier,
+            allowInitialBundleFallback: bundle === Bundle.main
+        )
     }
 
     private static func spawnChild(command: [String], detached: Bool) throws -> pid_t {
@@ -127,7 +169,48 @@ enum SessionRuntimeHostLauncher {
         return pid
     }
 
+    static func currentWrapperExecutableMetadata(bundle: Bundle = .main) -> (executablePath: String, dev: UInt64, ino: UInt64)? {
+        let bundleURL = bundle.bundleURL
+        guard bundleURL.pathExtension == "app",
+              let bundleID = bundle.bundleIdentifier,
+              isValidOMGHostBundleIdentifier(bundleID) else {
+            return nil
+        }
+        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
+        let pidPath: String? = {
+            let len = proc_pidpath(getpid(), &buffer, UInt32(buffer.count))
+            return len > 0 ? String(cString: buffer) : nil
+        }()
+        guard let executablePath = pidPath ?? bundle.executableURL?.path,
+              !executablePath.isEmpty,
+              !isEphemeralOrTrashedBundlePath(executablePath) else {
+            return nil
+        }
+        let fd = Darwin.open(executablePath, O_RDONLY | O_CLOEXEC)
+        guard fd >= 0 else {
+            return nil
+        }
+        defer { _ = Darwin.close(fd) }
+        var st = Darwin.stat()
+        guard Darwin.fstat(fd, &st) == 0,
+              (st.st_mode & S_IFMT) == S_IFREG else {
+            return nil
+        }
+        return (executablePath, UInt64(bitPattern: Int64(st.st_dev)), st.st_ino)
+    }
+
     static func spawnDetachedChild(_ invocation: Invocation) throws -> pid_t {
+        if let meta = currentWrapperExecutableMetadata() {
+            setenv(wrapperIdentityEnvironmentKey, "\(getpid()):\(meta.dev):\(meta.ino)", 1)
+            setenv(wrapperExecutableEnvironmentKey, meta.executablePath, 1)
+        } else {
+            unsetenv(wrapperIdentityEnvironmentKey)
+            unsetenv(wrapperExecutableEnvironmentKey)
+        }
+        defer {
+            unsetenv(wrapperIdentityEnvironmentKey)
+            unsetenv(wrapperExecutableEnvironmentKey)
+        }
         let pid = try spawnChild(command: invocation.command, detached: true)
 
         let stagingPath = invocation.readyPath + ".tmp"
@@ -233,12 +316,37 @@ enum SessionRuntimeHostLauncher {
         return 1
     }
 
+    static func foregroundEnvironment(
+        _ environment: [String: String],
+        bundle: Bundle = .main
+    ) -> [String: String] {
+        var result = environment
+        result.removeValue(forKey: hostLaunchdLabelEnvironmentKey)
+        let bundlePath = result[hostBundlePathEnvironmentKey]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let bundleID = result[hostBundleIDEnvironmentKey]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if bundlePath.isEmpty ||
+            !isValidOMGHostBundleIdentifier(bundleID) ||
+            isEphemeralOrTrashedBundlePath(bundlePath) {
+            result.removeValue(forKey: hostBundlePathEnvironmentKey)
+            result.removeValue(forKey: hostBundleIDEnvironmentKey)
+            result = applyingHostBundleEnvironment(result, bundle: bundle)
+        }
+        return result
+    }
+
     static func runIfRequested(arguments: [String] = CommandLine.arguments) {
         if let foreground = parseForeground(arguments: arguments) {
             let parentPID = getppid()
+            let updatedEnv = foregroundEnvironment(ProcessInfo.processInfo.environment)
             unsetenv(hostLaunchdLabelEnvironmentKey)
-            unsetenv(hostBundlePathEnvironmentKey)
-            unsetenv(hostBundleIDEnvironmentKey)
+            if let path = updatedEnv[hostBundlePathEnvironmentKey],
+               let id = updatedEnv[hostBundleIDEnvironmentKey] {
+                setenv(hostBundlePathEnvironmentKey, path, 1)
+                setenv(hostBundleIDEnvironmentKey, id, 1)
+            } else {
+                unsetenv(hostBundlePathEnvironmentKey)
+                unsetenv(hostBundleIDEnvironmentKey)
+            }
             _exit(runForegroundLifecycle(foreground, initialParentPID: parentPID))
         }
 

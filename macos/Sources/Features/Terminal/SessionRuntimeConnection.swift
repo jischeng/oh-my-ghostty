@@ -851,8 +851,7 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
         return path
     }
 
-    nonisolated static func localStateDirectory(
-        for descriptor: SessionRuntimeDescriptor,
+    nonisolated static func localChannelStateDirectory(
         applicationSupportRoot: URL? = nil,
         homeDirectory: URL? = nil
     ) -> URL {
@@ -862,6 +861,110 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
         let input = "omg-local-v2\0" + supportPath
         let hash = SHA256.hash(data: Data(input.utf8)).map { String(format: "%02x", $0) }.joined().prefix(20)
         return home.appendingPathComponent(".omg/run/\(hash)")
+    }
+
+    nonisolated static func localStateDirectory(
+        for descriptor: SessionRuntimeDescriptor,
+        applicationSupportRoot: URL? = nil,
+        homeDirectory: URL? = nil
+    ) -> URL {
+        _ = descriptor
+        return localChannelStateDirectory(
+            applicationSupportRoot: applicationSupportRoot,
+            homeDirectory: homeDirectory
+        )
+    }
+
+    struct ValidatedReplacementAppBundle: Equatable, Sendable {
+        let bundleURL: URL
+        let bundleIdentifier: String
+        let omgdURL: URL
+    }
+
+    nonisolated static func validatedOnDiskReplacementAppBundle(
+        candidateBundleURL: URL = OMGApplicationEnvironment.initialBundleURL,
+        expectedBundleIdentifier: String? = OMGApplicationEnvironment.initialBundleIdentifier
+    ) -> ValidatedReplacementAppBundle? {
+        let standardized = candidateBundleURL.standardizedFileURL
+        let path = standardized.path
+        guard standardized.pathExtension == "app",
+              !path.contains("/org.sparkle-project.Sparkle/"),
+              !path.contains("/.Trash/") else {
+            return nil
+        }
+        let infoPlistURL = standardized.appendingPathComponent("Contents/Info.plist", isDirectory: false)
+        guard let plist = NSDictionary(contentsOf: infoPlistURL),
+              let bundleID = (plist["CFBundleIdentifier"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              SessionRuntimeHostLauncher.isValidOMGHostBundleIdentifier(bundleID) else {
+            return nil
+        }
+        if let expected = expectedBundleIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !expected.isEmpty,
+           bundleID != expected {
+            return nil
+        }
+        let rawExe = (plist["CFBundleExecutable"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let exeName = (rawExe?.isEmpty == false) ? rawExe! : "omg"
+        guard !exeName.contains("/"), !exeName.contains("\0") else {
+            return nil
+        }
+        let mainExeURL = standardized
+            .appendingPathComponent("Contents/MacOS", isDirectory: true)
+            .appendingPathComponent(exeName, isDirectory: false)
+        let omgdURL = standardized
+            .appendingPathComponent("Contents/Resources/session-runtime/omgd", isDirectory: false)
+        guard FileManager.default.isExecutableFile(atPath: mainExeURL.path),
+              FileManager.default.isExecutableFile(atPath: omgdURL.path) else {
+            return nil
+        }
+        return ValidatedReplacementAppBundle(
+            bundleURL: standardized,
+            bundleIdentifier: bundleID,
+            omgdURL: omgdURL
+        )
+    }
+
+    /// Proactively rotates an active local runtime broker onto the newly installed
+    /// on-disk `.app` bundle after Sparkle silently swaps the bundle pre-quit.
+    nonisolated static func rotateLocalHostAfterInPlaceBundleUpdate(
+        candidateBundleURL: URL = OMGApplicationEnvironment.initialBundleURL,
+        expectedBundleIdentifier: String? = OMGApplicationEnvironment.initialBundleIdentifier,
+        applicationSupportRoot: URL? = nil,
+        homeDirectory: URL? = nil
+    ) {
+        guard !OMGApplicationEnvironment.isRunningTests else { return }
+        let supportRoot = applicationSupportRoot ?? OMGApplicationEnvironment.applicationSupportURL()
+        let stateDirectory = localChannelStateDirectory(
+            applicationSupportRoot: supportRoot,
+            homeDirectory: homeDirectory
+        )
+        let socketURL = stateDirectory.appendingPathComponent("host.sock", isDirectory: false)
+        var st = stat()
+        guard Darwin.lstat(socketURL.path, &st) == 0,
+              (st.st_mode & S_IFMT) == S_IFSOCK else {
+            return
+        }
+        guard let replacement = validatedOnDiskReplacementAppBundle(
+            candidateBundleURL: candidateBundleURL,
+            expectedBundleIdentifier: expectedBundleIdentifier
+        ) else {
+            return
+        }
+        Task.detached(priority: .utility) {
+            let process = Process()
+            process.executableURL = replacement.omgdURL
+            process.arguments = ["ensure-host", "--local", stateDirectory.path]
+            process.standardInput = FileHandle.nullDevice
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            var environment = ProcessInfo.processInfo.environment
+            environment[SessionRuntimeHostLauncher.hostBundlePathEnvironmentKey] = replacement.bundleURL.path
+            environment[SessionRuntimeHostLauncher.hostBundleIDEnvironmentKey] = replacement.bundleIdentifier
+            environment["OMG_APP_SUPPORT"] = supportRoot.path
+            process.environment = environment
+            try? process.run()
+            process.waitUntilExit()
+        }
     }
 
     nonisolated static func legacyLocalStateDirectory(

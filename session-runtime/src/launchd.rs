@@ -108,6 +108,7 @@ pub fn environment(vars: impl Iterator<Item = (String, String)>) -> Vec<(String,
                 && key != "OMG_HOST_APP_BUNDLE"
                 && key != "OMG_HOST_APP_BUNDLE_ID"
                 && key != "OMG_RUNTIME_HOST_LABEL"
+                && !key.starts_with("OMG_WRAPPER_")
         })
         .filter(|(key, value)| escape(key).is_ok() && escape(value).is_ok())
         .map(|(key, value)| {
@@ -169,10 +170,10 @@ fn extract_plutil_string(plist_path: &Path, key: &str) -> Option<String> {
 }
 
 fn is_valid_omg_bundle_id(bundle_id: &str) -> bool {
-    bundle_id.starts_with("com.jischeng.omg")
+    (bundle_id == "com.jischeng.omg" || bundle_id.starts_with("com.jischeng.omg."))
         && bundle_id
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
 }
 
 fn is_executable_file(path: &Path) -> bool {
@@ -189,8 +190,15 @@ fn is_executable_file(path: &Path) -> bool {
     }
 }
 
+fn is_ephemeral_bundle_path(path: &Path) -> bool {
+    let raw = path.to_string_lossy();
+    raw.contains("/org.sparkle-project.Sparkle/") || raw.contains("/.Trash/")
+}
+
 pub fn host_app_from_bundle(bundle: &Path, bundle_id_hint: Option<&str>) -> Option<HostApp> {
-    if bundle.extension().and_then(|s| s.to_str()) != Some("app") {
+    if bundle.extension().and_then(|s| s.to_str()) != Some("app")
+        || is_ephemeral_bundle_path(bundle)
+    {
         return None;
     }
     let contents = bundle.join("Contents");
@@ -232,6 +240,18 @@ pub fn host_app_from_bundle(bundle: &Path, bundle_id_hint: Option<&str>) -> Opti
 fn enclosing_app_bundle(path: &Path) -> Option<&Path> {
     path.ancestors()
         .find(|ancestor| ancestor.extension().and_then(|s| s.to_str()) == Some("app"))
+}
+
+pub fn enclosing_omg_host_app(executable_path: &Path) -> Option<HostApp> {
+    let bundle = enclosing_app_bundle(executable_path)?;
+    let app = host_app_from_bundle(bundle, None)?;
+    if app.executable == executable_path
+        || crate::registry::same_canonical_path(&app.executable, executable_path)
+    {
+        Some(app)
+    } else {
+        None
+    }
 }
 
 pub fn resolve_host_app(
@@ -451,6 +471,11 @@ mod tests {
                 ("OMG_HOST_APP_BUNDLE", "/Applications/OMG.app"),
                 ("OMG_HOST_APP_BUNDLE_ID", "com.jischeng.omg"),
                 ("OMG_RUNTIME_HOST_LABEL", "com.jischeng.omg.host.1"),
+                ("OMG_WRAPPER_IDENTITY", "123:1:2"),
+                (
+                    "OMG_WRAPPER_EXECUTABLE",
+                    "/Applications/OMG.app/Contents/MacOS/omg",
+                ),
                 ("PATH", "/bin"),
                 ("TERM", "dumb"),
                 ("BAD", "a\u{1}"),
@@ -527,6 +552,26 @@ mod tests {
         let resolved = resolve_host_app(&helper, None, None).unwrap();
         assert_eq!(resolved.bundle_id, "com.jischeng.omg.debug");
         assert_eq!(resolved.executable, exe);
+        assert_eq!(enclosing_omg_host_app(&exe), Some(resolved));
+        assert!(enclosing_omg_host_app(&helper).is_none());
+
+        let sparkle_app = root.join("org.sparkle-project.Sparkle/Installation/OMG Dev.app");
+        std::fs::create_dir_all(sparkle_app.join("Contents/MacOS")).unwrap();
+        std::fs::copy(
+            app.join("Contents/Info.plist"),
+            sparkle_app.join("Contents/Info.plist"),
+        )
+        .unwrap();
+        std::fs::copy(&exe, sparkle_app.join("Contents/MacOS/omg")).unwrap();
+        assert!(host_app_from_bundle(&sparkle_app, None).is_none());
+        assert!(enclosing_omg_host_app(&sparkle_app.join("Contents/MacOS/omg")).is_none());
+
+        std::fs::write(
+            app.join("Contents/Info.plist"),
+            r#"<plist><dict><key>CFBundleIdentifier</key><string>com.jischeng.omgevil</string></dict></plist>"#,
+        )
+        .unwrap();
+        assert!(host_app_from_bundle(&app, None).is_none());
 
         std::fs::write(
             app.join("Contents/Info.plist"),

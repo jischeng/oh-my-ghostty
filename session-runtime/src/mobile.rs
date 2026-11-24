@@ -117,6 +117,18 @@ struct GatewayRecord {
     started_at: u64,
     #[serde(default)]
     connected_devices: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wrapper_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wrapper_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wrapper_executable: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wrapper_dev: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wrapper_ino: Option<u64>,
 }
 
 struct GatewayStateTracker {
@@ -889,11 +901,36 @@ pub fn run(args: &[String]) -> io::Result<()> {
             || public_url_arg.is_some()
             || ip_pref != IpPreference::Auto
             || port != DEFAULT_PORT;
+        let current_rev = omg_session_runtime::host::current_host_revision();
+        let current_exe = std::env::current_exe()?;
+        let env_bundle = std::env::var_os("OMG_HOST_APP_BUNDLE").map(PathBuf::from);
+        let env_bundle_id = std::env::var("OMG_HOST_APP_BUNDLE_ID").ok();
+        let caller_has_app_bundle = should_launch_gateway_via_launchd(
+            support.is_some(),
+            &current_exe,
+            env_bundle.as_deref(),
+            env_bundle_id.as_deref(),
+        );
         let record = if let Some(existing) = support
             .as_deref()
             .and_then(read_gateway_record)
             .filter(|rec| {
-                !explicit_net || (rec.listen == address.to_string() && rec.public_url == public_url)
+                let net_ok = !explicit_net
+                    || (rec.listen == address.to_string() && rec.public_url == public_url);
+                let rev_ok = rec.revision.as_deref() == Some(current_rev.as_str());
+                let wrapper_ok = omg_session_runtime::host::is_process_local_wrapper_healthy(
+                    rec.pid,
+                    rec.wrapper_mode.as_deref(),
+                    rec.wrapper_pid,
+                    rec.wrapper_executable.as_deref(),
+                    rec.wrapper_dev,
+                    rec.wrapper_ino,
+                    caller_has_app_bundle,
+                );
+                let wrapper_acceptable = wrapper_ok
+                    || (!caller_has_app_bundle
+                        && rec.wrapper_mode.as_deref() == Some("app-bundle"));
+                net_ok && rev_ok && wrapper_acceptable
             }) {
             existing
         } else {
@@ -955,6 +992,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
+            let wrapper = omg_session_runtime::host::current_local_wrapper_identity();
             let record = GatewayRecord {
                 pid: std::process::id(),
                 listen: bound.to_string(),
@@ -962,6 +1000,12 @@ pub fn run(args: &[String]) -> io::Result<()> {
                 token_file: key_path.clone(),
                 started_at: now,
                 connected_devices: 0,
+                revision: Some(omg_session_runtime::host::current_host_revision()),
+                wrapper_mode: wrapper.wrapper_mode,
+                wrapper_pid: wrapper.wrapper_pid,
+                wrapper_executable: wrapper.wrapper_executable,
+                wrapper_dev: wrapper.wrapper_dev,
+                wrapper_ino: wrapper.wrapper_ino,
             };
             let _ = write_gateway_record(dir, &record);
             Some(Arc::new(std::sync::Mutex::new(GatewayStateTracker {
@@ -1077,6 +1121,7 @@ fn ensure_background_gateway(
     ensure_state_dir(state_dir)?;
     let log_path = state_dir.join("mobile-gateway.log");
     let exe = std::env::current_exe()?;
+    let serve_exe = crate::stage_or_resolve_local_helper(&exe, support)?;
     let mut serve_args = vec![
         "mobile".to_string(),
         "serve".to_string(),
@@ -1110,7 +1155,7 @@ fn ensure_background_gateway(
         env_bundle_id.as_deref(),
     ) {
         let mut launchd_cmd = Vec::with_capacity(serve_args.len() + 1);
-        launchd_cmd.push(exe.to_string_lossy().into_owned());
+        launchd_cmd.push(serve_exe.to_string_lossy().into_owned());
         launchd_cmd.extend(serve_args.iter().cloned());
         let mut extra_env = Vec::new();
         if let Some(sup_str) = support.and_then(Path::to_str) {
@@ -1131,7 +1176,7 @@ fn ensure_background_gateway(
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
             .open(&log_path)?;
-        let mut cmd = Command::new(&exe);
+        let mut cmd = Command::new(&serve_exe);
         cmd.args(&serve_args);
         if let Some(dir) = support {
             cmd.env("OMG_APP_SUPPORT", dir);
@@ -1609,6 +1654,12 @@ mod tests {
             token_file: dir.join("mobile-pair.token"),
             started_at: 1,
             connected_devices: 0,
+            revision: None,
+            wrapper_mode: None,
+            wrapper_pid: None,
+            wrapper_executable: None,
+            wrapper_dev: None,
+            wrapper_ino: None,
         };
         write_gateway_record(&dir, &record).unwrap();
         let tracker = Some(Arc::new(std::sync::Mutex::new(GatewayStateTracker {

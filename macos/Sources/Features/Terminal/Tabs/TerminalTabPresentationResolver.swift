@@ -129,7 +129,7 @@ enum TerminalTabPresentationResolver {
 
         switch style {
         case .chrome:
-            let chromeAgent = titleActivity.flatMap { SupportedAgent(rawValue: $0.source) }
+            let chromeAgent = titleActivity.flatMap { SupportedAgent(rawValue: $0.source) } ?? descriptor?.agent
             let restoredTitle = chromeAgent == nil
                 ? controller.restoredTitleFallback(for: surface, terminalTitle: surface.title)
                 : nil

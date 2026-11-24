@@ -161,8 +161,9 @@ final class AgentConversationTitleCoordinator {
                 skip(target, trigger, "read recently, the Agent named nothing")
                 return
             }
-            if canUpgradePrompt {
-                delays = [.zero]
+            if source == .prompt {
+                // Once a prompt was already read, the transcript exists: check once without grace retries.
+                delays = canUpgradePrompt ? [.zero] : Array(retryDelays.prefix(1))
             } else {
                 // Only a turn that just started can be ahead of its transcript.
                 delays = trigger == .working ? retryDelays : Array(retryDelays.prefix(1))

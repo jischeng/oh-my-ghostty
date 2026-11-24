@@ -498,12 +498,14 @@ extension TerminalController {
     func tabTitleHasSubtitle(activities: TabActivityStore?) -> Bool {
         guard let surface = focusedSurface ?? surfaceTree.first else { return false }
         // A tab named by the user, and every Agent tab while session titles
-        // are on: a sidebar row always names an Agent tab.
+        // are on: a sidebar row always names an Agent tab. Mirrors the Agent
+        // the resolver reads: the focused pane's, else the tab's unless split.
         if titleOverride != nil { return true }
         guard OhMyGhosttySettings.shared.agentSessionTitleMode != .off else { return false }
-        return agentResumeDescriptor(for: surface) != nil
-            || (focusedAgentActivity() ?? activities?.activity(for: tabSessionID))
-                .flatMap { SupportedAgent(rawValue: $0.source) } != nil
+        if agentResumeDescriptor(for: surface) != nil { return true }
+        let activity = preferredAgentActivity() ?? activities?.activity(for: tabSessionID)
+        let titleActivity = focusedAgentActivity() ?? (surfaceTree.isSplit ? nil : activity)
+        return titleActivity.flatMap { SupportedAgent(rawValue: $0.source) } != nil
     }
 
     /// Starts looking up conversation titles for this tab's panes. Calling it

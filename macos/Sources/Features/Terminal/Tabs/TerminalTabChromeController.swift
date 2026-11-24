@@ -232,7 +232,9 @@ final class TerminalTabChromeController {
                 .foregroundColor: OMGNativeTheme.resolve(for: window).foreground,
             ])
             if window.tab.attributedTitle?.isEqual(to: attributed) != true { window.tab.attributedTitle = attributed }
-            let help = AgentLogoStyle.toolTip(title: title, activity: value.activity)
+            let detail = value.showsSubtitle ? value.subtitle : nil
+            let headerTitle = detail.map { "\(title)\n\($0)" } ?? title
+            let help = value.toolTip ?? AgentLogoStyle.toolTip(title: headerTitle, activity: value.activity)
             status.toolTip = help
             status.setAccessibilityLabel(help)
             if window.tab.toolTip != help { window.tab.toolTip = help }

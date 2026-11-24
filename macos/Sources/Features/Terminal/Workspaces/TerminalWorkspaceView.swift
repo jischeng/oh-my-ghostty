@@ -15,8 +15,9 @@ struct TerminalWorkspaceHeaderState {
         let workspace = coordinator.presentationWorkspace(controller.workspaceID)
         let attention = coordinator.liveControllers.contains { other in
             guard other.workspaceID != controller.workspaceID else { return false }
-            let states = other.surfaceTree.map { activities?.activity(for: $0.id)?.state }
-                + [activities?.activity(for: other.tabSessionID)?.state]
+            let states = other.surfaceTree.map {
+                (other.agentActivity(for: $0) ?? activities?.activity(for: $0.id))?.state
+            } + [(other.preferredAgentActivity() ?? activities?.activity(for: other.tabSessionID))?.state]
             return states.contains { $0 == .needsAttention || $0 == .error }
         }
         return .init(name: workspace?.name ?? WorkspaceL10n.text("Workspace", "工作区"),

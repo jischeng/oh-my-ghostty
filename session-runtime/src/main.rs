@@ -612,6 +612,17 @@ fn ensure_host_mode(
     }
     Err(io::Error::other("host daemon failed to start"))
 }
+fn parse_report_pid(raw: &str) -> io::Result<Option<i32>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let parsed = trimmed
+        .parse::<i32>()
+        .map_err(|_| io::Error::other("invalid --pid value"))?;
+    Ok((parsed > 1).then_some(parsed))
+}
+
 fn report_cli(args: &[String]) -> io::Result<()> {
     use omg_session_runtime::record::{nonce, AgentEvent, Resume};
     let mut positional: Vec<&str> = Vec::new();
@@ -698,10 +709,7 @@ fn report_cli(args: &[String]) -> io::Result<()> {
                 let raw = args
                     .get(i)
                     .ok_or_else(|| io::Error::other("missing --pid value"))?;
-                owner_pid = Some(
-                    raw.parse::<i32>()
-                        .map_err(|_| io::Error::other("invalid --pid value"))?,
-                );
+                owner_pid = parse_report_pid(raw)?;
             }
             "--session-id" => {
                 i += 1;
@@ -1231,8 +1239,19 @@ fn exec_local(socket_path: &Path, max_output_bytes: usize, command: &str) -> i32
 
 #[cfg(test)]
 mod tests {
-    use super::ensure_host_with;
+    use super::{ensure_host_with, parse_report_pid};
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn parse_report_pid_handles_ps_whitespace_and_empty_fallbacks() {
+        assert_eq!(parse_report_pid("  66221\n").unwrap(), Some(66221));
+        assert_eq!(parse_report_pid("42").unwrap(), Some(42));
+        assert_eq!(parse_report_pid("").unwrap(), None);
+        assert_eq!(parse_report_pid("   ").unwrap(), None);
+        assert_eq!(parse_report_pid("0").unwrap(), None);
+        assert_eq!(parse_report_pid("1").unwrap(), None);
+        assert!(parse_report_pid("not-a-pid").is_err());
+    }
 
     #[test]
     fn ensure_host_with_serializes_concurrent_cold_start_and_handles_early_exit() {

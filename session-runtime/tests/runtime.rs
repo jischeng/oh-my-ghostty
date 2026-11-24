@@ -2123,3 +2123,255 @@ fn exec_local_handles_offline_socket_legacy_remote_without_exec_and_mid_exec_dro
         "unexpected drop stderr: {drop_err:?}"
     );
 }
+
+#[test]
+fn claude_detached_setsid_hook_osc7501_claude_code_and_stop_failure_end_to_end() {
+    struct DirGuard(std::path::PathBuf);
+    impl Drop for DirGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let dir = std::path::PathBuf::from("/tmp")
+        .join(format!("omg-claude-e2e-{}", &record::nonce().unwrap()[..8]));
+    fs::create_dir(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let _guard = DirGuard(dir.clone());
+
+    let sock_path = dir.join("s.sock");
+    let rec_path = dir.join("rec.json");
+    let shell_pid_file = dir.join("shell.pid");
+    let agent_pid_file = dir.join("agent.pid");
+    let login_script = dir.join("login_sim.py");
+    let claude_script = dir.join("claude_sim.py");
+    let bin = env!("CARGO_BIN_EXE_omgd");
+
+    fs::write(
+        &login_script,
+        format!(
+            r#"import os, signal, sys
+
+signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+signal.signal(signal.SIGTTIN, signal.SIG_IGN)
+
+shell_bin = "/bin/zsh" if os.path.exists("/bin/zsh") else ("/bin/bash" if os.path.exists("/bin/bash") else "/bin/sh")
+if shell_bin.endswith("zsh"):
+    shell_argv = ["-" + shell_bin, "-f", "-i"]
+elif shell_bin.endswith("bash"):
+    shell_argv = ["-" + shell_bin, "--norc", "--noprofile", "-i"]
+else:
+    shell_argv = ["-" + shell_bin, "-m", "-i"]
+
+pid = os.fork()
+if pid == 0:
+    os.setpgid(0, 0)
+    try:
+        os.tcsetpgrp(0, os.getpid())
+    except OSError:
+        pass
+    signal.signal(signal.SIGTTOU, signal.SIG_DFL)
+    signal.signal(signal.SIGTTIN, signal.SIG_DFL)
+    env = dict(os.environ)
+    env["PS1"] = "PROMPT> "
+    os.execve(shell_bin, shell_argv, env)
+
+try:
+    os.setpgid(pid, pid)
+except OSError:
+    pass
+with open({shell_pid:?}, "w") as f:
+    f.write(str(pid))
+_, status = os.waitpid(pid, 0)
+sys.exit(0)
+"#,
+            shell_pid = shell_pid_file.to_str().unwrap(),
+        ),
+    )
+    .unwrap();
+
+    fs::write(
+        &claude_script,
+        format!(
+            r#"import os, subprocess, sys
+
+with open({agent_pid:?}, "w") as f:
+    f.write(f"{{os.getpid()}} {{os.getpgrp()}}")
+
+bin_path = {bin:?}
+
+def run_detached_hook(args_tail):
+    subprocess.run(
+        ["/bin/sh", "-c", f'"{{bin_path}}" {{args_tail}}'],
+        start_new_session=True,
+        check=True,
+    )
+
+run_detached_hook('report claude working conv-setsid /tmp --message "Claude thinking"')
+
+while True:
+    line = sys.stdin.readline()
+    if not line:
+        break
+    cmd = line.strip()
+    if cmd == "EMIT_OSC7501":
+        sys.stdout.write("\x1b]7501;state=working:app=claude-code\x07")
+        sys.stdout.flush()
+    elif cmd == "STOP_FAILURE":
+        run_detached_hook('report claude error conv-setsid /tmp --message "API 529 Overloaded"')
+    elif cmd == "SESSION_END":
+        sys.stdout.write("\x1b]7501;state=clear:app=claude-code\x07")
+        sys.stdout.flush()
+        run_detached_hook('report claude end')
+        break
+"#,
+            agent_pid = agent_pid_file.to_str().unwrap(),
+            bin = bin,
+        ),
+    )
+    .unwrap();
+
+    let mut session_rec = record::Record::new(
+        "33333333-4444-5555-6666-777777777777",
+        lifecycle::Policy::default(),
+    )
+    .unwrap();
+    session_rec.save(&rec_path).unwrap();
+
+    let argv = vec![
+        "python3".to_owned(),
+        "-c".to_owned(),
+        format!(
+            r#"import os, sys
+real = sys.executable
+if sys.platform == "darwin":
+    import ctypes
+    buf = ctypes.create_string_buffer(4096)
+    if ctypes.CDLL(None).proc_pidpath(os.getpid(), buf, len(buf)) > 0:
+        real = buf.value.decode()
+os.execv(real, ["login", "-u", {:?}])"#,
+            login_script.to_str().unwrap()
+        ),
+    ];
+    let sock_clone = sock_path.clone();
+    let rec_clone = rec_path.clone();
+    let daemon = std::thread::spawn(move || {
+        server::serve_managed(
+            &sock_clone,
+            argv,
+            Some(server::ManagedSession {
+                path: rec_clone,
+                record: session_rec,
+                containment_root: None,
+                initial_cwd: None,
+                local_launch: None,
+                remote_launch: None,
+                presentation: None,
+                resurrect: false,
+                shutdown_wake: None,
+            }),
+        )
+    });
+
+    for _ in 0..100 {
+        if sock_path.exists()
+            && shell_pid_file.exists()
+            && record::Record::load(&rec_path)
+                .ok()
+                .and_then(|r| r.pid)
+                .is_some()
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let (mut client, _, _) = connect_session(&sock_path);
+    Frame::new(CLAIM, 0, &[]).send(&mut client).unwrap();
+    until(&mut client, CLAIM);
+    std::thread::sleep(Duration::from_millis(150));
+
+    // 1) Launch simulated Claude inside the interactive shell; its `start_new_session=True`
+    //    (`setsid()`) `/bin/sh` hook exits immediately, yet ownership binds to Claude's PGID
+    //    and survives >650ms (`prune()`) without any false `error` flash!
+    let launch_cmd = format!("python3 -u {}\n", claude_script.display());
+    Frame::new(INPUT, 0, launch_cmd.as_bytes())
+        .send(&mut client)
+        .unwrap();
+    let working_snap = loop {
+        let snap = next_activity(&mut client, "claude_setsid_working");
+        if snap
+            .presentation()
+            .is_some_and(|p| p.agent == "claude" && p.state == "working")
+        {
+            break snap;
+        }
+    };
+    let ids_raw = fs::read_to_string(&agent_pid_file).unwrap();
+    let claude_pgid: i32 = ids_raw.split_whitespace().nth(1).unwrap().parse().unwrap();
+    let expected_record_id = format!("omg-agent-claude-{claude_pgid}");
+    assert!(
+        working_snap
+            .records
+            .iter()
+            .any(|r| r.id == expected_record_id),
+        "expected setsid() hook to walk back to claude PGID ({expected_record_id}), got {:?}",
+        working_snap.records
+    );
+
+    std::thread::sleep(Duration::from_millis(650));
+    let (_, _, after_prune) = connect_session(&sock_path);
+    assert_eq!(
+        after_prune.presentation().map(|p| (p.agent, p.state)),
+        Some(("claude".to_owned(), "working")),
+        "detached setsid() hook exit must NOT trigger false crash error!"
+    );
+
+    // 2) Emit native `OSC 7501` `app=claude-code`: stored record canonicalizes `app=claude`.
+    Frame::new(INPUT, 0, b"EMIT_OSC7501\n")
+        .send(&mut client)
+        .unwrap();
+    let osc_snap = loop {
+        let snap = next_activity(&mut client, "claude_osc7501");
+        if snap.records.iter().any(|r| r.id == "omg-program-status") {
+            break snap;
+        }
+    };
+    let native_rec = osc_snap
+        .records
+        .iter()
+        .find(|r| r.id == "omg-program-status")
+        .unwrap();
+    assert_eq!(native_rec.metadata, "state=working:app=claude");
+
+    // 3) Explicit `StopFailure` (`omgd report claude error ...`) surfaces `error` while Claude lives!
+    Frame::new(INPUT, 0, b"STOP_FAILURE\n")
+        .send(&mut client)
+        .unwrap();
+    let err_snap = loop {
+        let snap = next_activity(&mut client, "claude_stop_failure");
+        if snap
+            .presentation()
+            .is_some_and(|p| p.agent == "claude" && p.state == "error")
+        {
+            break snap;
+        }
+    };
+    assert_eq!(
+        err_snap.presentation().unwrap().message,
+        "API 529 Overloaded"
+    );
+
+    // 4) `OSC 7501 state=clear` + `SessionEnd` (`omgd report claude end`) clears all records cleanly.
+    Frame::new(INPUT, 0, b"SESSION_END\n")
+        .send(&mut client)
+        .unwrap();
+    loop {
+        let snap = next_activity(&mut client, "claude_session_end");
+        if snap.records.is_empty() {
+            break;
+        }
+    }
+
+    Frame::new(INPUT, 0, b"exit\n").send(&mut client).unwrap();
+    let _ = daemon.join();
+}

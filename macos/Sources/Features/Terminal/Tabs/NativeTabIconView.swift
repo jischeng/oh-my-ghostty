@@ -107,6 +107,34 @@ final class NativeTabIconView: NSView {
         }
     }
 
+    @MainActor
+    static func previewMenuEntries(for controller: TerminalController) -> [NativeMenuEntry] {
+        let panes = Array(controller.surfaceTree)
+        return [.action("\(panes.count) Panes", enabled: false) {}] + panes.map { surface in
+            let symbol = TerminalTabPresentationResolver.paneSymbolName(for: surface, in: controller)
+            let activity = controller.agentActivity(for: surface)
+            let agent = activity.flatMap { SupportedAgent(rawValue: $0.source) }
+                ?? controller.agentResumeDescriptor(for: surface)?.agent
+            let rawTitle = surface.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            let paneTitle: String = if let conversationTitle = controller.agentConversationTitle(for: surface) {
+                conversationTitle
+            } else if rawTitle.isEmpty || rawTitle == "👻" {
+                agent?.displayName ?? "Terminal"
+            } else {
+                agent?.normalizedTitle(rawTitle) ?? rawTitle
+            }
+            return .action(
+                paneTitle,
+                symbol: symbol,
+                checked: controller.focusedSurface === surface
+            ) { [weak controller, weak surface] in
+                guard let controller, let surface, controller.surfaceTree.contains(where: { $0 === surface }) else { return }
+                controller.selectVerticalTab(controller)
+                Ghostty.moveFocus(to: surface)
+            }
+        }
+    }
+
     override func mouseEntered(with event: NSEvent) {
         guard controller?.surfaceTree.isSplit == true else { return }
         dismissTask?.cancel()
@@ -117,15 +145,7 @@ final class NativeTabIconView: NSView {
             guard let self, NativePointerLocation.contains(self), let controller = self.controller, let window = self.window else { return }
             Self.previewOwner?.closePreview()
             Self.previewOwner = self
-            let panes = Array(controller.surfaceTree)
-            let entries: [NativeMenuEntry] = [.action("\(panes.count) Panes", enabled: false) {}] + panes.map { surface in
-                .action(surface.title.isEmpty ? "Terminal" : surface.title, symbol: "terminal",
-                        checked: controller.focusedSurface === surface) { [weak controller, weak surface] in
-                    guard let controller, let surface, controller.surfaceTree.contains(where: { $0 === surface }) else { return }
-                    controller.selectVerticalTab(controller)
-                    Ghostty.moveFocus(to: surface)
-                }
-            }
+            let entries = Self.previewMenuEntries(for: controller)
             let content = NativeActionPopoverController(entries: entries)
             let panel = NativeTabPanePreviewController(controller: controller, actions: content)
             panel.surface.onExit = { [weak self] in self?.scheduleDismiss() }

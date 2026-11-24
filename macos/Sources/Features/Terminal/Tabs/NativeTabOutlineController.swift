@@ -1082,7 +1082,8 @@ final class NativeTabCell: NSTableCellView {
         // A name is read from its start; a path keeps its host and its tail.
         label.lineBreakMode = detail != nil ? .byTruncatingTail : .byTruncatingMiddle
         if icon.isHidden { icon.isHidden = false }
-        toolTip = AgentLogoStyle.toolTip(title: detail.map { "\(title)\n\($0)" } ?? title, activity: value.activity)
+        let headerTitle = detail.map { "\(title)\n\($0)" } ?? title
+        toolTip = value.toolTip ?? AgentLogoStyle.toolTip(title: headerTitle, activity: value.activity)
         icon.configure(controller: tab.controller, icon: value.icon, selected: selected, activity: value.activity)
         label.stringValue = title
         let theme = OMGNativeTheme.resolve(for: self)

@@ -52,8 +52,18 @@
         "state": "working"
       },
       {
+        "name": "PreToolUse",
+        "state": "needsAttention",
+        "matcher": "AskUserQuestion|ExitPlanMode"
+      },
+      {
         "name": "PostToolUse",
         "state": "working"
+      },
+      {
+        "name": "PostToolUseFailure",
+        "state": "working",
+        "matcher": "AskUserQuestion|ExitPlanMode"
       },
       {
         "name": "PermissionRequest",
@@ -69,6 +79,10 @@
       {
         "name": "Stop",
         "state": "done"
+      },
+      {
+        "name": "StopFailure",
+        "state": "error"
       },
       {
         "name": "SessionEnd"

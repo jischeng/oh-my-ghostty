@@ -443,4 +443,141 @@ struct AgentProgramStatusTests {
         controller.acknowledgeTerminalAgentStateFromUserInput(on: surface, eventTimestamp: 0)
         #expect(controller.agentActivities[surface.id]?.state == .idle)
     }
+
+    @Test func claudeCodeNativeStatusClearAndAgentPreservation() throws {
+        #expect(AgentProgramStatus.resolveAgent("claude-code") == .claude)
+        #expect(AgentProgramStatus.resolveAgent("Claude Code") == .claude)
+        #expect(AgentProgramStatus.resolveAgent("CLAUDE-CODE") == .claude)
+
+        // Empty status with no app and no fallback must not insert a zombie nil-agent record.
+        var empty = AgentProgramStatus()
+        #expect(empty.consume("state=idle") == false)
+        #expect(empty.records.isEmpty)
+        #expect(empty.consume("state=working:app=unknown-non-agent") == false)
+        #expect(empty.records.isEmpty)
+
+        // Resolved `app=claude-code` is preserved across subsequent app-less updates and
+        // is never clobbered by an unrecognized `app=` token.
+        var status = AgentProgramStatus()
+        #expect(status.consume("state=idle:app=claude-code") == true)
+        #expect(status.activity?.source == "claude")
+        #expect(status.activity?.state == .idle)
+        #expect(status.activity?.icon == SupportedAgent.claude.icon)
+
+        #expect(status.consume("state=working") == true)
+        #expect(status.activity?.source == "claude")
+        #expect(status.activity?.state == .working)
+
+        #expect(status.consume("state=working:app=unknown-non-agent") == false)
+        #expect(status.activity?.source == "claude")
+        #expect(status.activity?.state == .working)
+
+        #expect(status.consume("state=clear") == true)
+        #expect(status.records.isEmpty)
+        #expect(status.activity == nil)
+
+        // Controller integration: `state=clear` removes `agentProgramStatuses[surface.id]`
+        // so Tier 3 title spinner detection is never permanently locked out.
+        let enabled = OhMyGhosttySettings.shared.agentStatusHooksEnabled
+        OhMyGhosttySettings.shared.agentStatusHooksEnabled = true
+        defer { OhMyGhosttySettings.shared.agentStatusHooksEnabled = enabled }
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let coordinator = TerminalWorkspaceCoordinator(store: TerminalWorkspaceStore(fileURL: nil))
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let controller = TerminalController(app, withBaseConfig: config, workspaceCoordinator: coordinator)
+        _ = controller.window
+        defer { controller.window?.delegate = nil; controller.window?.close() }
+        let surface = try #require(controller.surfaceTree.first)
+
+        // Establish a non-typed local Claude context (Tier 3 eligible).
+        controller.applyDetectedAgent(.claude, processGroupID: Int(getpgrp()), surfaceID: surface.id)
+        #expect(controller.agentActivities[surface.id]?.state == .idle)
+
+        // Native OSC 7501 `app=claude-code` takes Tier 1 ownership, then `state=clear` releases it.
+        surface.contextSignal = .init(action: .start, id: "omg-program-status",
+            metadata: "state=working:app=claude-code")
+        #expect(controller.agentActivities[surface.id]?.source == "claude")
+        #expect(controller.agentActivities[surface.id]?.state == .working)
+
+        surface.contextSignal = .init(action: .start, id: "omg-program-status",
+            metadata: "state=clear")
+        #expect(controller.agentActivities[surface.id]?.state == .idle)
+
+        // Tier 3 title spinner immediately works again because `agentProgramStatuses` was cleared.
+        controller.updateAgentTitleActivity("◐ Claude Code", for: surface.id)
+        #expect(controller.agentActivities[surface.id]?.state == .working)
+    }
+
+    @Test func claudeStopFailureErrorSurfacesOverNativeOSC7501WorkingAndIdle() throws {
+        let enabled = OhMyGhosttySettings.shared.agentStatusHooksEnabled
+        OhMyGhosttySettings.shared.agentStatusHooksEnabled = true
+        defer { OhMyGhosttySettings.shared.agentStatusHooksEnabled = enabled }
+
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let coordinator = TerminalWorkspaceCoordinator(store: TerminalWorkspaceStore(fileURL: nil))
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let controller = TerminalController(app, withBaseConfig: config, workspaceCoordinator: coordinator)
+        _ = controller.window
+        defer { controller.window?.delegate = nil; controller.window?.close() }
+        let surface = try #require(controller.surfaceTree.first)
+        let pid = ProcessInfo.processInfo.processIdentifier
+
+        // 1. OSC 7501 working -> StopFailure error -> OSC 7501 idle -> acknowledge -> idle.
+        surface.contextSignal = .init(
+            action: .start,
+            id: "omg-program-status",
+            metadata: "state=working:app=claude-code"
+        )
+        #expect(controller.agentActivities[surface.id]?.state == .working)
+
+        surface.contextSignal = .init(
+            action: .start,
+            id: "omg-agent-claude-\(pid)",
+            metadata: "type=app;omg_agent=claude;omg_scope=local;omg_liveness=pid;omg_state=error;omg_conversation=conv-err-1"
+        )
+        #expect(controller.agentActivities[surface.id]?.state == .error)
+
+        surface.contextSignal = .init(
+            action: .start,
+            id: "omg-program-status",
+            metadata: "state=idle:app=claude-code"
+        )
+        // Tier 1 `idle` must NOT swallow unacknowledged Tier 2 `StopFailure` `error`!
+        #expect(controller.agentActivities[surface.id]?.state == .error)
+
+        controller.acknowledgeTerminalAgentState(for: surface)
+        #expect(controller.agentActivities[surface.id]?.state == .idle)
+
+        // 2. OSC 7501 working -> StopFailure error -> OSC 7501 idle -> next working turn -> working.
+        surface.contextSignal = .init(
+            action: .start,
+            id: "omg-program-status",
+            metadata: "state=working:app=claude-code"
+        )
+        #expect(controller.agentActivities[surface.id]?.state == .working)
+
+        surface.contextSignal = .init(
+            action: .start,
+            id: "omg-agent-claude-\(pid)",
+            metadata: "type=app;omg_agent=claude;omg_scope=local;omg_liveness=pid;omg_state=error;omg_conversation=conv-err-1"
+        )
+        #expect(controller.agentActivities[surface.id]?.state == .error)
+
+        surface.contextSignal = .init(
+            action: .start,
+            id: "omg-program-status",
+            metadata: "state=idle:app=claude-code"
+        )
+        #expect(controller.agentActivities[surface.id]?.state == .error)
+
+        // Next turn `OSC 7501 state=working` acknowledges prior reducer `error` and resumes `working`.
+        surface.contextSignal = .init(
+            action: .start,
+            id: "omg-program-status",
+            metadata: "state=working:app=claude-code"
+        )
+        #expect(controller.agentActivities[surface.id]?.state == .working)
+    }
 }

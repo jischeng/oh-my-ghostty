@@ -202,8 +202,15 @@ struct AgentProgramStatus {
         let attention: TabAttentionKind? = if state == .needsAttention {
             fields["kind"] == "question" ? .question : (fields["kind"] == "permission" ? .permission : nil)
         } else { nil }
-        let agent = fields["app"].flatMap(Self.resolveAgent)
-            ?? inheritedAgent(for: id, fallback: fallbackAgent)
+        let resolvedAgent: SupportedAgent?
+        if let rawApp = fields["app"], !rawApp.isEmpty {
+            resolvedAgent = Self.resolveAgent(rawApp)
+        } else {
+            resolvedAgent = inheritedAgent(for: id, fallback: fallbackAgent)
+        }
+        guard let agent = resolvedAgent else {
+            return false
+        }
         if state == .working, phase != .background {
             for index in records.indices
             where !records[index].acknowledged &&
@@ -270,21 +277,26 @@ struct AgentProgramStatus {
         fallback: TabActivity?
     ) -> TabActivity? {
         if let program {
+            let allowsSameAgentHookOverride =
+                SupportedAgent(rawValue: program.source)?
+                    .definition.supportsNativeOSC7501Blocked != true
             if program.state != .idle {
                 if program.state == .working,
                    let fallback,
-                   fallback.state == .needsAttention,
+                   fallback.state == .needsAttention || fallback.state == .error,
                    fallback.source == program.source,
-                   SupportedAgent(rawValue: program.source)?
-                       .definition.supportsNativeOSC7501Blocked != true {
+                   allowsSameAgentHookOverride {
                     return fallback
                 }
                 return program
             }
-            if let fallback,
-               fallback.state != .idle,
-               fallback.source != program.source {
-                return fallback
+            if let fallback, fallback.state != .idle {
+                if fallback.source != program.source {
+                    return fallback
+                }
+                if fallback.state == .error, allowsSameAgentHookOverride {
+                    return fallback
+                }
             }
             return program
         }
@@ -358,22 +370,55 @@ struct AgentProgramStatus {
         return fallback
     }
 
-    private static func resolveAgent(_ raw: String) -> SupportedAgent? {
+    static func resolveAgent(_ raw: String) -> SupportedAgent? {
         let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !normalized.isEmpty else { return nil }
-        if let agent = SupportedAgent(rawValue: normalized) { return agent }
-        switch normalized {
-        case "agy", "jetski", "jetski-cli", "antigravity-cli": return .antigravity
-        default:
-            for candidate in SupportedAgent.allCases {
-                let definition = candidate.definition
-                if definition.command.lowercased() == normalized ||
-                    definition.process.executables.contains(where: { $0.lowercased() == normalized }) {
-                    return candidate
-                }
+        let hyphenated = normalized
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: "-")
+
+        for candidateName in [normalized, hyphenated] {
+            if let agent = SupportedAgent(rawValue: candidateName) { return agent }
+            switch candidateName {
+            case "agy", "jetski", "jetski-cli", "antigravity-cli", "gemini":
+                return .antigravity
+            case "claude-code":
+                return .claude
+            case "openai-codex":
+                return .codex
+            case "pi-coding-agent":
+                return .pi
+            case "github-copilot-cli", "gh-copilot":
+                return .copilot
+            case "oh-my-pi":
+                return .omp
+            case "qwen-code":
+                return .qwen
+            case "kimi-code":
+                return .kimi
+            default:
+                break
             }
-            return nil
         }
+
+        for candidate in SupportedAgent.allCases {
+            let definition = candidate.definition
+            if candidate.displayName.lowercased() == normalized ||
+                definition.command.lowercased() == normalized ||
+                definition.command.lowercased() == hyphenated ||
+                definition.process.executables.contains(where: {
+                    let lower = $0.lowercased()
+                    return lower == normalized || lower == hyphenated
+                }) ||
+                definition.process.runtimeMarkers.contains(where: {
+                    guard !$0.contains("/") else { return false }
+                    let lower = $0.lowercased()
+                    return lower == normalized || lower == hyphenated
+                }) {
+                return candidate
+            }
+        }
+        return nil
     }
 
     private static func validID(_ value: String) -> Bool {

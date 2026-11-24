@@ -92,6 +92,20 @@ class NativeActionControl: NSButton, NSMenuDelegate {
     private(set) var isMenuOpen = false
     private var actionStyle: NativeActionStyle = .plain
     private var configuredSymbol: String?
+    private(set) var trailingImage: NSImage?
+    var trailingSymbol: String? {
+        didSet {
+            let changed = oldValue != trailingSymbol || (trailingSymbol == nil) != (trailingImage == nil)
+            guard changed else { return }
+            trailingImage = trailingSymbol.flatMap {
+                NSImage(systemSymbolName: $0, accessibilityDescription: nil)?
+                    .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
+                    ?? NSImage(named: $0)
+            }
+            invalidateIntrinsicContentSize()
+            needsDisplay = true
+        }
+    }
     var controlStyle: NativeActionStyle {
         get { actionStyle }
         set { actionStyle = newValue; needsDisplay = true }
@@ -135,6 +149,7 @@ class NativeActionControl: NSButton, NSMenuDelegate {
             image = symbol.flatMap {
                 NSImage(systemSymbolName: $0, accessibilityDescription: nil)?
                     .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
+                    ?? NSImage(named: $0)
             }
         }
         let position: NSControl.ImagePosition = symbol == nil ? .noImage : title.isEmpty ? .imageOnly : .imageLeading
@@ -165,8 +180,9 @@ class NativeActionControl: NSButton, NSMenuDelegate {
 
     override var intrinsicContentSize: NSSize {
         let textWidth = (title as NSString).size(withAttributes: [.font: font ?? NSFont.systemFont(ofSize: 11)]).width
+        let trailingReserve: CGFloat = trailingImage == nil ? 0 : 19
         return NSSize(width: max(24, ceil(textWidth) + (image == nil ? 0 : 14) +
-                                (image != nil && !title.isEmpty ? 5 : 0) + (title.isEmpty ? 0 : 16)), height: 28)
+                                (image != nil && !title.isEmpty ? 5 : 0) + (title.isEmpty ? 0 : 16) + trailingReserve), height: 28)
     }
 
     override func updateTrackingAreas() {
@@ -245,6 +261,15 @@ class NativeActionControl: NSButton, NSMenuDelegate {
                       y: (bounds.height - height) / 2, width: width, height: height)
     }
 
+    var trailingGlyphRect: NSRect {
+        guard let trailingImage else { return .zero }
+        let size = trailingImage.withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))?.size ?? trailingImage.size
+        let scale = max(size.width, size.height) > 0 ? min(1, 14 / max(size.width, size.height)) : 0
+        let width = size.width * scale
+        let height = size.height * scale
+        return NSRect(x: max(0, bounds.width - width - 8), y: (bounds.height - height) / 2, width: width, height: height)
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 5, yRadius: 5)
         effectiveFill.setFill()
@@ -281,6 +306,18 @@ class NativeActionControl: NSButton, NSMenuDelegate {
             tinted.draw(in: glyphRect, from: .zero, operation: .sourceOver, fraction: symbolAlpha,
                         respectFlipped: true, hints: nil)
         }
+        let trailingRect = trailingGlyphRect
+        if let trailingImage, trailingRect.width > 0 {
+            let tintedTrailing = NSImage(size: trailingImage.size, flipped: false) { rect in
+                trailingImage.draw(in: rect)
+                color.withAlphaComponent(1).setFill()
+                rect.fill(using: .sourceAtop)
+                return true
+            }
+            let symbolAlpha = (isHovered || isHighlighted || isMenuOpen ? 1 : restingSymbolAlpha) * color.alphaComponent
+            tintedTrailing.draw(in: trailingRect, from: .zero, operation: .sourceOver, fraction: symbolAlpha,
+                                respectFlipped: true, hints: nil)
+        }
         if !title.isEmpty {
             let paragraph = NSMutableParagraphStyle()
             paragraph.alignment = image == nil ? alignment : .left
@@ -290,8 +327,9 @@ class NativeActionControl: NSButton, NSMenuDelegate {
                 .foregroundColor: color, .paragraphStyle: paragraph,
             ])
             let x = image == nil ? 7 : glyphRect.maxX + 5
+            let maxX = trailingImage == nil ? bounds.width - 7 : trailingRect.minX - 5
             text.draw(in: NSRect(x: x, y: floor((bounds.height - text.size().height) / 2),
-                                width: max(0, bounds.width - x - 7), height: text.size().height))
+                                width: max(0, maxX - x), height: text.size().height))
         }
     }
 
@@ -360,7 +398,10 @@ enum NativeActionMenu {
                 item.isEnabled = enabled
                 item.state = checked ? .on : .off
                 item.image = checked && symbol == "checkmark" ? nil :
-                    symbol.flatMap { NSImage(systemSymbolName: $0, accessibilityDescription: nil) }
+                    symbol.flatMap {
+                        NSImage(systemSymbolName: $0, accessibilityDescription: nil)
+                            ?? NSImage(named: $0)
+                    }
                 menu.addItem(item)
             }
         }

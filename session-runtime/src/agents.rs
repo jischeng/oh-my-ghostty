@@ -65,7 +65,7 @@ pub const AGENTS: &[AgentSpec] = &[
         vector_icon: "claude",
         mobile_icon: "claude",
         executables: &["claude"],
-        aliases: &["claude-code"],
+        aliases: &["claude-code", "claude_code"],
         resume_args: &["--resume", "{id}"],
         store: Some(StoreKind::Pattern {
             root: ".claude/projects",
@@ -326,6 +326,147 @@ pub fn resolve(raw: &str) -> Option<&'static AgentSpec> {
     })
 }
 
+/// Canonicalizes a known agent identifier, executable name, or alias (such as
+/// `"claude-code"` -> `"claude"` or `"agy"` -> `"antigravity"`), returning `None`
+/// for unknown third-party `app` names so callers can preserve them verbatim.
+pub fn canonicalize_app(raw: &str) -> Option<&'static str> {
+    resolve(raw).map(|spec| spec.id)
+}
+
+pub fn is_shell_executable(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    let base = trimmed
+        .rsplit('/')
+        .next()
+        .unwrap_or(trimmed)
+        .trim_start_matches('-');
+    matches!(
+        base,
+        "sh" | "bash"
+            | "zsh"
+            | "fish"
+            | "dash"
+            | "ksh"
+            | "mksh"
+            | "oksh"
+            | "tcsh"
+            | "csh"
+            | "nu"
+            | "nushell"
+            | "elvish"
+            | "xonsh"
+            | "pwsh"
+    )
+}
+
+/// Resolves an executable path string (from `proc_pidpath`, `/proc/<pid>/exe`,
+/// `argv[0]`, or a script entrypoint) to a known `AgentSpec`.
+/// Recognizes standalone versioned Claude Code binaries (`.../claude/versions/<ver>`),
+/// npm/bun `@anthropic-ai/claude-code` entrypoints, and direct executables/symlinks.
+pub fn resolve_path_str(raw_path: &str) -> Option<&'static AgentSpec> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let segments: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
+    let last = segments.last().copied()?.trim_start_matches('-');
+    if last.is_empty() || is_shell_executable(last) || last.eq_ignore_ascii_case("login") {
+        return None;
+    }
+    if let Some(spec) = resolve(last) {
+        return Some(spec);
+    }
+    let n = segments.len();
+    if n >= 3
+        && segments[n - 2].eq_ignore_ascii_case("versions")
+        && (segments[n - 3].eq_ignore_ascii_case("claude")
+            || segments[n - 3].eq_ignore_ascii_case("claude-code"))
+    {
+        return resolve("claude");
+    }
+    if segments.windows(2).any(|w| {
+        w[0].eq_ignore_ascii_case("@anthropic-ai") && w[1].eq_ignore_ascii_case("claude-code")
+    }) {
+        return resolve("claude");
+    }
+    None
+}
+
+pub fn resolve_executable_path(path: &Path) -> Option<&'static AgentSpec> {
+    resolve_path_str(&path.to_string_lossy())
+}
+
+/// Resolves a process `argv` slice to a known `AgentSpec`, handling login-prefixed
+/// `argv[0]` (`-claude`), `/usr/bin/env`, and JS/Python runtime wrappers while
+/// strictly excluding shells (`/bin/sh -c ...`) and inline eval (`python3 -c ...`).
+pub fn resolve_process_argv(argv: &[String]) -> Option<&'static AgentSpec> {
+    let first = argv.first()?.trim();
+    if first.is_empty() {
+        return None;
+    }
+    let base0 = first
+        .rsplit('/')
+        .next()
+        .unwrap_or(first)
+        .trim_start_matches('-');
+    if base0.is_empty() || is_shell_executable(base0) || base0.eq_ignore_ascii_case("login") {
+        return None;
+    }
+    if let Some(spec) = resolve_path_str(first) {
+        return Some(spec);
+    }
+    if base0.eq_ignore_ascii_case("env") {
+        let mut idx = 1;
+        while idx < argv.len() {
+            let arg = argv[idx].as_str();
+            if arg == "--" {
+                idx += 1;
+                break;
+            }
+            if matches!(arg, "-u" | "--unset" | "-C" | "--chdir") {
+                idx += 2;
+                continue;
+            }
+            if arg.starts_with('-') || arg.contains('=') {
+                idx += 1;
+                continue;
+            }
+            break;
+        }
+        return argv.get(idx..).and_then(resolve_process_argv);
+    }
+    let base0_lower = base0.to_ascii_lowercase();
+    if matches!(
+        base0_lower.as_str(),
+        "node" | "nodejs" | "bun" | "deno" | "python" | "python3"
+    ) || base0_lower.starts_with("python3.")
+    {
+        let mut idx = 1;
+        while idx < argv.len() {
+            let arg = argv[idx].as_str();
+            if arg == "--" {
+                return argv.get(idx + 1).and_then(|s| resolve_path_str(s));
+            }
+            if matches!(arg, "-e" | "--eval" | "-p" | "--print" | "-c" | "-m") {
+                return None;
+            }
+            if matches!(
+                arg,
+                "-r" | "--require" | "--import" | "--loader" | "--conditions" | "--input-type"
+            ) {
+                idx += 2;
+                continue;
+            }
+            if arg.starts_with('-') {
+                idx += 1;
+                continue;
+            }
+            return resolve_path_str(arg);
+        }
+    }
+    None
+}
+
 /// Normalizes an agent string to its canonical OMG `id` if recognized, or sanitized lowercase.
 pub fn normalize_id(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
@@ -454,4 +595,111 @@ fn search_pattern(
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonicalize_app_maps_known_aliases_and_preserves_unknown_apps() {
+        assert_eq!(canonicalize_app("claude-code"), Some("claude"));
+        assert_eq!(canonicalize_app("CLAUDE-CODE"), Some("claude"));
+        assert_eq!(canonicalize_app("claude_code"), Some("claude"));
+        assert_eq!(canonicalize_app("claude"), Some("claude"));
+        assert_eq!(canonicalize_app("agy"), Some("antigravity"));
+        assert_eq!(canonicalize_app("jetski-cli"), Some("antigravity"));
+        assert_eq!(canonicalize_app("openai-codex"), Some("codex"));
+        assert_eq!(canonicalize_app("oh-my-pi"), Some("omp"));
+        assert_eq!(canonicalize_app("qodercli"), Some("qoder"));
+        assert_eq!(canonicalize_app("cargo"), None);
+        assert_eq!(canonicalize_app("terraform"), None);
+        assert_eq!(canonicalize_app("my-custom-tool"), None);
+        assert_eq!(canonicalize_app(""), None);
+    }
+
+    #[test]
+    fn executable_and_argv_detection_handles_versioned_claude_mach_o_and_rejects_shells() {
+        let vec_str = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+
+        assert_eq!(
+            resolve_executable_path(Path::new(
+                "/Users/alice/.local/share/claude/versions/2.1.331"
+            ))
+            .map(|s| s.id),
+            Some("claude")
+        );
+        assert_eq!(
+            resolve_executable_path(Path::new("/opt/claude-code/versions/2.2.0-beta.1"))
+                .map(|s| s.id),
+            Some("claude")
+        );
+        assert_eq!(
+            resolve_executable_path(Path::new("/Users/alice/.local/bin/claude")).map(|s| s.id),
+            Some("claude")
+        );
+        assert_eq!(
+            resolve_executable_path(Path::new("/Users/alice/.local/bin/agy")).map(|s| s.id),
+            Some("antigravity")
+        );
+        assert!(resolve_executable_path(Path::new("/bin/sh")).is_none());
+        assert!(resolve_executable_path(Path::new("/usr/bin/login")).is_none());
+        assert!(resolve_executable_path(Path::new(
+            "/Users/alice/.local/share/claude/versions/zsh"
+        ))
+        .is_none());
+
+        assert_eq!(
+            resolve_process_argv(&vec_str(&[
+                "claude",
+                "--dangerously-skip-permissions",
+                "--resume",
+                "b02999d0-9406-46f5-801e-d6f4bb34cd2f"
+            ]))
+            .map(|s| s.id),
+            Some("claude")
+        );
+        assert_eq!(
+            resolve_process_argv(&vec_str(&["-claude", "--continue"])).map(|s| s.id),
+            Some("claude")
+        );
+        assert_eq!(
+            resolve_process_argv(&vec_str(&[
+                "/Users/alice/.local/share/claude/versions/2.1.331",
+                "--resume",
+                "abc"
+            ]))
+            .map(|s| s.id),
+            Some("claude")
+        );
+        assert_eq!(
+            resolve_process_argv(&vec_str(&[
+                "/opt/homebrew/bin/node",
+                "--no-warnings",
+                "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+            ]))
+            .map(|s| s.id),
+            Some("claude")
+        );
+        assert_eq!(
+            resolve_process_argv(&vec_str(&[
+                "/usr/bin/env",
+                "-u",
+                "CLAUDECODE",
+                "FOO=1",
+                "claude"
+            ]))
+            .map(|s| s.id),
+            Some("claude")
+        );
+
+        // Hook shells and inline script eval must never be misclassified as agents.
+        assert!(
+            resolve_process_argv(&vec_str(&["/bin/sh", "-c", "omgd report claude working"]))
+                .is_none()
+        );
+        assert!(resolve_process_argv(&vec_str(&["-/bin/zsh", "-l"])).is_none());
+        assert!(resolve_process_argv(&vec_str(&["python3", "-c", "print('claude')"])).is_none());
+        assert!(resolve_process_argv(&vec_str(&["node", "-e", "claude"])).is_none());
+    }
 }

@@ -326,12 +326,12 @@ impl Snapshot {
         }
 
         // Strict authority hierarchy: Tier 1 > Tier 2 > Tier 3.
-        // Exception: if Tier 1 only reports generic `working` while Tier 2 Hook
-        // reports active `needsAttention` on the same agent whose Tier 1 does NOT
-        // natively emit OSC 7501 `blocked`, surface the Tier 2 `needsAttention`.
+        // Exception: for agents whose Tier 1 does NOT natively emit OSC 7501 `blocked`
+        // (such as Claude Code), surface active Tier 2 Hook `needsAttention` (over `working`)
+        // and explicit `StopFailure` `error` (over `working` or `idle`).
         if let Some(t1) = &best_t1 {
-            if t1.state != "idle" {
-                if t1.state == "working" && !crate::agents::native_supports_blocked(&t1.agent) {
+            if !crate::agents::native_supports_blocked(&t1.agent) {
+                if t1.state == "working" {
                     if let Some(t2) = t2_candidates
                         .iter()
                         .rev()
@@ -340,6 +340,17 @@ impl Snapshot {
                         return Some(t2.clone());
                     }
                 }
+                if matches!(t1.state, "working" | "idle") {
+                    if let Some(t2) = t2_candidates
+                        .iter()
+                        .rev()
+                        .find(|t2| t2.state == "error" && t2.agent == t1.agent)
+                    {
+                        return Some(t2.clone());
+                    }
+                }
+            }
+            if t1.state != "idle" {
                 return Some(t1.clone());
             }
         }
@@ -1223,6 +1234,43 @@ pub(crate) fn is_interactive_shell_pid(pid: i32) -> bool {
         .is_some_and(is_interactive_shell_argv)
 }
 
+pub(crate) fn is_shell_pid(pid: i32) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    if let Some(argv) = crate::location::process_argv(pid) {
+        if let Some(first) = argv.first() {
+            return is_shell_name(exe_basename(first));
+        }
+    }
+    crate::location::process_path(pid)
+        .and_then(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_owned))
+        .is_some_and(|name| is_shell_name(exe_basename(&name)))
+}
+
+/// Identifies whether `pid` is a known coding agent process via `KERN_PROCARGS2`/`cmdline`
+/// (`argv[0]` basename `"claude"`, runtime wrappers) or executable path (`proc_pidpath`
+/// matching `*/claude/versions/*`, direct binaries). Never matches shells or `login`.
+pub fn detect_agent_process(pid: i32) -> Option<&'static crate::agents::AgentSpec> {
+    if pid <= 1 {
+        return None;
+    }
+    if let Some(argv) = crate::location::process_argv(pid) {
+        if argv.first().is_some_and(|arg0| {
+            let base = exe_basename(arg0);
+            is_shell_name(base) || base.eq_ignore_ascii_case("login")
+        }) {
+            return None;
+        }
+        if let Some(spec) = crate::agents::resolve_process_argv(&argv) {
+            return Some(spec);
+        }
+    }
+    crate::location::process_path(pid)
+        .as_deref()
+        .and_then(crate::agents::resolve_executable_path)
+}
+
 pub(crate) fn is_login_wrapper(pid: i32) -> bool {
     if pid <= 1 {
         return false;
@@ -1259,22 +1307,35 @@ pub(crate) fn is_login_shell_child(pid: i32, leader: i32) -> bool {
         .is_some_and(is_interactive_shell_argv)
 }
 
-/// Validates a socket `AgentEvent` sender and resolves `(owner_id, is_group, job_pgid)`.
-/// Supports foreground child process groups, interactive shells (including macOS
-/// `/usr/bin/login -> -/bin/zsh`), direct `exec` launches, and inherited-capability
-/// daemons owned by the same effective UID.
-pub fn resolve_event_owner(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_event_owner_with<FInfo, FSid, FShell, FLoginShell, FAgent, FDesc, FForeign>(
     event_pid: i32,
     event_group: i32,
     explicit_owner_pid: Option<i32>,
     session_leader: i32,
     fg_pgid: i32,
-) -> Option<(i32, bool, i32)> {
+    euid: u32,
+    proc_info: FInfo,
+    get_sid: FSid,
+    is_shell_fn: FShell,
+    is_login_shell_fn: FLoginShell,
+    is_agent_fn: FAgent,
+    is_descendant_fn: FDesc,
+    pid_exists_foreign: FForeign,
+) -> Option<(i32, bool, i32)>
+where
+    FInfo: Fn(i32) -> Option<(i32, u32, i32, bool)>,
+    FSid: Fn(i32) -> i32,
+    FShell: Fn(i32) -> bool,
+    FLoginShell: Fn(i32, i32) -> bool,
+    FAgent: Fn(i32) -> bool,
+    FDesc: Fn(i32, i32) -> bool,
+    FForeign: Fn(i32) -> bool,
+{
     if event_pid <= 1 || event_group <= 1 || session_leader <= 1 {
         return None;
     }
-    let euid = unsafe { libc::geteuid() };
-    let (caller_ppid, caller_uid, caller_pgid, caller_zombie) = process_info(event_pid)?;
+    let (caller_ppid, caller_uid, caller_pgid, caller_zombie) = proc_info(event_pid)?;
     if caller_zombie || caller_uid != euid || caller_pgid != event_group {
         return None;
     }
@@ -1283,18 +1344,71 @@ pub fn resolve_event_owner(
         if opid <= 1 {
             return None;
         }
-        let (_, o_uid, o_pgid, o_zombie) = process_info(opid)?;
-        if o_zombie || o_uid != euid {
-            return None;
-        }
-        return Some((opid, false, o_pgid.max(session_leader)));
+        return match proc_info(opid) {
+            Some((_, o_uid, o_pgid, _o_zombie)) => {
+                if o_uid != euid {
+                    return None;
+                }
+                Some((opid, false, o_pgid.max(session_leader)))
+            }
+            None => {
+                if pid_exists_foreign(opid) {
+                    return None;
+                }
+                Some((opid, false, fg_pgid.max(session_leader)))
+            }
+        };
     }
 
-    let in_session = unsafe { libc::getsid(event_pid) } == session_leader;
+    let originally_in_session = get_sid(event_pid) == session_leader;
+    let mut in_session_anchor: Option<i32> = None;
+    let mut detached_root: Option<(i32, i32)> = None;
+    let mut detached_non_shell_leader: Option<(i32, i32)> = None;
 
-    if in_session {
+    if originally_in_session {
+        in_session_anchor = Some(event_pid);
+    } else if caller_ppid > 1 {
+        // Walk `ppid` upward (bounded 32 hops) WITHOUT stopping early on `getsid(p) == p`,
+        // because agents like Claude Code spawn hook `/bin/sh` wrappers with `setsid()`
+        // (`detached: true`) whose parent/ancestor re-enters `session_leader`.
+        let mut curr = caller_ppid;
+        for _ in 0..32 {
+            if curr <= 1 {
+                break;
+            }
+            if curr == session_leader || get_sid(curr) == session_leader {
+                if curr == session_leader {
+                    in_session_anchor = Some(curr);
+                } else if let Some((_, c_uid, _, c_zombie)) = proc_info(curr) {
+                    if !c_zombie && c_uid == euid {
+                        in_session_anchor = Some(curr);
+                    }
+                }
+                break;
+            }
+            let Some((next_ppid, c_uid, c_pgid, c_zombie)) = proc_info(curr) else {
+                break;
+            };
+            if c_zombie || c_uid != euid {
+                break;
+            }
+            let curr_is_shell = is_shell_fn(curr);
+            if !curr_is_shell || detached_root.is_none() {
+                detached_root = Some((curr, c_pgid));
+            }
+            if get_sid(curr) == curr && !curr_is_shell {
+                detached_non_shell_leader = Some((curr, c_pgid));
+            }
+            if next_ppid <= 1 || next_ppid == curr {
+                break;
+            }
+            curr = next_ppid;
+        }
+    }
+
+    if let Some(anchor) = in_session_anchor {
         let mut chain = Vec::with_capacity(8);
-        let mut current = event_pid;
+        let mut current = anchor;
         let mut reached_leader = false;
         for _ in 0..32 {
             if current == session_leader {
@@ -1302,7 +1416,7 @@ pub fn resolve_event_owner(
                 break;
             }
             chain.push(current);
-            let Some((ppid, _, _, _)) = process_info(current) else {
+            let Some((ppid, _, _, _)) = proc_info(current) else {
                 break;
             };
             if ppid == session_leader {
@@ -1318,22 +1432,54 @@ pub fn resolve_event_owner(
 
         let mut shell_root = session_leader;
         let mut job_idx = 0usize;
-        if reached_leader && !chain.is_empty() && is_login_shell_child(chain[0], session_leader) {
+        if reached_leader && !chain.is_empty() && is_login_shell_fn(chain[0], session_leader) {
             shell_root = chain[0];
             job_idx = 1;
+        }
+
+        // If a bare shell/launcher (`anchor == shell_root`, not itself a detected agent like
+        // `exec claude`) spawned a long-lived `setsid()` non-shell daemon (e.g. `opencode`),
+        // track that daemon's PID rather than `shell_root`.
+        if !originally_in_session
+            && reached_leader
+            && chain.get(job_idx).is_none()
+            && !is_agent_fn(shell_root)
+        {
+            if let Some((d_pid, d_pgid)) = detached_non_shell_leader {
+                let job = if fg_pgid > 1 { fg_pgid } else { d_pgid };
+                return Some((d_pid, false, job));
+            }
         }
 
         if reached_leader {
             if let Some(&p1) = chain.get(job_idx) {
                 if p1 != event_pid {
-                    let p1_pgid = process_info(p1)
-                        .map(|(_, _, pg, _)| pg)
-                        .unwrap_or(event_group);
+                    // Prefer the deepest detected agent ancestor below `shell_root` if present.
+                    if let Some(agent_pid) = chain[job_idx..]
+                        .iter()
+                        .rev()
+                        .copied()
+                        .find(|&pid| pid != event_pid && is_agent_fn(pid))
+                    {
+                        let agent_pgid = proc_info(agent_pid)
+                            .map(|(_, _, pg, _)| pg)
+                            .unwrap_or(event_group);
+                        if agent_pgid > 1
+                            && agent_pgid != session_leader
+                            && agent_pgid != shell_root
+                        {
+                            return Some((agent_pgid, true, agent_pgid));
+                        }
+                        return Some((agent_pid, false, agent_pgid.max(shell_root)));
+                    }
+
+                    let p1_pgid = proc_info(p1).map(|(_, _, pg, _)| pg).unwrap_or(event_group);
+                    let is_fg_job =
+                        fg_pgid > 1 && (fg_pgid == p1_pgid || is_descendant_fn(fg_pgid, p1));
                     if p1_pgid > 1
                         && p1_pgid != session_leader
                         && p1_pgid != shell_root
-                        && fg_pgid > 1
-                        && (fg_pgid == p1_pgid || is_descendant_of(fg_pgid, p1))
+                        && (is_fg_job || (!originally_in_session && !is_shell_fn(p1)))
                     {
                         return Some((p1_pgid, true, p1_pgid));
                     }
@@ -1342,7 +1488,8 @@ pub fn resolve_event_owner(
                 let job = if fg_pgid > 1 { fg_pgid } else { shell_root };
                 return Some((shell_root, true, job));
             }
-            return Some((shell_root, true, shell_root));
+            let job = if fg_pgid > 1 { fg_pgid } else { shell_root };
+            return Some((shell_root, true, job));
         }
 
         if fg_pgid > 1 && fg_pgid != session_leader {
@@ -1351,36 +1498,46 @@ pub fn resolve_event_owner(
         return Some((session_leader, true, session_leader));
     }
 
-    // Same-UID detached daemon (e.g. `opencode serve` with inherited capability).
-    // Walk `ppid` upward past ephemeral `/bin/sh` hook wrappers to the root daemon PID.
-    if caller_ppid > 1 {
-        if let Some((mut next_ppid, p_uid, mut root_pgid, p_zombie)) = process_info(caller_ppid) {
-            if !p_zombie && p_uid == euid {
-                let mut root_pid = caller_ppid;
-                for _ in 0..16 {
-                    if next_ppid <= 1
-                        || next_ppid == root_pid
-                        || unsafe { libc::getsid(root_pid) } == root_pid
-                    {
-                        break;
-                    }
-                    let Some((grand_ppid, g_uid, g_pgid, g_zombie)) = process_info(next_ppid)
-                    else {
-                        break;
-                    };
-                    if g_zombie || g_uid != euid {
-                        break;
-                    }
-                    root_pid = next_ppid;
-                    root_pgid = g_pgid;
-                    next_ppid = grand_ppid;
-                }
-                let job = if fg_pgid > 1 { fg_pgid } else { root_pgid };
-                return Some((root_pid, false, job));
-            }
-        }
+    // Same-UID detached daemon whose ancestry no longer reaches `session_leader`
+    // (e.g. reparented to PID 1).
+    if let Some((root_pid, root_pgid)) = detached_non_shell_leader.or(detached_root) {
+        let job = if fg_pgid > 1 { fg_pgid } else { root_pgid };
+        return Some((root_pid, false, job));
     }
     None
+}
+
+/// Validates a socket `AgentEvent` sender and resolves `(owner_id, is_group, job_pgid)`.
+/// Supports foreground child process groups, detached `setsid()` hook subprocesses whose
+/// parent/ancestor belongs to `session_leader`, interactive shells (including macOS
+/// `/usr/bin/login -> -/bin/zsh`), direct `exec` launches, and inherited-capability
+/// daemons owned by the same effective UID.
+pub fn resolve_event_owner(
+    event_pid: i32,
+    event_group: i32,
+    explicit_owner_pid: Option<i32>,
+    session_leader: i32,
+    fg_pgid: i32,
+) -> Option<(i32, bool, i32)> {
+    let euid = unsafe { libc::geteuid() };
+    resolve_event_owner_with(
+        event_pid,
+        event_group,
+        explicit_owner_pid,
+        session_leader,
+        fg_pgid,
+        euid,
+        process_info,
+        |pid| unsafe { libc::getsid(pid) },
+        is_shell_pid,
+        is_login_shell_child,
+        |pid| detect_agent_process(pid).is_some(),
+        is_descendant_of,
+        |pid| {
+            let alive = unsafe { libc::kill(pid, 0) == 0 };
+            alive || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        },
+    )
 }
 
 fn owner_alive_in_session(pid: i32, group: bool, session: i32, verified_session: bool) -> bool {
@@ -1467,9 +1624,47 @@ fn owner_alive_in_session(pid: i32, group: bool, session: i32, verified_session:
     unsafe { libc::getsid(pid) == session }
 }
 
+fn canonicalize_native_app_value(raw_app: &str) -> &str {
+    crate::agents::canonicalize_app(raw_app).unwrap_or(raw_app)
+}
+
+fn canonicalize_native_app_metadata(metadata: &str) -> String {
+    let Some(raw_app) = field(metadata, ':', "app").filter(|v| !v.is_empty()) else {
+        return metadata.to_owned();
+    };
+    let canonical = canonicalize_native_app_value(raw_app);
+    let app_count = metadata
+        .split(':')
+        .filter(|s| s.trim().split_once('=').is_some_and(|(k, _)| k == "app"))
+        .count();
+    if canonical == raw_app && app_count <= 1 {
+        return metadata.to_owned();
+    }
+    let mut parts = Vec::new();
+    let mut seen = 0usize;
+    for part in metadata.split(':') {
+        if let Some((k, _)) = part.trim().split_once('=') {
+            if k == "app" {
+                seen += 1;
+                if seen == app_count {
+                    parts.push(format!("app={canonical}"));
+                }
+                continue;
+            }
+        }
+        parts.push(part.to_owned());
+    }
+    let rewritten = parts.join(":");
+    if rewritten.len() <= 4096 {
+        rewritten
+    } else {
+        metadata.to_owned()
+    }
+}
+
 fn inherit_native_app(records: &[Record], key: &str, metadata: &str) -> String {
     if field(metadata, ':', "app").is_some_and(|v| !v.is_empty()) {
-        return metadata.to_owned();
+        return canonicalize_native_app_metadata(metadata);
     }
     let mut candidate: Option<String> = None;
 
@@ -1477,7 +1672,7 @@ fn inherit_native_app(records: &[Record], key: &str, metadata: &str) -> String {
     for r in records.iter().rev() {
         if r.signal.id == "omg-program-status" && r.key == key {
             if let Some(app) = field(&r.signal.metadata, ':', "app").filter(|a| !a.is_empty()) {
-                candidate = Some(app.to_owned());
+                candidate = Some(canonicalize_native_app_value(app).to_owned());
                 break;
             }
         }
@@ -1492,7 +1687,7 @@ fn inherit_native_app(records: &[Record], key: &str, metadata: &str) -> String {
                     .flatten()
                     .filter(|a| !a.is_empty())
             }) {
-                candidate = Some(app.to_owned());
+                candidate = Some(canonicalize_native_app_value(app).to_owned());
                 break;
             }
             prefix = parent;
@@ -1508,7 +1703,7 @@ fn inherit_native_app(records: &[Record], key: &str, metadata: &str) -> String {
                     .then(|| field(&r.signal.metadata, ':', "app"))
                     .flatten()
                     .filter(|a| !a.is_empty())
-                    .map(str::to_owned)
+                    .map(|app| canonicalize_native_app_value(app).to_owned())
             })
             .or_else(|| {
                 let mut unique: Option<String> = None;
@@ -1675,8 +1870,17 @@ impl State {
         } else {
             format!("omg-agent-{agent}")
         };
+        let canonical_state = match state {
+            "working" | "processing" | "active" => "working",
+            "waiting" | "awaiting" | "blocked" | "needsAttention" => "needsAttention",
+            "error" | "failed" => "error",
+            "done" | "completed" => "done",
+            "idle" => "idle",
+            "end" | "clear" => "end",
+            other => other,
+        };
         let before = self.revision;
-        if state == "end" || state == "clear" {
+        if canonical_state == "end" {
             let meta = if let Some(ctx) = context_id.filter(|s| !s.is_empty()) {
                 format!("omg_context={}", encode_percent(ctx))
             } else {
@@ -1692,7 +1896,7 @@ impl State {
             format!("omg_agent={agent}"),
             format!("omg_scope={scope}"),
             format!("omg_liveness={liveness}"),
-            format!("omg_state={state}"),
+            format!("omg_state={canonical_state}"),
         ];
         if let Some(att) = attention.filter(|a| matches!(*a, "permission" | "question")) {
             parts.push(format!("omg_attention={att}"));
@@ -1877,13 +2081,20 @@ impl State {
                         return false;
                     }
                     if let Some(ref target_agent) = ended_socket_agent {
-                        let same_pgid_agent = field(&r.signal.metadata, ';', "omg_liveness")
-                            == Some("pgid")
+                        let same_root_hook_agent = r.signal.id != "omg-program-status"
+                            && r.signal.id != TAP
+                            && field(&r.signal.metadata, ';', "omg_context")
+                                .filter(|s| !s.is_empty())
+                                .is_none()
+                            && matches!(
+                                field(&r.signal.metadata, ';', "omg_liveness"),
+                                Some("pgid" | "pid")
+                            )
                             && field(&r.signal.metadata, ';', "omg_agent")
                                 .and_then(crate::agents::normalize_id)
                                 .as_deref()
                                 == Some(target_agent.as_str());
-                        return !same_pgid_agent;
+                        return !same_root_hook_agent;
                     }
                     true
                 }
@@ -2476,35 +2687,95 @@ impl State {
     }
 
     /// Shell Prompt Return Fence (`OSC 133;A` / `OSC 133;D`):
-    /// When the shell emits `OSC 133;A` and the foreground process group is back at
-    /// the shell (not a live tracked agent child), clear lingering `working` /
-    /// `needsAttention` records while preserving `done` and `error`.
+    /// - User interrupt / termination exit codes (`129`/`SIGHUP`, `130`/`SIGINT`,
+    ///   `143`/`SIGTERM`) NEVER flip an agent into `error`; if back at a bare shell
+    ///   prompt with no live child owner, they mark `interrupted` and settle to `idle`.
+    /// - Non-zero `OSC 133;D` marks `error` ONLY when a verified child agent process
+    ///   has genuinely exited back to a bare interactive shell prompt (never when an
+    ///   `in_session` TUI agent is still alive, `exec`-launched, or `shell_root`-owned).
+    /// - `OSC 133;A` clears lingering `working`/`needsAttention` once back at the shell
+    ///   while preserving `done` and `error`.
     pub(crate) fn on_osc133(&mut self, event: Osc133Event) -> bool {
+        const fn is_user_interrupt_exit_code(code: i32) -> bool {
+            matches!(code, 129 | 130 | 143)
+        }
+
         match event {
-            Osc133Event::CommandDone(Some(code)) if code != 0 && code != 130 => {
-                // Non-zero command exit (excluding SIGINT 130): if back at shell and an
-                // un-interrupted record was `working` without a live child owner, mark error.
+            Osc133Event::CommandDone(Some(code)) if is_user_interrupt_exit_code(code) => {
+                let Some(leader) = self.session_leader.filter(|&l| l > 1) else {
+                    return false;
+                };
                 if !self.is_at_shell_prompt() {
                     return false;
                 }
-                let shell_pgid = self.session_leader.and_then(|l| self.resolve_shell_pgid(l));
-                let session_leader = self.session_leader;
+                let shell_pgid = self.resolve_shell_pgid(leader);
+                if !(is_login_wrapper(leader) || is_interactive_shell_pid(leader))
+                    || crate::location::session_has_non_shell_member(leader, shell_pgid)
+                {
+                    return false;
+                }
+                let mut changed = false;
+                for r in &mut self.records {
+                    if r.remote && self.local {
+                        continue;
+                    }
+                    let owner_is_live_child = match r.owner {
+                        Some((pid, group)) if pid != leader && Some(pid) != shell_pgid => {
+                            owner_alive_in_session(pid, group, leader, r.verified_session)
+                        }
+                        _ => false,
+                    };
+                    if owner_is_live_child {
+                        continue;
+                    }
+                    r.interrupted = true;
+                    if matches!(
+                        signal_effective_state(&r.signal),
+                        Some("working" | "needsAttention")
+                    ) && rewrite_signal_state(&mut r.signal, "idle", None)
+                    {
+                        r.attention_locked = false;
+                        r.owner = None;
+                        r.verified_session = false;
+                        changed = true;
+                    }
+                }
+                if changed {
+                    self.last_change_sync_restore = false;
+                    self.revision = self.revision.saturating_add(1);
+                }
+                changed
+            }
+            Osc133Event::CommandDone(Some(code)) if code != 0 => {
+                let Some(leader) = self.session_leader.filter(|&l| l > 1) else {
+                    return false;
+                };
+                if !self.is_at_shell_prompt() {
+                    return false;
+                }
+                let shell_pgid = self.resolve_shell_pgid(leader);
+                if !(is_login_wrapper(leader) || is_interactive_shell_pid(leader))
+                    || crate::location::session_has_non_shell_member(leader, shell_pgid)
+                {
+                    return false;
+                }
                 let mut changed = false;
                 let next_rev = self.revision.saturating_add(1);
                 for r in &mut self.records {
                     if r.remote && self.local {
                         continue;
                     }
-                    if signal_effective_state(&r.signal) == Some("working") && !r.interrupted {
-                        let owner_still_live = match (r.owner, session_leader) {
-                            (Some((pid, group)), Some(leader))
-                                if pid != leader && Some(pid) != shell_pgid =>
-                            {
-                                owner_alive_in_session(pid, group, leader, r.verified_session)
+                    if signal_effective_state(&r.signal) == Some("working")
+                        && !r.interrupted
+                        && r.verified_session
+                    {
+                        let child_owner_exited = match r.owner {
+                            Some((pid, group)) if pid != leader && Some(pid) != shell_pgid => {
+                                !owner_alive_in_session(pid, group, leader, r.verified_session)
                             }
                             _ => false,
                         };
-                        if !owner_still_live
+                        if child_owner_exited
                             && rewrite_signal_state(
                                 &mut r.signal,
                                 "error",
@@ -4080,5 +4351,639 @@ mod tests {
         let p_done = vt.activity().presentation().unwrap();
         assert_eq!(p_done.state, "done");
         assert!(!p_done.background);
+    }
+
+    #[test]
+    fn osc7501_canonicalizes_claude_code_and_known_aliases_and_clears_cleanly() {
+        let mut vt = Vt::new(80, 24).unwrap();
+
+        // 1) Claude Code emits `app=claude-code`: stored record canonicalizes to `app=claude`.
+        vt.write(b"\x1b]7501;state=working:app=claude-code\x07");
+        let snap = vt.activity().snapshot();
+        assert_eq!(snap.records.len(), 1);
+        assert_eq!(snap.records[0].id, "omg-program-status");
+        assert_eq!(snap.records[0].metadata, "state=working:app=claude");
+        let pres = snap.presentation().unwrap();
+        assert_eq!(pres.tier, Tier::ProgramStatus);
+        assert_eq!(pres.agent, "claude");
+        assert_eq!(pres.state, "working");
+
+        // 2) Child sub-record omitting `app` inherits canonical `app=claude`.
+        vt.write(b"\x1b]7501;state=blocked:id=perm1:kind=permission\x07");
+        let snap2 = vt.activity().snapshot();
+        assert_eq!(snap2.records.len(), 2);
+        assert_eq!(
+            snap2.records[1].metadata,
+            "state=blocked:id=perm1:kind=permission:app=claude"
+        );
+        assert_eq!(snap2.presentation().unwrap().state, "needsAttention");
+
+        // 3) Scoped `state=clear:id=perm1` removes `perm1`, leaving root `working`.
+        vt.write(b"\x1b]7501;state=clear:id=perm1\x07");
+        let snap3 = vt.activity().snapshot();
+        assert_eq!(snap3.records.len(), 1);
+        assert_eq!(snap3.records[0].metadata, "state=working:app=claude");
+
+        // 4) Root `state=clear:app=claude-code` removes all `omg-program-status` records cleanly
+        //    without leaving an empty/null record behind.
+        vt.write(b"\x1b]7501;state=clear:app=claude-code\x07");
+        let cleared = vt.activity().snapshot();
+        assert!(cleared.records.is_empty());
+        assert!(cleared.presentation().is_none());
+
+        // 5) Other known aliases (`app=agy`) canonicalize, while unknown third-party `app=cargo`
+        //    strings are preserved intact in `Snapshot.records`.
+        vt.write(b"\x1b]7501;state=idle:app=agy:id=a1\x07");
+        vt.write(b"\x1b]7501;state=working:app=cargo:id=b1:progress=50\x07");
+        let mixed = vt.activity().snapshot();
+        assert_eq!(mixed.records.len(), 2);
+        assert_eq!(
+            mixed.records[0].metadata,
+            "state=idle:app=antigravity:id=a1"
+        );
+        assert_eq!(
+            mixed.records[1].metadata,
+            "state=working:app=cargo:id=b1:progress=50"
+        );
+        assert_eq!(mixed.presentation().unwrap().agent, "cargo");
+        vt.write(b"\x1b]7501;state=clear\x07");
+        assert!(vt.activity().snapshot().records.is_empty());
+    }
+
+    #[test]
+    fn resolve_event_owner_walks_detached_setsid_hooks_back_into_pty_session() {
+        use std::collections::HashMap;
+
+        #[derive(Clone, Copy)]
+        struct FakeProc {
+            ppid: i32,
+            uid: u32,
+            pgid: i32,
+            sid: i32,
+            zombie: bool,
+            shell: bool,
+            login_shell: bool,
+            agent: bool,
+            setuid_unreadable: bool,
+        }
+
+        let euid = 501u32;
+        let run = |table: &HashMap<i32, FakeProc>,
+                   event_pid: i32,
+                   event_group: i32,
+                   explicit_pid: Option<i32>,
+                   leader: i32,
+                   fg_pgid: i32| {
+            resolve_event_owner_with(
+                event_pid,
+                event_group,
+                explicit_pid,
+                leader,
+                fg_pgid,
+                euid,
+                |pid| {
+                    let p = table.get(&pid)?;
+                    (!p.setuid_unreadable).then_some((p.ppid, p.uid, p.pgid, p.zombie))
+                },
+                |pid| table.get(&pid).map_or(-1, |p| p.sid),
+                |pid| table.get(&pid).is_some_and(|p| p.shell),
+                |pid, ldr| {
+                    table
+                        .get(&pid)
+                        .is_some_and(|p| p.login_shell && p.ppid == ldr)
+                },
+                |pid| table.get(&pid).is_some_and(|p| p.agent),
+                |mut cur, anc| {
+                    for _ in 0..32 {
+                        if cur == anc {
+                            return true;
+                        }
+                        let Some(p) = table.get(&cur) else {
+                            return false;
+                        };
+                        if p.ppid <= 1 || p.ppid == cur {
+                            return false;
+                        }
+                        cur = p.ppid;
+                    }
+                    false
+                },
+                |pid| table.get(&pid).is_some_and(|p| p.uid != euid),
+            )
+        };
+
+        // 1) Exact live topology: `/usr/bin/login` (28643, setuid root) -> `-fish` (28644) ->
+        //    `claude` `2.1.331` (66221, SID=28643, PGID=66221) -> `setsid()` `/bin/sh` (70001,
+        //    SID=70001, PGID=70001) -> `omgd report` (70002, SID=70001, PGID=70001).
+        let mut t = HashMap::new();
+        t.insert(
+            28643,
+            FakeProc {
+                ppid: 1,
+                uid: 0,
+                pgid: 28643,
+                sid: 28643,
+                zombie: false,
+                shell: false,
+                login_shell: false,
+                agent: false,
+                setuid_unreadable: true,
+            },
+        );
+        t.insert(
+            28644,
+            FakeProc {
+                ppid: 28643,
+                uid: euid,
+                pgid: 28644,
+                sid: 28643,
+                zombie: false,
+                shell: true,
+                login_shell: true,
+                agent: false,
+                setuid_unreadable: false,
+            },
+        );
+        t.insert(
+            66221,
+            FakeProc {
+                ppid: 28644,
+                uid: euid,
+                pgid: 66221,
+                sid: 28643,
+                zombie: false,
+                shell: false,
+                login_shell: false,
+                agent: true,
+                setuid_unreadable: false,
+            },
+        );
+        t.insert(
+            70001,
+            FakeProc {
+                ppid: 66221,
+                uid: euid,
+                pgid: 70001,
+                sid: 70001,
+                zombie: false,
+                shell: true,
+                login_shell: false,
+                agent: false,
+                setuid_unreadable: false,
+            },
+        );
+        t.insert(
+            70002,
+            FakeProc {
+                ppid: 70001,
+                uid: euid,
+                pgid: 70001,
+                sid: 70001,
+                zombie: false,
+                shell: false,
+                login_shell: false,
+                agent: false,
+                setuid_unreadable: false,
+            },
+        );
+
+        // Foreground `claude` (`fg_pgid == 66221`) AND unfocused/shell `fg_pgid == 28644`
+        // both resolve to `(66221, true, 66221)` — never `(70001, false, ...)` or `(28644, ...)`!
+        assert_eq!(
+            run(&t, 70002, 70001, None, 28643, 66221),
+            Some((66221, true, 66221))
+        );
+        assert_eq!(
+            run(&t, 70002, 70001, None, 28643, 28644),
+            Some((66221, true, 66221))
+        );
+        // Also when `/bin/sh` `exec`s `omgd` in place (`event_pid == 70001`, `ppid == 66221`).
+        t.get_mut(&70001).unwrap().shell = false;
+        assert_eq!(
+            run(&t, 70001, 70001, None, 28643, 66221),
+            Some((66221, true, 66221))
+        );
+
+        // 2) Non-job-control shell where `claude` (66221) shares `shell_root` PGID (28644):
+        //    binds PID liveness directly to `claude` `(66221, false, 28644)` instead of `shell_root`.
+        t.get_mut(&70001).unwrap().shell = true;
+        t.get_mut(&66221).unwrap().pgid = 28644;
+        assert_eq!(
+            run(&t, 70002, 70001, None, 28643, 28644),
+            Some((66221, false, 28644))
+        );
+
+        // 3) `exec claude` replacing the login shell (`28644` IS `claude`, `login_shell == false`).
+        let mut exec_t = HashMap::new();
+        exec_t.insert(28643, t[&28643]);
+        exec_t.insert(
+            28644,
+            FakeProc {
+                ppid: 28643,
+                uid: euid,
+                pgid: 28644,
+                sid: 28643,
+                zombie: false,
+                shell: false,
+                login_shell: false,
+                agent: true,
+                setuid_unreadable: false,
+            },
+        );
+        exec_t.insert(
+            70001,
+            FakeProc {
+                ppid: 28644,
+                uid: euid,
+                pgid: 70001,
+                sid: 70001,
+                zombie: false,
+                shell: true,
+                login_shell: false,
+                agent: false,
+                setuid_unreadable: false,
+            },
+        );
+        exec_t.insert(70002, t[&70002]);
+        assert_eq!(
+            run(&exec_t, 70002, 70001, None, 28643, 28644),
+            Some((28644, true, 28644))
+        );
+
+        // 4) Detached non-shell daemon (`opencode` PID 80000, SID=80000) spawned by bare shell:
+        //    tracks daemon `(80000, false, 28644)` rather than `shell_root`.
+        let mut daemon_t = HashMap::new();
+        daemon_t.insert(28643, t[&28643]);
+        daemon_t.insert(28644, t[&28644]);
+        daemon_t.insert(
+            80000,
+            FakeProc {
+                ppid: 28644,
+                uid: euid,
+                pgid: 80000,
+                sid: 80000,
+                zombie: false,
+                shell: false,
+                login_shell: false,
+                agent: false,
+                setuid_unreadable: false,
+            },
+        );
+        daemon_t.insert(
+            80001,
+            FakeProc {
+                ppid: 80000,
+                uid: euid,
+                pgid: 80000,
+                sid: 80000,
+                zombie: false,
+                shell: true,
+                login_shell: false,
+                agent: false,
+                setuid_unreadable: false,
+            },
+        );
+        daemon_t.insert(
+            80002,
+            FakeProc {
+                ppid: 80001,
+                uid: euid,
+                pgid: 80000,
+                sid: 80000,
+                zombie: false,
+                shell: false,
+                login_shell: false,
+                agent: false,
+                setuid_unreadable: false,
+            },
+        );
+        assert_eq!(
+            run(&daemon_t, 80002, 80000, None, 28643, 28644),
+            Some((80000, false, 28644))
+        );
+
+        // 5) Explicit `--pid` on `SessionEnd` after `66221` already exited (`ESRCH`) succeeds,
+        //    whereas pointing `--pid` at a foreign-UID PID (`28643`) is rejected.
+        assert_eq!(
+            run(&daemon_t, 80002, 80000, Some(99999), 28643, 28644),
+            Some((99999, false, 28644))
+        );
+        assert_eq!(
+            run(&daemon_t, 80002, 80000, Some(28643), 28643, 28644),
+            None
+        );
+    }
+
+    #[test]
+    fn real_pty_setsid_hook_and_versioned_claude_binary_detection_and_osc133d_hardening() {
+        use std::os::{
+            fd::FromRawFd,
+            unix::{fs::PermissionsExt, process::CommandExt},
+        };
+
+        let nonce = crate::record::nonce().unwrap();
+        let base = std::env::temp_dir().join(format!("omg-claude-ver-{}", &nonce[..8]));
+        let versions_dir = base.join(".local/share/claude/versions");
+        let bin_dir = base.join(".local/bin");
+        std::fs::create_dir_all(&versions_dir).unwrap();
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        // Compile a tiny standalone Mach-O/ELF binary named `2.1.331` under
+        // `.local/share/claude/versions/2.1.331` and symlink `.local/bin/claude` -> `2.1.331`.
+        let c_src = base.join("claude_stub.c");
+        std::fs::write(
+            &c_src,
+            "#include <unistd.h>\nint main(void) { pause(); return 0; }\n",
+        )
+        .unwrap();
+        let versioned_bin = versions_dir.join("2.1.331");
+        let cc = std::env::var("OMG_RUNTIME_CC").unwrap_or_else(|_| "/usr/bin/cc".into());
+        assert!(std::process::Command::new(cc)
+            .arg(&c_src)
+            .arg("-o")
+            .arg(&versioned_bin)
+            .status()
+            .unwrap()
+            .success());
+        std::fs::set_permissions(&versioned_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let claude_symlink = bin_dir.join("claude");
+        std::os::unix::fs::symlink(&versioned_bin, &claude_symlink).unwrap();
+
+        let mut master: libc::c_int = -1;
+        let mut slave: libc::c_int = -1;
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        unsafe {
+            libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC);
+            libc::fcntl(slave, libc::F_SETFD, libc::FD_CLOEXEC);
+            libc::fcntl(master, libc::F_SETFL, libc::O_NONBLOCK);
+        }
+        let slave_file = unsafe { std::fs::File::from_raw_fd(slave) };
+        let mut shell_cmd = std::process::Command::new("/bin/sh");
+        shell_cmd
+            .arg("-i")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &base)
+            .env("TERM", "dumb")
+            .stdin(slave_file.try_clone().unwrap())
+            .stdout(slave_file.try_clone().unwrap())
+            .stderr(slave_file);
+        unsafe {
+            shell_cmd.pre_exec(|| {
+                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let shell_child = shell_cmd.spawn().unwrap();
+        drop(shell_cmd);
+        let leader = shell_child.id() as i32;
+
+        // Spawn the versioned `claude` binary both via `.local/bin/claude` symlink AND
+        // directly with `argv[0] = "2.1.331"` to verify `proc_pidpath` + `argv` detection!
+        let claude_child = std::process::Command::new(&claude_symlink)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let claude_direct = std::process::Command::new(&versioned_bin)
+            .arg0("2.1.331")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+
+        struct Cleanup {
+            shell: std::process::Child,
+            claude1: std::process::Child,
+            claude2: std::process::Child,
+            master: libc::c_int,
+            dir: std::path::PathBuf,
+        }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                if self.master >= 0 {
+                    unsafe {
+                        libc::close(self.master);
+                    }
+                    self.master = -1;
+                }
+                let leader = self.shell.id() as i32;
+                if leader > 1 {
+                    unsafe {
+                        libc::kill(-leader, libc::SIGKILL);
+                    }
+                }
+                let _ = self.claude1.kill();
+                let _ = self.claude1.wait();
+                let _ = self.claude2.kill();
+                let _ = self.claude2.wait();
+                let _ = self.shell.kill();
+                let _ = self.shell.wait();
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+        let guard = Cleanup {
+            shell: shell_child,
+            claude1: claude_child,
+            claude2: claude_direct,
+            master,
+            dir: base.clone(),
+        };
+
+        // (c) Verify live OS `detect_agent_process` resolves BOTH symlinked `claude` AND
+        //     `argv[0] == "2.1.331"` (`proc_pidpath == .../claude/versions/2.1.331`) to `claude`!
+        assert_eq!(
+            detect_agent_process(guard.claude1.id() as i32).map(|s| s.id),
+            Some("claude")
+        );
+        assert_eq!(
+            detect_agent_process(guard.claude2.id() as i32).map(|s| s.id),
+            Some("claude")
+        );
+
+        // (d) Verify `StopFailure` explicit `error` / `failed` hook reports AND non-false-error
+        //     `OSC 133;D` + user interrupt exit codes (`130`, `143`, `129`).
+        let mut vt = Vt::new(80, 24).unwrap();
+
+        // Stateless `Vt` with `OSC 7501` `app=claude-code`: `OSC 133;D;1`, `130`, `143`, `129`
+        // must NEVER flip `claude` into `error`!
+        vt.write(b"\x1b]7501;state=working:app=claude-code\x07");
+        vt.write(b"\x1b]133;D;1\x07\x1b]133;D;130\x07\x1b]133;D;143\x07\x1b]133;D;129\x07");
+        assert_eq!(vt.activity().presentation().unwrap().state, "working");
+
+        // Explicit `StopFailure` hook (`error` or `failed`) surfaces `error` cleanly even while
+        // Tier 1 `OSC 7501` for `claude` was `working` or `idle`, without process death!
+        assert!(vt.activity_mut().consume_report(
+            "claude",
+            "failed",
+            555,
+            true,
+            false,
+            Some("conv-stop-fail"),
+            Some("/tmp"),
+            None,
+            None,
+            None,
+            Some("API 529 Overloaded"),
+            None,
+            Some("stop_failure"),
+        ));
+        let err_pres = vt.activity().presentation().unwrap();
+        assert_eq!(err_pres.agent, "claude");
+        assert_eq!(err_pres.state, "error");
+        assert_eq!(err_pres.message, "API 529 Overloaded");
+        assert_eq!(err_pres.conversation.as_deref(), Some("conv-stop-fail"));
+
+        // Even if Claude's OSC 7501 settles to `state=idle`, explicit `StopFailure` `error`
+        // remains visible until acknowledged or superseded by a new turn!
+        vt.write(b"\x1b]7501;state=idle:app=claude-code\x07");
+        assert_eq!(vt.activity().presentation().unwrap().state, "error");
+        assert!(vt.activity_mut().acknowledge());
+        assert_eq!(vt.activity().presentation().unwrap().state, "idle");
+
+        // Now verify local PTY `OSC 133;D` inside `leader`:
+        // 1) While a live child process exists in `leader` (`sleep 5` spawned by `/bin/sh -i`),
+        //    `OSC 133;D;1` (e.g. from a subshell/tool) NEVER flips `claude` into `error`!
+        let mut pty_vt = Vt::new(80, 24).unwrap();
+        {
+            let tracker = pty_vt.activity_mut();
+            tracker.local = true;
+            tracker.session_leader = Some(leader);
+            tracker.foreground = Some(leader);
+        }
+        let launch_sleep = b"/bin/sleep 2 &\n";
+        unsafe {
+            libc::write(
+                guard.master,
+                launch_sleep.as_ptr().cast(),
+                launch_sleep.len(),
+            );
+        }
+        let has_member = (0..40).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            crate::location::session_has_non_shell_member(leader, None)
+        });
+        assert!(has_member);
+        pty_vt.activity_mut().consume_report(
+            "claude",
+            "working",
+            leader,
+            true,
+            true,
+            Some("conv-live"),
+            Some("/tmp"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        pty_vt.write(b"\x1b]133;D;1\x07");
+        assert_eq!(pty_vt.activity().presentation().unwrap().state, "working");
+
+        // 2) Wait or return to bare `/bin/sh -i` and verify `130`/`143`/`129` interrupt exit codes
+        //    settle a dead child owner to `idle` (NEVER `error`), even across `prune(leader)`!
+        let mut int_vt = Vt::new(80, 24).unwrap();
+        let mut bare_master: libc::c_int = -1;
+        let mut bare_slave: libc::c_int = -1;
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut bare_master,
+                    &mut bare_slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        unsafe {
+            libc::fcntl(bare_master, libc::F_SETFD, libc::FD_CLOEXEC);
+            libc::fcntl(bare_slave, libc::F_SETFD, libc::FD_CLOEXEC);
+            libc::fcntl(bare_master, libc::F_SETFL, libc::O_NONBLOCK);
+        }
+        let bare_slave_file = unsafe { std::fs::File::from_raw_fd(bare_slave) };
+        let mut bare_cmd = std::process::Command::new("/bin/sh");
+        bare_cmd
+            .arg("-i")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("TERM", "dumb")
+            .stdin(bare_slave_file.try_clone().unwrap())
+            .stdout(bare_slave_file.try_clone().unwrap())
+            .stderr(bare_slave_file);
+        unsafe {
+            bare_cmd.pre_exec(|| {
+                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut bare_shell = bare_cmd.spawn().unwrap();
+        drop(bare_cmd);
+        let bare_leader = bare_shell.id() as i32;
+        {
+            let tracker = int_vt.activity_mut();
+            tracker.local = true;
+            tracker.session_leader = Some(bare_leader);
+            tracker.foreground = Some(bare_leader);
+        }
+        for code in [130, 143, 129] {
+            int_vt.activity_mut().consume_report(
+                "claude",
+                "working",
+                999_993,
+                true,
+                true,
+                Some("conv-int"),
+                Some("/tmp"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            assert_eq!(int_vt.activity().presentation().unwrap().state, "working");
+            int_vt.write(format!("\x1b]133;D;{code}\x07").as_bytes());
+            assert_eq!(
+                int_vt.activity().presentation().unwrap().state,
+                "idle",
+                "exit code {code} must settle to idle, never error"
+            );
+            let _ = int_vt.activity_mut().prune(bare_leader);
+            assert!(
+                int_vt
+                    .activity()
+                    .presentation()
+                    .is_none_or(|p| p.state == "idle"),
+                "prune after exit code {code} must never flip to error"
+            );
+        }
+        unsafe {
+            libc::kill(-bare_leader, libc::SIGKILL);
+            libc::close(bare_master);
+        }
+        let _ = bare_shell.kill();
+        let _ = bare_shell.wait();
     }
 }

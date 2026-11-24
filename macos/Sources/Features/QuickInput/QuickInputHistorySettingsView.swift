@@ -12,6 +12,16 @@ struct QuickInputHistorySettingsView: View {
                               options: QuickInputHistoryScope.allCases.map { .init($0, strings.quickInputHistoryScopeName($0)) }, showsTitle: false)
         }
         Divider()
+        OMGSettingsRow(
+            strings.quickInputHistoryShareByDirectoryLabel,
+            subtitle: strings.quickInputHistoryShareByDirectoryCaption
+        ) {
+            Toggle(strings.quickInputHistoryShareByDirectoryLabel, isOn: $settings.quickInputHistoryShareByDirectory)
+                .labelsHidden().toggleStyle(.switch)
+        }
+        .disabled(settings.quickInputHistoryScope == .global)
+        .opacity(settings.quickInputHistoryScope == .global ? 0.5 : 1)
+        Divider()
         OMGSettingsRow(strings.quickInputHistoryInsertionLabel) {
             OMGSettingsPicker(title: strings.quickInputHistoryInsertionLabel, selection: $settings.quickInputHistoryInsertionMode,
                               options: QuickInputHistoryInsertionMode.allCases.map { .init($0, strings.quickInputHistoryInsertionName($0)) }, showsTitle: false)

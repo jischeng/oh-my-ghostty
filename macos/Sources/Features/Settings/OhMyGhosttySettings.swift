@@ -526,6 +526,11 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Visible Quick Input history: current pane, current tab, or all windows.",
             requiresNewWindow: false, category: "keyboard"),
         .init(
+            id: "keyboard.quickInputHistoryShareByDirectory", type: .boolean, defaultValue: "true",
+            allowedValues: nil, minimum: nil, maximum: nil,
+            description: "Share Quick Input history across sessions in the same directory while keeping each pane's own history after changing directories.",
+            requiresNewWindow: false, category: "keyboard"),
+        .init(
             id: "keyboard.quickInputHistoryInsertionMode", type: .enumeration,
             defaultValue: QuickInputHistoryInsertionMode.append.rawValue,
             allowedValues: QuickInputHistoryInsertionMode.allCases.map(\.rawValue), minimum: nil, maximum: nil,
@@ -1005,6 +1010,9 @@ final class OhMyGhosttySettings: ObservableObject {
     }
     @Published var quickInputHistoryScope: QuickInputHistoryScope = .tab {
         didSet { persist("keyboard.quickInputHistoryScope", quickInputHistoryScope.rawValue) }
+    }
+    @Published var quickInputHistoryShareByDirectory = true {
+        didSet { persist("keyboard.quickInputHistoryShareByDirectory", quickInputHistoryShareByDirectory) }
     }
     @Published var quickInputHistoryInsertionMode: QuickInputHistoryInsertionMode = .append {
         didSet { persist("keyboard.quickInputHistoryInsertionMode", quickInputHistoryInsertionMode.rawValue) }
@@ -1536,6 +1544,7 @@ final class OhMyGhosttySettings: ObservableObject {
                 range: AgentQuickInputMetrics.minimumOpacity...AgentQuickInputMetrics.maximumOpacity
             )
             quickInputHistoryScope = enumValue("keyboard.quickInputHistoryScope", fallback: .tab)
+            quickInputHistoryShareByDirectory = boolValue("keyboard.quickInputHistoryShareByDirectory", fallback: true)
             quickInputHistoryInsertionMode = enumValue("keyboard.quickInputHistoryInsertionMode", fallback: .append)
             quickInputHistoryRetentionDays = numberValue(
                 "keyboard.quickInputHistoryRetentionDays", fallback: 7, range: 1...365

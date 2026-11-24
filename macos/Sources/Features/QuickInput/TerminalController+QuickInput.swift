@@ -249,6 +249,10 @@ extension TerminalController {
         requestFocus: Bool
     ) {
         quickInputLastTerminalSurfaceID = surface.id
+        quickInputModel.updateHistoryLocation(
+            QuickInputHistoryLocation.from(paneSessionContext(for: surface)),
+            for: surface.id
+        )
         quickInputModel.present(for: surface.id, requestFocus: requestFocus)
         // The composer transfers first responder once its native view is ready.
         // Manually resigning here creates an intermediate unfocused pane frame.
@@ -322,7 +326,11 @@ extension TerminalController {
             guard let surface = focusedSurface ?? surfaceTree.first else { return }
             presentQuickInput(for: surface, requestFocus: false)
         }
-        quickInputModel.toggleHistory(scope: OhMyGhosttySettings.shared.quickInputHistoryScope)
+        let settings = OhMyGhosttySettings.shared
+        quickInputModel.toggleHistory(
+            scope: settings.quickInputHistoryScope,
+            shareByDirectory: settings.quickInputHistoryShareByDirectory
+        )
     }
 
     func dismissQuickInput() {
@@ -596,6 +604,10 @@ extension TerminalController {
             terminal.sendKeyEvent(.init(key: .enter, action: .release))
             self.acknowledgeTerminalAgentState(for: surface)
             self.quickInputModel.didSubmitAgentDraft(for: surfaceID)
+            self.quickInputModel.updateHistoryLocation(
+                QuickInputHistoryLocation.from(self.paneSessionContext(for: surface)),
+                for: surfaceID
+            )
             self.quickInputModel.recordSentText(text, for: surfaceID, historyID: historyID)
             self.quickInputModel.setStatusMessage(nil)
             completion()

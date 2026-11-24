@@ -4,8 +4,9 @@ import Foundation
 import os
 
 // History belongs to the host, not an Agent transcript or a plugin. Surface and
-// tab session UUIDs already survive session restoration; never infer ownership
-// from working directories, titles, or prompt text.
+// tab session UUIDs already survive session restoration; optional normalized
+// location metadata enables orthogonal same-directory sharing without inferring
+// ownership from titles or prompt text.
 enum QuickInputHistoryScope: String, CaseIterable, Codable {
     case pane
     case tab
@@ -18,6 +19,114 @@ enum QuickInputHistoryDelivery: String, Codable {
     case cancelled
 }
 
+struct QuickInputHistoryLocation: Equatable, Hashable, Sendable {
+    private static let normalizedHomeDirectory = normalizeLocalPath(NSHomeDirectory())
+
+    let workingDirectory: String
+    let remoteHostKey: String?
+
+    init?(workingDirectory: String?, remoteHostKey: String? = nil) {
+        guard let workingDirectory, !workingDirectory.isEmpty, !workingDirectory.contains("\0") else {
+            return nil
+        }
+        let normalizedHost = Self.normalizedHostKey(remoteHostKey)
+        let normalizedPath = normalizedHost == nil
+            ? Self.normalizeLocalPath(workingDirectory)
+            : Self.normalizeRemotePath(workingDirectory)
+        guard !normalizedPath.isEmpty else { return nil }
+        self.workingDirectory = normalizedPath
+        self.remoteHostKey = normalizedHost
+    }
+
+    /// Pure in-memory initializer for already-normalized fields stored on
+    /// `QuickInputHistoryEntry` so `visibleEntries` never touches the filesystem.
+    init?(storedWorkingDirectory: String?, remoteHostKey: String?) {
+        guard let storedWorkingDirectory, !storedWorkingDirectory.isEmpty else {
+            return nil
+        }
+        self.workingDirectory = storedWorkingDirectory
+        self.remoteHostKey = Self.normalizedHostKey(remoteHostKey)
+    }
+
+    static func from(_ context: PaneSessionContext?) -> Self? {
+        guard let context else { return nil }
+        switch context.state {
+        case .local:
+            return Self(workingDirectory: context.local.workingDirectory, remoteHostKey: nil)
+        case .sshReady(let ssh, workingDirectory: let dir):
+            guard let host = [ssh.serverID, ssh.transferTarget, ssh.alias]
+                .compactMap(Self.normalizedHostKey)
+                .first else {
+                return nil
+            }
+            return Self(workingDirectory: dir, remoteHostKey: host)
+        case .sshConnecting:
+            return nil
+        }
+    }
+
+    var displayPath: String {
+        if let remoteHostKey {
+            return "\(remoteHostKey):\(workingDirectory)"
+        }
+        let home = Self.normalizedHomeDirectory
+        if workingDirectory == home {
+            return "~"
+        }
+        if workingDirectory.hasPrefix(home + "/") {
+            return "~" + workingDirectory.dropFirst(home.count)
+        }
+        return workingDirectory
+    }
+
+    private static func normalizedHostKey(_ raw: String?) -> String? {
+        raw.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    private static func normalizeLocalPath(_ raw: String) -> String {
+        let standardized = URL(fileURLWithPath: raw).standardizedFileURL
+        let resolved: String
+        if FileManager.default.fileExists(atPath: standardized.path) {
+            resolved = standardized.resolvingSymlinksInPath().path
+        } else {
+            resolved = standardized.path
+        }
+        return stripTrailingSlashes(resolved)
+    }
+
+    private static func normalizeRemotePath(_ raw: String) -> String {
+        var segments: [Substring] = []
+        let isAbsolute = raw.hasPrefix("/")
+        for part in raw.split(separator: "/", omittingEmptySubsequences: true) {
+            if part == "." { continue }
+            if part == ".." {
+                if !segments.isEmpty && segments.last != ".." {
+                    segments.removeLast()
+                } else if !isAbsolute {
+                    segments.append(part)
+                }
+            } else {
+                segments.append(part)
+            }
+        }
+        let joined = segments.joined(separator: "/")
+        if isAbsolute {
+            return joined.isEmpty ? "/" : "/" + joined
+        }
+        return stripTrailingSlashes(joined)
+    }
+
+    private static func stripTrailingSlashes(_ path: String) -> String {
+        guard path.count > 1 else { return path }
+        var result = path
+        while result.count > 1 && result.hasSuffix("/") {
+            result.removeLast()
+        }
+        return result
+    }
+}
+
 struct QuickInputHistoryEntry: Identifiable, Codable, Equatable {
     let id: UUID
     let paneID: UUID
@@ -26,8 +135,14 @@ struct QuickInputHistoryEntry: Identifiable, Codable, Equatable {
     let sentAt: Date
     // Missing in version-1 archives written before queue history was added.
     var delivery: QuickInputHistoryDelivery?
+    // Missing in version-1 archives written before directory sharing was added.
+    var workingDirectory: String?
+    var remoteHostKey: String?
 
     var deliveryState: QuickInputHistoryDelivery { delivery ?? .sent }
+    var location: QuickInputHistoryLocation? {
+        QuickInputHistoryLocation(storedWorkingDirectory: workingDirectory, remoteHostKey: remoteHostKey)
+    }
 }
 
 @MainActor
@@ -95,6 +210,17 @@ final class QuickInputHistoryStore: ObservableObject {
                     // Queues are in-memory pane state. A restored history item
                     // must not claim it is still waiting in a vanished queue.
                     if entry.deliveryState == .queued { entry.delivery = .cancelled }
+                    // Normalize persisted location once on load so queries stay pure in-memory.
+                    if let normalized = QuickInputHistoryLocation(
+                        workingDirectory: entry.workingDirectory,
+                        remoteHostKey: entry.remoteHostKey
+                    ) {
+                        entry.workingDirectory = normalized.workingDirectory
+                        entry.remoteHostKey = normalized.remoteHostKey
+                    } else {
+                        entry.workingDirectory = nil
+                        entry.remoteHostKey = nil
+                    }
                     return entry
                 })
             } catch {
@@ -117,19 +243,30 @@ final class QuickInputHistoryStore: ObservableObject {
         persistSnapshot()
     }
 
-    func record(_ text: String, paneID: UUID, tabID: UUID, id: UUID? = nil,
+    func record(_ text: String, paneID: UUID, tabID: UUID,
+                location: QuickInputHistoryLocation? = nil,
+                id: UUID? = nil,
                 delivery: QuickInputHistoryDelivery = .sent) {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               text.utf8.count <= Self.maximumEntryBytes else { return }
         var updated = entries
+        var resolvedLocation = location
         if let id {
+            if resolvedLocation == nil, let existing = updated.first(where: { $0.id == id }) {
+                resolvedLocation = existing.location
+            }
             updated.removeAll { $0.id == id }
         } else if let last = updated.lastIndex(where: { $0.paneID == paneID && $0.deliveryState == .sent }),
                   updated[last].text == text {
+            if resolvedLocation == nil {
+                resolvedLocation = updated[last].location
+            }
             updated.remove(at: last)
         }
         updated.append(.init(id: id ?? UUID(), paneID: paneID, tabID: tabID, text: text,
-                             sentAt: now(), delivery: delivery))
+                             sentAt: now(), delivery: delivery,
+                             workingDirectory: resolvedLocation?.workingDirectory,
+                             remoteHostKey: resolvedLocation?.remoteHostKey))
         entries = bounded(updated)
         persistSnapshot()
     }
@@ -152,18 +289,25 @@ final class QuickInputHistoryStore: ObservableObject {
     }
 
     func visibleEntries(paneID: UUID?, tabID: UUID, scope: QuickInputHistoryScope,
+                        location: QuickInputHistoryLocation? = nil,
+                        shareByDirectory: Bool = false,
                         query: String = "") -> [QuickInputHistoryEntry] {
         let cutoff = now().addingTimeInterval(-Double(retentionDays) * 86_400)
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        var seenTexts = Set<String>()
         return entries.reversed().filter { entry in
+            let matchesDirectory = shareByDirectory && location != nil && entry.location == location
             let visible: Bool
             switch scope {
-            case .pane: visible = entry.paneID == paneID
-            case .tab: visible = entry.tabID == tabID
+            case .pane: visible = entry.paneID == paneID || matchesDirectory
+            case .tab: visible = entry.tabID == tabID || matchesDirectory
             case .global: visible = true
             }
-            return visible && entry.sentAt > cutoff &&
-                (query.isEmpty || entry.text.localizedStandardContains(query))
+            guard visible && entry.sentAt > cutoff &&
+                (query.isEmpty || entry.text.localizedStandardContains(query)) else {
+                return false
+            }
+            return seenTexts.insert(entry.text).inserted
         }
     }
 

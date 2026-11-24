@@ -271,4 +271,210 @@ struct QuickInputHistoryStoreTests {
         #expect(linked.storageError != nil)
         #expect(try Data(contentsOf: file) == invalid)
     }
+
+    @Test func directorySharingCombinesOrthogonallyWithPaneAndTabAndRetainsPaneHistoryAcrossCd() {
+        var timestamp = Date(timeIntervalSince1970: 1_800_000_000)
+        let store = QuickInputHistoryStore(now: { timestamp })
+        let paneA = UUID()
+        let paneB = UUID()
+        let paneSibling = UUID()
+        let tab1 = UUID()
+        let tab2 = UUID()
+        let dirA = QuickInputHistoryLocation(workingDirectory: "/tmp/omg-dir-a/")!
+        let dirB = QuickInputHistoryLocation(workingDirectory: "/tmp/omg-dir-b")!
+
+        // paneA writes in dirA (tab1), sibling writes in dirOther (tab1), paneB writes in dirB (tab2)
+        store.record("paneA in A", paneID: paneA, tabID: tab1, location: dirA)
+        timestamp = timestamp.addingTimeInterval(1)
+        store.record("sibling in tab1", paneID: paneSibling, tabID: tab1, location: QuickInputHistoryLocation(workingDirectory: "/tmp/omg-other"))
+        timestamp = timestamp.addingTimeInterval(1)
+        store.record("paneB in B", paneID: paneB, tabID: tab2, location: dirB)
+
+        // paneA cds to dirB:
+        // - With pane + dir sharing: paneA sees both its own dirA entry AND dirB's shared entry (paneB), newest first
+        #expect(
+            store.visibleEntries(paneID: paneA, tabID: tab1, scope: .pane, location: dirB, shareByDirectory: true).map(\.text)
+                == ["paneB in B", "paneA in A"]
+        )
+        // - With tab + dir sharing: paneA sees tab1's entries AND dirB's shared entry
+        #expect(
+            store.visibleEntries(paneID: paneA, tabID: tab1, scope: .tab, location: dirB, shareByDirectory: true).map(\.text)
+                == ["paneB in B", "sibling in tab1", "paneA in A"]
+        )
+        // - paneB in dirB does NOT see paneA's dirA history (no leak from A to other panes in B)
+        #expect(
+            store.visibleEntries(paneID: paneB, tabID: tab2, scope: .pane, location: dirB, shareByDirectory: true).map(\.text)
+                == ["paneB in B"]
+        )
+        // - With shareByDirectory == false: paneA in dirB only sees its own pane / tab history
+        #expect(
+            store.visibleEntries(paneID: paneA, tabID: tab1, scope: .pane, location: dirB, shareByDirectory: false).map(\.text)
+                == ["paneA in A"]
+        )
+        #expect(
+            store.visibleEntries(paneID: paneA, tabID: tab1, scope: .tab, location: dirB, shareByDirectory: false).map(\.text)
+                == ["sibling in tab1", "paneA in A"]
+        )
+    }
+
+    @Test func directorySharingIsolatesLocalAndSSHHostsAndHandlesConnectingFallback() {
+        var timestamp = Date(timeIntervalSince1970: 1_800_000_000)
+        let store = QuickInputHistoryStore(now: { timestamp })
+        let localPane = UUID()
+        let sshAPane = UUID()
+        let sshBPane = UUID()
+        let otherPane = UUID()
+        let tab1 = UUID()
+        let tab2 = UUID()
+        let tab3 = UUID()
+
+        let localRoot = QuickInputHistoryLocation(workingDirectory: "/root/")!
+        let sshARoot = QuickInputHistoryLocation(workingDirectory: "/root//", remoteHostKey: "srv-a")!
+        let sshBRoot = QuickInputHistoryLocation(workingDirectory: "/root", remoteHostKey: "srv-b")!
+
+        #expect(localRoot.workingDirectory == "/root")
+        #expect(sshARoot.workingDirectory == "/root")
+        #expect(localRoot != sshARoot)
+        #expect(sshARoot != sshBRoot)
+
+        store.record("local cmd", paneID: localPane, tabID: tab1, location: localRoot)
+        timestamp = timestamp.addingTimeInterval(1)
+        store.record("sshA cmd", paneID: sshAPane, tabID: tab2, location: sshARoot)
+        timestamp = timestamp.addingTimeInterval(1)
+        store.record("sshB cmd", paneID: sshBPane, tabID: tab3, location: sshBRoot)
+
+        #expect(
+            store.visibleEntries(paneID: otherPane, tabID: UUID(), scope: .pane, location: localRoot, shareByDirectory: true).map(\.text)
+                == ["local cmd"]
+        )
+        #expect(
+            store.visibleEntries(paneID: otherPane, tabID: UUID(), scope: .pane, location: sshARoot, shareByDirectory: true).map(\.text)
+                == ["sshA cmd"]
+        )
+        #expect(
+            store.visibleEntries(paneID: otherPane, tabID: UUID(), scope: .pane, location: sshBRoot, shareByDirectory: true).map(\.text)
+                == ["sshB cmd"]
+        )
+
+        // PaneSessionContext.sshConnecting must return nil location so it never mixes local cwd with SSH
+        var connectingContext = PaneSessionContext(workingDirectory: "/root", terminalTitle: "ssh")
+        connectingContext.observeForegroundSSH(
+            alias: "prod",
+            transferTarget: "ubuntu@prod",
+            processGroupID: 42,
+            currentWorkingDirectory: "/root",
+            currentTerminalTitle: "ssh",
+            remoteWorkingDirectory: nil
+        )
+        #expect(QuickInputHistoryLocation.from(connectingContext) == nil)
+        #expect(
+            store.visibleEntries(
+                paneID: sshAPane,
+                tabID: tab2,
+                scope: .pane,
+                location: QuickInputHistoryLocation.from(connectingContext),
+                shareByDirectory: true
+            ).map(\.text) == ["sshA cmd"]
+        )
+
+        // Once sshReady, remoteHostKey + remote workingDirectory are resolved
+        connectingContext.applyInferredRemoteWorkingDirectory("/root/app/")
+        let readyLocation = QuickInputHistoryLocation.from(connectingContext)
+        #expect(readyLocation == QuickInputHistoryLocation(workingDirectory: "/root/app", remoteHostKey: "ubuntu@prod"))
+
+        // OMG SSH signal with empty serverid must fall back to targethost (never misclassified as local)
+        var signalContext = PaneSessionContext(workingDirectory: "/root", terminalTitle: "ssh")
+        signalContext.apply(
+            Ghostty.ContextSignal(
+                action: .start,
+                id: "omg-ssh-test-1",
+                metadata: "type=remote;targethost=prod-box;serverid=;cwd=%2Froot%2Fapp"
+            ),
+            currentWorkingDirectory: "/root",
+            currentTerminalTitle: "ssh"
+        )
+        let signalLocation = QuickInputHistoryLocation.from(signalContext)
+        #expect(signalLocation == QuickInputHistoryLocation(workingDirectory: "/root/app", remoteHostKey: "prod-box"))
+        #expect(signalLocation != localRoot)
+    }
+
+    @Test func visibleEntriesDeduplicatesCrossPaneIdenticalTextKeepingLatest() {
+        var timestamp = Date(timeIntervalSince1970: 1_800_000_000)
+        let store = QuickInputHistoryStore(now: { timestamp })
+        let pane1 = UUID()
+        let pane2 = UUID()
+        let tab1 = UUID()
+        let tab2 = UUID()
+        let dir = QuickInputHistoryLocation(workingDirectory: "/tmp/shared-dedup")!
+
+        store.record("git status", paneID: pane1, tabID: tab1, location: dir)
+        let olderTime = timestamp
+        timestamp = timestamp.addingTimeInterval(5)
+        store.record("unique cmd", paneID: pane1, tabID: tab1, location: dir)
+        timestamp = timestamp.addingTimeInterval(5)
+        store.record("git status", paneID: pane2, tabID: tab2, location: dir)
+        let newerTime = timestamp
+
+        let dirVisible = store.visibleEntries(paneID: pane1, tabID: tab1, scope: .pane, location: dir, shareByDirectory: true)
+        #expect(dirVisible.map(\.text) == ["git status", "unique cmd"])
+        #expect(dirVisible.first?.sentAt == newerTime)
+        #expect(dirVisible.first?.sentAt != olderTime)
+
+        let globalVisible = store.visibleEntries(paneID: pane1, tabID: tab1, scope: .global)
+        #expect(globalVisible.map(\.text) == ["git status", "unique cmd"])
+        #expect(globalVisible.first?.paneID == pane2)
+    }
+
+    @Test func legacyV1EntriesWithoutLocationDecodeCleanlyAndStayPaneOwned() throws {
+        let file = try temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let pane = UUID()
+        let tab = UUID()
+        let payload: [String: Any] = [
+            "version": 1,
+            "entries": [
+                [
+                    "id": UUID().uuidString,
+                    "paneID": pane.uuidString,
+                    "tabID": tab.uuidString,
+                    "text": "legacy entry",
+                    "sentAt": Date().timeIntervalSinceReferenceDate,
+                ]
+            ]
+        ]
+        try JSONSerialization.data(withJSONObject: payload).write(to: file)
+        let restored = QuickInputHistoryStore(fileURL: file)
+        #expect(restored.entries.count == 1)
+        #expect(restored.entries.first?.workingDirectory == nil)
+        #expect(restored.entries.first?.remoteHostKey == nil)
+        #expect(restored.entries.first?.location == nil)
+
+        let someDir = QuickInputHistoryLocation(workingDirectory: "/tmp/some-dir")!
+        #expect(restored.visibleEntries(paneID: pane, tabID: tab, scope: .pane, location: someDir, shareByDirectory: true).map(\.text) == ["legacy entry"])
+        #expect(restored.visibleEntries(paneID: UUID(), tabID: UUID(), scope: .pane, location: someDir, shareByDirectory: true).isEmpty)
+    }
+
+    @Test func modelLocationUpdateReactsImmediatelyForNavigationAndRecording() {
+        let store = QuickInputHistoryStore()
+        let model = AgentQuickInputModel(dockHeight: 252, historyStore: store)
+        let paneA = UUID()
+        let paneB = UUID()
+        let dirA = QuickInputHistoryLocation(workingDirectory: "/tmp/model-dir-a")!
+        let dirB = QuickInputHistoryLocation(workingDirectory: "/tmp/model-dir-b")!
+
+        model.present(for: paneA)
+        model.updateHistoryLocation(dirA, for: paneA)
+        model.recordSentText("from A", for: paneA)
+        store.record("from B", paneID: paneB, tabID: UUID(), location: dirB)
+
+        // While in dirA, paneA only sees "from A"
+        #expect(store.visibleEntries(paneID: paneA, tabID: model.historyTabID, scope: .pane, location: model.targetHistoryLocation, shareByDirectory: true).map(\.text) == ["from A"])
+
+        // After cd to dirB, paneA immediately sees "from B" + "from A" via navigateHistory
+        model.updateHistoryLocation(dirB, for: paneA)
+        let draft = QuickInputDraftSnapshot(text: "", selection: NSRange(location: 0, length: 0))
+        _ = model.navigateHistory(.older, current: draft, scope: .pane, shareByDirectory: true, atBoundary: true, isRepeat: false)
+        _ = model.navigateHistory(.older, current: draft, scope: .pane, shareByDirectory: true, atBoundary: true, isRepeat: false)
+        #expect(model.draft == "from B")
+    }
 }

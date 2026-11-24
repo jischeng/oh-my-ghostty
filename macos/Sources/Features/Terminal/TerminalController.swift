@@ -867,6 +867,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard surfaceTree.contains(where: { $0.id == surfaceID }) else { return }
         cancelAgentValidationMonitoring(for: surfaceID)
         paneSessionContexts[surfaceID] = snapshot.context
+        quickInputModel.updateHistoryLocation(
+            QuickInputHistoryLocation.from(snapshot.context),
+            for: surfaceID
+        )
         if let activity = snapshot.activity {
             agentActivities[surfaceID] = activity
         } else {
@@ -1079,6 +1083,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
             paneSessionObservers[surface.id] = observers
         }
+        var historyLocations: [UUID: QuickInputHistoryLocation] = [:]
+        for surface in surfaces {
+            if let location = QuickInputHistoryLocation.from(paneSessionContext(for: surface)) {
+                historyLocations[surface.id] = location
+            }
+        }
+        quickInputModel.updateHistoryLocations(historyLocations)
         if paneSessionContexts != previousContexts {
             NotificationCenter.default.post(
                 name: .terminalPaneSessionContextsDidChange,
@@ -2506,6 +2517,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         next[surfaceID] = context
         paneSessionContexts = next
         if locationChanged {
+            quickInputModel.updateHistoryLocation(
+                QuickInputHistoryLocation.from(context),
+                for: surfaceID
+            )
             NotificationCenter.default.post(
                 name: .terminalPaneSessionContextsDidChange,
                 object: self

@@ -422,6 +422,7 @@ final class AgentQuickInputModel: ObservableObject {
         }
     }
     @Published private(set) var paneStates: [UUID: AgentQuickInputPaneState] = [:]
+    @Published private(set) var paneLocations: [UUID: QuickInputHistoryLocation] = [:]
     @Published private(set) var statusMessage: String?
     @Published private(set) var dockHeight: CGFloat
     @Published private(set) var editingQueueItemID: UUID?
@@ -493,6 +494,20 @@ final class AgentQuickInputModel: ObservableObject {
         historyStore.bind(paneIDs: paneIDs, to: tabID)
     }
 
+    var targetHistoryLocation: QuickInputHistoryLocation? {
+        targetSurfaceID.flatMap { paneLocations[$0] }
+    }
+
+    func updateHistoryLocations(_ locations: [UUID: QuickInputHistoryLocation]) {
+        guard paneLocations != locations else { return }
+        paneLocations = locations
+    }
+
+    func updateHistoryLocation(_ location: QuickInputHistoryLocation?, for surfaceID: UUID) {
+        guard paneLocations[surfaceID] != location else { return }
+        paneLocations[surfaceID] = location
+    }
+
     var targetQueue: [AgentQuickInputQueueItem] {
         guard let targetSurfaceID else { return [] }
         return paneStates[targetSurfaceID]?.queue ?? []
@@ -508,7 +523,13 @@ final class AgentQuickInputModel: ObservableObject {
     }
 
     func recordSentText(_ text: String, for surfaceID: UUID, historyID: UUID? = nil) {
-        historyStore.record(text, paneID: surfaceID, tabID: historyTabID, id: historyID)
+        historyStore.record(
+            text,
+            paneID: surfaceID,
+            tabID: historyTabID,
+            location: paneLocations[surfaceID],
+            id: historyID
+        )
     }
 
     @discardableResult
@@ -568,7 +589,7 @@ final class AgentQuickInputModel: ObservableObject {
         if let globalPresentation { globalPresentation.togglePinned() } else { isPinned.toggle() }
     }
 
-    func toggleHistory(scope: QuickInputHistoryScope) {
+    func toggleHistory(scope: QuickInputHistoryScope, shareByDirectory: Bool = false) {
         guard !isEditingQueuedItem else { return }
         if historyPresentation.isPresented {
             historyPresentation.close()
@@ -576,7 +597,11 @@ final class AgentQuickInputModel: ObservableObject {
         } else {
             isQueueExpanded = false
             historyPresentation.open(entries: historyStore.visibleEntries(
-                paneID: targetSurfaceID, tabID: historyTabID, scope: scope,
+                paneID: targetSurfaceID,
+                tabID: historyTabID,
+                scope: scope,
+                location: targetHistoryLocation,
+                shareByDirectory: shareByDirectory,
                 query: historyPresentation.isSearching ? historyPresentation.query : ""
             ))
         }
@@ -607,10 +632,16 @@ final class AgentQuickInputModel: ObservableObject {
     func historyCaretMoved() { historyNavigation.caretMoved() }
 
     func navigateHistory(_ direction: QuickInputHistoryDirection, current: QuickInputDraftSnapshot,
-                         scope: QuickInputHistoryScope, atBoundary: Bool,
-                         isRepeat: Bool) -> QuickInputHistoryNavigationResult {
+                         scope: QuickInputHistoryScope, shareByDirectory: Bool = false,
+                         atBoundary: Bool, isRepeat: Bool) -> QuickInputHistoryNavigationResult {
         guard !isEditingQueuedItem else { return .unhandled }
-        let entries = historyStore.visibleEntries(paneID: targetSurfaceID, tabID: historyTabID, scope: scope)
+        let entries = historyStore.visibleEntries(
+            paneID: targetSurfaceID,
+            tabID: historyTabID,
+            scope: scope,
+            location: targetHistoryLocation,
+            shareByDirectory: shareByDirectory
+        )
         let result = historyNavigation.navigate(direction, current: current, entries: entries.map(\.text),
                                                 atBoundary: atBoundary, isRepeat: isRepeat)
         if case .restore(let snapshot) = result {
@@ -701,7 +732,14 @@ final class AgentQuickInputModel: ObservableObject {
         state.queue.append(item)
         state.draft = ""
         paneStates[targetSurfaceID] = state
-        historyStore.record(item.text, paneID: targetSurfaceID, tabID: historyTabID, id: item.id, delivery: .queued)
+        historyStore.record(
+            item.text,
+            paneID: targetSurfaceID,
+            tabID: historyTabID,
+            location: paneLocations[targetSurfaceID],
+            id: item.id,
+            delivery: .queued
+        )
         applyDraft("")
         statusMessage = "Queued message \(state.queue.count)."
         return item
@@ -771,7 +809,14 @@ final class AgentQuickInputModel: ObservableObject {
         }
         state.draft = draftBeforeEditing ?? ""
         paneStates[surfaceID] = state
-        historyStore.record(updated.text, paneID: surfaceID, tabID: historyTabID, id: updated.id, delivery: .queued)
+        historyStore.record(
+            updated.text,
+            paneID: surfaceID,
+            tabID: historyTabID,
+            location: paneLocations[surfaceID],
+            id: updated.id,
+            delivery: .queued
+        )
         finishQueuedItemEdit(restoredDraft: state.draft, automatically: true)
         return true
     }
@@ -844,6 +889,7 @@ final class AgentQuickInputModel: ObservableObject {
 
     func removeState(for surfaceID: UUID) {
         paneStates.removeValue(forKey: surfaceID)
+        paneLocations.removeValue(forKey: surfaceID)
         if targetSurfaceID == surfaceID {
             isQueueExpanded = false
             historyPresentation.close()
@@ -1008,6 +1054,8 @@ struct AgentQuickInputDock<Content: View>: View {
             paneID: model.targetSurfaceID,
             tabID: model.historyTabID,
             scope: settings.quickInputHistoryScope,
+            location: model.targetHistoryLocation,
+            shareByDirectory: settings.quickInputHistoryShareByDirectory,
             query: model.historyPresentation.isSearching ? model.historyPresentation.query : ""
         )
     }
@@ -2591,8 +2639,14 @@ private struct AgentQuickInputComposer: View {
                 onQueue: controller.queueQuickInputDraft,
                 onCancel: controller.dismissQuickInput,
                 onNavigateHistory: { direction, snapshot, atBoundary, isRepeat in
-                    model.navigateHistory(direction, current: snapshot, scope: settings.quickInputHistoryScope,
-                                          atBoundary: atBoundary, isRepeat: isRepeat)
+                    model.navigateHistory(
+                        direction,
+                        current: snapshot,
+                        scope: settings.quickInputHistoryScope,
+                        shareByDirectory: settings.quickInputHistoryShareByDirectory,
+                        atBoundary: atBoundary,
+                        isRepeat: isRepeat
+                    )
                 },
                 onHistoryCaretMoved: model.historyCaretMoved,
                 companionSurfaceID: surfaceID,

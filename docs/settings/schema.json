@@ -395,6 +395,12 @@
       "enum": ["pane", "tab", "global"],
       "type": "string"
     },
+    "keyboard.quickInputHistoryShareByDirectory": {
+      "category": "keyboard",
+      "default": true,
+      "description": "Share Quick Input history across sessions in the same directory while keeping each pane's own history after changing directories.",
+      "type": "boolean"
+    },
     "keyboard.quickInputOpacity": {
       "category": "keyboard",
       "default": 0.7,

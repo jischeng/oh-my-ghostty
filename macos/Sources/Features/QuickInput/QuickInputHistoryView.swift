@@ -136,6 +136,8 @@ struct QuickInputHistoryView: View {
             paneID: model.targetSurfaceID,
             tabID: model.historyTabID,
             scope: settings.quickInputHistoryScope,
+            location: model.targetHistoryLocation,
+            shareByDirectory: settings.quickInputHistoryShareByDirectory,
             query: presentation.isSearching ? presentation.query : ""
         )
     }
@@ -506,7 +508,11 @@ private struct QuickInputHistoryEntryCapsule: View {
         let capped = entry.text.count > 2_000
             ? String(entry.text.prefix(2_000)) + "\n…"
             : entry.text
-        return "\(dateText) · \(deliveryText)\n\n\(capped)"
+        var headerParts = [dateText, deliveryText]
+        if let displayPath = entry.location?.displayPath {
+            headerParts.append(displayPath)
+        }
+        return "\(headerParts.joined(separator: " · "))\n\n\(capped)"
     }
 
     private static func formatter(isToday: Bool) -> DateFormatter {
@@ -671,6 +677,31 @@ private struct QuickInputHistoryControlCapsule: View {
                 .pointingHandCursor()
                 .help(strings.quickInputHistoryClearSearch)
                 .accessibilityLabel(strings.quickInputHistoryClearSearch)
+            }
+
+            if settings.quickInputHistoryScope != .global {
+                let isSharing = settings.quickInputHistoryShareByDirectory
+                Button {
+                    settings.quickInputHistoryShareByDirectory.toggle()
+                    presentation.requestFocus()
+                } label: {
+                    Image(systemName: isSharing ? "folder.fill" : "folder")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(isSharing ? Color.accentColor : .secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(
+                            (isSharing ? Color.accentColor : Color.primary)
+                                .opacity(isSharing ? 0.16 : 0.08),
+                            in: Capsule()
+                        )
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .pointingHandCursor()
+                .help(strings.quickInputHistoryShareByDirectoryHelp(enabled: isSharing))
+                .accessibilityLabel(strings.quickInputHistoryShareByDirectoryLabel)
+                .accessibilityValue(isSharing ? "on" : "off")
             }
 
             Button(action: cycleScope) {

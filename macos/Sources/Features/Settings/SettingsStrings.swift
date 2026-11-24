@@ -555,6 +555,22 @@ struct SettingsStrings: Equatable, Sendable {
         case .global: t("All Windows", "所有窗口")
         }
     }
+    var quickInputHistoryShareByDirectoryLabel: String {
+        t("Share History by Directory", "同目录共享历史")
+    }
+    var quickInputHistoryShareByDirectoryCaption: String {
+        t(
+            "Sessions in the same directory share history; each pane keeps its own history after changing directories.",
+            "同一目录下的会话共享历史；切换目录后，当前 Pane 原有历史仍对其可见。"
+        )
+    }
+    func quickInputHistoryShareByDirectoryHelp(enabled: Bool) -> String {
+        if enabled {
+            t("Sharing history with same directory (click to turn off)", "已开启同目录共享历史（点击关闭）")
+        } else {
+            t("Same-directory history sharing is off (click to turn on)", "未开启同目录共享历史（点击开启）")
+        }
+    }
     var quickInputHistoryRetentionLabel: String { t("History Expiration", "历史过期时间") }
     var quickInputHistoryDayUnit: String { t("days", "天") }
     func quickInputHistoryRetentionValue(_ days: Int) -> String { t("\(days) days", "\(days) 天") }

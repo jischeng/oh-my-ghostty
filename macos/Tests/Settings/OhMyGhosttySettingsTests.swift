@@ -92,15 +92,18 @@ struct OhMyGhosttySettingsTests {
         let (settings, url) = temporarySettings()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         #expect(settings.quickInputHistoryScope == .tab)
+        #expect(settings.quickInputHistoryShareByDirectory)
         #expect(settings.quickInputHistoryInsertionMode == .append)
         #expect(settings.quickInputHistoryRetentionDays == 7)
         #expect(settings.quickInputHistoryKeepAfterQuit)
         settings.quickInputHistoryScope = .tab
+        settings.quickInputHistoryShareByDirectory = false
         settings.quickInputHistoryRetentionDays = 30
         settings.quickInputHistoryKeepAfterQuit = false
         settings.quickInputHistoryInsertionMode = .replace
         let restored = OhMyGhosttySettings(fileURL: url)
         #expect(restored.quickInputHistoryScope == .tab)
+        #expect(!restored.quickInputHistoryShareByDirectory)
         #expect(restored.quickInputHistoryRetentionDays == 30)
         #expect(!restored.quickInputHistoryKeepAfterQuit)
         #expect(restored.quickInputHistoryInsertionMode == .replace)

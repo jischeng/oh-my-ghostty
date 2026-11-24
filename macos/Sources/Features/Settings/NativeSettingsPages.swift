@@ -381,6 +381,20 @@ extension NativeSettingsController {
             guard let self else { return }
             page.section(self.strings.quickInputHistoryTitle)
             self.picker(page, self.strings.quickInputHistoryScopeLabel, \.quickInputHistoryScope, QuickInputHistoryScope.allCases.map { ($0, self.strings.quickInputHistoryScopeName($0)) })
+            let shareByDirectory = SettingsSwitch(value: self.settings.quickInputHistoryShareByDirectory) { [weak settings = self.settings] in
+                settings?.quickInputHistoryShareByDirectory = $0
+            }
+            shareByDirectory.isEnabled = self.settings.quickInputHistoryScope != .global
+            page.row(
+                self.strings.quickInputHistoryShareByDirectoryLabel,
+                control: shareByDirectory,
+                help: self.strings.quickInputHistoryShareByDirectoryCaption
+            )
+            page.refreshers.append { [weak settings = self.settings, weak shareByDirectory] in
+                guard let settings else { return }
+                shareByDirectory?.state = settings.quickInputHistoryShareByDirectory ? .on : .off
+                shareByDirectory?.isEnabled = settings.quickInputHistoryScope != .global
+            }
             self.picker(page, self.strings.quickInputHistoryInsertionLabel, \.quickInputHistoryInsertionMode, QuickInputHistoryInsertionMode.allCases.map { ($0, self.strings.quickInputHistoryInsertionName($0)) })
             self.number(page, self.strings.quickInputHistoryRetentionLabel, \.quickInputHistoryRetentionDays, range: 1...365)
             self.toggle(page, self.strings.quickInputHistoryKeepLabel, \.quickInputHistoryKeepAfterQuit, help: self.strings.quickInputHistoryPrivacyCaption)

@@ -1192,8 +1192,6 @@ struct VerticalTabInboxSidebarTests {
     }
 
     @Test func autoRenameMenusAndToggleInboxActionAndSingleLineCloudDeduplication() throws {
-        let fixture = try TerminalWorkspaceRefactorTests.Fixture()
-        defer { fixture.close() }
         let settings = OhMyGhosttySettings.shared
         let savedMode = settings.tabSidebarViewMode
         let savedShortcut = settings.toggleInboxShortcut
@@ -1202,8 +1200,9 @@ struct VerticalTabInboxSidebarTests {
             settings.toggleInboxShortcut = savedShortcut
         }
 
-        let controller = try fixture.tab()
-        let second = try fixture.tab()
+        let sidebar = try Sidebar()
+        defer { sidebar.close() }
+        let controller = try #require(sidebar.controllers.first)
         let strings = ChromeStrings.current
 
         // 1. Tab context menu includes Auto-Rename Tab right after Rename Tab….
@@ -1214,7 +1213,6 @@ struct VerticalTabInboxSidebarTests {
         #expect(autoRenameIndex == renameIndex + 1)
 
         // 2. Sidebar `...` options menu includes Auto-Rename Workspace Tabs in both .tabs and .inbox modes.
-        let sidebar = try SidebarHarness(controllers: [controller, second])
         func optionsControl() throws -> NativeOptionsControl {
             var queue: [NSView] = [sidebar.host]
             while !queue.isEmpty {

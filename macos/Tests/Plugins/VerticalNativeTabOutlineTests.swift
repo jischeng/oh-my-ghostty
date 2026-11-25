@@ -124,14 +124,10 @@ struct VerticalNativeTabOutlineTests {
         outline.updateTrackingAreas()
         let owner = try #require(outline.trackingAreas.first { $0.owner is NativeTableHover }?.owner as? NativeTableHover)
         let rows = try (0..<2).map { try #require(outline.rowView(atRow: $0, makeIfNecessary: true) as? NativeTabRowView) }
-        func closeButton(in view: NSView) -> NativeActionControl? {
-            if let button = view as? NativeActionControl, button.accessibilityLabel() == ChromeStrings.current.closeTab { return button }
-            return view.subviews.lazy.compactMap(closeButton).first
-        }
         let buttons = try (0..<2).map { index in
             let cell = try #require(outline.view(atColumn: 0, row: index, makeIfNecessary: true) as? NativeTabCell)
             #expect(cell.superview === rows[index])
-            return try #require(closeButton(in: cell))
+            return cell.closeButton
         }
         let selection = outline.selectedRowIndexes
         for index in [1, 0, 1, 0] {
@@ -144,6 +140,7 @@ struct VerticalNativeTabOutlineTests {
             for row in 0..<2 {
                 #expect(rows[row].isHovered == (row == index))
                 #expect(buttons[row].isHidden == (row != index))
+                #expect(!buttons[row].showsHoverDisc)
             }
             #expect(outline.selectedRowIndexes == selection)
         }
@@ -211,24 +208,26 @@ struct VerticalNativeTabOutlineTests {
             )
         }
 
-        let outlineController = NativeTabOutlineController(makeConfig(rowHeight: 32))
+        let outlineController = NativeTabOutlineController(makeConfig(rowHeight: 36))
         let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 260, height: 260),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentView = outlineController.view
         defer { window.contentView = nil; window.close() }
 
-        for expectedHeight in [CGFloat(32), CGFloat(28)] {
+        for expectedHeight in [CGFloat(36), CGFloat(30)] {
             outlineController.update(makeConfig(rowHeight: expectedHeight))
             outlineController.view.layoutSubtreeIfNeeded()
             let outline = outlineController.outline
             #expect(NativeHoverRowView.highlightCornerRadius == 6)
             #expect(NativeHoverRowView.highlightInset == NSSize(width: 2, height: 1))
+            #expect(NativeTabRowView.pillCornerRadius == 8)
             for index in 0..<controllers.count {
                 let row = try #require(outline.rowView(atRow: index, makeIfNecessary: true) as? NativeTabRowView)
                 let cell = try #require(outline.view(atColumn: 0, row: index, makeIfNecessary: true) as? NativeTabCell)
                 row.layoutSubtreeIfNeeded()
                 cell.layoutSubtreeIfNeeded()
+                #expect(row.cornerRadius == 8)
                 #expect(outlineController.outlineView(outline, heightOfRowByItem: outlineController.roots[index]) == expectedHeight)
                 #expect(row.bounds.height == expectedHeight + outline.intercellSpacing.height)
                 #expect(row.highlightRect == row.bounds.insetBy(dx: 2, dy: 1))
@@ -237,8 +236,188 @@ struct VerticalNativeTabOutlineTests {
                 let hoverLayer = try #require(row.layer?.sublayers?.first { $0.name == "omg.row.hover" } as? CAShapeLayer)
                 #expect(hoverLayer.path?.boundingBoxOfPath == row.selectionRect)
                 #expect(abs(cell.rowStack.frame.midY - cell.bounds.midY) <= 0.5)
+                #expect(cell.icon.frame.size == NSSize(width: 18, height: 18))
+                let iconInRow = cell.convert(cell.icon.frame, to: row)
+                #expect(abs((iconInRow.minX - row.selectionRect.minX) - 10) <= 0.5)
+                let expectedWeight: NSFont.Weight = index == 1 ? .medium : .regular
+                #expect(cell.label.font == .systemFont(ofSize: 13, weight: expectedWeight))
+                if index == 3 {
+                    // Unhovered attention row shows 14×14 status badge in the single trailing slot, inset ~10pt from right pill edge.
+                    #expect(cell.trailingAccessory == .status)
+                    #expect(!cell.status.isHidden)
+                    #expect(cell.shortcut.isHidden)
+                    #expect(cell.closeButton.isHidden)
+                    let slotInRow = cell.convert(cell.trailingSlot.frame, to: row)
+                    #expect(abs((row.selectionRect.maxX - slotInRow.maxX) - 10) <= 0.5)
+                } else {
+                    // Unhovered rows without a status badge collapse the trailing slot so titles extend to 10pt inside the pill.
+                    #expect(cell.trailingAccessory == .none)
+                    #expect(cell.trailingSlot.isHidden)
+                    let labelInRow = cell.convert(cell.label.frame, to: row)
+                    #expect(abs((row.selectionRect.maxX - labelInRow.maxX) - 10) <= 0.5)
+                }
             }
         }
+    }
+
+    @Test func singleTrailingSlotPriorityAndCommandHoldRevealInNormalTabs() throws {
+        final class KeyOutlineWindow: NSWindow {
+            var keyState = true
+            override var isKeyWindow: Bool { keyState }
+            override var isVisible: Bool { true }
+        }
+
+        let fixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { fixture.close() }
+        let first = try fixture.tab()
+        let second = try fixture.tab(parent: first)
+        let third = try fixture.tab(parent: first)
+        let tabs = [first, second, third]
+        let attention = TabActivity(
+            source: "claude", state: .needsAttention, attentionKind: .question,
+            label: nil, message: nil, detail: nil, progress: nil,
+            icon: .init(kind: .bundledAsset, name: "AgentClaudeLogo")
+        )
+        let completed = TabActivity(
+            source: "codex", state: .done, label: nil, message: nil,
+            detail: nil, progress: nil,
+            icon: .init(kind: .bundledAsset, name: "AgentOpenAILogo")
+        )
+        var showShortcuts = true
+        func makeConfig() -> NativeTabOutlineConfiguration {
+            NativeTabOutlineConfiguration(
+                groups: GhosttyTabOrganizationModel().groups(tabs: tabs, grouping: .none, ordering: .manual),
+                selectedID: ObjectIdentifier(first),
+                layoutState: first.tabLayoutState,
+                controller: first,
+                rowHeight: OhMyGhosttyTabRowDensity.comfortable.rowHeight,
+                presentation: { tab in
+                    let activity: TabActivity? = switch tab.actualIndex {
+                    case 1: nil
+                    case 2: attention
+                    default: completed
+                    }
+                    return .init(
+                        title: "Tab \(tab.actualIndex)",
+                        remoteBreadcrumb: nil,
+                        shortcut: showShortcuts ? "⌘\(tab.actualIndex)" : nil,
+                        icon: .systemSymbol("terminal"),
+                        activity: activity,
+                        selected: tab.actualIndex == 1,
+                        hovered: false
+                    )
+                }
+            )
+        }
+
+        let controller = NativeTabOutlineController(makeConfig())
+        let window = KeyOutlineWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 250, height: 220),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = controller.view
+        defer { window.contentView = nil; window.close() }
+
+        controller.update(makeConfig())
+        controller.view.layoutSubtreeIfNeeded()
+        let outline = controller.outline
+        let rows = try (0..<3).map {
+            try #require(outline.rowView(atRow: $0, makeIfNecessary: true) as? NativeTabRowView)
+        }
+        let cells = try (0..<3).map {
+            try #require(outline.view(atColumn: 0, row: $0, makeIfNecessary: true) as? NativeTabCell)
+        }
+        let baselineReloads = controller.reloadCount
+
+        func flagsEvent(_ flags: NSEvent.ModifierFlags) throws -> NSEvent {
+            try #require(NSEvent.keyEvent(
+                with: .flagsChanged,
+                location: .zero,
+                modifierFlags: flags,
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber,
+                context: nil,
+                characters: "",
+                charactersIgnoringModifiers: "",
+                isARepeat: false,
+                keyCode: 55
+            ))
+        }
+
+        // 1. Default resting state: NO shortcuts shown; idle collapses (.none); attention/done show status badge (.status).
+        #expect(!controller.isCommandHeld)
+        #expect(cells[0].trailingAccessory == .none)
+        #expect(cells[0].trailingSlot.isHidden)
+        #expect(cells[0].shortcut.isHidden && cells[0].status.isHidden && cells[0].closeButton.isHidden)
+        #expect(cells[1].trailingAccessory == .status)
+        #expect(!cells[1].status.isHidden && cells[1].shortcut.isHidden && cells[1].closeButton.isHidden)
+        #expect(cells[2].trailingAccessory == .status)
+        #expect(!cells[2].status.isHidden && cells[2].shortcut.isHidden && cells[2].closeButton.isHidden)
+
+        // 2. Holding ⌘ (and ⌘⇧) reveals ⌘1..3 in-place without reloadData(), overriding status on unhovered rows.
+        controller.commandMonitor.handleFlagsChanged(try flagsEvent([.command]))
+        #expect(controller.isCommandHeld)
+        #expect(controller.reloadCount == baselineReloads)
+        for cell in cells {
+            cell.layoutSubtreeIfNeeded()
+            #expect(cell.trailingAccessory == .shortcut)
+            #expect(!cell.shortcut.isHidden)
+            #expect(cell.status.isHidden)
+            #expect(cell.closeButton.isHidden)
+        }
+        controller.commandMonitor.handleFlagsChanged(try flagsEvent([.command, .shift]))
+        #expect(controller.isCommandHeld)
+        #expect(cells.allSatisfy { $0.trailingAccessory == .shortcut })
+
+        // 3. Hovering row 1 while ⌘ is held shows ONLY ✕ on row 1 (.close > .shortcut > .status),
+        //    while unhovered rows 0 & 2 continue showing ⌘1 / ⌘3.
+        rows[1].isHovered = true
+        cells[1].layoutSubtreeIfNeeded()
+        #expect(cells[1].trailingAccessory == .close)
+        #expect(!cells[1].closeButton.isHidden)
+        #expect(!cells[1].closeButton.showsHoverDisc)
+        #expect(cells[1].shortcut.isHidden)
+        #expect(cells[1].status.isHidden)
+        cells[1].closeButton.isHovered = true
+        #expect(cells[1].closeButton.showsHoverDisc)
+        cells[1].closeButton.isHovered = false
+        #expect(cells[0].trailingAccessory == .shortcut)
+        #expect(cells[2].trailingAccessory == .shortcut)
+        rows[1].isHovered = false
+        #expect(cells[1].trailingAccessory == .shortcut)
+
+        // 4. Adding Control or Option suppresses ⌘1..9 reveal.
+        controller.commandMonitor.handleFlagsChanged(try flagsEvent([.command, .option]))
+        #expect(!controller.isCommandHeld)
+        #expect(cells[0].trailingAccessory == .none)
+        #expect(cells[1].trailingAccessory == .status)
+        #expect(cells[2].trailingAccessory == .status)
+
+        // 5. Window resignKey and app resignActive immediately clear ⌘-hold so Command-Tab never sticks ON.
+        controller.commandMonitor.handleFlagsChanged(try flagsEvent([.command]))
+        #expect(controller.isCommandHeld)
+        window.keyState = false
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window)
+        #expect(!controller.isCommandHeld)
+        #expect(cells[1].trailingAccessory == .status)
+
+        window.keyState = true
+        controller.commandMonitor.handleFlagsChanged(try flagsEvent([.command]))
+        #expect(controller.isCommandHeld)
+        NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: NSApp)
+        #expect(!controller.isCommandHeld)
+
+        // 6. Disabling showShortcutLabels keeps shortcuts nil, so ⌘-hold leaves status/.none intact.
+        showShortcuts = false
+        controller.update(makeConfig())
+        controller.isCommandModifierHeldOverride = true
+        defer { controller.isCommandModifierHeldOverride = nil }
+        #expect(cells[0].trailingAccessory == .none)
+        #expect(cells[1].trailingAccessory == .status)
+        #expect(cells[2].trailingAccessory == .status)
     }
 
     private func descendantLabel(_ view: NSView, matching value: String) -> NSTextField? {

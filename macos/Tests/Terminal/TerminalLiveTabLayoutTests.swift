@@ -332,6 +332,12 @@ struct TerminalLiveTabLayoutTests {
         #expect(try resolvedChrome().subtitle == nil)
         #expect(controller.tabAgentConversationTitle == nil)
 
+        let savedShortcuts = settings.showShortcutLabels
+        settings.showShortcutLabels = false
+        #expect(try resolvedInbox().shortcut == nil)
+        #expect(try resolvedChrome().shortcut == nil)
+        settings.showShortcutLabels = savedShortcuts
+
         // Once named, the Inbox row renders the session name + path subtitle,
         // while .chrome and window.title remain pure non-AI terminal chrome.
         let store = AgentConversationTitleStore.shared

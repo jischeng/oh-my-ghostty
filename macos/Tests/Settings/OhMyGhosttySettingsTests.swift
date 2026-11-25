@@ -951,10 +951,16 @@ struct OhMyGhosttySettingsTests {
         #expect(settings.tabSidebarViewMode == .tabs)
         #expect(settings.tabInboxGroupingMode == .date)
         #expect(settings.tabInboxOrderingMode == .recentlyUsed)
+        #expect(settings.tabRowDensity == .comfortable)
+        #expect(OhMyGhosttyTabRowDensity.comfortable.rowHeight == 36)
+        #expect(OhMyGhosttyTabRowDensity.compact.rowHeight == 30)
         #expect(settings.agentSessionTitleMode == .generate)
         #expect(settings.aiProviders.isEmpty)
         #expect(settings.aiTitleRoute == nil)
 
+        let density = OhMyGhosttySettings.descriptors.first { $0.id == "appearance.tabRowDensity" }
+        #expect(density?.defaultValue == "comfortable")
+        #expect(density?.allowedValues == ["compact", "comfortable"])
         let sidebar = OhMyGhosttySettings.descriptors.first { $0.id == "tabs.sidebarView" }
         #expect(sidebar?.defaultValue == "tabs")
         #expect(sidebar?.allowedValues == ["tabs", "inbox"])
@@ -972,6 +978,7 @@ struct OhMyGhosttySettingsTests {
         settings.tabSidebarViewMode = .inbox
         settings.tabInboxGroupingMode = .project
         settings.tabInboxOrderingMode = .created
+        settings.tabRowDensity = .compact
         settings.agentSessionTitleMode = .native
 
         let object = try #require(
@@ -980,12 +987,14 @@ struct OhMyGhosttySettingsTests {
         #expect(object["tabs.sidebarView"] as? String == "inbox")
         #expect(object["tabs.inboxGrouping"] as? String == "project")
         #expect(object["tabs.inboxOrdering"] as? String == "created")
+        #expect(object["appearance.tabRowDensity"] as? String == "compact")
         #expect(object["agents.sessionTitle.mode"] as? String == "native")
 
         let restored = OhMyGhosttySettings(fileURL: url)
         #expect(restored.tabSidebarViewMode == .inbox)
         #expect(restored.tabInboxGroupingMode == .project)
         #expect(restored.tabInboxOrderingMode == .created)
+        #expect(restored.tabRowDensity == .compact)
         #expect(restored.agentSessionTitleMode == .native)
     }
 
@@ -993,12 +1002,13 @@ struct OhMyGhosttySettingsTests {
         let (settings, url) = temporarySettings()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         // `recent` is what the first inbox build stored for the ordering.
-        try #"{"tabs.sidebarView":"grid","tabs.inboxGrouping":"host","tabs.inboxOrdering":"recent","agents.sessionTitle.mode":"always","ai.providers":"none","ai.routes.title":["x"],"ai.routes.commit":{"kind":"agent"}}"#
+        try #"{"tabs.sidebarView":"grid","tabs.inboxGrouping":"host","tabs.inboxOrdering":"recent","appearance.tabRowDensity":" cramped ","agents.sessionTitle.mode":"always","ai.providers":"none","ai.routes.title":["x"],"ai.routes.commit":{"kind":"agent"}}"#
             .write(to: url, atomically: true, encoding: .utf8)
         settings.reloadFromDisk()
         #expect(settings.tabSidebarViewMode == .tabs)
         #expect(settings.tabInboxGroupingMode == .date)
         #expect(settings.tabInboxOrderingMode == .recentlyUsed)
+        #expect(settings.tabRowDensity == .comfortable)
         #expect(settings.agentSessionTitleMode == .generate)
         #expect(settings.aiProviders.isEmpty)
         #expect(settings.aiTitleRoute == nil)

@@ -87,6 +87,7 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
 
     let outline: NativeTabOutline
     let scrollView = NSScrollView()
+    let commandMonitor = NativeCommandRevealMonitor()
     var configuration: NativeTabOutlineConfiguration
     var roots: [NativeTabNode] = []
     var nodes: [String: NativeTabNode] = [:]
@@ -94,6 +95,12 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
     var updating = false
     var lastSelectedID: ObjectIdentifier?
     var animationsEnabled = true
+    /// Test seam for deterministic `⌘`-hold shortcut reveal in unit tests.
+    var isCommandModifierHeldOverride: Bool? {
+        get { commandMonitor.overrideValue }
+        set { commandMonitor.overrideValue = newValue }
+    }
+    var isCommandHeld: Bool { commandMonitor.isCommandHeld }
     private var selectionChangeGeneration = 0
     private(set) var reloadCount = 0
     private(set) var moveCount = 0
@@ -209,9 +216,24 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
         self.configuration = parent
         outline = NativeTabOutline()
         super.init(nibName: nil, bundle: nil)
+        commandMonitor.hostView = outline
+        commandMonitor.onChange = { [weak self] held in
+            self?.updateCommandRevealOnAvailableCells(held)
+        }
+        outline.onWindowDidChange = { [weak self] in
+            self?.commandMonitor.reconcileWindowFocus()
+        }
         outline.activateSelectedRow = { [weak self] in self?.activateSelectedRow() }
         outline.didBeginMouseTracking = { [weak self] in self?.selectionChangeGeneration += 1 }
         outline.didBeginDrag = { [weak self] in self?.selectionChangeGeneration += 1 }
+    }
+
+    private func updateCommandRevealOnAvailableCells(_ held: Bool) {
+        outline.enumerateAvailableRowViews { rowView, _ in
+            guard rowView.numberOfColumns > 0,
+                  let cell = rowView.view(atColumn: 0) as? NativeTabCell else { return }
+            cell.isCommandHeld = held
+        }
     }
 
     @available(*, unavailable)
@@ -433,6 +455,7 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
     }
 
     private func configure(_ cell: NativeTabCell, item: NativeTabNode) {
+        cell.isCommandHeld = commandMonitor.isCommandHeld
         cell.configure(
             tab: item.tab,
             title: item.title,
@@ -660,6 +683,7 @@ final class NativeTabOutline: NSOutlineView {
     var activateSelectedRow: (() -> Void)?
     var didBeginMouseTracking: (() -> Void)?
     var didBeginDrag: (() -> Void)?
+    var onWindowDidChange: (() -> Void)?
     private(set) var isNavigatingWithKeyboard = false
     private(set) var isDraggingTab = false
     private weak var mouseDownResponder: NSResponder?
@@ -672,8 +696,9 @@ final class NativeTabOutline: NSOutlineView {
     /// column even for level-0 leaves. A flat tab list has no disclosure
     /// buttons, so give its cells the full row width instead.
     var reservesDisclosureSpace = true
-    /// Matches the trailing inset so icons and shortcuts sit evenly inside the row highlight.
-    static let flatLeadingInset: CGFloat = 4
+    /// Places flat cells at `10pt` inside `NativeTabRowView.highlightRect` (`pill.minX = 2` + `10pt` = `12pt` with `stack.leading = 2`),
+    /// matching `NativeInboxMetrics.rowHorizontalPadding` (`10pt`) to the exact pixel.
+    static let flatLeadingInset: CGFloat = 10
     override func frameOfCell(atColumn column: Int, row: Int) -> NSRect {
         let frame = super.frameOfCell(atColumn: column, row: row)
         guard !reservesDisclosureSpace, row >= 0, column >= 0, column < tableColumns.count,
@@ -688,6 +713,7 @@ final class NativeTabOutline: NSOutlineView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         hover.update()
+        onWindowDidChange?()
         guard dragDiagnosticMonitor == nil else { return }
         dragDiagnosticMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .keyDown],
@@ -841,6 +867,8 @@ final class NativeTabListPointer: NSObject {
 }
 
 final class NativeTabRowView: NativeHoverRowView {
+    static let pillCornerRadius: CGFloat = NativeInboxMetrics.rowCornerRadius
+    override var cornerRadius: CGFloat { Self.pillCornerRadius }
     var selectionRect: NSRect { highlightRect }
 
     override func hoverStateDidChange(_ hovered: Bool) {
@@ -860,11 +888,12 @@ final class NativeTabRowView: NativeHoverRowView {
     override func drawSelection(in dirtyRect: NSRect) {
         let rect = selectionRect
         guard !rect.isEmpty else { return }
+        let radius = cornerRadius
         OMGNativeTheme.resolve(for: self).selectedFill.setFill()
         NSBezierPath(
             roundedRect: rect,
-            xRadius: Self.highlightCornerRadius,
-            yRadius: Self.highlightCornerRadius
+            xRadius: radius,
+            yRadius: radius
         ).fill()
     }
 }
@@ -872,12 +901,29 @@ final class NativeTabRowView: NativeHoverRowView {
 /// Pure single-line AppKit cells observe their own title changes without invalidating the list.
 @MainActor
 final class NativeTabCell: NSTableCellView {
-    private let icon = NativeTabIconView()
-    private let label = NSTextField(labelWithString: "")
-    private let shortcut = NSTextField(labelWithString: "")
-    private let status = NSImageView()
-    private let closeButton = NativeActionControl()
+    static let iconSize: CGFloat = NativeInboxMetrics.iconSize
+    static let iconToTitleSpacing: CGFloat = 7
+    static let trailingInsetFromCellEdge: CGFloat = 12
+
+    static func iconSizing(
+        preferredLogoSize: CGFloat = CGFloat(OhMyGhosttySettings.shared.tabIconSize)
+    ) -> NativeTabIconView.CustomSizing {
+        NativeTabIconView.CustomSizing(
+            composition: iconSize,
+            singleLogo: min(iconSize, max(12, preferredLogoSize)),
+            symbolBonus: 1,
+            paneSize: 8.5
+        )
+    }
+
+    let icon = NativeTabIconView()
+    let label = NSTextField(labelWithString: "")
+    let shortcut = NSTextField(labelWithString: "")
+    let status = NSImageView()
+    let closeButton = NativeInboxCloseButton()
+    let trailingSlot = NSView()
     private(set) var rowStack: NSStackView!
+    private var trailingWidthConstraint: NSLayoutConstraint!
     private var closeAction: (() -> Void)?
     private var observations = Set<AnyCancellable>()
     private var surfaceObservations = Set<AnyCancellable>()
@@ -887,78 +933,154 @@ final class NativeTabCell: NSTableCellView {
     private var selectAction: (() -> Void)?
     private var refreshScheduled = false
     private var canClose = false
+    private(set) var hasStatusBadge = false
+    private(set) var trailingAccessory: NativeTabTrailingAccessory = .none
+
+    var isCommandHeld = false {
+        didSet {
+            guard oldValue != isCommandHeld else { return }
+            updateTrailingVisibility()
+        }
+    }
 
     override func viewDidMoveToSuperview() {
         super.viewDidMoveToSuperview()
         updateHoverAppearance()
     }
 
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTheme()
+    }
+
     func updateSelection(_ selected: Bool) {
         guard self.selected != selected else { return }
         self.selected = selected
+        if configuredTab != nil {
+            label.font = .systemFont(ofSize: 13, weight: selected ? .medium : .regular)
+        }
         guard let tab = configuredTab, let presentation, let value = presentation(tab) else { return }
         icon.configure(controller: tab.controller, icon: value.icon, selected: selected, activity: value.activity)
     }
 
     func updateHoverAppearance() {
+        updateTrailingVisibility()
+    }
+
+    func updateTrailingVisibility() {
+        guard configuredTab != nil else {
+            trailingAccessory = .none
+            closeButton.isHidden = true
+            shortcut.isHidden = true
+            status.isHidden = true
+            trailingSlot.isHidden = true
+            return
+        }
         let hovered = (superview as? NativeHoverRowView)?.isHovered == true
-        let showsClose = hovered && canClose
-        if closeButton.isHidden != !showsClose { closeButton.isHidden = !showsClose }
-        if shortcut.isHidden != showsClose { shortcut.isHidden = showsClose }
+        let next = NativeTabTrailingAccessory.resolve(
+            isHovered: hovered,
+            canClose: canClose,
+            isCommandHeld: isCommandHeld,
+            hasShortcut: !shortcut.stringValue.isEmpty,
+            hasStatus: hasStatusBadge
+        )
+        trailingAccessory = next
+        closeButton.isHidden = next != .close
+        shortcut.isHidden = next != .shortcut
+        status.isHidden = next != .status
+        switch next {
+        case .close:
+            trailingWidthConstraint.constant = NativeInboxMetrics.closeButtonSize
+            trailingSlot.isHidden = false
+        case .shortcut:
+            trailingWidthConstraint.constant = max(
+                NativeInboxMetrics.closeButtonSize,
+                ceil(shortcut.fittingSize.width)
+            )
+            trailingSlot.isHidden = false
+        case .status:
+            trailingWidthConstraint.constant =
+                (NativeInboxMetrics.closeButtonSize + NativeInboxMetrics.statusBadgeSize) / 2
+            trailingSlot.isHidden = false
+        case .none:
+            trailingSlot.isHidden = true
+        }
     }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        closeButton.title = ""
+        icon.customSizing = Self.iconSizing()
         label.lineBreakMode = .byTruncatingMiddle
-        label.font = .systemFont(ofSize: 13)
+        label.font = .systemFont(ofSize: 13, weight: .regular)
         shortcut.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        shortcut.textColor = .secondaryLabelColor
-        closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: ChromeStrings.current.closeTab)
-        closeButton.isBordered = false
-        closeButton.target = self
-        closeButton.action = #selector(closeTab)
+        shortcut.alignment = .right
+        status.imageScaling = .scaleProportionallyDown
+        closeButton.onPress = { [weak self] in self?.closeTab() }
         closeButton.setAccessibilityLabel(ChromeStrings.current.closeTab)
-        let trailing = NSView()
-        for view in [shortcut, closeButton] {
+        closeButton.isHidden = true
+        shortcut.isHidden = true
+        status.isHidden = true
+        trailingSlot.isHidden = true
+
+        trailingSlot.translatesAutoresizingMaskIntoConstraints = false
+        for view in [shortcut, status, closeButton] {
             view.translatesAutoresizingMaskIntoConstraints = false
-            trailing.addSubview(view)
-            NSLayoutConstraint.activate([
-                view.trailingAnchor.constraint(equalTo: trailing.trailingAnchor),
-                view.centerYAnchor.constraint(equalTo: trailing.centerYAnchor)
-            ])
+            trailingSlot.addSubview(view)
+            view.centerYAnchor.constraint(equalTo: trailingSlot.centerYAnchor).isActive = true
         }
-        trailing.widthAnchor.constraint(equalToConstant: 28).isActive = true
-        trailing.heightAnchor.constraint(equalToConstant: 24).isActive = true
-        let stack = NSStackView(views: [icon, label, status, trailing])
+        let statusTrailingOffset = -(NativeInboxMetrics.closeButtonSize - NativeInboxMetrics.statusBadgeSize) / 2
+        let widthConstraint = trailingSlot.widthAnchor.constraint(
+            equalToConstant: NativeInboxMetrics.closeButtonSize
+        )
+        trailingWidthConstraint = widthConstraint
+        NSLayoutConstraint.activate([
+            widthConstraint,
+            trailingSlot.heightAnchor.constraint(equalToConstant: NativeInboxMetrics.closeButtonSize),
+            shortcut.trailingAnchor.constraint(equalTo: trailingSlot.trailingAnchor),
+            closeButton.trailingAnchor.constraint(equalTo: trailingSlot.trailingAnchor),
+            closeButton.widthAnchor.constraint(equalToConstant: NativeInboxMetrics.closeButtonSize),
+            closeButton.heightAnchor.constraint(equalToConstant: NativeInboxMetrics.closeButtonSize),
+            status.trailingAnchor.constraint(equalTo: trailingSlot.trailingAnchor, constant: statusTrailingOffset),
+            status.widthAnchor.constraint(equalToConstant: NativeInboxMetrics.statusBadgeSize),
+            status.heightAnchor.constraint(equalToConstant: NativeInboxMetrics.statusBadgeSize),
+        ])
+
+        let stack = NSStackView(views: [icon, label, trailingSlot])
         stack.orientation = .horizontal
         stack.distribution = .fill
         stack.spacing = 6
+        stack.setCustomSpacing(Self.iconToTitleSpacing, after: icon)
         stack.alignment = .centerY
         stack.translatesAutoresizingMaskIntoConstraints = false
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         label.setContentHuggingPriority(.init(1), for: .horizontal)
         addSubview(stack)
         rowStack = stack
-        let trailingConstraint = stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -9)
+        let trailingConstraint = stack.trailingAnchor.constraint(
+            equalTo: trailingAnchor,
+            constant: -Self.trailingInsetFromCellEdge
+        )
         trailingConstraint.priority = .defaultHigh
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
             trailingConstraint,
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: TabIconMetrics.footprint),
-            icon.heightAnchor.constraint(equalToConstant: TabIconMetrics.footprint),
-            status.widthAnchor.constraint(equalToConstant: 14),
-            status.heightAnchor.constraint(equalToConstant: 14),
-            closeButton.widthAnchor.constraint(equalToConstant: 20),
-            closeButton.heightAnchor.constraint(equalToConstant: 20)
+            icon.widthAnchor.constraint(equalToConstant: Self.iconSize),
+            icon.heightAnchor.constraint(equalToConstant: Self.iconSize),
         ])
 
+        applyTheme()
         // Do not register these as NSTableCellView's standard outlets: source
         // list cell layout can reposition them around our stack constraints.
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    private func applyTheme() {
+        let theme = OMGNativeTheme.resolve(for: self)
+        label.textColor = theme.foreground
+        shortcut.textColor = theme.foreground.withAlphaComponent(0.45)
+    }
 
     // Row configuration keeps the native interaction callbacks explicit.
     // swiftlint:disable:next function_parameter_count
@@ -984,20 +1106,21 @@ final class NativeTabCell: NSTableCellView {
         selectAction = select
         closeAction = close
         self.canClose = tab != nil && canClose
-        updateHoverAppearance()
         guard let tab else {
             configuredTab = nil
             self.presentation = nil
             selectAction = nil
+            hasStatusBadge = false
             label.stringValue = title ?? ""
             label.font = .systemFont(ofSize: 11, weight: .semibold)
-            let theme = OMGNativeTheme.resolve(for: self)
-            label.textColor = theme.foreground
+            applyTheme()
+            icon.customSizing = Self.iconSizing()
             icon.isHidden = false
             icon.configure(controller: nil, icon: groupIcon ?? .systemSymbol("folder"), selected: false, activity: nil)
             shortcut.stringValue = ""
-            shortcut.textColor = theme.secondary
-            status.isHidden = true
+            status.image = nil
+            status.toolTip = nil
+            updateTrailingVisibility()
             toolTip = nil
             setAccessibilityLabel(title ?? "")
             return
@@ -1056,20 +1179,21 @@ final class NativeTabCell: NSTableCellView {
         let selected = self.selected
         shortcut.stringValue = value.shortcut ?? ""
         let title = value.remoteBreadcrumb?.title ?? value.title
-        label.font = .systemFont(ofSize: 13)
+        let titleWeight: NSFont.Weight = (selected || value.selected) ? .medium : .regular
+        label.font = .systemFont(ofSize: 13, weight: titleWeight)
         label.lineBreakMode = .byTruncatingMiddle
+        icon.customSizing = Self.iconSizing()
         if icon.isHidden { icon.isHidden = false }
         toolTip = value.toolTip ?? AgentLogoStyle.toolTip(title: title, activity: value.activity)
         icon.configure(controller: tab.controller, icon: value.icon, selected: selected, activity: value.activity)
         label.stringValue = title
-        let theme = OMGNativeTheme.resolve(for: self)
-        label.textColor = theme.foreground
-        shortcut.textColor = theme.secondary
+        applyTheme()
         let badge = AgentStatusBadge.resolve(value.activity)
-        status.isHidden = badge == nil
+        hasStatusBadge = badge != nil
         status.image = badge.flatMap { NSImage(systemSymbolName: $0.symbol, accessibilityDescription: nil) }
         status.contentTintColor = badge?.color
         status.toolTip = value.activity.map(AgentLogoStyle.localizedStatus)
+        updateTrailingVisibility()
         setAccessibilityLabel(value.title)
     }
 

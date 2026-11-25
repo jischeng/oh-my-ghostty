@@ -141,6 +141,7 @@ class NativeHoverRowView: NSTableRowView {
     private let hoverBackground = CAShapeLayer()
     private let themeObserver = OMGNativeThemeObserver()
     private var hoverBounds: NSRect?
+    var cornerRadius: CGFloat { Self.highlightCornerRadius }
     var highlightRect: NSRect {
         bounds.insetBy(dx: Self.highlightInset.width, dy: Self.highlightInset.height)
     }
@@ -186,11 +187,12 @@ class NativeHoverRowView: NSTableRowView {
         defer { CATransaction.commit() }
         hoverBackground.frame = bounds
         let rect = highlightRect
+        let radius = cornerRadius
         hoverBackground.path = rect.isEmpty ? nil :
             CGPath(
                 roundedRect: rect,
-                cornerWidth: Self.highlightCornerRadius,
-                cornerHeight: Self.highlightCornerRadius,
+                cornerWidth: radius,
+                cornerHeight: radius,
                 transform: nil
             )
     }

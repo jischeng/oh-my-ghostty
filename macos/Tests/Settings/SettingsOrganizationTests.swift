@@ -24,6 +24,8 @@ struct SettingsOrganizationTests {
             #expect(entries.first { $0.settingIDs.contains("keyboard.quickInputOpacity") }?.tab == .controls)
             #expect(entries.first { $0.settingIDs.contains("keyboard.quickInput") }?.tab == .keyboard)
             #expect(entries.first { $0.settingIDs.contains("appearance.tabIconSize") }?.tab == .tabs)
+            #expect(entries.first { $0.settingIDs.contains("appearance.tabRowDensity") }?.tab == .tabs)
+            #expect(OhMyGhosttySettings.descriptors.first { $0.id == "appearance.tabRowDensity" }?.defaultValue == "comfortable")
             #expect(entries.first { $0.settingIDs.contains("tabs.sidebarView") }?.tab == .tabs)
             #expect(entries.first { $0.settingIDs.contains("tabs.inboxGrouping") }?.tab == .tabs)
             #expect(entries.first { $0.settingIDs.contains("tabs.inboxOrdering") }?.tab == .tabs)

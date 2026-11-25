@@ -3,20 +3,39 @@ import Combine
 
 private let tabPresentationDidChangeNotification = Notification.Name("GhosttyTabPresentationDidChange")
 
-/// Subtle 18×18pt close control rendered at the trailing edge of a hovered Inbox row.
+/// Subtle 18×18pt close control rendered at the trailing edge of a hovered sidebar row.
 /// Shows a plain `xmark` glyph on row hover and paints a subtle circular backing only
 /// when the pointer is directly over (or pressing) the close button itself.
 @MainActor
-final class NativeInboxCloseButton: NSView {
+final class NativeInboxCloseButton: NSButton {
     var isHovered = false { didSet { if oldValue != isHovered { needsDisplay = true } } }
     var isPressed = false { didSet { if oldValue != isPressed { needsDisplay = true } } }
+    var onPress: (() -> Void)?
+    private var trackingArea: NSTrackingArea?
 
-    var showsHoverDisc: Bool { isHovered || isPressed }
+    private var activePress: Bool {
+        isPressed || (isHighlighted && NativePointerLocation.contains(self))
+    }
 
-    override var isFlipped: Bool { true }
+    var showsHoverDisc: Bool { isHovered || activePress }
+
+    override var isHidden: Bool {
+        didSet {
+            if isHidden {
+                isHovered = false
+                isPressed = false
+            }
+        }
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        title = ""
+        isBordered = false
+        bezelStyle = .regularSquare
+        setButtonType(.momentaryChange)
+        target = self
+        action = #selector(invokePress)
         setAccessibilityRole(.button)
         setAccessibilityLabel(ChromeStrings.current.closeTab)
     }
@@ -24,10 +43,51 @@ final class NativeInboxCloseButton: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    @objc private func invokePress() {
+        onPress?()
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if trackingArea == nil {
+            let area = NSTrackingArea(
+                rect: .zero,
+                options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                owner: self
+            )
+            trackingArea = area
+            addTrackingArea(area)
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        isHovered = false
+        isPressed = false
+    }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        isHovered = false
+        isPressed = false
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        guard NativePointerLocation.contains(self, event: event) else {
+            isHovered = false
+            return
+        }
+        isHovered = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         let theme = OMGNativeTheme.resolve(for: self)
         if showsHoverDisc {
-            let bgAlpha: CGFloat = isPressed ? 0.16 : 0.10
+            let bgAlpha: CGFloat = activePress ? 0.16 : 0.10
             theme.foreground.withAlphaComponent(bgAlpha).setFill()
             NSBezierPath(ovalIn: bounds).fill()
         }
@@ -89,10 +149,19 @@ final class NativeInboxRowView: NSView {
     private(set) var showsSubtitle = false
     private(set) var subtitleIsRemote = false
     private(set) var hasRemoteBreadcrumb = false
+    private(set) var hasStatusBadge = false
+    private(set) var trailingAccessory: NativeTabTrailingAccessory = .none
 
     var canClose = false {
         didSet {
             guard oldValue != canClose else { return }
+            updateTrailingVisibility()
+        }
+    }
+
+    var isCommandHeld = false {
+        didSet {
+            guard oldValue != isCommandHeld else { return }
             updateTrailingVisibility()
         }
     }
@@ -165,7 +234,11 @@ final class NativeInboxRowView: NSView {
 
         statusView.imageScaling = .scaleProportionallyDown
         statusView.isHidden = true
+        shortcutLabel.isHidden = true
         closeButton.isHidden = true
+        closeButton.onPress = { [weak self] in
+            self?.closeAction?()
+        }
 
         for child in [
             iconView, remoteCloudView, titleLabel, statusView,
@@ -285,7 +358,7 @@ final class NativeInboxRowView: NSView {
         )
 
         let badge = AgentStatusBadge.resolve(value.activity)
-        statusView.isHidden = badge == nil
+        hasStatusBadge = badge != nil
         statusView.image = badge.flatMap { NSImage(systemSymbolName: $0.symbol, accessibilityDescription: nil) }
         statusView.contentTintColor = badge?.color
         statusView.toolTip = value.activity.map(AgentLogoStyle.localizedStatus)
@@ -312,11 +385,18 @@ final class NativeInboxRowView: NSView {
         subtitleCloudView.contentTintColor = theme.secondary
     }
 
-    private func updateTrailingVisibility() {
-        let showsClose = isHovered && canClose
-        closeButton.isHidden = !showsClose
-        let hasShortcut = !shortcutLabel.stringValue.isEmpty
-        shortcutLabel.isHidden = showsClose || !hasShortcut
+    func updateTrailingVisibility() {
+        let next = NativeTabTrailingAccessory.resolve(
+            isHovered: isHovered,
+            canClose: canClose,
+            isCommandHeld: isCommandHeld,
+            hasShortcut: !shortcutLabel.stringValue.isEmpty,
+            hasStatus: hasStatusBadge
+        )
+        trailingAccessory = next
+        closeButton.isHidden = next != .close
+        shortcutLabel.isHidden = next != .shortcut
+        statusView.isHidden = next != .status
         needsLayout = true
     }
 
@@ -353,29 +433,27 @@ final class NativeInboxRowView: NSView {
             height: shortcutSize.height
         )
 
-        let trailingMinX: CGFloat
-        if !closeButton.isHidden {
-            trailingMinX = closeButton.frame.minX - 6
-        } else if !shortcutLabel.isHidden {
-            trailingMinX = shortcutLabel.frame.minX - 6
-        } else {
-            trailingMinX = rightEdge
-        }
-
         let statusEdge = NativeInboxMetrics.statusBadgeSize
-        let titleMaxX: CGFloat
-        if !statusView.isHidden {
-            let statusX = trailingMinX - statusEdge
-            statusView.frame = NSRect(
+        let statusX = rightEdge - (closeEdge + statusEdge) / 2
+        statusView.frame = statusView.isHidden
+            ? .zero
+            : NSRect(
                 x: statusX,
                 y: topMidY - statusEdge / 2,
                 width: statusEdge,
                 height: statusEdge
             )
-            titleMaxX = statusX - 6
-        } else {
-            statusView.frame = .zero
-            titleMaxX = trailingMinX
+
+        let titleMaxX: CGFloat
+        switch trailingAccessory {
+        case .close:
+            titleMaxX = closeButton.frame.minX - 6
+        case .shortcut:
+            titleMaxX = shortcutLabel.frame.minX - 6
+        case .status:
+            titleMaxX = statusView.frame.minX - 6
+        case .none:
+            titleMaxX = rightEdge
         }
 
         var titleX = NativeInboxMetrics.textLeadingX

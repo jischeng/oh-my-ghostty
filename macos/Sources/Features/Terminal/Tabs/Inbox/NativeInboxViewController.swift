@@ -50,6 +50,7 @@ final class NativeInboxViewController: NSViewController {
 
     let scrollView = NativeInboxScrollView()
     let documentView = NativeInboxDocumentView()
+    let commandMonitor = NativeCommandRevealMonitor()
     private(set) var configuration: NativeInboxConfiguration
 
     private var headerViews: [String: NativeInboxSectionHeaderView] = [:]
@@ -79,6 +80,13 @@ final class NativeInboxViewController: NSViewController {
     var pointerDidLeave: (() -> Void)?
     /// Test seam for pointer-hold stability in unit tests without a desktop cursor.
     var holdsOrderOverride: Bool?
+    /// Test seam for deterministic `⌘`-hold shortcut reveal in unit tests.
+    var isCommandModifierHeldOverride: Bool? {
+        get { commandMonitor.overrideValue }
+        set { commandMonitor.overrideValue = newValue }
+    }
+
+    var isCommandHeld: Bool { commandMonitor.isCommandHeld }
 
     var isPointerHoldingOrder: Bool {
         holdsOrderOverride ?? pointer?.holdsOrder ?? false
@@ -87,6 +95,13 @@ final class NativeInboxViewController: NSViewController {
     init(_ configuration: NativeInboxConfiguration) {
         self.configuration = configuration
         super.init(nibName: nil, bundle: nil)
+        commandMonitor.hostView = scrollView
+        commandMonitor.onChange = { [weak self] held in
+            guard let self else { return }
+            for row in self.rowViews.values {
+                row.isCommandHeld = held
+            }
+        }
     }
 
     @available(*, unavailable)
@@ -180,6 +195,7 @@ final class NativeInboxViewController: NSViewController {
         windowObservers.forEach(NotificationCenter.default.removeObserver)
         windowObservers.removeAll()
         observedWindow = window
+        commandMonitor.reconcileWindowFocus()
         guard let window else {
             clearHover()
             return
@@ -281,6 +297,7 @@ final class NativeInboxViewController: NSViewController {
                 row.onHeightPreferenceChange = { [weak self] in
                     self?.relayoutItems()
                 }
+                row.isCommandHeld = commandMonitor.isCommandHeld
                 row.configure(
                     tab: tab,
                     selected: selected,

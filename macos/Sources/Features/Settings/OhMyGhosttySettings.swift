@@ -247,8 +247,8 @@ enum OhMyGhosttyTabRowDensity: String, CaseIterable, Identifiable {
 
     var rowHeight: CGFloat {
         switch self {
-        case .compact: 28
-        case .comfortable: 32
+        case .compact: 30
+        case .comfortable: 36
         }
     }
 }
@@ -421,7 +421,7 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Optional terminal cursor style override.",
             requiresNewWindow: false, category: "appearance"),
         .init(
-            id: "appearance.tabRowDensity", type: .enumeration, defaultValue: "compact",
+            id: "appearance.tabRowDensity", type: .enumeration, defaultValue: "comfortable",
             allowedValues: OhMyGhosttyTabRowDensity.allCases.map(\.rawValue), minimum: nil, maximum: nil,
             description: "Vertical tab row density.",
             requiresNewWindow: false, category: "appearance"),
@@ -863,7 +863,7 @@ final class OhMyGhosttySettings: ObservableObject {
     @Published var cursorStyleOverride: OhMyGhosttyCursorStyle? {
         didSet { persistOptional("appearance.cursorStyle", cursorStyleOverride?.rawValue) }
     }
-    @Published var tabRowDensity: OhMyGhosttyTabRowDensity = .compact {
+    @Published var tabRowDensity: OhMyGhosttyTabRowDensity = .comfortable {
         didSet { persist("appearance.tabRowDensity", tabRowDensity.rawValue) }
     }
     @Published var tabIconSize: Double = 16 {
@@ -1558,7 +1558,7 @@ final class OhMyGhosttySettings: ObservableObject {
             unfocusedSplitOpacity = numberValue("appearance.unfocusedSplitOpacity", fallback: 0.9, range: 0.15...1)
             backgroundBlurOverride = optionalEnumValue("appearance.backgroundBlur")
             cursorStyleOverride = optionalEnumValue("appearance.cursorStyle")
-            tabRowDensity = enumValue("appearance.tabRowDensity", fallback: .compact)
+            tabRowDensity = enumValue("appearance.tabRowDensity", fallback: .comfortable)
             tabIconSize = numberValue("appearance.tabIconSize", fallback: 16, range: 12...20)
             notifyTaskComplete = boolValue("notifications.taskComplete", fallback: true)
             notifyAttention = boolValue("notifications.attention", fallback: true)

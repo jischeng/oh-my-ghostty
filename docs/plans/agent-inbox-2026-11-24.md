@@ -379,3 +379,33 @@ Where this section contradicts earlier iterations, this section wins.
   conversation title updates post `GhosttyTabPresentationDidChange` instead of
   emitting `BaseTerminalController.objectWillChange`, preventing SwiftUI surface
   wrapper flashes while refreshing sidebar cells immediately.
+
+## Iteration 6 (2026-11-25, unified trailing slot, ⌘-hold shortcut reveal & Otty Normal Tabs proportions)
+
+Where this section contradicts earlier iterations, this section wins.
+
+- **Single shared rightmost trailing slot across `.tabs` and `.inbox`**:
+  `NativeTabCell` and `NativeInboxRowView` share `NativeTabTrailingAccessory`
+  priority in one rightmost column inset `10pt` from the pill edge:
+  1. Row hovered (`isHovered && canClose`) -> `18×18pt` `NativeInboxCloseButton`
+     (`✕` glyph on row hover, subtle circular hover disc only when the pointer is
+     over or pressing `✕`).
+  2. Else `⌘` held (`isCommandHeld && shortcut != nil`) -> `⌘1..⌘9` shortcut
+     label (`tabs.showShortcutLabels == false` disables it cleanly).
+  3. Else resting state -> `14×14pt` `AgentStatusBadge` centered on the same
+     trailing axis when active; otherwise `0pt` width so titles extend cleanly to
+     `10pt` inside the right pill edge.
+- **AppKit `⌘`-hold reveal monitor (`NativeCommandRevealMonitor`)**: observes
+  local `.flagsChanged` events on the key terminal window
+  (`flags.intersection([.command, .control, .option]) == .command`) and resets on
+  `NSWindow.didResignKeyNotification` and
+  `NSApplication.didResignActiveNotification` so Command-Tabbing never leaves
+  shortcuts stuck on. Updates instantiated rows in place without `reloadData()`.
+- **Normal Tabs (`.tabs`) Otty proportions**: `OhMyGhosttyTabRowDensity` defaults
+  to `comfortable` (`36pt` pill + `2pt` gap, matching Otty's `baseH = 36pt` and
+  1-line Inbox rows; `compact` uses `30pt` + `2pt` gap). `NativeHoverRowView`
+  keeps its `6pt` default corner radius for Inspector/Settings tables while
+  `NativeTabRowView` overrides `cornerRadius` to `8pt`. `NativeTabCell` aligns
+  horizontal rhythm and typography with 1-line Inbox rows (`18×18pt` leading icon
+  at `10pt` inside pill, `7pt` gap to `13pt` `.medium` selected / `.regular`
+  unselected title, and `10pt` right pill inset).

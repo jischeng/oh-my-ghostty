@@ -778,7 +778,8 @@ struct VerticalTabInboxSidebarTests {
         #expect(header.titleLabel.frame.minX == 20)
         #expect(abs(header.countLabel.frame.maxX - (expectedWidth - 10)) <= 0.5)
 
-        // Row 1: 1-line 36pt row centered at midY = 18pt, 18×18pt iconView at x = 10pt, y = 9pt
+        // Row 1: 1-line 36pt row centered at midY = 18pt, 18×18pt iconView at x = 10pt, y = 9pt.
+        // In resting state (!isCommandHeld), trailing slot collapses (.none) so title extends to width - 10pt.
         let row1 = try #require(inbox.rowView(for: controllers[0]))
         #expect(row1.frame.minX == 8)
         #expect(row1.frame.width == expectedWidth)
@@ -793,28 +794,16 @@ struct VerticalTabInboxSidebarTests {
         #expect(row1Marks[0].frame.size == NSSize(width: 17, height: 17))
         #expect(row1.titleLabel.frame.minX == 34)
         #expect(abs(row1.titleLabel.frame.midY - 18) <= 0.5)
-        #expect(abs(row1.shortcutLabel.frame.maxX - (expectedWidth - 10)) <= 0.5)
-        #expect(abs(row1.shortcutLabel.frame.midY - 18) <= 0.5)
+        #expect(row1.trailingAccessory == .none)
+        #expect(row1.shortcutLabel.isHidden)
+        #expect(row1.statusView.isHidden)
+        #expect(row1.closeButton.isHidden)
+        #expect(abs(row1.titleLabel.frame.maxX - (expectedWidth - 10)) <= 0.5)
         #expect(row1.subtitleLabel.isHidden)
         #expect(row1.remoteCloudView.isHidden)
 
-        // Hover swaps ⌘N to 18×18 close button on the exact same centerline (midY = 18pt, rightEdge = width - 10pt),
-        // keeping its hover disc hidden until the pointer enters the ✕ button itself.
-        inbox.updateHover(at: NSPoint(x: row1.frame.midX, y: row1.frame.midY))
-        row1.layoutSubtreeIfNeeded()
-        #expect(row1.isHovered)
-        #expect(row1.shortcutLabel.isHidden)
-        #expect(!row1.closeButton.isHidden)
-        #expect(!row1.closeButton.showsHoverDisc)
-        #expect(row1.closeButton.frame == NSRect(x: expectedWidth - 28, y: 9, width: 18, height: 18))
-        inbox.updateHover(at: NSPoint(
-            x: row1.frame.minX + row1.closeButton.frame.midX,
-            y: row1.frame.minY + row1.closeButton.frame.midY
-        ))
-        #expect(row1.isCloseHovered)
-        #expect(row1.closeButton.showsHoverDisc)
-
-        // Row 2: 2-line 52pt local named session row (Line-1 anchored on midY = 18pt, Line-2 flush-left at x = 10pt on midY = 38pt)
+        // Row 2: 2-line 52pt local named session row (Line-1 anchored on midY = 18pt, Line-2 flush-left at x = 10pt on midY = 38pt).
+        // In resting state, the single trailing slot shows the 14×14pt status badge centered on the trailing column (midX = width - 19pt).
         let row2 = try #require(inbox.rowView(for: controllers[1]))
         #expect(row2.frame.minX == 8)
         #expect(row2.frame.width == expectedWidth)
@@ -831,9 +820,13 @@ struct VerticalTabInboxSidebarTests {
         #expect(row2.titleLabel.frame.minX == 34)
         #expect(row1.titleLabel.frame.minX == row2.titleLabel.frame.minX)
         #expect(abs(row2.titleLabel.frame.midY - 18) <= 0.5)
-        #expect(row2.statusView.frame.size == NSSize(width: 14, height: 14))
+        #expect(row2.trailingAccessory == .status)
+        #expect(!row2.statusView.isHidden)
+        #expect(row2.shortcutLabel.isHidden)
+        #expect(row2.closeButton.isHidden)
+        #expect(row2.statusView.frame == NSRect(x: expectedWidth - 26, y: 11, width: 14, height: 14))
         #expect(abs(row2.statusView.frame.midY - 18) <= 0.5)
-        #expect(abs(row2.shortcutLabel.frame.midY - 18) <= 0.5)
+        #expect(row2.statusView.frame.midX == row2.closeButton.frame.midX)
         #expect(row2.closeButton.frame.midY == 18)
         #expect(!row2.subtitleLabel.isHidden)
         #expect(row2.subtitleCloudView.isHidden)
@@ -841,6 +834,52 @@ struct VerticalTabInboxSidebarTests {
         #expect(row2.subtitleLabel.frame.minX == 10)
         #expect(abs(row2.subtitleLabel.frame.midY - 38) <= 0.5)
         #expect(row2.subtitleLabel.frame.width == expectedWidth - 20)
+
+        // Holding ⌘ reveals ⌘1..4 in that single rightmost slot (overriding status on unhovered row2).
+        inbox.isCommandModifierHeldOverride = true
+        defer { inbox.isCommandModifierHeldOverride = nil }
+        row1.layoutSubtreeIfNeeded()
+        row2.layoutSubtreeIfNeeded()
+        #expect(row1.trailingAccessory == .shortcut)
+        #expect(!row1.shortcutLabel.isHidden)
+        #expect(abs(row1.shortcutLabel.frame.maxX - (expectedWidth - 10)) <= 0.5)
+        #expect(abs(row1.shortcutLabel.frame.midY - 18) <= 0.5)
+        #expect(row2.trailingAccessory == .shortcut)
+        #expect(!row2.shortcutLabel.isHidden)
+        #expect(row2.statusView.isHidden)
+        #expect(abs(row2.shortcutLabel.frame.maxX - (expectedWidth - 10)) <= 0.5)
+        #expect(abs(row2.shortcutLabel.frame.midY - 18) <= 0.5)
+
+        // Hover swaps ⌘N / status to 18×18 close button on the exact same centerline (midY = 18pt, rightEdge = width - 10pt),
+        // keeping its hover disc hidden until the pointer enters the ✕ button itself.
+        inbox.updateHover(at: NSPoint(x: row1.frame.midX, y: row1.frame.midY))
+        row1.layoutSubtreeIfNeeded()
+        #expect(row1.isHovered)
+        #expect(row1.trailingAccessory == .close)
+        #expect(row1.shortcutLabel.isHidden)
+        #expect(!row1.closeButton.isHidden)
+        #expect(!row1.closeButton.showsHoverDisc)
+        #expect(row1.closeButton.frame == NSRect(x: expectedWidth - 28, y: 9, width: 18, height: 18))
+        inbox.updateHover(at: NSPoint(
+            x: row1.frame.minX + row1.closeButton.frame.midX,
+            y: row1.frame.minY + row1.closeButton.frame.midY
+        ))
+        #expect(row1.isCloseHovered)
+        #expect(row1.closeButton.showsHoverDisc)
+
+        inbox.updateHover(at: NSPoint(x: row2.frame.midX, y: row2.frame.midY))
+        row2.layoutSubtreeIfNeeded()
+        #expect(row2.trailingAccessory == .close)
+        #expect(!row2.closeButton.isHidden)
+        #expect(row2.shortcutLabel.isHidden)
+        #expect(row2.statusView.isHidden)
+
+        inbox.clearHover()
+        inbox.isCommandModifierHeldOverride = nil
+        row1.layoutSubtreeIfNeeded()
+        row2.layoutSubtreeIfNeeded()
+        #expect(row1.trailingAccessory == .none)
+        #expect(row2.trailingAccessory == .status)
 
         // Row 3: 2-line 52pt remote SSH named session row (unselected uses .regular, flush-left cloud at x = 10pt before subtitle)
         let row3 = try #require(inbox.rowView(for: controllers[2]))

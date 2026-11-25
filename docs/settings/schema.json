@@ -239,7 +239,7 @@
     },
     "appearance.tabRowDensity": {
       "category": "appearance",
-      "default": "compact",
+      "default": "comfortable",
       "description": "Vertical tab row density.",
       "enum": ["compact", "comfortable"],
       "type": "string"

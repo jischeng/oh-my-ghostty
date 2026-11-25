@@ -265,7 +265,7 @@ struct VerticalTabInboxInteractionTests {
         let controller = try terminal(created: created)
         defer { close([controller]) }
         let tab = GhosttyOrganizedTab(controller: controller, actualIndex: 1)
-        let row = NativeInboxRowView(frame: NSRect(x: 0, y: 0, width: 234, height: 34))
+        let row = NativeInboxRowView(frame: NSRect(x: 0, y: 0, width: 234, height: 36))
         row.configure(tab: tab, selected: true, canClose: false) { item in
             let name = item.controller.titleOverride
             return GhosttyTabPresentation(
@@ -281,8 +281,13 @@ struct VerticalTabInboxInteractionTests {
         }
         row.layoutSubtreeIfNeeded()
         let singleLineHeight = row.preferredHeight
-        #expect(singleLineHeight >= 34)
+        #expect(singleLineHeight == 36)
         #expect(!row.showsSubtitle)
+        #expect(row.shortcutLabel.isHidden)
+        row.isCommandHeld = true
+        #expect(!row.shortcutLabel.isHidden)
+        row.isCommandHeld = false
+        #expect(row.shortcutLabel.isHidden)
         #expect(controller.tabLastInteractionAt == created)
 
         controller.titleOverride = "Fix sidebar pills"

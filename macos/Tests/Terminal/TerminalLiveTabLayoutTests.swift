@@ -432,14 +432,14 @@ struct TerminalLiveTabLayoutTests {
         #expect(Resolver.place(session: bare, descriptor: agent) == "/tmp/project")
         #expect(Resolver.place(session: bare, descriptor: nil) == nil)
 
-        // An SSH pane names its host first and keeps the remote path whole.
+        // An SSH pane names its host first and shortens the remote home folder to `~`.
         var remote = PaneSessionContext(workingDirectory: home, terminalTitle: "ssh")
         remote.observeForegroundSSH(
             alias: "build-box", transferTarget: "me@build-box", processGroupID: 4_242,
             currentWorkingDirectory: home, currentTerminalTitle: "ssh",
             remoteWorkingDirectory: "/home/me/code/project"
         )
-        #expect(Resolver.place(session: remote, descriptor: nil) == "build-box › /home/me/code/project")
+        #expect(Resolver.place(session: remote, descriptor: nil) == "build-box › ~/code/project")
         // The local directory belongs to the launcher while the host connects.
         var connecting = PaneSessionContext(workingDirectory: home, terminalTitle: "ssh")
         connecting.observeForegroundSSH(

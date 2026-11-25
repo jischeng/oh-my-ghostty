@@ -490,7 +490,7 @@ final class AgentConversationTitleTracker {
     typealias Target = AgentConversationTitleCoordinator.Target
 
     private weak var controller: TerminalController?
-    private let coordinator: AgentConversationTitleCoordinator
+    let coordinator: AgentConversationTitleCoordinator
     private let owner = UUID()
     private var subscriptions = Set<AnyCancellable>()
     private var targets: [UUID: Target] = [:]
@@ -623,9 +623,10 @@ final class AgentConversationTitleTracker {
         guard let controller else { return }
         let allowsGeneration = Self.allowsGeneration(in: controller)
         for surface in controller.surfaceTree {
-            guard let descriptor = controller.agentResumeDescriptor(for: surface),
-                  let session = controller.paneSessionContext(for: surface),
-                  let binding = PaneAgentHistoryService.Binding.current(descriptor: descriptor, session: session)
+            guard let descriptor = controller.agentResumeDescriptor(for: surface) else { continue }
+            let session = controller.paneSessionContext(for: surface)
+                ?? .init(workingDirectory: surface.pwd, terminalTitle: surface.title)
+            guard let binding = PaneAgentHistoryService.Binding.current(descriptor: descriptor, session: session)
             else { continue }
             let target = Target(
                 agent: binding.agent,
@@ -701,9 +702,15 @@ extension TerminalController {
     }
 
     /// Starts looking up conversation titles for this tab's panes. Calling it
-    /// again changes nothing; tracking ends when the controller is released.
+    /// again with the same coordinator changes nothing; tracking ends when the
+    /// controller is released.
     func startAgentConversationTitleTracking(coordinator: AgentConversationTitleCoordinator = .shared) {
-        guard objc_getAssociatedObject(self, &agentConversationTitleTrackerKey) == nil else { return }
+        if let existing = objc_getAssociatedObject(
+            self, &agentConversationTitleTrackerKey
+        ) as? AgentConversationTitleTracker,
+           existing.coordinator === coordinator {
+            return
+        }
         objc_setAssociatedObject(
             self,
             &agentConversationTitleTrackerKey,
@@ -720,7 +727,9 @@ extension TerminalController {
         if force, titleOverride != nil {
             titleOverride = nil
         }
-        startAgentConversationTitleTracking()
+        if objc_getAssociatedObject(self, &agentConversationTitleTrackerKey) == nil {
+            startAgentConversationTitleTracking()
+        }
         if let tracker = objc_getAssociatedObject(
             self, &agentConversationTitleTrackerKey
         ) as? AgentConversationTitleTracker {

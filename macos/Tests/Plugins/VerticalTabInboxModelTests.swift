@@ -549,5 +549,85 @@ struct VerticalTabInboxModelTests {
         let localFallback = PaneSessionContext(workingDirectory: nil, terminalTitle: "")
         #expect(TerminalTabPresentationResolver.place(session: localFallback, descriptor: remoteDescriptor)
             == "cloud › ~/deeproute/deepmine")
+
+        // When `includeHost` is false (single SSH host in workspace), omit `<host> › ` when a directory exists,
+        // and fall back to `<host>` when still connecting with no directory.
+        #expect(TerminalTabPresentationResolver.place(
+            session: readySession, descriptor: remoteDescriptor, includeHost: false
+        ) == "~/deeproute/deepmine")
+        #expect(TerminalTabPresentationResolver.place(
+            session: connectingSession, descriptor: nil, includeHost: false
+        ) == "cloud")
+        #expect(TerminalTabPresentationResolver.place(
+            session: localFallback, descriptor: remoteDescriptor, includeHost: false
+        ) == "~/deeproute/deepmine")
+    }
+
+    @Test @MainActor func singleRemoteHostOmitsHostPrefixInInboxAndMultiHostKeepsIt() throws {
+        let fixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { fixture.close() }
+
+        let localTab = try fixture.tab()
+        let cloudTabA = try fixture.tab()
+        let cloudTabB = try fixture.tab()
+        let jumpTab = try fixture.tab()
+
+        let cloudReplay = SSHReplayDescriptor(
+            version: 1, ssh: "/usr/bin/ssh", forwardEnv: false, terminfo: false,
+            cache: false, args: ["cloud"], localWorkingDirectory: "/Users/me/src"
+        )
+        let jumpReplay = SSHReplayDescriptor(
+            version: 1, ssh: "/usr/bin/ssh", forwardEnv: false, terminfo: false,
+            cache: false, args: ["vps-jump"], localWorkingDirectory: "/Users/me/src"
+        )
+        let cloudSurfaceA = try #require(cloudTabA.surfaceTree.first)
+        let cloudSurfaceB = try #require(cloudTabB.surfaceTree.first)
+        let jumpSurface = try #require(jumpTab.surfaceTree.first)
+
+        cloudTabA.adoptAgentResumeDescriptor(
+            .init(agent: .claude, scope: .remote, workingDirectory: "/home/chengjisheng/deeproute/bi_board_server",
+                  sshReplay: cloudReplay),
+            for: cloudSurfaceA
+        )
+        cloudTabB.adoptAgentResumeDescriptor(
+            .init(agent: .claude, scope: .remote, workingDirectory: "/home/chengjisheng/deeproute/deepmine",
+                  sshReplay: cloudReplay),
+            for: cloudSurfaceB
+        )
+        jumpTab.adoptAgentResumeDescriptor(
+            .init(agent: .claude, scope: .remote, workingDirectory: "/home/ops/deploy",
+                  sshReplay: jumpReplay),
+            for: jumpSurface
+        )
+
+        #expect(TerminalTabPresentationResolver.remoteHostIdentifier(for: localTab) == nil)
+        #expect(TerminalTabPresentationResolver.remoteHostIdentifier(for: cloudTabA) == "cloud")
+        #expect(TerminalTabPresentationResolver.remoteHostIdentifier(for: jumpTab) == "vps-jump")
+        #expect(!TerminalTabPresentationResolver.hasMultipleRemoteHosts(in: [localTab, cloudTabA, cloudTabB]))
+        #expect(TerminalTabPresentationResolver.hasMultipleRemoteHosts(in: [localTab, cloudTabA, jumpTab]))
+
+        // Single-host unnamed Inbox SSH row omits `cloud › ` and renders abbreviated path.
+        let singleHostUnnamed = try #require(TerminalTabPresentationResolver.resolve(
+            cloudTabA, index: 1, selected: false, activities: nil, style: .inbox, includeRemoteHost: false
+        ))
+        #expect(singleHostUnnamed.title == "~/deeproute/bi_board_server")
+        #expect(singleHostUnnamed.remoteBreadcrumb == nil)
+        #expect(singleHostUnnamed.subtitle == nil)
+
+        // Single-host named Inbox SSH row keeps `subtitleIsRemote = true` with host omitted from subtitle.
+        cloudTabA.titleOverride = "排查看板服务"
+        let singleHostNamed = try #require(TerminalTabPresentationResolver.resolve(
+            cloudTabA, index: 1, selected: false, activities: nil, style: .inbox, includeRemoteHost: false
+        ))
+        #expect(singleHostNamed.title == "排查看板服务")
+        #expect(singleHostNamed.subtitle == "~/deeproute/bi_board_server")
+        #expect(singleHostNamed.subtitleIsRemote)
+
+        // Multi-host named Inbox SSH row preserves `cloud › ~/...`.
+        let multiHostNamed = try #require(TerminalTabPresentationResolver.resolve(
+            cloudTabA, index: 1, selected: false, activities: nil, style: .inbox, includeRemoteHost: true
+        ))
+        #expect(multiHostNamed.subtitle == "cloud › ~/deeproute/bi_board_server")
+        #expect(multiHostNamed.subtitleIsRemote)
     }
 }

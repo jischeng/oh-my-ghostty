@@ -105,10 +105,31 @@ enum TerminalTabPresentationResolver {
         case inbox
     }
 
+    /// Normalized SSH host identifier for `controller`'s primary surface, or `nil` for local tabs.
+    static func remoteHostIdentifier(for controller: TerminalController) -> String? {
+        guard let surface = controller.focusedSurface ?? controller.surfaceTree.first else { return nil }
+        let session = controller.paneSessionContext(for: surface)
+        switch session?.state {
+        case .sshReady(let ssh, _), .sshConnecting(let ssh):
+            let host = nonEmptyTrimmed(ssh.alias) ?? nonEmptyTrimmed(ssh.transferTarget)
+            return host?.lowercased()
+        case .local, nil:
+            let descriptor = controller.agentResumeDescriptor(for: surface)
+            guard descriptor?.scope == .remote else { return nil }
+            return nonEmptyTrimmed(descriptor?.sshReplay?.transferTarget)?.lowercased()
+        }
+    }
+
+    /// True when `controllers` span more than one distinct remote SSH host.
+    static func hasMultipleRemoteHosts(in controllers: [TerminalController]) -> Bool {
+        Set(controllers.compactMap(remoteHostIdentifier(for:))).count > 1
+    }
+
     static func resolve(_ controller: TerminalController, index: Int, selected: Bool,
                         activities: TabActivityStore?,
                         icons: AnyGhosttyTabIconProvider = .init(CompositeGhosttyTabIconProvider(overrides: [])),
-                        style: Style = .chrome) -> GhosttyTabPresentation? {
+                        style: Style = .chrome,
+                        includeRemoteHost: Bool = true) -> GhosttyTabPresentation? {
         guard let surface = controller.focusedSurface ?? controller.surfaceTree.first else { return nil }
         let settings = OhMyGhosttySettings.shared
         let session = controller.paneSessionContext(for: surface)
@@ -151,7 +172,7 @@ enum TerminalTabPresentationResolver {
             let pathTitle = agent == nil
                 ? session.presentationTitle(pathDisplay: settings.tabPathDisplay)
                 : session.agentPathTitle(pathDisplay: settings.tabPathDisplay, resumeDescriptor: descriptor)
-            let location = place(session: session, descriptor: descriptor)
+            let location = place(session: session, descriptor: descriptor, includeHost: includeRemoteHost)
             let localPane: Bool = if case .local = session.state { true } else { false }
             let remotePane: Bool = switch session.state {
             case .sshReady, .sshConnecting: true
@@ -174,14 +195,15 @@ enum TerminalTabPresentationResolver {
                 name = conversation ?? terminal
             }
 
+            let singleLineLocation = (localPane && !remotePane) || (remotePane && !includeRemoteHost)
             title = name ?? restoredTitle
-                ?? (localPane && !remotePane ? location : nil)
+                ?? (singleLineLocation ? location : nil)
                 ?? (agent?.normalizedTitle(pathTitle) ?? pathTitle)
             subtitle = name == nil
                 ? nil
                 : namedSubtitle(location: location, session: session, agent: agent, pathTitle: pathTitle)
             subtitleIsRemote = subtitle != nil && remotePane
-            breadcrumb = name == nil && restoredTitle == nil && !(localPane && !remotePane)
+            breadcrumb = name == nil && restoredTitle == nil && !singleLineLocation
                 ? session.remoteTabBreadcrumb
                 : nil
         }
@@ -285,25 +307,33 @@ enum TerminalTabPresentationResolver {
     }
 
     /// Where a pane is: its working directory with the home folder shortened
-    /// to `~`, after the host for an SSH pane.
-    static func place(session: PaneSessionContext, descriptor: AgentResumeDescriptor?) -> String? {
+    /// to `~`, after the host for an SSH pane (or just the directory when
+    /// `includeHost` is false and a directory is known).
+    static func place(
+        session: PaneSessionContext,
+        descriptor: AgentResumeDescriptor?,
+        includeHost: Bool = true
+    ) -> String? {
         func nonEmpty(_ value: String?) -> String? { value.flatMap { $0.isEmpty ? nil : $0 } }
+        func formatRemote(host: String, directory: String?, user: String?) -> String {
+            guard let directory else { return host }
+            let abbreviated = abbreviatingRemoteHome(directory, user: user)
+            return includeHost ? RemoteTabBreadcrumb(host: host, directory: abbreviated).title : abbreviated
+        }
         let restored = nonEmpty(descriptor?.workingDirectory)
         let remoteAgentDirectory = descriptor?.scope == .remote ? restored : nil
         switch session.state {
         case .sshReady(let ssh, let workingDirectory):
             let directory = nonEmpty(workingDirectory) ?? remoteAgentDirectory
-            let user = remoteUser(from: ssh.transferTarget)
-            return directory.map {
-                RemoteTabBreadcrumb(host: ssh.alias, directory: abbreviatingRemoteHome($0, user: user)).title
-            } ?? ssh.alias
+            return formatRemote(host: ssh.alias, directory: directory, user: remoteUser(from: ssh.transferTarget))
         case .sshConnecting(let ssh):
             // The local directory belongs to the SSH launcher until the host
             // reports its own.
-            let user = remoteUser(from: ssh.transferTarget)
-            return remoteAgentDirectory.map {
-                RemoteTabBreadcrumb(host: ssh.alias, directory: abbreviatingRemoteHome($0, user: user)).title
-            } ?? ssh.alias
+            return formatRemote(
+                host: ssh.alias,
+                directory: remoteAgentDirectory,
+                user: remoteUser(from: ssh.transferTarget)
+            )
         case .local:
             guard descriptor?.scope == .remote else {
                 return (nonEmpty(session.workingDirectory) ?? restored).map { abbreviatingHome($0) }
@@ -312,10 +342,7 @@ enum TerminalTabPresentationResolver {
             guard let host = descriptor?.sshReplay?.transferTarget else {
                 return restored.map { abbreviatingRemoteHome($0) }
             }
-            let user = remoteUser(from: host)
-            return restored.map {
-                RemoteTabBreadcrumb(host: host, directory: abbreviatingRemoteHome($0, user: user)).title
-            } ?? host
+            return formatRemote(host: host, directory: restored, user: remoteUser(from: host))
         }
     }
 

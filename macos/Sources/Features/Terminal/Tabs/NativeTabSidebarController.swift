@@ -52,6 +52,7 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
     private let organization = GhosttyTabOrganizationModel()
     private var subscriptions = Set<AnyCancellable>()
     private var metadataSubscriptions = Set<AnyCancellable>()
+    private var inboxExpiryTimerSubscription: AnyCancellable?
     private var tabIDs: [ObjectIdentifier] = []
     private var scheduled = false
     private var workspaceWidth: NSLayoutConstraint?
@@ -175,6 +176,20 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
     }
 
     private var isInbox: Bool { OhMyGhosttySettings.shared.tabSidebarViewMode == .inbox }
+
+    var isInboxExpiryTimerActive: Bool { inboxExpiryTimerSubscription != nil }
+
+    private func updateInboxExpiryTimer() {
+        let needsTimer = isInbox && OhMyGhosttySettings.shared.tabInboxGroupingMode == .date
+        if needsTimer {
+            guard inboxExpiryTimerSubscription == nil else { return }
+            inboxExpiryTimerSubscription = Timer.publish(every: 60, on: .main, in: .common)
+                .autoconnect()
+                .sink { [weak self] _ in self?.scheduleRefresh() }
+        } else {
+            inboxExpiryTimerSubscription = nil
+        }
+    }
 
     /// Only the recency order depends on interaction and agent timestamps.
     private var followsRecency: Bool {
@@ -359,6 +374,7 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
         )
         configureInboxButton(strings)
         let inboxMode = isInbox
+        updateInboxExpiryTimer()
         optionsButton.entries = inboxMode ? inboxEntries(strings) : organizationEntries(strings)
         list.view.isHidden = inboxMode
         inbox.view.isHidden = !inboxMode

@@ -58,9 +58,30 @@ struct VerticalTabInboxSidebarTests {
         init() throws {
             let fixture = try TerminalWorkspaceRefactorTests.Fixture()
             self.fixture = fixture
-            let first = try fixture.tab()
-            _ = try fixture.tab(parent: first)
-            _ = try fixture.tab(parent: first)
+            let baseAge = Date().addingTimeInterval(-30 * 60)
+            func makeAgedTab(parent: TerminalController?, offset: TimeInterval) throws -> TerminalController {
+                var config = Ghostty.SurfaceConfiguration()
+                config.command = "/bin/sleep 60"
+                let controller = TerminalController(
+                    fixture.app,
+                    withBaseConfig: config,
+                    parent: parent?.window,
+                    tabLayout: .vertical,
+                    tabCreatedAt: baseAge.addingTimeInterval(offset),
+                    workspaceCoordinator: fixture.coordinator
+                )
+                fixture.controllers.append(controller)
+                let window = try #require(controller.window)
+                if let parentWindow = parent?.window {
+                    try #require(parentWindow.addTabbedWindowSafely(window, ordered: .above))
+                    controller.finishWorkspaceTabAttachment()
+                    parent?.refreshWorkspaceTabs()
+                }
+                return controller
+            }
+            let first = try makeAgedTab(parent: nil, offset: 0)
+            _ = try makeAgedTab(parent: first, offset: 60)
+            _ = try makeAgedTab(parent: first, offset: 120)
             let group = try #require(first.window?.tabGroup)
             let controllers = group.windows.compactMap { $0.windowController as? TerminalController }
             let activities = try #require(NSApp.delegate as? AppDelegate).tabActivities
@@ -191,8 +212,8 @@ struct VerticalTabInboxSidebarTests {
     }
 
     @Test func dateGroupingBucketsRealTabsAndKeepsTheirNativeIndex() throws {
-        let now = Date()
-        let today = Calendar.current.startOfDay(for: now)
+        let today = Calendar.current.startOfDay(for: Date())
+        let now = today.addingTimeInterval(12 * 3_600)
         let controllers = try detachedTabs(created: [
             today.addingTimeInterval(-3 * 86_400), today.addingTimeInterval(-60),
             today, today.addingTimeInterval(-7_200),
@@ -212,10 +233,10 @@ struct VerticalTabInboxSidebarTests {
             == ["inbox:today", "inbox:yesterday", "inbox:earlier"])
         for ordering in GhosttyTabOrderingMode.allCases { #expect(indices(ordering) == byCreation) }
 
-        // Selecting the oldest tab changes nothing; using it moves it to today.
+        // Selecting the oldest tab changes nothing; using it (outside the 15-min Continue window) moves it to today.
         controllers[0].markTabActivated()
         #expect(indices(.recentlyUsed) == byCreation)
-        controllers[0].recordTabInteraction(at: now.addingTimeInterval(60))
+        controllers[0].recordTabInteraction(at: now.addingTimeInterval(-20 * 60))
         #expect(indices(.recentlyUsed) == ["inbox:today": [1, 3], "inbox:yesterday": [2, 4]])
         #expect(indices(.created) == byCreation)
         #expect(indices(.manual) == byCreation)
@@ -451,7 +472,7 @@ struct VerticalTabInboxSidebarTests {
         #expect(!sidebar.host.sidebar.inboxOrderIsPending)
 
         sidebar.inbox.holdsOrderOverride = true
-        last.recordTabInteraction(at: Date().addingTimeInterval(3_600))
+        last.recordTabInteraction(at: Date().addingTimeInterval(-18 * 60))
         sidebar.refresh()
         #expect(sidebar.rows == before)
         #expect(sidebar.host.sidebar.inboxOrderIsPending)
@@ -469,7 +490,7 @@ struct VerticalTabInboxSidebarTests {
 
         // `goto_tab` selects the row the user sees while the order is held.
         sidebar.inbox.holdsOrderOverride = true
-        released[2].recordTabInteraction(at: Date().addingTimeInterval(7_200))
+        released[2].recordTabInteraction(at: Date().addingTimeInterval(-16 * 60))
         sidebar.refresh()
         #expect(sidebar.host.sidebar.inboxOrderIsPending)
         #expect(ids(sidebar.displayed.map(\.controller)) == ids(released))
@@ -1128,7 +1149,7 @@ struct VerticalTabInboxSidebarTests {
 
         let initialOrder = sidebar.rows
         let bottomTab = try #require(sidebar.displayed.last?.controller)
-        bottomTab.recordTabInteraction(at: Date().addingTimeInterval(3_600))
+        bottomTab.recordTabInteraction(at: Date().addingTimeInterval(-18 * 60))
         sidebar.refresh()
         #expect(sidebar.host.sidebar.inboxOrderIsPending)
         #expect(sidebar.rows == initialOrder)
@@ -1186,7 +1207,7 @@ struct VerticalTabInboxSidebarTests {
         inbox.animationsEnabled = false
         let countWithAnimationsDisabled = inbox.animatedLayoutCount
         let nextBottom = try #require(sidebar.displayed.last?.controller)
-        nextBottom.recordTabInteraction(at: Date().addingTimeInterval(7_200))
+        nextBottom.recordTabInteraction(at: Date().addingTimeInterval(-16 * 60))
         sidebar.refresh()
         #expect(inbox.animatedLayoutCount == countWithAnimationsDisabled)
     }
@@ -1212,7 +1233,11 @@ struct VerticalTabInboxSidebarTests {
         let autoRenameIndex = try #require(titles.firstIndex(of: strings.autoRenameTab))
         #expect(autoRenameIndex == renameIndex + 1)
 
-        // 2. Sidebar `...` options menu includes Auto-Rename Workspace Tabs in both .tabs and .inbox modes.
+        // 2. Sidebar `...` options menu includes Auto-Rename Workspace Tabs in both .tabs and .inbox modes,
+        //    and the 60s expiry timer runs only when Date-grouped Inbox is active.
+        let savedGrouping = settings.tabInboxGroupingMode
+        defer { settings.tabInboxGroupingMode = savedGrouping }
+        settings.tabInboxGroupingMode = .date
         func optionsControl() throws -> NativeOptionsControl {
             var queue: [NSView] = [sidebar.host]
             while !queue.isEmpty {
@@ -1229,6 +1254,7 @@ struct VerticalTabInboxSidebarTests {
         for mode in [GhosttyTabSidebarViewMode.tabs, .inbox] {
             settings.tabSidebarViewMode = mode
             sidebar.refresh()
+            #expect(sidebar.host.sidebar.isInboxExpiryTimerActive == (mode == .inbox))
             let options = try optionsControl()
             let entryTitles = options.entries.compactMap { entry -> String? in
                 if case .action(let title, _, _, _, _) = entry { return title }
@@ -1236,6 +1262,9 @@ struct VerticalTabInboxSidebarTests {
             }
             #expect(entryTitles.contains(strings.autoRenameWorkspaceTabs))
         }
+        settings.tabInboxGroupingMode = .project
+        sidebar.refresh()
+        #expect(!sidebar.host.sidebar.isInboxExpiryTimerActive)
 
         // 3. Toggle Inbox tooltip includes formatted shortcut and action reveals hidden sidebar when entering Inbox.
         settings.toggleInboxShortcut = OMGKeyboardShortcut.defaultToggleInbox.storageValue

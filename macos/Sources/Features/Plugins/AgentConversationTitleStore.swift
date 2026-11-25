@@ -189,7 +189,8 @@ final class AgentConversationTitleStore: ObservableObject {
     /// Records a title unless a better one is already known. A source is never
     /// downgraded, and among equals only the Agent renames its own
     /// conversation: the opening prompt does not change and a generated title
-    /// is never generated again.
+    /// is never generated again, except when `force` is true or a Chinese
+    /// generated title localizes an English-only native title.
     ///
     /// - Returns: Whether the conversation's title changed.
     @discardableResult
@@ -198,14 +199,19 @@ final class AgentConversationTitleStore: ObservableObject {
         source: Source,
         agent: SupportedAgent,
         conversationID: AgentConversationID,
-        remoteHost: String? = nil
+        remoteHost: String? = nil,
+        force: Bool = false
     ) -> Bool {
         let columns = source == .prompt ? Self.promptTitleColumns : Self.maximumTitleColumns
         guard let title = Self.displayTitle(title, columns: columns) else { return false }
         let key = Key(agent: agent, conversationID: conversationID)
-        if let existing = records[key] {
+        if let existing = records[key], !force {
             let renamed = source == .native && existing.source == .native && existing.title != title
-            guard source.rank > existing.source.rank || renamed else { return false }
+            let localizedUpgrade = source == .generated
+                && existing.source == .native
+                && !Self.containsCJK(existing.title)
+                && Self.containsCJK(title)
+            guard source.rank > existing.source.rank || renamed || localizedUpgrade else { return false }
         }
         var next = records
         next[key] = Record(
@@ -305,6 +311,18 @@ final class AgentConversationTitleStore: ObservableObject {
             used += width
         }
         return result
+    }
+
+    /// Whether `text` contains any CJK Unified Ideograph character.
+    nonisolated static func containsCJK(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            switch scalar.value {
+            case 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF, 0x20000...0x2A6DF:
+                return true
+            default:
+                return false
+            }
+        }
     }
 
     nonisolated private static func isDirectionOverride(_ scalar: Unicode.Scalar) -> Bool {

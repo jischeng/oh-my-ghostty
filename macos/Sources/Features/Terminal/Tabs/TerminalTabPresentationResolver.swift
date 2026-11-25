@@ -267,6 +267,7 @@ enum TerminalTabPresentationResolver {
             excluded.insert(rawDirectory)
             excluded.insert(WorkspacePathPresentation.folderName(rawDirectory))
             excluded.insert(abbreviatingHome(rawDirectory))
+            excluded.insert(abbreviatingRemoteHome(rawDirectory))
         }
         guard !excluded.contains(cleaned) else { return nil }
         return AgentConversationTitleStore.displayTitle(
@@ -292,18 +293,29 @@ enum TerminalTabPresentationResolver {
         switch session.state {
         case .sshReady(let ssh, let workingDirectory):
             let directory = nonEmpty(workingDirectory) ?? remoteAgentDirectory
-            return directory.map { RemoteTabBreadcrumb(host: ssh.alias, directory: $0).title } ?? ssh.alias
+            let user = remoteUser(from: ssh.transferTarget)
+            return directory.map {
+                RemoteTabBreadcrumb(host: ssh.alias, directory: abbreviatingRemoteHome($0, user: user)).title
+            } ?? ssh.alias
         case .sshConnecting(let ssh):
             // The local directory belongs to the SSH launcher until the host
             // reports its own.
-            return remoteAgentDirectory.map { RemoteTabBreadcrumb(host: ssh.alias, directory: $0).title } ?? ssh.alias
+            let user = remoteUser(from: ssh.transferTarget)
+            return remoteAgentDirectory.map {
+                RemoteTabBreadcrumb(host: ssh.alias, directory: abbreviatingRemoteHome($0, user: user)).title
+            } ?? ssh.alias
         case .local:
             guard descriptor?.scope == .remote else {
                 return (nonEmpty(session.workingDirectory) ?? restored).map { abbreviatingHome($0) }
             }
             // A remote Agent whose connection is down: its host and directory.
-            guard let host = descriptor?.sshReplay?.transferTarget else { return restored }
-            return restored.map { RemoteTabBreadcrumb(host: host, directory: $0).title } ?? host
+            guard let host = descriptor?.sshReplay?.transferTarget else {
+                return restored.map { abbreviatingRemoteHome($0) }
+            }
+            let user = remoteUser(from: host)
+            return restored.map {
+                RemoteTabBreadcrumb(host: host, directory: abbreviatingRemoteHome($0, user: user)).title
+            } ?? host
         }
     }
 
@@ -315,6 +327,15 @@ enum TerminalTabPresentationResolver {
         return trimmed
     }
 
+    private static func remoteUser(from transferTarget: String?) -> String? {
+        guard let target = transferTarget,
+              let atIndex = target.firstIndex(of: "@") else { return nil }
+        let candidate = String(target[..<atIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !candidate.isEmpty, !candidate.contains("/"),
+              candidate.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else { return nil }
+        return candidate
+    }
+
     /// `~` in place of the user's home folder, without touching the file
     /// system: a row asks on every refresh.
     static func abbreviatingHome(_ path: String, home: String? = nil) -> String {
@@ -323,5 +344,39 @@ enum TerminalTabPresentationResolver {
         let rest = path.dropFirst(home.count)
         guard rest.isEmpty || rest.hasPrefix("/") else { return path }
         return "~" + rest
+    }
+
+    /// `~` in place of a remote Unix home folder (`/home/<user>`, `/Users/<user>`,
+    /// or `/root`), while preserving non-home paths such as `/opt`, `/var`, `/etc`,
+    /// `/tmp`, and `/srv`.
+    static func abbreviatingRemoteHome(_ path: String, user: String? = nil) -> String {
+        if let user = nonEmptyTrimmed(user) {
+            let prefixes = user == "root"
+                ? ["/root", "/home/\(user)", "/Users/\(user)"]
+                : ["/home/\(user)", "/Users/\(user)"]
+            for prefix in prefixes {
+                if path == prefix { return "~" }
+                if path.hasPrefix(prefix + "/") {
+                    return "~" + path.dropFirst(prefix.count)
+                }
+            }
+            return path
+        }
+        if path == "/root" { return "~" }
+        if path.hasPrefix("/root/") {
+            return "~" + path.dropFirst("/root".count)
+        }
+        for rootPrefix in ["/home/", "/Users/"] where path.hasPrefix(rootPrefix) {
+            let remainder = path.dropFirst(rootPrefix.count)
+            guard !remainder.isEmpty else { return path }
+            if let slash = remainder.firstIndex(of: "/") {
+                let segment = remainder[..<slash]
+                guard !segment.isEmpty else { return path }
+                return "~" + remainder[slash...]
+            } else {
+                return "~"
+            }
+        }
+        return path
     }
 }

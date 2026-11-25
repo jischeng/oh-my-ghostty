@@ -386,4 +386,76 @@ struct VerticalTabInboxModelTests {
             fromTerminalTitle: "\(homeFolder) | \(homeFolder)", agent: .codex, directory: "~"
         ) == nil)
     }
+
+    @Test @MainActor func remoteHomePathsAreAbbreviatedInSSHPlaceBreadcrumbs() throws {
+        #expect(TerminalTabPresentationResolver.abbreviatingRemoteHome("/home/chengjisheng/deeproute/deepmine")
+            == "~/deeproute/deepmine")
+        #expect(TerminalTabPresentationResolver.abbreviatingRemoteHome("/home/chengjisheng") == "~")
+        #expect(TerminalTabPresentationResolver.abbreviatingRemoteHome("/Users/alice/work") == "~/work")
+        #expect(TerminalTabPresentationResolver.abbreviatingRemoteHome("/Users/alice") == "~")
+        #expect(TerminalTabPresentationResolver.abbreviatingRemoteHome("/root/app") == "~/app")
+        #expect(TerminalTabPresentationResolver.abbreviatingRemoteHome("/root") == "~")
+        #expect(TerminalTabPresentationResolver.abbreviatingRemoteHome("/opt/omg-runtime") == "/opt/omg-runtime")
+        #expect(TerminalTabPresentationResolver.abbreviatingRemoteHome("/var/log") == "/var/log")
+        #expect(TerminalTabPresentationResolver.abbreviatingRemoteHome("/etc/hosts") == "/etc/hosts")
+        #expect(TerminalTabPresentationResolver.abbreviatingRemoteHome("/tmp/work") == "/tmp/work")
+        #expect(TerminalTabPresentationResolver.abbreviatingRemoteHome("/srv/data") == "/srv/data")
+        #expect(TerminalTabPresentationResolver.abbreviatingRemoteHome("/home") == "/home")
+        #expect(TerminalTabPresentationResolver.abbreviatingRemoteHome("/home/") == "/home/")
+
+        // Explicit user matches only that user's home.
+        #expect(TerminalTabPresentationResolver.abbreviatingRemoteHome(
+            "/home/chengjisheng/deeproute/deepmine", user: "chengjisheng"
+        ) == "~/deeproute/deepmine")
+        #expect(TerminalTabPresentationResolver.abbreviatingRemoteHome(
+            "/home/bob/work", user: "alice"
+        ) == "/home/bob/work")
+
+        let replay = SSHReplayDescriptor(
+            version: 1,
+            ssh: "/usr/bin/ssh",
+            forwardEnv: false,
+            terminfo: false,
+            cache: false,
+            args: ["cloud"],
+            localWorkingDirectory: "/Users/me/src"
+        )
+        let runtimeDescriptor = SessionRuntimeDescriptor(
+            connection: try GitSSHConnection(destination: "cloud"),
+            revision: "test",
+            policy: .init()
+        )
+        let remoteDescriptor = AgentResumeDescriptor(
+            agent: .claude,
+            conversationID: AgentConversationID("0f0e0d0c-1111-4222-8333-444455556666"),
+            scope: .remote,
+            workingDirectory: "/home/chengjisheng/deeproute/deepmine",
+            sshReplay: replay
+        )
+
+        // `.sshReady` abbreviates the remote working directory.
+        var readySession = PaneSessionContext(workingDirectory: nil, terminalTitle: "")
+        readySession.applyRuntimeConnection(
+            runtimeDescriptor,
+            workingDirectory: "/home/chengjisheng/deeproute/deepmine",
+            state: .ready
+        )
+        #expect(TerminalTabPresentationResolver.place(session: readySession, descriptor: remoteDescriptor)
+            == "cloud › ~/deeproute/deepmine")
+
+        // `.sshConnecting` abbreviates the remote agent descriptor working directory.
+        var connectingSession = PaneSessionContext(workingDirectory: nil, terminalTitle: "")
+        connectingSession.applyRuntimeConnection(
+            runtimeDescriptor,
+            workingDirectory: nil,
+            state: .connecting
+        )
+        #expect(TerminalTabPresentationResolver.place(session: connectingSession, descriptor: remoteDescriptor)
+            == "cloud › ~/deeproute/deepmine")
+
+        // Disconnected remote `.local` fallback also abbreviates the remote home path.
+        let localFallback = PaneSessionContext(workingDirectory: nil, terminalTitle: "")
+        #expect(TerminalTabPresentationResolver.place(session: localFallback, descriptor: remoteDescriptor)
+            == "cloud › ~/deeproute/deepmine")
+    }
 }

@@ -61,6 +61,7 @@ struct AgentConversationTitleCoordinatorTests {
         let generator: Generator
         let delays = Delays()
         var mode: AgentSessionTitleMode
+        var language: OhMyGhosttyLanguage
         var now = Date(timeIntervalSince1970: 1_800_000_000)
         private(set) var coordinator: Coordinator!
         let owner = UUID()
@@ -70,16 +71,19 @@ struct AgentConversationTitleCoordinatorTests {
         )
 
         init(seeds: Seeds, generated: String? = nil, mode: AgentSessionTitleMode = .generate,
+             language: OhMyGhosttyLanguage = .english,
              sleep: Coordinator.Sleep? = nil) {
             self.seeds = seeds
             self.generator = Generator(generated)
             self.mode = mode
+            self.language = language
             let delays = self.delays
             coordinator = Coordinator(
                 store: store,
                 generator: generator,
                 loadSeed: { await seeds.next($0) },
                 mode: { [unowned self] in self.mode },
+                language: { [unowned self] in self.language },
                 sleep: sleep ?? { delay in
                     delays.append(delay)
                     try Task.checkCancellation()
@@ -92,12 +96,18 @@ struct AgentConversationTitleCoordinatorTests {
             store.record(agent: target.agent, conversationID: target.conversationID)
         }
 
-        func request(_ trigger: Coordinator.Trigger, owner: UUID? = nil, allowsGeneration: Bool = true) {
+        func request(
+            _ trigger: Coordinator.Trigger,
+            owner: UUID? = nil,
+            allowsGeneration: Bool = true,
+            force: Bool = false
+        ) {
             coordinator.request(
                 target,
                 trigger: trigger,
                 owner: owner ?? self.owner,
-                allowsGeneration: allowsGeneration
+                allowsGeneration: allowsGeneration,
+                force: force
             )
         }
     }
@@ -382,5 +392,135 @@ struct AgentConversationTitleCoordinatorTests {
         #expect(AgentConversationTitleTracker.trigger(for: .idle, newlyBound: true) == .bound)
         #expect(AgentConversationTitleTracker.trigger(for: .working, newlyBound: true) == .working)
         #expect(AgentConversationTitleTracker.trigger(for: .done, newlyBound: true) == .done)
+    }
+
+    @Test func chineseGenerateModeUpgradesEnglishOnlyNativeTitleAndKeepsChineseNative() async {
+        // English-only native title with firstPrompt -> invokes generator using firstPrompt.
+        let withPrompt = Fixture(
+            seeds: Seeds(rest: Seed(native: "Ray Gateway V2 Migration", firstPrompt: "Migrate Ray gateway to V2")),
+            generated: "Ray 网关 V2 迁移",
+            mode: .generate,
+            language: .simplifiedChinese
+        )
+        withPrompt.request(.working)
+        await withPrompt.coordinator.waitUntilIdle()
+        #expect(await withPrompt.generator.prompts == ["Migrate Ray gateway to V2"])
+        #expect(withPrompt.record?.source == .generated)
+        #expect(withPrompt.record?.title == "Ray 网关 V2 迁移")
+
+        // Subsequent completed turns keep the Chinese generated title without re-calling the endpoint.
+        withPrompt.request(.done)
+        await withPrompt.coordinator.waitUntilIdle()
+        #expect(await withPrompt.generator.prompts.count == 1)
+        #expect(withPrompt.record?.source == .generated)
+        #expect(withPrompt.record?.title == "Ray 网关 V2 迁移")
+
+        // English-only native title without firstPrompt -> invokes generator using native title itself.
+        let nativeOnly = Fixture(
+            seeds: Seeds(rest: Seed(native: "Ray Gateway V2 Migration", firstPrompt: nil)),
+            generated: "Ray 网关迁移",
+            mode: .generate,
+            language: .simplifiedChinese
+        )
+        nativeOnly.request(.bound)
+        await nativeOnly.coordinator.waitUntilIdle()
+        #expect(await nativeOnly.generator.prompts == ["Ray Gateway V2 Migration"])
+        #expect(nativeOnly.record?.source == .generated)
+        #expect(nativeOnly.record?.title == "Ray 网关迁移")
+
+        // Already-Chinese native title is preserved untouched without calling the generator.
+        let chineseNative = Fixture(
+            seeds: Seeds(rest: Seed(native: "修复网关健康检查", firstPrompt: "Fix health check")),
+            generated: "不应被调用",
+            mode: .generate,
+            language: .simplifiedChinese
+        )
+        chineseNative.request(.working)
+        await chineseNative.coordinator.waitUntilIdle()
+        #expect(await chineseNative.generator.prompts.isEmpty)
+        #expect(chineseNative.record?.source == .native)
+        #expect(chineseNative.record?.title == "修复网关健康检查")
+
+        // An existing cached English-only native record upgrades on `.bound` when Chinese + generate is active.
+        let cachedUpgrade = Fixture(
+            seeds: Seeds(rest: Seed(native: "Checking Group Chat Message", firstPrompt: nil)),
+            generated: "排查群聊消息",
+            mode: .generate,
+            language: .simplifiedChinese
+        )
+        cachedUpgrade.store.set(
+            "Checking Group Chat Message",
+            source: .native,
+            agent: cachedUpgrade.target.agent,
+            conversationID: cachedUpgrade.target.conversationID
+        )
+        cachedUpgrade.request(.bound)
+        await cachedUpgrade.coordinator.waitUntilIdle()
+        #expect(await cachedUpgrade.generator.prompts == ["Checking Group Chat Message"])
+        #expect(cachedUpgrade.record?.source == .generated)
+        #expect(cachedUpgrade.record?.title == "排查群聊消息")
+    }
+
+    @Test func autoRenameTabAndWorkspaceTabsRespectManualOverridesAndForceRegeneration() async throws {
+        let workspaceFixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { workspaceFixture.close() }
+
+        let manualTab = try workspaceFixture.tab()
+        let eligibleTab = try workspaceFixture.tab()
+        let plainTab = try workspaceFixture.tab()
+
+        let manualSurface = try #require(manualTab.surfaceTree.first)
+        let eligibleSurface = try #require(eligibleTab.surfaceTree.first)
+        let manualConversation = try #require(AgentConversationID("11111111-2222-4333-8444-555555555555"))
+        let eligibleConversation = try #require(AgentConversationID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"))
+
+        manualTab.adoptAgentResumeDescriptor(
+            .init(agent: .codex, conversationID: manualConversation, scope: .local, workingDirectory: "/repo"),
+            for: manualSurface
+        )
+        eligibleTab.adoptAgentResumeDescriptor(
+            .init(agent: .codex, conversationID: eligibleConversation, scope: .local, workingDirectory: "/repo"),
+            for: eligibleSurface
+        )
+
+        let store = AgentConversationTitleStore()
+        // Pre-populate eligible tab with an existing Chinese `.generated` title so
+        // normal background evaluation skips it and only a forced rename updates it.
+        store.set("旧中文标题", source: .generated, agent: .codex, conversationID: eligibleConversation)
+        store.set("Manual Tab Cached", source: .native, agent: .codex, conversationID: manualConversation)
+
+        let seeds = Seeds(rest: Seed(native: "Ray Gateway V2 Migration", firstPrompt: "Migrate Ray gateway"))
+        let generator = Generator("Ray 网关 V2 迁移")
+        let coordinator = Coordinator(
+            store: store,
+            generator: generator,
+            loadSeed: { await seeds.next($0) },
+            mode: { .generate },
+            language: { .simplifiedChinese },
+            sleep: { _ in }
+        )
+
+        manualTab.titleOverride = "Pinned Tab"
+        manualTab.startAgentConversationTitleTracking(coordinator: coordinator)
+        eligibleTab.startAgentConversationTitleTracking(coordinator: coordinator)
+        plainTab.startAgentConversationTitleTracking(coordinator: coordinator)
+        await coordinator.waitUntilIdle()
+
+        // Batch workspace rename skips tabs with explicit manual `titleOverride` and renames eligible Agent tabs.
+        TerminalController.autoRenameWorkspaceTabs([manualTab, eligibleTab, plainTab])
+        await coordinator.waitUntilIdle()
+
+        #expect(manualTab.titleOverride == "Pinned Tab")
+        #expect(store.title(agent: .codex, conversationID: manualConversation) == "Manual Tab Cached")
+        #expect(store.title(agent: .codex, conversationID: eligibleConversation) == "Ray 网关 V2 迁移")
+        #expect(store.record(agent: .codex, conversationID: eligibleConversation)?.source == .generated)
+
+        // Direct single-tab forced rename clears `titleOverride` and forces regeneration.
+        manualTab.autoRenameTab(force: true)
+        await coordinator.waitUntilIdle()
+
+        #expect(manualTab.titleOverride == nil)
+        #expect(store.title(agent: .codex, conversationID: manualConversation) == "Ray 网关 V2 迁移")
+        #expect(store.record(agent: .codex, conversationID: manualConversation)?.source == .generated)
     }
 }

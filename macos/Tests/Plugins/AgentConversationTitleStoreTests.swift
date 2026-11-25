@@ -170,4 +170,37 @@ struct AgentConversationTitleStoreTests {
         cautious.flushPendingWrites()
         #expect(try Data(contentsOf: file) == newerData)
     }
+
+    @Test func containsCJKAndLocalizedOrForcedOverridesWorkAsExpected() {
+        #expect(AgentConversationTitleStore.containsCJK("Ray 网关 V2 迁移"))
+        #expect(AgentConversationTitleStore.containsCJK("修复登录测试"))
+        #expect(AgentConversationTitleStore.containsCJK("\u{3400}"))
+        #expect(!AgentConversationTitleStore.containsCJK("Ray Gateway V2 Migration"))
+        #expect(!AgentConversationTitleStore.containsCJK(""))
+
+        let store = AgentConversationTitleStore()
+        #expect(store.set("Ray Gateway V2 Migration", source: .native, agent: .codex, conversationID: conversation))
+        // English generated title cannot replace an English native title without force.
+        #expect(!store.set("Ray gateway migration", source: .generated, agent: .codex, conversationID: conversation))
+        // Chinese generated title upgrades an English-only native title.
+        #expect(store.set("Ray 网关 V2 迁移", source: .generated, agent: .codex, conversationID: conversation))
+        #expect(store.record(agent: .codex, conversationID: conversation)?.source == .generated)
+        #expect(store.title(agent: .codex, conversationID: conversation) == "Ray 网关 V2 迁移")
+
+        // A Chinese native title is not replaced by a generated title without force.
+        #expect(store.set("网关迁移收尾", source: .native, agent: .codex, conversationID: conversation))
+        #expect(!store.set("另一份中文标题", source: .generated, agent: .codex, conversationID: conversation))
+        #expect(store.title(agent: .codex, conversationID: conversation) == "网关迁移收尾")
+
+        // Force replaces any existing record regardless of rank or language.
+        #expect(store.set(
+            "强制生成标题",
+            source: .generated,
+            agent: .codex,
+            conversationID: conversation,
+            force: true
+        ))
+        #expect(store.record(agent: .codex, conversationID: conversation)?.source == .generated)
+        #expect(store.title(agent: .codex, conversationID: conversation) == "强制生成标题")
+    }
 }

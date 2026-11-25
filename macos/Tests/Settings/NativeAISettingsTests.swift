@@ -53,6 +53,8 @@ struct NativeAISettingsTests {
         }
 
         func close() {
+            if let sheet = window.attachedSheet { window.endSheet(sheet) }
+            controller.activeModalSheet?.closePanel()
             window.close()
             try? FileManager.default.removeItem(at: directory)
             UserDefaults.standard.removePersistentDomain(forName: defaultsName)
@@ -74,7 +76,7 @@ struct NativeAISettingsTests {
         return condition()
     }
 
-    @Test func theAIPageListsBothKindsOfProviderAndTheModelsPerTask() throws {
+    @Test func theAIPageUnifiesModelServicesCodingAgentsAndHistoryWithoutFeatureClutter() throws {
         for language in [OhMyGhosttyLanguage.english, .simplifiedChinese] {
             let fixture = Fixture(language: language)
             defer { fixture.close() }
@@ -88,117 +90,122 @@ struct NativeAISettingsTests {
             #expect(strings.tabTitle(.agents) == "AI")
             let form = try #require(fixture.controller.children.compactMap { $0 as? NativeSettingsForm }.first)
             let labels = descendants(view).compactMap { ($0 as? NSTextField)?.stringValue }
-            for title in [strings.aiProvidersSection, strings.aiTitleModelGroup, strings.aiTaskModelsSection,
-                          strings.terminalCodingAgentsSection, strings.agentNotificationsAndHistorySection,
-                          strings.aiProviderSummary(fixture.settings.aiProviders[0])] {
+            for title in [strings.aiProvidersSection, strings.terminalCodingAgentsSection,
+                          strings.agentHistorySection, strings.aiProviderSummary(fixture.settings.aiProviders[0])] {
                 #expect(labels.contains(title), "missing \(title)")
             }
-            // Local CLI models live behind one consolidated link instead of duplicating Agent rows on the main page.
-            let rows = form.rowTitles
-            #expect(!rows.contains(GitCommitAgent.claude.title))
-            #expect(!descendants(view).contains { $0.accessibilityIdentifier() == "settings.ai.agent.claude" })
+            // Feature-specific model assignments and notifications belong on their owning pages, not AI.
+            #expect(!labels.contains(strings.aiTitleModelGroup))
+            #expect(!labels.contains(strings.aiTaskModelsSection))
+            #expect(!labels.contains(strings.notificationsSection))
+            #expect(!descendants(view).contains { $0.accessibilityIdentifier() == "git.commit-ai.routes" })
+            #expect(!descendants(view).contains { $0.accessibilityIdentifier() == "settings.ai.title.mode" })
 
+            let rows = form.rowTitles
             let connection = try #require(rows.firstIndex(of: "Work proxy"))
             let addService = try #require(rows.firstIndex(of: strings.aiAddServiceLabel))
-            let localCLIs = try #require(rows.firstIndex(of: strings.aiLocalCLIModelsLabel))
-            let titles = try #require(rows.firstIndex(of: strings.agentSessionTitleLabel))
-            let commitPrompt = try #require(rows.firstIndex(of: strings.gitCustomPromptLabel))
-            let behavior = try #require(rows.firstIndex(of: strings.agentStatusHooksLabel))
-            let notifications = try #require(rows.firstIndex(of: strings.notifyTaskCompleteLabel))
+            let codex = try #require(rows.firstIndex(of: GitCommitAgent.codex.title))
+            let claude = try #require(rows.firstIndex(of: GitCommitAgent.claude.title))
+            let pi = try #require(rows.firstIndex(of: GitCommitAgent.pi.title))
+            let opencode = try #require(rows.firstIndex(of: GitCommitAgent.opencode.title))
+            let hooks = try #require(rows.firstIndex(of: strings.agentStatusHooksLabel))
             let historyLimit = try #require(rows.firstIndex(of: strings.agentHistoryLimitLabel))
-            #expect(connection < addService && addService < localCLIs)
-            #expect(localCLIs < titles && titles < commitPrompt)
-            #expect(commitPrompt < behavior && behavior < notifications && notifications < historyLimit)
-            #expect(rows.contains(strings.aiTitleModelLabel))
+            #expect(connection < addService && addService < codex)
+            #expect(codex < claude && claude < pi && pi < opencode)
+            #expect(opencode < hooks && hooks < historyLimit)
             #expect(rows.contains(strings.agentHistoryBackgroundIndexingLabel))
 
             _ = try find(NSButton.self, "settings.ai.provider." + provider.id.uuidString, in: view)
-            for identifier in ["settings.ai.provider.add", "settings.ai.local-cli-models",
-                               "settings.ai.commit.add-models", "settings.ai.commit.edit-prompt",
-                               "settings.ai.title.choose-model", "settings.ai.title.clear-model",
-                               "settings.ai.coding-agents.local"] {
-                _ = try find(NSButton.self, identifier, in: view)
+            _ = try find(NSButton.self, "settings.ai.provider.add", in: view)
+            _ = try find(NSButton.self, "settings.ai.coding-agents.local", in: view)
+            for agent in GitCommitAgent.allCases {
+                _ = try find(NSButton.self, "settings.ai.agent." + agent.rawValue, in: view)
             }
-            _ = try find(SettingsPopup.self, "settings.ai.title.mode", in: view)
-            let alwaysUseAI = try find(SettingsSwitch.self, "settings.ai.title.always-use-ai", in: view)
-            #expect(alwaysUseAI.state == .off)
-            #expect(alwaysUseAI.isEnabled)
-            #expect(rows.contains(strings.agentSessionTitleAlwaysUseAILabel))
-            _ = try find(NSTableView.self, "git.commit-ai.routes", in: view)
             // Showing the page asked no agent and no service for anything.
             #expect(fixture.controller.aiAgentCatalog.entry(.claude) == AIAgentModelCatalog.Entry())
             #expect(fixture.requests.all.isEmpty)
         }
     }
 
-    @Test func aConnectionIsAddedEditedAndItsKeyNeverReachesSettingsOrAControl() throws {
+    @Test func addingAServiceBuffersInAModalSheetWithoutCreatingDraftGarbageOnCancel() throws {
         let fixture = Fixture()
         defer { fixture.close() }
         let controller = fixture.controller
         controller.select(.agents)
         try find(NSButton.self, "settings.ai.provider.add", in: controller.view).performClick(nil)
 
-        let provider = try #require(fixture.settings.aiProviders.first)
-        #expect(provider.name == SettingsStrings(language: .english).aiNewConnectionName)
-        #expect(controller.isShowing("ai-provider:" + provider.id.uuidString))
+        // Clicking Add opens a modal sheet without polluting settings.aiProviders.
+        #expect(fixture.settings.aiProviders.isEmpty)
+        let cancelledSheet = try #require(controller.activeModalSheet as? AIProviderSheetController)
+        cancelledSheet.nameField.stringValue = "Abandoned service"
+        cancelledSheet.cancel()
+        #expect(fixture.settings.aiProviders.isEmpty)
 
-        let name = try find(SettingsTextField.self, "settings.ai.provider.name", in: controller.view)
+        // Now fill out and save a real API service; its key never enters settings.json or UI labels.
+        try find(NSButton.self, "settings.ai.provider.add", in: controller.view).performClick(nil)
+        let sheet = try #require(controller.activeModalSheet as? AIProviderSheetController)
+        let sheetView = sheet.view
+
+        let name = try find(SettingsTextField.self, "settings.ai.provider.name", in: sheetView)
         name.stringValue = "  Work proxy  "
         name.commit?(name.stringValue)
-        #expect(fixture.settings.aiProvider(provider.id)?.name == "Work proxy")
         #expect(name.stringValue == "Work proxy")
-        name.commit?("   ")
-        #expect(fixture.settings.aiProvider(provider.id)?.name == "Work proxy")
 
-        let kind = try find(SettingsPopup.self, "settings.ai.provider.kind", in: controller.view)
+        let kind = try find(SettingsPopup.self, "settings.ai.provider.kind", in: sheetView)
         kind.selectItem(at: 1)
         kind.change?(1)
-        #expect(fixture.settings.aiProvider(provider.id)?.kind == .anthropic)
+        #expect(sheet.draft.kind == .anthropic)
 
-        let url = try find(SettingsTextField.self, "settings.ai.provider.base-url", in: controller.view)
+        let url = try find(SettingsTextField.self, "settings.ai.provider.base-url", in: sheetView)
         url.commit?("http://api.example.com")
-        // A plain-HTTP remote host is refused and the stored URL stays empty.
-        #expect(fixture.settings.aiProvider(provider.id)?.baseURL == "")
+        // Plain-HTTP remote host is rejected.
+        #expect(sheet.draft.baseURL == "")
         url.commit?(" https://api.example.com/v1/messages ")
-        #expect(fixture.settings.aiProvider(provider.id)?.baseURL == "https://api.example.com/v1")
+        #expect(sheet.draft.baseURL == "https://api.example.com/v1")
         #expect(url.stringValue == "https://api.example.com/v1")
 
-        let key = try find(SettingsSecureField.self, "settings.ai.provider.api-key", in: controller.view)
-        let clear = try find(NSButton.self, "settings.ai.provider.clear-api-key", in: controller.view)
+        let key = try find(SettingsSecureField.self, "settings.ai.provider.api-key", in: sheetView)
+        let clear = try find(NSButton.self, "settings.ai.provider.clear-api-key", in: sheetView)
         #expect(!clear.isEnabled)
         key.stringValue = "  secret-test-key  "
         key.commit?(key.stringValue)
-        #expect(fixture.credentials.apiKey(for: provider.id) == "secret-test-key")
         #expect(key.stringValue.isEmpty)
         #expect(clear.isEnabled)
-        // Leaving the empty field does not delete the stored key.
+        // Leaving the empty field does not erase the staged key.
         key.commit?("")
-        #expect(fixture.credentials.hasAPIKey(for: provider.id))
+        #expect(clear.isEnabled)
+
+        sheet.save()
+        let provider = try #require(fixture.settings.aiProviders.first)
+        #expect(provider.name == "Work proxy")
+        #expect(provider.kind == .anthropic)
+        #expect(provider.baseURL == "https://api.example.com/v1")
+        #expect(fixture.credentials.apiKey(for: provider.id) == "secret-test-key")
 
         let saved = try String(contentsOf: fixture.directory.appendingPathComponent("settings.json"), encoding: .utf8)
         #expect(!saved.contains("secret-test-key"))
-        for view in descendants(controller.view) {
+        for view in descendants(controller.view) + descendants(sheetView) {
             #expect((view as? NSTextField)?.stringValue.contains("secret-test-key") != true)
             #expect((view as? NSTextField)?.placeholderString?.contains("secret-test-key") != true)
             #expect((view.accessibilityLabel() ?? "").contains("secret-test-key") == false)
         }
 
-        let enabled = try find(SettingsSwitch.self, "settings.ai.provider.enabled", in: controller.view)
+        // Reopen in edit mode to clear the stored key and toggle enabled off.
+        try find(NSButton.self, "settings.ai.provider." + provider.id.uuidString, in: controller.view).performClick(nil)
+        let editSheet = try #require(controller.activeModalSheet as? AIProviderSheetController)
+        let editClear = try find(NSButton.self, "settings.ai.provider.clear-api-key", in: editSheet.view)
+        #expect(editClear.isEnabled)
+        editClear.performClick(nil)
+        let enabled = try find(SettingsSwitch.self, "settings.ai.provider.enabled", in: editSheet.view)
         enabled.state = .off
         enabled.change?(false)
-        #expect(fixture.settings.aiProvider(provider.id)?.enabled == false)
+        editSheet.save()
 
-        clear.performClick(nil)
         #expect(!fixture.credentials.hasAPIKey(for: provider.id))
-        #expect(!clear.isEnabled)
-
-        // Back leads to the AI page, where the connection is listed under its new name.
-        try find(NSButton.self, "settings.back", in: controller.view).performClick(nil)
-        #expect(controller.isShowing("agents"))
-        _ = try find(NSButton.self, "settings.ai.provider." + provider.id.uuidString, in: controller.view)
+        #expect(fixture.settings.aiProvider(provider.id)?.enabled == false)
     }
 
-    @Test func fetchingModelsMergesTheListAndLimitsAreEditedPerModel() async throws {
+    @Test func fetchingReorderingEditingAndRemovingModelsWorksInsideTheProviderSheet() async throws {
         let fixture = Fixture()
         defer { fixture.close() }
         let controller = fixture.controller
@@ -208,12 +215,13 @@ struct NativeAISettingsTests {
             $0.models = [AIProviderModel(id: "alpha", contextWindow: 8_000)]
         }
         try fixture.credentials.setAPIKey("secret-test-key", for: provider.id)
-        controller.showAIProvider(provider.id)
+        controller.select(.agents)
+        controller.presentAIProviderSheet(id: provider.id)
+        let sheet = try #require(controller.activeModalSheet as? AIProviderSheetController)
 
-        try find(NSButton.self, "settings.ai.provider.fetch-models", in: controller.view).performClick(nil)
-        #expect(await settle { fixture.settings.aiProvider(provider.id)?.models.count == 2 })
-        // The existing model keeps its limit; the new one is appended.
-        #expect(fixture.settings.aiProvider(provider.id)?.models == [
+        try find(NSButton.self, "settings.ai.provider.fetch-models", in: sheet.view).performClick(nil)
+        #expect(await settle { sheet.draft.models.count == 2 })
+        #expect(sheet.draft.models == [
             AIProviderModel(id: "alpha", contextWindow: 8_000), AIProviderModel(id: "beta"),
         ])
         let request = try #require(fixture.requests.all.first)
@@ -221,36 +229,37 @@ struct NativeAISettingsTests {
         #expect(request.url?.absoluteString == "https://api.example.com/v1/models")
         #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer secret-test-key")
 
-        let add = try find(SettingsTextField.self, "settings.ai.provider.add-model-id", in: controller.view)
+        let add = try find(SettingsTextField.self, "settings.ai.provider.add-model-id", in: sheet.view)
         add.stringValue = " manual-model "
-        try find(NSButton.self, "settings.ai.provider.add-model", in: controller.view).performClick(nil)
-        #expect(fixture.settings.aiProvider(provider.id)?.models.map(\.id) == ["alpha", "beta", "manual-model"])
+        try find(NSButton.self, "settings.ai.provider.add-model", in: sheet.view).performClick(nil)
+        #expect(sheet.draft.models.map(\.id) == ["alpha", "beta", "manual-model"])
         #expect(add.stringValue.isEmpty)
 
-        let table = try find(NSTableView.self, "settings.ai.models", in: controller.view)
+        let table = try find(NSTableView.self, "settings.ai.models", in: sheet.view)
         #expect(await settle { table.numberOfRows == 3 })
         let cell = try #require(table.view(atColumn: 0, row: 1, makeIfNecessary: true) as? AIModelListCell)
         cell.contextField.stringValue = "128k"
         cell.outputField.stringValue = "4,096"
         cell.controlTextDidEndEditing(Notification(name: NSControl.textDidEndEditingNotification,
                                                    object: cell.outputField))
-        #expect(fixture.settings.aiProvider(provider.id)?.model("beta")
-            == AIProviderModel(id: "beta", contextWindow: 128_000, maxOutputTokens: 4_096))
+        #expect(sheet.draft.models[1] == AIProviderModel(id: "beta", contextWindow: 128_000, maxOutputTokens: 4_096))
         #expect(cell.contextField.stringValue == "128000")
-        cell.contextField.stringValue = ""
-        cell.controlTextDidEndEditing(Notification(name: NSControl.textDidEndEditingNotification,
-                                                   object: cell.contextField))
-        #expect(fixture.settings.aiProvider(provider.id)?.model("beta")?.contextWindow == nil)
 
-        // Removing a model also removes the choices that pointed at it.
+        // Reorder models inside the provider sheet so custom order is persisted on Save.
+        #expect(sheet.list.moveModel("manual-model", by: -1))
+        #expect(sheet.draft.models.map(\.id) == ["alpha", "manual-model", "beta"])
+
+        // Removing a model and saving also cleans up routes pointing at that model.
         fixture.settings.aiTitleRoute = AITitleRoute(provider: provider.id, model: "beta")
         fixture.settings.gitCommitAIRoutes = [GitCommitAIRoute(provider: provider.id, model: "beta"),
                                               GitCommitAIRoute(provider: provider.id, model: "alpha")]
-        cell.removeButton.performClick(nil)
+        let betaCell = try #require(table.view(atColumn: 0, row: 2, makeIfNecessary: true) as? AIModelListCell)
+        betaCell.removeButton.performClick(nil)
+        sheet.save()
+
         #expect(fixture.settings.aiProvider(provider.id)?.models.map(\.id) == ["alpha", "manual-model"])
         #expect(fixture.settings.aiTitleRoute == nil)
         #expect(fixture.settings.gitCommitAIRoutes.map(\.model) == ["alpha"])
-        #expect(await settle { table.numberOfRows == 2 })
     }
 
     @Test func aFailedFetchKeepsTheListAndNeverShowsTheKey() async throws {
@@ -264,82 +273,80 @@ struct NativeAISettingsTests {
         }
         try fixture.credentials.setAPIKey("secret-test-key", for: provider.id)
         fixture.listResponse = (Data(#"{"error":"upstream rejected secret-test-key"}"#.utf8), 500)
-        controller.showAIProvider(provider.id)
-        let fetch = try find(NSButton.self, "settings.ai.provider.fetch-models", in: controller.view)
+        controller.presentAIProviderSheet(id: provider.id)
+        let sheet = try #require(controller.activeModalSheet as? AIProviderSheetController)
+        let fetch = try find(NSButton.self, "settings.ai.provider.fetch-models", in: sheet.view)
         fetch.performClick(nil)
         #expect(await settle { fixture.requests.all.count == 1 && fetch.isEnabled })
 
-        #expect(fixture.settings.aiProvider(provider.id)?.models.map(\.id) == ["alpha"])
-        let labels = descendants(controller.view).compactMap { ($0 as? NSTextField)?.stringValue }
+        #expect(sheet.draft.models.map(\.id) == ["alpha"])
+        let labels = descendants(sheet.view).compactMap { ($0 as? NSTextField)?.stringValue }
         #expect(labels.contains { $0.hasPrefix("HTTP 500") })
         #expect(!labels.contains { $0.contains("secret-test-key") })
 
         // Without a usable base URL nothing is sent at all.
-        fixture.settings.updateAIProvider(provider.id) { $0.baseURL = "" }
+        sheet.urlField.stringValue = ""
+        sheet.urlField.commit?("")
         fetch.performClick(nil)
         #expect(fixture.requests.all.count == 1)
     }
 
-    @Test func removingAConnectionDeletesItsKeyAndLeavesThePage() async throws {
+    @Test func removingAConnectionDeletesItsKeyAndRoutes() throws {
         let fixture = Fixture()
         defer { fixture.close() }
         let provider = try #require(fixture.settings.addAIProvider(name: "Work proxy"))
+        fixture.settings.updateAIProvider(provider.id) { $0.mergeModels(["alpha"]) }
+        fixture.settings.aiTitleRoute = AITitleRoute(provider: provider.id, model: "alpha")
         try fixture.credentials.setAPIKey("secret-test-key", for: provider.id)
-        fixture.controller.showAIProvider(provider.id)
-        #expect(fixture.controller.isShowing("ai-provider:" + provider.id.uuidString))
-        _ = try find(NSButton.self, "settings.ai.provider.remove", in: fixture.controller.view)
 
-        // The page follows the settings: once the connection is gone it returns to the AI page.
-        try fixture.settings.removeAIProvider(provider.id, credentials: fixture.credentials)
-        #expect(await settle { fixture.controller.isShowing("agents") })
+        fixture.controller.select(.agents)
+        fixture.controller.presentAIProviderSheet(id: provider.id)
+        let sheet = try #require(fixture.controller.activeModalSheet as? AIProviderSheetController)
+        _ = try find(NSButton.self, "settings.ai.provider.remove", in: sheet.view)
+
+        sheet.deleteProviderConfirmed()
+        #expect(fixture.settings.aiProviders.isEmpty)
+        #expect(fixture.settings.aiTitleRoute == nil)
         #expect(!fixture.credentials.hasAPIKey(for: provider.id))
         #expect(!descendants(fixture.controller.view).contains {
             $0.accessibilityIdentifier() == "settings.ai.provider." + provider.id.uuidString
         })
-        // A connection that no longer exists cannot be opened.
-        fixture.controller.showAIProvider(provider.id)
-        #expect(fixture.controller.isShowing("agents"))
     }
 
-    @Test func anInstalledAgentPageDiscoversItsModelsOnFirstVisit() async throws {
+    @Test func clickingALocalCLIOpensItsModalSheetAndSharesDiscoveredModels() async throws {
         let fixture = Fixture()
         defer { fixture.close() }
         let controller = fixture.controller
         controller.select(.agents)
-        try find(NSButton.self, "settings.ai.local-cli-models", in: controller.view).performClick(nil)
-        #expect(controller.isShowing("ai-local-cli-models"))
-        for agent in GitCommitAgent.allCases {
-            _ = try find(NSButton.self, "settings.ai.agent." + agent.rawValue, in: controller.view)
-        }
         try find(NSButton.self, "settings.ai.agent.opencode", in: controller.view).performClick(nil)
-        #expect(controller.isShowing("ai-agent:opencode"))
+        let sheet = try #require(controller.activeModalSheet as? AICLIProviderSheetController)
 
-        let table = try find(NSTableView.self, "settings.ai.models", in: controller.view)
+        let table = try find(NSTableView.self, "settings.ai.models", in: sheet.view)
         #expect(await settle { table.numberOfRows == 2 })
         #expect(controller.aiAgentCatalog.entry(.opencode).models == ["opencode-one", "opencode-two"])
         // A discovered list is read-only: no limit fields, no remove buttons.
-        #expect(!descendants(controller.view).contains {
+        #expect(!descendants(sheet.view).contains {
             $0.accessibilityIdentifier() == "settings.ai.model.context-window"
         })
-        let refresh = try find(NSButton.self, "settings.ai.agent.refresh-models", in: controller.view)
+        let refresh = try find(NSButton.self, "settings.ai.agent.refresh-models", in: sheet.view)
         #expect(refresh.isEnabled)
-        // Only Codex has an adapter OMG can manage.
-        #expect(!descendants(controller.view).contains {
+        // Only Codex exposes the managed ACP helper package row.
+        #expect(!descendants(sheet.view).contains {
             $0.accessibilityIdentifier() == "settings.ai.agent.codex.adapter-update"
         })
 
-        try find(NSButton.self, "settings.back", in: controller.view).performClick(nil)
-        #expect(controller.isShowing("ai-local-cli-models"))
-        let subpageLabels = descendants(controller.view).compactMap { ($0 as? NSTextField)?.stringValue }
-        #expect(subpageLabels.contains { $0.contains(SettingsStrings(language: .english).aiModelCount(2)) })
+        // AI overview updates its CLI row subtitle immediately from the shared catalog.
+        #expect(await settle {
+            descendants(controller.view).compactMap { ($0 as? NSTextField)?.stringValue }
+                .contains { $0.contains(SettingsStrings(language: .english).aiModelCount(2)) }
+        })
 
-        try find(NSButton.self, "settings.back", in: controller.view).performClick(nil)
-        #expect(controller.isShowing("agents"))
-        let labels = descendants(controller.view).compactMap { ($0 as? NSTextField)?.stringValue }
-        #expect(labels.contains { $0.contains(SettingsStrings(language: .english).aiModelCount(2)) })
+        try find(NSButton.self, "settings.ai.agent.codex", in: controller.view).performClick(nil)
+        let codexSheet = try #require(controller.activeModalSheet as? AICLIProviderSheetController)
+        _ = try find(NSButton.self, "settings.ai.agent.codex.adapter-update", in: codexSheet.view)
     }
 
-    @Test func thePickerOffersOnlyUsableConnectionsAndReportsTheChoice() throws {
+    @Test func pickersPreserveUserSelectionOrderAndUnifyAPIServicesWithLocalCLIs() throws {
         let strings = SettingsStrings(language: .english)
         let first = AIProvider(name: "Same name", baseURL: "https://one.example.com",
                                models: [AIProviderModel(id: "a"), AIProviderModel(id: "b"), AIProviderModel(id: "c")])
@@ -355,7 +362,6 @@ struct NativeAISettingsTests {
         let multi = AIProviderModelPickerController(providers: eligible, allowsMultiple: true, strings: strings,
                                                     heading: "Add API Models") { chosen = ($0, $1) }
         _ = multi.view
-        // Two connections may share a name; both stay in the menu.
         #expect(multi.providerPopup.numberOfItems == 2)
         #expect(multi.modelTable.numberOfRows == 3)
         #expect(multi.addProviderButton.isHidden)
@@ -365,8 +371,8 @@ struct NativeAISettingsTests {
         #expect(multi.confirmButton.isEnabled)
         multi.confirm()
         #expect(chosen?.0 == first.id)
-        // Reported in the connection's order, not in click order.
-        #expect(chosen?.1 == ["a", "c"])
+        // Reported in exact user click order ("c" then "a"), never silently re-sorted.
+        #expect(chosen?.1 == ["c", "a"])
 
         let single = AIProviderModelPickerController(providers: eligible, allowsMultiple: false, strings: strings,
                                                      heading: "Choose Title Model") { chosen = ($0, $1) }
@@ -374,7 +380,6 @@ struct NativeAISettingsTests {
         single.toggle("a")
         single.toggle("b")
         #expect(single.selected == ["b"])
-        // Switching the connection starts the choice over.
         single.select(providerAt: 1)
         #expect(single.selected.isEmpty)
         #expect(single.modelTable.numberOfRows == 1)
@@ -383,34 +388,58 @@ struct NativeAISettingsTests {
         #expect(chosen?.0 == second.id)
         #expect(chosen?.1 == ["x"])
 
-        let none = AIProviderModelPickerController(providers: [], allowsMultiple: true, strings: strings,
-                                                   heading: "Add API Models") { _, _ in }
-        _ = none.view
-        #expect(none.modelTable.numberOfRows == 0)
-        #expect(none.addProviderButton.isHidden)
-        #expect(!none.confirmButton.isEnabled)
-        #expect(!none.searchField.isEnabled)
+        // Unified picker combines enabled API services and Local CLIs in consistent order and shares AIAgentModelCatalog.
+        let catalog = AIAgentModelCatalog { agent in ["\(agent.rawValue)-live"] }
+        catalog.recordModels(["codex-cached-1", "codex-cached-2"], for: .codex)
+        var unifiedPicked: [AIUnifiedModelPickerController.PickedModel] = []
+        let unified = AIUnifiedModelPickerController(
+            providers: [first, off],
+            catalog: catalog,
+            strings: strings,
+            heading: "Add Generation Models"
+        ) { unifiedPicked = $0 }
+        _ = unified.view
+        #expect(unified.sources == [
+            .provider(first),
+            .agent(.codex),
+            .agent(.claude),
+            .agent(.pi),
+            .agent(.opencode),
+        ])
+        // Select an API model first, then switch to Codex (cached!) and select a CLI model.
+        unified.toggle("c")
+        unified.selectSource(at: 1) // .agent(.codex)
+        #expect(unified.modelTable.numberOfRows == 2)
+        unified.toggle("codex-cached-2")
+        unified.selectSource(at: 0) // back to .provider(first)
+        unified.toggle("a")
+        unified.confirm()
+        #expect(unifiedPicked == [
+            .init(target: .provider(first.id), model: "c"),
+            .init(target: .agent(.codex), model: "codex-cached-2"),
+            .init(target: .provider(first.id), model: "a"),
+        ])
 
-        // Empty-state picker with an add-service callback offers a direct jump into connection setup.
+        // Empty-state picker with an add-service callback opens the Add API Service modal sheet without creating garbage.
         let fixture = Fixture()
         defer { fixture.close() }
-        fixture.controller.select(.agents)
+        fixture.controller.select(.tabs)
         let emptyWithAdd = AIProviderModelPickerController(
             providers: [],
             allowsMultiple: false,
             strings: strings,
             heading: "Choose Title Model",
-            onAddProvider: { [weak controller = fixture.controller] in controller?.addConnection() },
+            onAddProvider: { [weak controller = fixture.controller] in controller?.presentAIProviderSheet(id: nil) },
             done: { _, _ in }
         )
         _ = emptyWithAdd.view
         #expect(!emptyWithAdd.addProviderButton.isHidden)
         emptyWithAdd.addProvider()
-        let created = try #require(fixture.settings.aiProviders.first)
-        #expect(fixture.controller.isShowing("ai-provider:" + created.id.uuidString))
+        #expect(fixture.settings.aiProviders.isEmpty)
+        #expect(fixture.controller.activeModalSheet is AIProviderSheetController)
     }
 
-    @Test func theTitleModelRowExplainsWhatWillHappen() throws {
+    @Test func automaticTabTitleControlsLiveOnViewsAndTabsPage() throws {
         let fixture = Fixture()
         defer { fixture.close() }
         let strings = SettingsStrings(language: .english)
@@ -425,18 +454,18 @@ struct NativeAISettingsTests {
         fixture.settings.updateAIProvider(provider.id) { $0.enabled = false }
         #expect(controller.aiTitleModelSummary().hasPrefix("Work proxy · alpha: "))
 
-        // A route can outlive its connection in a hand-edited file; the row says so.
         fixture.settings.aiProviders = []
         #expect(controller.aiTitleModelSummary().hasPrefix("alpha: "))
 
-        controller.select(.agents)
+        controller.select(.tabs)
+        _ = try find(SettingsPopup.self, "settings.ai.title.mode", in: controller.view)
         let alwaysUseAI = try find(SettingsSwitch.self, "settings.ai.title.always-use-ai", in: controller.view)
         #expect(alwaysUseAI.isEnabled)
         alwaysUseAI.state = .on
         alwaysUseAI.change?(true)
         #expect(fixture.settings.agentSessionTitleAlwaysUseAI)
         fixture.settings.agentSessionTitleMode = .native
-        controller.select(.agents)
+        controller.select(.tabs)
         let disabledAlwaysUseAI = try find(SettingsSwitch.self, "settings.ai.title.always-use-ai", in: controller.view)
         #expect(!disabledAlwaysUseAI.isEnabled)
         #expect(disabledAlwaysUseAI.state == .on)
@@ -447,14 +476,14 @@ struct NativeAISettingsTests {
         #expect(fixture.settings.aiTitleRoute == nil)
     }
 
-    @Test func commitRoutesShowTheConnectionNameAndItsState() throws {
+    @Test func commitRoutesAndPromptSheetLiveOnGitPage() throws {
         let fixture = Fixture()
         defer { fixture.close() }
         let provider = try #require(fixture.settings.addAIProvider(name: "Work proxy"))
         fixture.settings.updateAIProvider(provider.id) { $0.mergeModels(["alpha"]); $0.enabled = false }
         fixture.settings.gitCommitAIRoutes = [GitCommitAIRoute(agent: .claude, model: "sonnet"),
                                               GitCommitAIRoute(provider: provider.id, model: "alpha")]
-        fixture.controller.select(.agents)
+        fixture.controller.select(.git)
         let table = try find(NSTableView.self, "git.commit-ai.routes", in: fixture.controller.view)
         #expect(table.numberOfRows == 2)
         let agentCell = try #require(table.view(atColumn: 0, row: 0, makeIfNecessary: true))
@@ -464,5 +493,11 @@ struct NativeAISettingsTests {
         let apiLabels = descendants(apiCell).compactMap { ($0 as? NSTextField)?.stringValue }
         #expect(apiLabels.contains("Work proxy (off)"))
         #expect(apiLabels.contains("alpha"))
+
+        try find(NSButton.self, "settings.ai.commit.add-models", in: fixture.controller.view).performClick(nil)
+        #expect(fixture.controller.activeModalSheet is AIUnifiedModelPickerController)
+
+        try find(NSButton.self, "settings.ai.commit.edit-prompt", in: fixture.controller.view).performClick(nil)
+        #expect(fixture.controller.activeModalSheet is GitCommitAIPromptController)
     }
 }

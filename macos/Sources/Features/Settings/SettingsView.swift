@@ -50,14 +50,15 @@ final class OhMyGhosttySettingsWindowController: NSWindowController {
 
     init(
         settings: OhMyGhosttySettings,
-        initialSelection: OhMyGhosttySettingsTab = .tabs
+        initialSelection: OhMyGhosttySettingsTab = .general
     ) {
         let root = NativeSettingsController(settings: settings, initialSelection: initialSelection)
         let window = SettingsWindow(contentViewController: root)
         window.title = SettingsStrings(language: settings.language).windowTitle
-        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.toolbarStyle = .unified
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+        window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
+        window.isMovableByWindowBackground = true
         window.isOpaque = true
         window.minSize = NSSize(width: 820, height: 540)
         window.contentMinSize = NSSize(width: 760, height: 560)
@@ -121,31 +122,61 @@ final class OhMyGhosttySettingsWindowController: NSWindowController {
         )
     }
 
+    static func resolvedPalette(
+        for settings: OhMyGhosttySettings,
+        terminalPalette: OMGThemePalette? = nil,
+        systemAppearance: NSAppearance? = nil
+    ) -> (palette: OMGThemePalette, appearance: NSAppearance?) {
+        let terminalPalette = terminalPalette ?? OMGThemeBackground.palette()
+        let systemAppearance = systemAppearance ?? NSApp.effectiveAppearance
+        let desiredScheme: ColorScheme
+        let appearance: NSAppearance?
+        switch settings.windowThemeOverride {
+        case .light:
+            desiredScheme = .light
+            appearance = NSAppearance(named: .aqua)
+        case .dark:
+            desiredScheme = .dark
+            appearance = NSAppearance(named: .darkAqua)
+        case .system:
+            let match = systemAppearance.bestMatch(from: [.aqua, .darkAqua])
+            desiredScheme = match == .darkAqua ? .dark : .light
+            appearance = nil
+        case nil:
+            desiredScheme = terminalPalette.colorScheme
+            appearance = NSAppearance(named: desiredScheme == .dark ? .darkAqua : .aqua)
+        }
+        if terminalPalette.colorScheme == desiredScheme {
+            return (terminalPalette, appearance)
+        }
+        let configuredTheme = desiredScheme == .light ? settings.lightThemeOverride : settings.darkThemeOverride
+        if let configuredTheme,
+           let sample = SettingsThemeSample.load(configuredTheme),
+           sample.background.isLightColor == (desiredScheme == .light) {
+            return (OMGThemePalette(background: sample.background, foreground: sample.foreground), appearance)
+        }
+        let fallback = desiredScheme == .light
+            ? OMGThemePalette(
+                background: NSColor(srgbRed: 0.965, green: 0.965, blue: 0.973, alpha: 1),
+                foreground: NSColor(srgbRed: 0.11, green: 0.11, blue: 0.13, alpha: 1)
+            )
+            : OMGThemePalette(
+                background: NSColor(srgbRed: 0.125, green: 0.13, blue: 0.145, alpha: 1),
+                foreground: NSColor(srgbRed: 0.90, green: 0.91, blue: 0.93, alpha: 1)
+            )
+        return (fallback, appearance)
+    }
+
     private func applyAppearance(_ settings: OhMyGhosttySettings) {
         guard let window else { return }
         let title = SettingsStrings(language: settings.language).windowTitle
         if window.title != title {
             window.title = title
         }
-        let appearance: NSAppearance?
-        switch settings.windowThemeOverride {
-        case .light:
-            appearance = NSAppearance(named: .aqua)
-        case .dark:
-            appearance = NSAppearance(named: .darkAqua)
-        case .system:
-            appearance = nil
-        case nil:
-            // Follow the same effective appearance as terminal windows so the
-            // settings window tracks OMG's theme, including automatic switches.
-            appearance = NSApp.effectiveAppearance
-        }
-        // Follow the OMG/terminal theme background color (e.g. Atom One Dark),
-        // not the default aqua/darkAqua window background.
-        let palette = OMGThemeBackground.palette()
-        window.backgroundColor = palette.background
-        (window.contentViewController as? NativeSettingsController)?.applyPalette(palette)
-        window.appearance = appearance
+        let resolved = Self.resolvedPalette(for: settings)
+        window.backgroundColor = resolved.palette.background
+        (window.contentViewController as? NativeSettingsController)?.applyPalette(resolved.palette)
+        window.appearance = resolved.appearance
         window.contentView?.needsDisplay = true
     }
 }

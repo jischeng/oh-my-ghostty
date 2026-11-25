@@ -256,6 +256,134 @@ struct AITitleServiceTests {
         let service = AITitleService(client: client, endpoints: { AITestData.endpoint })
         #expect(await service.title(forFirstPrompt: "prompt") == nil)
     }
+
+    @Test func freshlyPausedBreakerFailsFastWithoutPollingAndEmptyOutputsDoNotTripBreaker() async {
+        let emptyClient = AIHTTPClient { _ in
+            (AITestData.openAI("<think>long reasoning</think>"), AITestData.response(200))
+        }
+        let emptyService = AITitleService(
+            client: emptyClient,
+            endpoints: { AITestData.endpoint },
+            limits: .init(consecutiveFailuresBeforePause: 2, pauseDuration: .seconds(30))
+        )
+        // Three empty/reasoning-only outputs must not trip the endpoint outage breaker.
+        for _ in 0..<3 {
+            #expect(await emptyService.title(forFirstPrompt: "prompt") == nil)
+        }
+
+        let counter = AIScriptedClient(error: AIHTTPError.httpStatus(503))
+        let failingClient = AIHTTPClient { _ in
+            _ = try await counter.complete(user: "")
+            return (try await counter.payload(), AITestData.response(200))
+        }
+        let service = AITitleService(
+            client: failingClient,
+            endpoints: { AITestData.endpoint },
+            limits: .init(consecutiveFailuresBeforePause: 3, pauseDuration: .seconds(30), pollInterval: .milliseconds(500))
+        )
+        for _ in 0..<3 {
+            #expect(await service.title(forFirstPrompt: "prompt") == nil)
+        }
+        let clock = ContinuousClock()
+        let start = clock.now
+        #expect(await service.title(forFirstPrompt: "prompt") == nil)
+        let elapsed = start.duration(to: clock.now)
+        #expect(elapsed < .milliseconds(250))
+        #expect(await counter.callCount() == 3)
+    }
+
+    @Test func updatingTheAPIKeyOnTheSameEndpointClearsAnAuthenticationPause() async {
+        let counter = AIScriptedClient(error: AIHTTPError.httpStatus(401))
+        let client = AIHTTPClient { _ in
+            _ = try await counter.complete(user: "")
+            return (try await counter.payload(), AITestData.response(200))
+        }
+        let baseEndpoint = AIEndpoint(
+            kind: .openAI,
+            baseURL: URL(string: "https://api.example.com")!,
+            model: "test-model",
+            apiKey: "bad-key"
+        )
+        let provider = SwitchingEndpointProvider(baseEndpoint)
+        let service = AITitleService(
+            client: client,
+            endpoints: { await provider.current() },
+            limits: .init(pauseDuration: .seconds(60))
+        )
+
+        #expect(await service.title(forFirstPrompt: "one") == nil)
+        #expect(await service.title(forFirstPrompt: "two") == nil)
+        #expect(await counter.callCount() == 1)
+
+        // Fixing ONLY the API key on the exact same baseURL + model lifts `authBlocked`.
+        await counter.setError(nil)
+        await counter.setResponse("Recovered Title")
+        await provider.set(AIEndpoint(
+            kind: .openAI,
+            baseURL: URL(string: "https://api.example.com")!,
+            model: "test-model",
+            apiKey: "fixed-key"
+        ))
+        #expect(await service.title(forFirstPrompt: "three") == "Recovered Title")
+        #expect(await counter.callCount() == 2)
+    }
+
+    @Test func forcedBatchRequestsQueueInFIFOOrderInsteadOfDroppingBeyondMaxInFlight() async {
+        let blocking = AIBlockingClient()
+        let recorder = AIRequestRecorder()
+        let client = AIHTTPClient { request in
+            recorder.record(request)
+            let title = try await blocking.complete(user: "Renamed Tab")
+            return (AITestData.openAI(title), AITestData.response(200))
+        }
+        let service = AITitleService(client: client, endpoints: { AITestData.endpoint })
+
+        let firstWave = (1...2).map { index in
+            Task {
+                await service.title(
+                    forFirstPrompt: "prompt-\(index)",
+                    nativeTitle: nil,
+                    projectName: nil,
+                    force: true
+                )
+            }
+        }
+        #expect(await waitUntil { await blocking.startedCount == 2 })
+
+        // Queue 3 additional forced requests in strict order while both slots are occupied.
+        var queuedTasks: [Task<String?, Never>] = []
+        for index in 3...5 {
+            queuedTasks.append(Task {
+                await service.title(
+                    forFirstPrompt: "prompt-\(index)",
+                    nativeTitle: nil,
+                    projectName: nil,
+                    force: true
+                )
+            })
+            try? await Task.sleep(for: .milliseconds(15))
+        }
+        #expect(await blocking.startedCount == 2)
+
+        await blocking.release()
+        #expect(await waitUntil { await blocking.startedCount == 5 })
+
+        var results: [String] = []
+        for task in firstWave + queuedTasks {
+            if let value = await task.value {
+                results.append(value)
+            }
+        }
+        #expect(results.count == 5)
+        let sentPrompts = recorder.bodies.compactMap { body -> String? in
+            let messages = (body["messages"] as? [[String: Any]]) ?? []
+            return messages.last?["content"] as? String
+        }
+        #expect(sentPrompts.count == 5)
+        #expect(sentPrompts.dropFirst(2).enumerated().allSatisfy { offset, content in
+            content.contains("prompt-\(offset + 3)")
+        })
+    }
 }
 
 actor SwitchingEndpointProvider {

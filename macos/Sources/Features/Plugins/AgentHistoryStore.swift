@@ -19,6 +19,8 @@ struct AgentHistorySession: Identifiable, Equatable, Codable, Sendable {
     var nativeTitle: String?
     /// The cleaned opening prompt, bounded, when the scan read one.
     var firstPrompt: String?
+    /// True when `nativeTitle` came from an explicit user rename in the CLI (e.g. Claude `/rename`).
+    var nativeTitleIsUserRenamed: Bool?
 
     var id: String { "\(agent.rawValue):\(conversationID.rawValue)" }
 
@@ -228,6 +230,8 @@ enum AgentHistoryStore {
         var native: String?
         /// The cleaned opening prompt, bounded.
         var firstPrompt: String?
+        /// True when `native` came from an explicit user rename in the Agent CLI.
+        var isUserRenamed = false
     }
 
     /// A transcript that is not named after its conversation is looked for
@@ -457,9 +461,16 @@ enum AgentHistoryStore {
             return trimmed.isEmpty ? nil : trimmed
         }
         var native = collapsedTitle(session.nativeTitle)
-        // A store that names a conversation after its opening prompt has not named it.
-        if native != nil, native == collapsedTitle(prompt) { native = nil }
-        return .init(native: native, firstPrompt: prompt)
+        // A store that names a conversation after its opening prompt has not named it,
+        // unless the user explicitly ran `/rename` in the CLI.
+        if native != nil, session.nativeTitleIsUserRenamed != true, native == collapsedTitle(prompt) {
+            native = nil
+        }
+        return .init(
+            native: native,
+            firstPrompt: prompt,
+            isUserRenamed: native != nil && session.nativeTitleIsUserRenamed == true
+        )
     }
 
     /// The name an Agent gave a conversation: a title record of its store, or
@@ -467,8 +478,10 @@ enum AgentHistoryStore {
     /// generated itself (`ai-title`). Of each kind the last record wins.
     nonisolated private static func nativeTitle(
         in records: [[String: Any]], agent: SupportedAgent, explicitTitle: String?
-    ) -> String? {
-        guard RecordFamily(agent) == .claude else { return collapsedTitle(explicitTitle) }
+    ) -> (title: String?, isUserRenamed: Bool) {
+        guard RecordFamily(agent) == .claude else {
+            return (collapsedTitle(explicitTitle), false)
+        }
         var custom: String?
         var generated: String?
         for record in records {
@@ -482,7 +495,10 @@ enum AgentHistoryStore {
                 break
             }
         }
-        return custom ?? generated ?? collapsedTitle(explicitTitle)
+        if let custom {
+            return (custom, true)
+        }
+        return (generated ?? collapsedTitle(explicitTitle), false)
     }
 
     /// One line of at most 140 characters, as `normalizedTitle` keeps of a
@@ -1129,6 +1145,7 @@ enum AgentHistoryStore {
             return nil
         }
 
+        let resolvedNative = nativeTitle(in: records, agent: agent, explicitTitle: explicitTitle)
         return .init(
             agent: candidate.source.agent,
             conversationID: conversationID,
@@ -1138,8 +1155,9 @@ enum AgentHistoryStore {
             sourcePath: candidate.url.path,
             isActive: false,
             previewSnippet: previewSnippet.isEmpty ? nil : previewSnippet,
-            nativeTitle: nativeTitle(in: records, agent: agent, explicitTitle: explicitTitle),
-            firstPrompt: userTitle.map { String($0.prefix(maximumFirstPromptCharacters)) }
+            nativeTitle: resolvedNative.title,
+            firstPrompt: userTitle.map { String($0.prefix(maximumFirstPromptCharacters)) },
+            nativeTitleIsUserRenamed: resolvedNative.isUserRenamed ? true : nil
         )
     }
 
@@ -1382,6 +1400,7 @@ enum AgentHistoryStore {
                     : String(cleaned.prefix(1_000))
             }.prefix(10).joined(separator: "\n")
 
+            let resolvedNative = nativeTitle(in: records, agent: matchedAgent, explicitTitle: explicitTitle)
             let session = AgentHistorySession(
                 agent: matchedAgent,
                 conversationID: conversationID,
@@ -1392,8 +1411,9 @@ enum AgentHistoryStore {
                 remoteHost: access.alias,
                 isActive: false,
                 previewSnippet: previewSnippet.isEmpty ? nil : previewSnippet,
-                nativeTitle: nativeTitle(in: records, agent: matchedAgent, explicitTitle: explicitTitle),
-                firstPrompt: userTitle.map { String($0.prefix(maximumFirstPromptCharacters)) }
+                nativeTitle: resolvedNative.title,
+                firstPrompt: userTitle.map { String($0.prefix(maximumFirstPromptCharacters)) },
+                nativeTitleIsUserRenamed: resolvedNative.isUserRenamed ? true : nil
             )
             if let existing = sessionsByID[session.id],
                existing.updatedAt >= session.updatedAt {

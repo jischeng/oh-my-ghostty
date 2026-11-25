@@ -5,6 +5,12 @@ import Foundation
 protocol AITitleGenerating: Sendable {
     func title(forFirstPrompt prompt: String) async -> String?
     func title(forFirstPrompt prompt: String, nativeTitle: String?, projectName: String?) async -> String?
+    func title(
+        forFirstPrompt prompt: String,
+        nativeTitle: String?,
+        projectName: String?,
+        force: Bool
+    ) async -> String?
 }
 
 extension AITitleGenerating {
@@ -15,13 +21,24 @@ extension AITitleGenerating {
     ) async -> String? {
         await title(forFirstPrompt: prompt)
     }
+
+    func title(
+        forFirstPrompt prompt: String,
+        nativeTitle: String?,
+        projectName: String?,
+        force: Bool
+    ) async -> String? {
+        await title(forFirstPrompt: prompt, nativeTitle: nativeTitle, projectName: projectName)
+    }
 }
 
 /// Generates conversation titles with a bounded background channel: at most two
-/// requests in flight, a short queue, and a breaker that pauses after repeated failures.
+/// requests in flight, FIFO queueing for explicit/batch renames, and a breaker
+/// that pauses after repeated endpoint failures.
 actor AITitleService: AITitleGenerating {
     /// Resolves the tab-title model from settings and the credential store; nil disables generation.
     typealias EndpointProvider = @Sendable () async -> AIEndpoint?
+    typealias ForcedEndpointProvider = @Sendable (_ force: Bool) async -> AIEndpoint?
     /// The language the title is written in: the app's display language.
     typealias LanguageProvider = @Sendable () async -> OhMyGhosttyLanguage
 
@@ -31,6 +48,7 @@ actor AITitleService: AITitleGenerating {
         var consecutiveFailuresBeforePause = 3
         var pauseDuration: Duration = .seconds(300)
         var pollInterval: Duration = .milliseconds(500)
+        var maxQueueDepth = 64
 
         static let `default` = Limits()
     }
@@ -38,27 +56,45 @@ actor AITitleService: AITitleGenerating {
     static let shared = AITitleService()
 
     private let client: AIHTTPClient
-    private let endpoints: EndpointProvider
+    private let endpoints: ForcedEndpointProvider
     private let language: LanguageProvider
     private let limits: Limits
     private let clock = ContinuousClock()
 
+    private struct SlotWaiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Bool, Never>
+    }
+
     private var inFlight = 0
+    private var slotWaiters: [SlotWaiter] = []
     private var consecutiveFailures = 0
     private var pausedUntil: ContinuousClock.Instant?
-    /// How much of a pause the service refuses to sit through before giving up.
-    private var blockedFor: Duration = .zero
+    /// Maximum remaining pause window a caller sits through before giving up.
+    private var tailWaitWindow: Duration = .zero
     private var authBlocked = false
     private var currentEndpoint: AIEndpoint?
 
     init(
         client: AIHTTPClient = AIHTTPClient(),
-        endpoints: @escaping EndpointProvider = AITitleService.configuredEndpoint,
+        endpoints: @escaping EndpointProvider,
         language: @escaping LanguageProvider = AITitleService.configuredLanguage,
         limits: Limits = .default
     ) {
         self.client = client
-        self.endpoints = endpoints
+        self.endpoints = { _ in await endpoints() }
+        self.language = language
+        self.limits = limits
+    }
+
+    init(
+        client: AIHTTPClient = AIHTTPClient(),
+        forcedEndpoints: @escaping ForcedEndpointProvider = AITitleService.configuredEndpoint(force:),
+        language: @escaping LanguageProvider = AITitleService.configuredLanguage,
+        limits: Limits = .default
+    ) {
+        self.client = client
+        self.endpoints = forcedEndpoints
         self.language = language
         self.limits = limits
     }
@@ -67,9 +103,20 @@ actor AITitleService: AITitleGenerating {
     /// and key, outside the settings actor. No choice, or a disabled connection, is nil.
     @Sendable
     nonisolated static func configuredEndpoint() async -> AIEndpoint? {
+        await configuredEndpoint(force: false)
+    }
+
+    /// Explicit manual renames (`force: true`) may use `ai.routes.title` even when
+    /// automatic background naming is set to `.native`.
+    @Sendable
+    nonisolated static func configuredEndpoint(force: Bool) async -> AIEndpoint? {
         await MainActor.run {
             let settings = OhMyGhosttySettings.shared
-            guard settings.agentSessionTitleMode == .generate else { return nil }
+            if force {
+                guard settings.agentSessionTitleMode != .off else { return nil }
+            } else {
+                guard settings.agentSessionTitleMode == .generate else { return nil }
+            }
             return AIProviderDirectory(providers: settings.aiProviders, credentials: .shared)
                 .titleEndpoint(settings.aiTitleRoute)
         }
@@ -155,7 +202,7 @@ actor AITitleService: AITitleGenerating {
     }
 
     func title(forFirstPrompt prompt: String) async -> String? {
-        await title(forFirstPrompt: prompt, nativeTitle: nil, projectName: nil)
+        await title(forFirstPrompt: prompt, nativeTitle: nil, projectName: nil, force: false)
     }
 
     func title(
@@ -163,7 +210,16 @@ actor AITitleService: AITitleGenerating {
         nativeTitle: String?,
         projectName: String? = nil
     ) async -> String? {
-        guard !Task.isCancelled, let endpoint = await endpoints() else { return nil }
+        await title(forFirstPrompt: prompt, nativeTitle: nativeTitle, projectName: projectName, force: false)
+    }
+
+    func title(
+        forFirstPrompt prompt: String,
+        nativeTitle: String?,
+        projectName: String? = nil,
+        force: Bool
+    ) async -> String? {
+        guard !Task.isCancelled, let endpoint = await endpoints(force) else { return nil }
         noteEndpoint(endpoint)
         currentEndpoint = endpoint
         guard await waitUntilResolved(endpoint),
@@ -173,7 +229,7 @@ actor AITitleService: AITitleGenerating {
                   projectName: projectName,
                   maxBytes: limits.maxPromptBytes
               ),
-              acquireSlot(endpoint) else { return nil }
+              await acquireSlot(endpoint, waitIfBusy: force) else { return nil }
         defer { releaseSlot() }
 
         let system = AIHTTPClient.systemPrompt(language: await language())
@@ -211,8 +267,7 @@ actor AITitleService: AITitleGenerating {
         }
     }
 
-    /// A different endpoint means the user changed the configuration: forget the breaker state.
-    /// The key is compared separately so a rotating token does not lift an authentication pause.
+    /// A different endpoint or API key means the user changed the configuration: forget the breaker state.
     private func noteEndpoint(_ endpoint: AIEndpoint) {
         guard !sameConfiguration(currentEndpoint, endpoint) else { return }
         consecutiveFailures = 0
@@ -222,7 +277,10 @@ actor AITitleService: AITitleGenerating {
 
     private func sameConfiguration(_ lhs: AIEndpoint?, _ rhs: AIEndpoint) -> Bool {
         guard let lhs else { return false }
-        return lhs.kind == rhs.kind && lhs.baseURL == rhs.baseURL && lhs.model == rhs.model
+        return lhs.kind == rhs.kind
+            && lhs.baseURL == rhs.baseURL
+            && lhs.model == rhs.model
+            && lhs.apiKey == rhs.apiKey
     }
 
     private func note(_ outcome: Outcome, for endpoint: AIEndpoint) {
@@ -233,6 +291,9 @@ actor AITitleService: AITitleGenerating {
         case .success:
             consecutiveFailures = 0
             authBlocked = false
+        case .failure(.emptyOutput), .failure(.truncatedOutput):
+            // Empty or reasoning-exhausted model output on one prompt does not mean the endpoint is down.
+            break
         case .failure(.httpStatus(401, _)), .failure(.httpStatus(403, _)):
             authBlocked = true
             consecutiveFailures += 1
@@ -240,7 +301,7 @@ actor AITitleService: AITitleGenerating {
             consecutiveFailures += 1
             if consecutiveFailures >= limits.consecutiveFailuresBeforePause {
                 pausedUntil = clock.now + limits.pauseDuration
-                blockedFor = limits.pauseDuration / 2
+                tailWaitWindow = min(limits.pauseDuration / 2, .seconds(5))
                 consecutiveFailures = 0
             }
         }
@@ -251,7 +312,7 @@ actor AITitleService: AITitleGenerating {
         return authBlocked
     }
 
-    /// Waits out a pause before taking a request slot; cancelling the task ends the wait.
+    /// Waits out a nearly-finished pause before taking a request slot; cancelling the task ends the wait.
     private func waitUntilResolved(_ endpoint: AIEndpoint) async -> Bool {
         while true {
             guard !Task.isCancelled, sameConfiguration(currentEndpoint, endpoint) else { return false }
@@ -260,7 +321,7 @@ actor AITitleService: AITitleGenerating {
             case .wait:
                 try? await Task.sleep(for: limits.pollInterval)
             case .blocked:
-                // Give up rather than poll through a freshly started pause or a failed sign-in.
+                // Give up immediately rather than poll through a freshly started pause or a failed sign-in.
                 return false
             }
         }
@@ -270,7 +331,7 @@ actor AITitleService: AITitleGenerating {
         let now = clock.now
         if let pausedUntil {
             guard now < pausedUntil else { return .ready }
-            return pausedUntil - now > blockedFor ? .wait : .blocked
+            return pausedUntil - now <= tailWaitWindow ? .wait : .blocked
         }
         return authBlocked ? .blocked : .ready
     }
@@ -281,16 +342,49 @@ actor AITitleService: AITitleGenerating {
         case blocked
     }
 
-    /// Takes one of the in-flight slots. With both slots busy the caller gives up instead of
-    /// queueing, which keeps a cancelled title request from holding capacity.
-    private func acquireSlot(_ endpoint: AIEndpoint) -> Bool {
+    /// Takes one of the in-flight slots. Automatic background requests shed immediately when
+    /// busy, whereas explicit/batch forced renames wait in FIFO order for a free slot.
+    private func acquireSlot(_ endpoint: AIEndpoint, waitIfBusy: Bool) async -> Bool {
         guard !Task.isCancelled, sameConfiguration(currentEndpoint, endpoint),
-              !isPaused(at: clock.now), inFlight < limits.maxInFlight else { return false }
-        inFlight += 1
+              !isPaused(at: clock.now) else { return false }
+        if inFlight < limits.maxInFlight {
+            inFlight += 1
+            return true
+        }
+        guard waitIfBusy, slotWaiters.count < limits.maxQueueDepth else { return false }
+        let waiterID = UUID()
+        let granted = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(returning: false)
+                } else {
+                    slotWaiters.append(SlotWaiter(id: waiterID, continuation: continuation))
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelSlotWaiter(waiterID) }
+        }
+        guard granted else { return false }
+        guard !Task.isCancelled, sameConfiguration(currentEndpoint, endpoint),
+              !isPaused(at: clock.now) else {
+            releaseSlot()
+            return false
+        }
         return true
     }
 
+    private func cancelSlotWaiter(_ id: UUID) {
+        guard let index = slotWaiters.firstIndex(where: { $0.id == id }) else { return }
+        let waiter = slotWaiters.remove(at: index)
+        waiter.continuation.resume(returning: false)
+    }
+
     private func releaseSlot() {
+        while !slotWaiters.isEmpty {
+            let next = slotWaiters.removeFirst()
+            next.continuation.resume(returning: true)
+            return
+        }
         inFlight = max(0, inFlight - 1)
     }
 }

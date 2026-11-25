@@ -310,7 +310,7 @@ final class GitIntegrationDialogController: NSViewController, NSTextViewDelegate
     @objc private func generate() {
         guard !didFinish, !isBusy, valid else { return }
         let settings = OhMyGhosttySettings.shared
-        guard !settings.gitCommitAIRoutes.isEmpty else { SettingsNavigation.open(.agents); return }
+        guard !settings.gitCommitAIRoutes.isEmpty else { SettingsNavigation.open(.git); return }
         let routes = settings.gitCommitAIRoutes
         let style = settings.gitCommitAIPrompt
         let providers = settings.aiProviderDirectory()

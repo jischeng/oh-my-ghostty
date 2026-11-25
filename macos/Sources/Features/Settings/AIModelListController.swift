@@ -1,8 +1,8 @@
 import AppKit
 
 /// The models of one provider as a compact list. For an API connection each row also
-/// edits the model's context window and maximum output and can remove the model; for
-/// an installed agent the list is read-only.
+/// edits the model's context window and maximum output, reorders models, and can remove
+/// a model; for an installed agent the list is read-only.
 @MainActor
 final class AIModelListController: NSViewController, NSTableViewDataSource, NSTableViewDelegate,
     NSSearchFieldDelegate {
@@ -11,8 +11,8 @@ final class AIModelListController: NSViewController, NSTableViewDataSource, NSTa
     static let maxVisibleRows = 10
     /// Lists longer than this show the filter field.
     static let filterThreshold = 8
-    fileprivate static let limitFieldWidth: CGFloat = 104
-    fileprivate static let removeButtonWidth: CGFloat = 24
+    fileprivate static let limitFieldWidth: CGFloat = 96
+    fileprivate static let actionButtonWidth: CGFloat = 22
 
     let editable: Bool
     let table: NSTableView = AIModelTableView()
@@ -24,6 +24,8 @@ final class AIModelListController: NSViewController, NSTableViewDataSource, NSTa
     /// A model's limits were edited.
     var onChange: ((AIProviderModel) -> Void)?
     var onRemove: ((String) -> Void)?
+    /// The model list order changed via drag or up/down buttons.
+    var onReorder: (([AIProviderModel]) -> Void)?
     /// The height that shows the current rows changed.
     var onHeightChange: ((CGFloat) -> Void)?
 
@@ -60,6 +62,11 @@ final class AIModelListController: NSViewController, NSTableViewDataSource, NSTa
         table.backgroundColor = .clear
         table.selectionHighlightStyle = .none
         table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        if editable {
+            table.draggingDestinationFeedbackStyle = .gap
+            table.registerForDraggedTypes([.string])
+            table.setDraggingSourceOperationMask(.move, forLocal: true)
+        }
         let column = NSTableColumn(identifier: .init("model"))
         column.resizingMask = .autoresizingMask
         table.addTableColumn(column)
@@ -118,7 +125,10 @@ final class AIModelListController: NSViewController, NSTableViewDataSource, NSTa
             header.addSubview(view)
         }
         header.translatesAutoresizingMaskIntoConstraints = false
-        let trailing = AIModelListCell.trailingInset + Self.removeButtonWidth + AIModelListCell.spacing
+        let actionCount: CGFloat = 3
+        let trailing = AIModelListCell.trailingInset
+            + actionCount * Self.actionButtonWidth
+            + actionCount * AIModelListCell.spacing
         NSLayoutConstraint.activate([
             name.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: AIModelListCell.leadingInset),
             name.centerYAnchor.constraint(equalTo: header.centerYAnchor),
@@ -140,6 +150,17 @@ final class AIModelListController: NSViewController, NSTableViewDataSource, NSTa
         reload()
     }
 
+    @discardableResult
+    func moveModel(_ id: String, by delta: Int) -> Bool {
+        guard editable, query.isEmpty,
+              let source = models.firstIndex(where: { $0.id == id }),
+              models.indices.contains(source + delta) else { return false }
+        models.swapAt(source, source + delta)
+        table.reloadData()
+        onReorder?(models)
+        return true
+    }
+
     private func reload() {
         _ = view
         table.reloadData()
@@ -155,10 +176,58 @@ final class AIModelListController: NSViewController, NSTableViewDataSource, NSTa
         let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? AIModelListCell
             ?? AIModelListCell(editable: editable, strings: strings)
         cell.identifier = identifier
-        cell.configure(visible[row], showsDivider: row > 0)
+        let canReorder = editable && query.isEmpty && visible.count > 1
+        cell.configure(
+            visible[row],
+            showsDivider: row > 0,
+            canMoveUp: canReorder && row > 0,
+            canMoveDown: canReorder && row + 1 < visible.count
+        )
         cell.onCommit = { [weak self] in self?.commit($0) }
         cell.onRemove = { [weak self] in self?.onRemove?($0) }
+        cell.onMove = { [weak self] id, delta in _ = self?.moveModel(id, by: delta) }
         return cell
+    }
+
+    func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
+        guard editable, query.isEmpty, models.indices.contains(row) else { return nil }
+        return models[row].id as NSString
+    }
+
+    func tableView(
+        _ tableView: NSTableView,
+        validateDrop info: NSDraggingInfo,
+        proposedRow row: Int,
+        proposedDropOperation operation: NSTableView.DropOperation
+    ) -> NSDragOperation {
+        guard editable, query.isEmpty, operation == .above,
+              info.draggingSourceOperationMask.contains(.move),
+              let id = info.draggingPasteboard.string(forType: .string),
+              models.contains(where: { $0.id == id }) else {
+            return []
+        }
+        return .move
+    }
+
+    func tableView(
+        _ tableView: NSTableView,
+        acceptDrop info: NSDraggingInfo,
+        row: Int,
+        dropOperation: NSTableView.DropOperation
+    ) -> Bool {
+        guard editable, query.isEmpty,
+              let id = info.draggingPasteboard.string(forType: .string),
+              let source = models.firstIndex(where: { $0.id == id }) else {
+            return false
+        }
+        let insertion = min(max(row, 0), models.count)
+        let destination = insertion > source ? insertion - 1 : insertion
+        guard destination != source else { return true }
+        let item = models.remove(at: source)
+        models.insert(item, at: min(destination, models.count))
+        table.reloadData()
+        onReorder?(models)
+        return true
     }
 
     private func commit(_ model: AIProviderModel) {
@@ -186,17 +255,20 @@ private final class AIModelTableView: NSTableView {
 final class AIModelListCell: NSTableCellView, NSTextFieldDelegate {
     fileprivate static let leadingInset: CGFloat = 16
     fileprivate static let trailingInset: CGFloat = 12
-    fileprivate static let spacing: CGFloat = 8
+    fileprivate static let spacing: CGFloat = 6
 
     private let strings: SettingsStrings
     private let idField = NSTextField(labelWithString: "")
     let contextField = NSTextField()
     let outputField = NSTextField()
+    let upButton = NSButton()
+    let downButton = NSButton()
     let removeButton = NSButton()
     private var model = AIProviderModel(id: "")
     private var showsDivider = false
     var onCommit: ((AIProviderModel) -> Void)?
     var onRemove: ((String) -> Void)?
+    var onMove: ((String, Int) -> Void)?
 
     init(editable: Bool, strings: SettingsStrings) {
         self.strings = strings
@@ -219,16 +291,28 @@ final class AIModelListCell: NSTableCellView, NSTextFieldDelegate {
                 field.widthAnchor.constraint(equalToConstant: AIModelListController.limitFieldWidth).isActive = true
                 views.append(field)
             }
-            let label = strings.t("Remove model", "移除模型")
-            removeButton.image = NSImage(systemSymbolName: "minus.circle", accessibilityDescription: label)
-            removeButton.bezelStyle = .accessoryBar
-            removeButton.isBordered = false
-            removeButton.target = self
-            removeButton.action = #selector(remove)
-            removeButton.toolTip = label
-            removeButton.setAccessibilityIdentifier("settings.ai.model.remove")
-            removeButton.widthAnchor.constraint(equalToConstant: AIModelListController.removeButtonWidth).isActive = true
-            views.append(removeButton)
+            configureAction(
+                upButton,
+                symbol: "arrow.up",
+                label: strings.t("Move up", "上移"),
+                identifier: "settings.ai.model.move-up",
+                action: #selector(moveModelUp)
+            )
+            configureAction(
+                downButton,
+                symbol: "arrow.down",
+                label: strings.t("Move down", "下移"),
+                identifier: "settings.ai.model.move-down",
+                action: #selector(moveModelDown)
+            )
+            configureAction(
+                removeButton,
+                symbol: "minus.circle",
+                label: strings.t("Remove model", "移除模型"),
+                identifier: "settings.ai.model.remove",
+                action: #selector(remove)
+            )
+            views.append(contentsOf: [upButton, downButton, removeButton])
         }
         let row = NSStackView(views: views)
         row.orientation = .horizontal
@@ -247,7 +331,29 @@ final class AIModelListCell: NSTableCellView, NSTextFieldDelegate {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func configure(_ model: AIProviderModel, showsDivider: Bool) {
+    private func configureAction(
+        _ button: NSButton,
+        symbol: String,
+        label: String,
+        identifier: String,
+        action: Selector
+    ) {
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
+        button.bezelStyle = .accessoryBar
+        button.isBordered = false
+        button.target = self
+        button.action = action
+        button.toolTip = label
+        button.setAccessibilityIdentifier(identifier)
+        button.widthAnchor.constraint(equalToConstant: AIModelListController.actionButtonWidth).isActive = true
+    }
+
+    func configure(
+        _ model: AIProviderModel,
+        showsDivider: Bool,
+        canMoveUp: Bool = false,
+        canMoveDown: Bool = false
+    ) {
         self.model = model
         self.showsDivider = showsDivider
         idField.stringValue = model.id
@@ -256,6 +362,10 @@ final class AIModelListCell: NSTableCellView, NSTextFieldDelegate {
         outputField.stringValue = model.maxOutputTokens.map(String.init) ?? ""
         contextField.setAccessibilityLabel(strings.t("Context window", "上下文窗口") + ", " + model.id)
         outputField.setAccessibilityLabel(strings.t("Max output", "最大输出") + ", " + model.id)
+        upButton.isEnabled = canMoveUp
+        downButton.isEnabled = canMoveDown
+        upButton.setAccessibilityLabel(strings.t("Move up", "上移") + ", " + model.id)
+        downButton.setAccessibilityLabel(strings.t("Move down", "下移") + ", " + model.id)
         removeButton.setAccessibilityLabel(strings.t("Remove model", "移除模型") + ", " + model.id)
         setAccessibilityLabel(model.id)
         needsDisplay = true
@@ -271,6 +381,14 @@ final class AIModelListCell: NSTableCellView, NSTextFieldDelegate {
         guard edited != model else { return }
         model = edited
         onCommit?(edited)
+    }
+
+    @objc private func moveModelUp() {
+        onMove?(model.id, -1)
+    }
+
+    @objc private func moveModelDown() {
+        onMove?(model.id, 1)
     }
 
     @objc private func remove() {

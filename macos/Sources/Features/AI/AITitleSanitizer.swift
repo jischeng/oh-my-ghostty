@@ -157,13 +157,17 @@ enum AITitleSanitizer {
     }
 
     static func width(_ text: String) -> Int {
-        text.reduce(0) { $0 + width($1) }
+        text.reduce(0) { $0 + displayWidth(of: $1) }
     }
 
-    private static func width(_ character: Character) -> Int {
+    static func displayWidth(of character: Character) -> Int {
         let scalars = character.unicodeScalars
         guard !scalars.allSatisfy({ isZeroWidth($0.value) }) else { return 0 }
         return scalars.contains { isWide($0.value) } ? 2 : 1
+    }
+
+    private static func width(_ character: Character) -> Int {
+        displayWidth(of: character)
     }
 
     private static func isZeroWidth(_ value: UInt32) -> Bool {

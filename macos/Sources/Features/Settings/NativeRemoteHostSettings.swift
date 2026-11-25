@@ -17,11 +17,11 @@ extension NativeSettingsController {
         form.row("~/.ssh/config", control: SettingsActionButton(text("Edit…", "编辑…")) {
             NSWorkspace.shared.open(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh/config"))
         })
-        more(form, text("Discovery options", "主机发现选项")) { [weak self] page in
-            guard let self else { return }
-            page.section(self.text("Discovery", "发现"))
-            page.toggle(self.text("Add hosts when connected", "连接后自动添加主机"), value: self.registry.automaticallyRegister) { [weak registry = self.registry] in registry?.automaticallyRegister = $0
-            }
+        form.toggle(
+            text("Add hosts when connected", "连接后自动添加主机"),
+            value: registry.automaticallyRegister
+        ) { [weak registry] in
+            registry?.automaticallyRegister = $0
         }
     }
 
@@ -67,7 +67,10 @@ extension NativeSettingsController {
                         help: self.text("Required for background sessions on this host.", "用于此主机的后台会话。")) { [weak self] in
                 self?.registry.configure(id, runtime: $0)
             }
-            form.toggle(self.text("Install Agent Hooks", "自动安装 Agent Hooks"), value: host.autoInstallHooks ?? true) { [weak self] value in
+            form.toggle(
+                self.text("Install Agent Hooks", "自动安装 Agent Hooks"),
+                value: host.autoInstallHooks ?? self.agents.policy(for: id).updateHooksAutomatically
+            ) { [weak self] value in
                 guard let self else { return }
                 self.registry.configure(id, hooks: value)
                 var policy = self.agents.policy(for: id)
@@ -230,9 +233,10 @@ extension NativeSettingsController {
         form.retained.append(token)
     }
 
-    /// Cards 4 & 5 of the AI page: terminal Coding Agent integration, then notifications & history.
+    /// Cards 2 & 3 of the AI page: Terminal Coding Agents, then Agent History.
     func agentOverview(_ form: NativeSettingsForm) {
         form.section(strings.terminalCodingAgentsSection)
+        toggle(form, strings.agentStatusHooksLabel, \.agentStatusHooksEnabled, help: strings.agentStatusHooksHelp)
         let localLink = form.link(
             text("Coding Agents on This Mac", "本机 Agent 状态扩展与 CLI"),
             subtitle: localCodingAgentsSummary()
@@ -240,39 +244,8 @@ extension NativeSettingsController {
             self?.showAgents(target: AgentIntegrationManager.localID)
         }
         localLink?.setAccessibilityIdentifier("settings.ai.coding-agents.local")
-        toggle(form, strings.agentStatusHooksLabel, \.agentStatusHooksEnabled, help: strings.agentStatusHooksHelp)
-        toggle(form, strings.openQuickInputOnAgentStartLabel, \.openQuickInputOnAgentStart,
-               help: strings.openQuickInputOnAgentStartCaption)
-        toggle(form, strings.openQuickInputOnAgentCompleteLabel, \.openQuickInputOnAgentComplete,
-               help: strings.openQuickInputOnAgentCompleteCaption)
 
-        form.section(strings.agentNotificationsAndHistorySection)
-        toggle(form, strings.notifyTaskCompleteLabel, \.notifyTaskComplete)
-        toggle(form, strings.notifyAttentionLabel, \.notifyAttention)
-        toggle(form, strings.notificationSoundLabel, \.notificationSound)
-        let tones = AgentNotificationSoundTone.allCases
-        let tonePopup = SettingsPopup(
-            titles: tones.map { strings.notificationSoundToneTitle($0) },
-            selected: tones.firstIndex(of: settings.notificationSoundTone) ?? 0
-        ) { [weak settings] index in
-            guard tones.indices.contains(index) else { return }
-            let tone = tones[index]
-            settings?.notificationSoundTone = tone
-            AgentActivityNotification.previewSound(tone)
-        }
-        tonePopup.isEnabled = settings.notificationSound
-        form.row(strings.notificationSoundToneLabel, control: tonePopup)
-        let syncToneControl = { [weak settings, weak tonePopup] in
-            guard let settings, let tonePopup else { return }
-            tonePopup.isEnabled = settings.notificationSound
-            tonePopup.selectItem(at: tones.firstIndex(of: settings.notificationSoundTone) ?? 0)
-        }
-        form.refreshers.append(syncToneControl)
-        form.retained.append(
-            settings.$notificationSound.combineLatest(settings.$notificationSoundTone)
-                .receive(on: RunLoop.main)
-                .sink { _ in syncToneControl() }
-        )
+        form.section(strings.agentHistorySection)
         number(form, strings.agentHistoryLimitLabel, \.agentHistoryLimit, range: 100...50000, step: 100,
                help: strings.agentHistoryLimitCaption)
         toggle(form, strings.agentHistoryBackgroundIndexingLabel, \.agentHistoryBackgroundIndexing,
@@ -347,29 +320,6 @@ extension NativeSettingsController {
             if $0 { policy.checkAutomatically = true }
             self.agents.setPolicy(policy, for: target)
         }
-        form.link(text("Check schedule", "检查计划")) { [weak self] in
-            guard let self else { return }
-            self.push(self.text("Check schedule", "检查计划"), route: "agents:" + target + ":schedule",
-                      previous: { [weak self] in self?.refreshAgents(target) }, build: { page in
-                self.maintenanceSchedule(target, form: page)
-            })
-        }
-        if local {
-            form.row(
-                strings.exportSSHInstallerButton,
-                subtitle: text("Export a standalone script for manual setup on restricted SSH hosts.",
-                               "导出独立安装脚本，供在受限 SSH 主机上审阅并手动执行。"),
-                control: SettingsActionButton(text("Export…", "导出…")) { [weak self] in
-                    self?.exportHooks()
-                }
-            )
-        }
-        observeTarget(target, form: form)
-    }
-
-    private func maintenanceSchedule(_ target: String, form: NativeSettingsForm) {
-        let policy = agents.policy(for: target)
-        form.section(text("Maintenance", "维护"))
         form.toggle(strings.agentMaintenance, value: policy.checkAutomatically) { [weak self] in
             guard let self else { return }; var policy = self.agents.policy(for: target)
             policy.checkAutomatically = $0; self.agents.setPolicy(policy, for: target)
@@ -385,9 +335,21 @@ extension NativeSettingsController {
             })
         if let checked = policy.lastSuccess { form.note(strings.agentLastChecked + " " + checked.formatted()) }
         if let message = policy.lastMaintenanceError {
-            form.row(text("Last check did not finish", "上次检查未完成"), control: SettingsActionButton(text("Details…", "详情…")) { [weak self] in self?.showDetails(message)
+            form.row(text("Last check did not finish", "上次检查未完成"), control: SettingsActionButton(text("Details…", "详情…")) { [weak self] in
+                self?.showDetails(message)
             })
         }
+        if local {
+            form.row(
+                strings.exportSSHInstallerButton,
+                subtitle: text("Export a standalone script for manual setup on restricted SSH hosts.",
+                               "导出独立安装脚本，供在受限 SSH 主机上审阅并手动执行。"),
+                control: SettingsActionButton(text("Export…", "导出…")) { [weak self] in
+                    self?.exportHooks()
+                }
+            )
+        }
+        observeTarget(target, form: form)
     }
 
     private func refreshAgents(_ target: String) {

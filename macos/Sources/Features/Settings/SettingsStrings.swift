@@ -275,6 +275,13 @@ struct SettingsStrings: Equatable, Sendable {
         )
     }
     var showSidebarLabel: String { t("Show Sidebar", "显示侧边栏") }
+    var sidebarViewModeLabel: String { t("Default Sidebar View", "默认侧边栏视图") }
+    func sidebarViewModeTitle(_ mode: GhosttyTabSidebarViewMode) -> String {
+        switch mode {
+        case .tabs: t("Tabs List", "普通标签列表")
+        case .inbox: t("Inbox", "收件箱")
+        }
+    }
     var sidebarWidthLabel: String { t("Sidebar Width", "侧边栏宽度") }
     var rememberSidebarWidthLabel: String {
         t("Remember Resized Width", "记住调整后的宽度")
@@ -968,12 +975,12 @@ struct SettingsStrings: Equatable, Sendable {
 
     var aiTitleModelLabel: String { t("Title Model", "命名模型") }
     var aiTitleModelUnset: String {
-        t("Not set: select a model from an API service above to generate titles.",
-          "未选择：请从上方 API 服务中选择一个模型用于生成标题。")
+        t("Not set: choose a model from an API service configured in AI settings.",
+          "未选择：请从「AI」页面配置的 API 服务中选择一个模型。")
     }
     var aiTitleModelCaption: String {
-        t("Uses an API service above. OMG sends only the first prompt with likely secrets removed.",
-          "使用上方配置的 API 服务。仅发送脱敏后的首条提示词。")
+        t("Uses an API service from AI settings. Sends the redacted first prompt plus optional project folder and session title context.",
+          "使用「AI」页面配置的 API 服务；发送脱敏后的首条提示词及可选的项目目录名与会话标题上下文。")
     }
 
     static func aiBaseURLPlaceholder(_ kind: AIEndpointProtocol) -> String {

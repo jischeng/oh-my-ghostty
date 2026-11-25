@@ -47,14 +47,17 @@ final class NativeSettingsController: NSViewController, NSTableViewDataSource, N
     /// Seams of the AI page: where API keys are kept, how API connections are called
     /// and how the models of installed agents are discovered.
     var aiCredentials: AICredentialStore = .shared
-    /// An API connection added from the AI page and not edited yet; leaving it untouched discards it.
-    var aiConnectionDraft: UUID?
     var aiHTTPClient = AIHTTPClient()
     var aiAgentCatalog: AIAgentModelCatalog = .shared
+    /// Active modal sheet controller (also accessible in headless unit tests).
+    var activeModalSheet: GitCommitSettingsPanelController?
     var hostChoices: @Sendable () async -> [SSHRegistrationChoice] = { await SSHConfigurationCatalog.choices(live: []) }
     private(set) var selection: OhMyGhosttySettingsTab
     private let sidebar = NSTableView()
     private let sidebarSurface = NativeSettingsCanvas()
+    private let sidebarDivider = NSBox()
+    private var searchTopConstraint: NSLayoutConstraint?
+    private var headerTopConstraint: NSLayoutConstraint?
     private var palette: OMGThemePalette?
     private let search = NSSearchField()
     var searchField: NSSearchField { search }
@@ -90,13 +93,15 @@ final class NativeSettingsController: NSViewController, NSTableViewDataSource, N
     func isShowing(_ route: String) -> Bool { routeID == route }
 
     override func loadView() {
-        view = NativeSettingsCanvas()
+        let rootCanvas = NativeSettingsCanvas()
+        rootCanvas.onWindowDidChange = { [weak self] in self?.updateChromeInsets() }
+        view = rootCanvas
         let side = sidebarSurface
         search.placeholderString = strings.settingsSearch
         search.delegate = self
         search.sendsSearchStringImmediately = true
         sidebar.headerView = nil
-        sidebar.rowHeight = 36
+        sidebar.rowHeight = 34
         sidebar.style = .sourceList
         sidebar.backgroundColor = .clear
         sidebar.addTableColumn(NSTableColumn(identifier: .init("category")))
@@ -110,7 +115,11 @@ final class NativeSettingsController: NSViewController, NSTableViewDataSource, N
         scroll.documentView = sidebar
         side.addSubview(search)
         side.addSubview(scroll)
+        sidebarDivider.boxType = .custom
+        sidebarDivider.borderType = .noBorder
+        sidebarDivider.fillColor = NSColor.separatorColor.withAlphaComponent(0.55)
         view.addSubview(side)
+        view.addSubview(sidebarDivider)
         titleLabel.font = .systemFont(ofSize: 20, weight: .semibold)
         back.bezelStyle = .inline
         back.title = ""
@@ -130,21 +139,31 @@ final class NativeSettingsController: NSViewController, NSTableViewDataSource, N
         header.spacing = 12
         view.addSubview(header)
         view.addSubview(content)
-        for child in [side, search, scroll, header, content] { child.translatesAutoresizingMaskIntoConstraints = false }
+        for child in [side, sidebarDivider, search, scroll, header, content] {
+            child.translatesAutoresizingMaskIntoConstraints = false
+        }
+        let searchTop = search.topAnchor.constraint(equalTo: side.topAnchor, constant: 16)
+        let headerTop = header.topAnchor.constraint(equalTo: view.topAnchor, constant: 14)
+        searchTopConstraint = searchTop
+        headerTopConstraint = headerTop
         NSLayoutConstraint.activate([
             side.leadingAnchor.constraint(equalTo: view.leadingAnchor), side.topAnchor.constraint(equalTo: view.topAnchor),
             side.bottomAnchor.constraint(equalTo: view.bottomAnchor), side.widthAnchor.constraint(equalToConstant: 210),
-            search.topAnchor.constraint(equalTo: side.topAnchor, constant: 16),
+            sidebarDivider.leadingAnchor.constraint(equalTo: side.trailingAnchor),
+            sidebarDivider.topAnchor.constraint(equalTo: view.topAnchor),
+            sidebarDivider.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            sidebarDivider.widthAnchor.constraint(equalToConstant: 1),
+            searchTop,
             search.leadingAnchor.constraint(equalTo: side.leadingAnchor, constant: 14),
             search.trailingAnchor.constraint(equalTo: side.trailingAnchor, constant: -14),
-            scroll.topAnchor.constraint(equalTo: search.bottomAnchor, constant: 14),
+            scroll.topAnchor.constraint(equalTo: search.bottomAnchor, constant: 12),
             scroll.leadingAnchor.constraint(equalTo: side.leadingAnchor, constant: 8),
             scroll.trailingAnchor.constraint(equalTo: side.trailingAnchor, constant: -8),
             scroll.bottomAnchor.constraint(equalTo: side.bottomAnchor, constant: -12),
             header.leadingAnchor.constraint(equalTo: side.trailingAnchor, constant: 28),
-            header.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -28),
-            header.topAnchor.constraint(equalTo: view.topAnchor, constant: 14), header.heightAnchor.constraint(equalToConstant: 36),
-            content.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 10),
+            header.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -32),
+            headerTop, header.heightAnchor.constraint(equalToConstant: 36),
+            content.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 8),
             content.leadingAnchor.constraint(equalTo: side.trailingAnchor), content.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             content.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
@@ -288,11 +307,34 @@ final class NativeSettingsController: NSViewController, NSTableViewDataSource, N
         back.isHidden = history.isEmpty
     }
 
+    func updateChromeInsets() {
+        let usesFullSizeTitlebar = view.window?.styleMask.contains(.fullSizeContentView) == true
+        searchTopConstraint?.constant = usesFullSizeTitlebar ? 40 : 16
+        headerTopConstraint?.constant = usesFullSizeTitlebar ? 18 : 14
+    }
+
     func applyPalette(_ palette: OMGThemePalette) {
         self.palette = palette
         (view as? NativeSettingsCanvas)?.background = palette.background
-        sidebarSurface.background = palette.background.blended(withFraction: 0.025, of: palette.foreground)
+        sidebarSurface.background = palette.background.blended(withFraction: 0.035, of: palette.foreground)
+        sidebarDivider.fillColor = palette.foreground.withAlphaComponent(0.10)
         (page as? NativeSettingsForm)?.applyPalette(palette)
+    }
+
+    func presentModalSheet(_ sheet: GitCommitSettingsPanelController, title: String, size: NSSize) {
+        if let existing = activeModalSheet, !existing.finished {
+            existing.closePanel()
+        }
+        activeModalSheet = sheet
+        _ = sheet.view
+        sheet.onSheetDidEnd = { [weak self, weak sheet] in
+            if self?.activeModalSheet === sheet {
+                self?.activeModalSheet = nil
+            }
+        }
+        if let parent = view.window {
+            GitCommitAISettingsPanel.present(sheet, title: title, size: size, from: parent)
+        }
     }
 
     func setRoute(_ id: String) { routeID = id }
@@ -304,8 +346,8 @@ final class NativeSettingsController: NSViewController, NSTableViewDataSource, N
         let policy = settings.runtimePolicy
         if !settings.runtimeExpiration.isEmpty, policy.expiresAt == nil {
             throw NSError(domain: "OMGSettings", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: text("Choose a valid expiration date in Session Options.",
-                                                                   "请在“会话选项”中选择有效的截止时间。")])
+                          userInfo: [NSLocalizedDescriptionKey: text("Choose a valid expiration date in Persistent Terminal Sessions.",
+                                                                   "请在“持久终端会话”中选择有效的截止时间。")])
         }
         return policy
     }
@@ -376,6 +418,9 @@ final class NativeSettingsController: NSViewController, NSTableViewDataSource, N
     func core(_ key: String, in form: NativeSettingsForm) {
         if let field = CoreSetting.find(key) { core(field, in: form) }
     }
+    func coreRow(_ key: String, in form: NativeSettingsForm) {
+        if let field = CoreSetting.find(key) { core(field, in: form) }
+    }
     private func core(_ field: CoreSetting, in form: NativeSettingsForm) {
         let values = [""] + field.values
         form.row(field.title(strings), control: SettingsPopup(
@@ -393,32 +438,10 @@ final class NativeSettingsController: NSViewController, NSTableViewDataSource, N
         guard ghostty_config_get(config, &value, field.key, UInt(field.key.utf8.count)) else { return base }
         return base + text(value ? " (On)" : " (Off)", value ? "（开启）" : "（关闭）")
     }
-    func more(_ form: NativeSettingsForm, _ title: String, build: @escaping (NativeSettingsForm) -> Void) {
-        let tab = selection
-        let action = { [weak self] in
-            guard let self else { return }
-            self.push(title, previous: { [weak self] in self?.select(tab) }, build: build)
-        }
-        secondaryPages[title] = action
-        form.link(title, action: action)
-    }
 
     func navigate(to entry: SettingsSearchEntry, query: String = "") {
         select(entry.tab)
-        if entry.id.hasPrefix("core:"),
-           let group = CoreSetting.Group(rawValue: String(entry.id.dropFirst(5))),
-           [.clipboard, .mouse, .keyboard, .notifications].contains(group) {
-            push(entry.title, previous: { [weak self] in self?.select(entry.tab) }, build: { [weak self] in self?.core(group, in: $0) })
-            return
-        }
-        var secondary = entry.title
-        if entry.tab == .terminal && entry.id == "terminal:runtime" &&
-            !query.localizedCaseInsensitiveContains("keep") && !query.contains("退出") {
-            secondary = text("Session options", "会话选项")
-        } else if entry.tab == .controls && (query.localizedCaseInsensitiveContains("history") || query.contains("历史")) {
-            secondary = strings.quickInputHistoryTitle
-        }
-        if let open = secondaryPages[secondary] { open(); return }
+        if let open = secondaryPages[entry.title] { open(); return }
         (page as? NativeSettingsForm)?.scrollTo(entry.anchor)
     }
 }

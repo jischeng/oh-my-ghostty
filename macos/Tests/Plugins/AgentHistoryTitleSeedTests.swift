@@ -98,12 +98,14 @@ struct AgentHistoryTitleSeedTests {
         ]
         try write(lines, to: file)
         #expect(await seed()?.native == "Login flake")
+        #expect(await seed()?.isUserRenamed == true)
         #expect(await seed()?.firstPrompt?.hasPrefix("Fix the flaky login test") == true)
 
         // Clearing the name gives the generated title back.
         lines.append(try name("custom-title", "customTitle", ""))
         try write(lines, to: file)
         #expect(await seed()?.native == "Generated later")
+        #expect(await seed()?.isUserRenamed == false)
 
         // The History list keeps naming the session after its opening prompt.
         let sessions = await AgentHistoryStore.load(

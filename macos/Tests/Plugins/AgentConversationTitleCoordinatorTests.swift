@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import Foundation
 import Testing
@@ -794,5 +795,146 @@ struct AgentConversationTitleCoordinatorTests {
         await asciiChinese.coordinator.waitUntilIdle()
         #expect(asciiChinese.record?.title == "OAuth2 PKCE")
         #expect(await asciiChinese.generator.prompts.count == 1)
+    }
+
+    @Test func plainNonAgentTabPreservesManualTitleOverrideAndDisablesAutoRenameMenuItem() throws {
+        let savedMode = OhMyGhosttySettings.shared.agentSessionTitleMode
+        OhMyGhosttySettings.shared.agentSessionTitleMode = .generate
+        defer { OhMyGhosttySettings.shared.agentSessionTitleMode = savedMode }
+
+        let workspaceFixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { workspaceFixture.close() }
+        let plainTab = try workspaceFixture.tab()
+        let agentTab = try workspaceFixture.tab()
+        let agentSurface = try #require(agentTab.surfaceTree.first)
+        let conversation = try #require(AgentConversationID("abababab-cdcd-4efe-8123-456789abcdef"))
+        agentTab.adoptAgentResumeDescriptor(
+            .init(agent: .claude, conversationID: conversation, scope: .local, workingDirectory: "/repo"),
+            for: agentSurface
+        )
+
+        #expect(!plainTab.canAutoRenameTab)
+        #expect(agentTab.canAutoRenameTab)
+
+        plainTab.titleOverride = "My Dev Shell"
+        plainTab.autoRenameTab(force: true)
+        #expect(plainTab.titleOverride == "My Dev Shell")
+
+        let strings = ChromeStrings.current
+        let plainMenu = NativeTabContextMenu.make(for: plainTab, host: plainTab)
+        let plainItem = try #require(plainMenu.items.first { $0.title == strings.autoRenameTab })
+        #expect(!plainItem.isEnabled)
+
+        let agentMenu = NativeTabContextMenu.make(for: agentTab, host: agentTab)
+        let agentItem = try #require(agentMenu.items.first { $0.title == strings.autoRenameTab })
+        #expect(agentItem.isEnabled)
+    }
+
+    @Test func promptFallbackRedactsSecretsAndFailedForcedRenameNeverClobbersGeneratedTitle() async {
+        let secretPrompt = "Fix deploy auth with api_key=sk-1234567890abcdefghijklmnop"
+        let unconfigured = Fixture(
+            seeds: Seeds(rest: Seed(native: nil, firstPrompt: secretPrompt)),
+            generated: nil,
+            mode: .generate
+        )
+        unconfigured.request(.working)
+        await unconfigured.coordinator.waitUntilIdle()
+        let storedFallback = unconfigured.record?.title ?? ""
+        #expect(unconfigured.record?.source == .prompt)
+        #expect(!storedFallback.contains("sk-1234567890"))
+
+        // An existing `.generated` title survives a failed forced rename (`generated: nil`)
+        // and is never fed back into the generator when `seed == nil` (offline SSH host).
+        let offline = Fixture(
+            seeds: Seeds([
+                Seed(native: "Verbose native sentence that was already shortened", firstPrompt: secretPrompt),
+                nil,
+            ], rest: nil),
+            generated: nil,
+            mode: .generate
+        )
+        offline.store.set(
+            "精简短标题",
+            source: .generated,
+            agent: offline.target.agent,
+            conversationID: offline.target.conversationID,
+            force: true,
+            supersededNativeTitle: "Verbose native sentence that was already shortened"
+        )
+        offline.request(.done, force: true, manualTabID: UUID())
+        await offline.coordinator.waitUntilIdle()
+        #expect(offline.record?.title == "精简短标题")
+        #expect(offline.record?.source == .generated)
+        #expect(await offline.generator.prompts.count == 1)
+
+        // Second forced rename with `seed == nil` does not send `"精简短标题"` back to the LLM.
+        offline.request(.done, force: true, manualTabID: UUID())
+        await offline.coordinator.waitUntilIdle()
+        #expect(await offline.generator.prompts.count == 1)
+        #expect(offline.record?.title == "精简短标题")
+    }
+
+    @Test func explicitUserCLIRenameSurvivesAlwaysUseAIAndLanguageSwitchInvalidatesSettledState() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-cli-rename-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let id = "0f0e0d0c-9999-4888-8777-666655554444"
+        let file = root.appendingPathComponent("-repo/\(id).jsonl")
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let lines = [
+            #"{"type":"user","sessionId":"\#(id)","cwd":"/repo","message":{"role":"user","content":"Refactor auth"}}"#,
+            #"{"type":"ai-title","aiTitle":"Auto title","sessionId":"\#(id)"}"#,
+            #"{"type":"custom-title","customTitle":"My Explicit CLI Name","sessionId":"\#(id)"}"#,
+        ]
+        try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: file)
+        let conversation = try #require(AgentConversationID(id))
+        let seed = try #require(await AgentHistoryStore.titleSeed(
+            agent: .claude,
+            conversationID: conversation,
+            rootURLs: [.claude: root]
+        ))
+        #expect(seed.native == "My Explicit CLI Name")
+        #expect(seed.isUserRenamed)
+
+        let fixture = Fixture(
+            seeds: Seeds(rest: seed),
+            generated: "不应覆盖手动重命名",
+            mode: .generate,
+            alwaysUseAI: true,
+            language: .simplifiedChinese
+        )
+        fixture.store.set(
+            "旧生成标题",
+            source: .generated,
+            agent: fixture.target.agent,
+            conversationID: fixture.target.conversationID,
+            force: true
+        )
+        fixture.request(.done)
+        await fixture.coordinator.waitUntilIdle()
+        #expect(await fixture.generator.prompts.isEmpty)
+        #expect(fixture.record?.title == "My Explicit CLI Name")
+        #expect(fixture.record?.source == .native)
+
+        // Language switch invalidates `settledAt` so an English generated title can localize to Chinese.
+        let langFixture = Fixture(
+            seeds: Seeds(rest: Seed(native: "Investigate flaky CI", firstPrompt: "Investigate flaky CI")),
+            generated: "排查 CI 偶现失败",
+            mode: .generate,
+            alwaysUseAI: false,
+            language: .english
+        )
+        langFixture.store.set(
+            "Flaky CI check",
+            source: .generated,
+            agent: langFixture.target.agent,
+            conversationID: langFixture.target.conversationID,
+            force: true
+        )
+        langFixture.language = .simplifiedChinese
+        langFixture.coordinator.invalidateSettledState()
+        langFixture.request(.done)
+        await langFixture.coordinator.waitUntilIdle()
+        #expect(langFixture.record?.title == "排查 CI 偶现失败")
     }
 }

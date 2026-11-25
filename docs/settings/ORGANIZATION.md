@@ -5,43 +5,33 @@ Otty is a visual/information-architecture reference, not a feature-parity requir
 
 | Destination | Owned settings |
 | --- | --- |
-| General | Language, terminal close confirmation, quit behavior |
-| Shell & Sessions | Shell integration, working-directory inheritance, startup/session restoration, terminal notifications |
-| Input & Controls | Quick Input size/history/privacy, terminal selection, clipboard permissions/paste safety, mouse focus, Option-as-Alt |
-| Editor | File/directory destination, editor keymap, wrapping/pairs, editor theme/font/tab width |
-| AI | Model Services (API services with keys & model lists, plus a consolidated Local CLI Models subpage), Automatic Tab Titles (naming mode, always-shorten switch, title model), Git Commit & PR Messages (ordered fallback models & custom prompt), Terminal Coding Agents (local status extensions/CLI setup, live status badge toggle, automatic Quick Input opening), Agent Notifications & History (notifications, sound tone, history limit & background indexing) |
-| Views & Tabs | Layout & Sidebar (horizontal/vertical tabs, sidebar visibility/width/remembered width), Tabs List (grouping/order/path), Inbox View (inbox grouping/order/Continue window), Display & Resize (row density/icon size/shortcut badges/resize rendering/reset) |
-| Appearance | Terminal theme, fonts, opacity/blur, cursor and font inheritance |
-| Shortcuts | Quick Input and Inspector shortcut recorders; original Ghostty keybinding configuration access |
-| Git | Auto-fetch interval, and AI Commit Messages (summary link to AI settings + custom commit prompt) |
-| Remote Machines | Explicit SSH host registration, connection setup, and cached Agent inventory |
+| General | Language, terminal close confirmation, quit behavior, and unified Notifications (terminal desktop notifications + Agent task completion/attention notifications & sound tone) |
+| Appearance | Window/OMG theme, fonts, opacity/blur, cursor, focused split border, and font inheritance |
+| Views & Tabs | Layout & Sidebar (horizontal/vertical tabs, default sidebar view, sidebar visibility/width/remembered width), Tabs List (grouping/order/path), Inbox View (inbox grouping/order/Continue window), Automatic Tab Titles (naming mode, always-shorten switch, title model sheet), Display & Resize (row density/icon size/shortcut badges/resize rendering/reset) |
+| Shell & Sessions | Session recovery on launch, new tab/split inheritance, persistent terminal sessions (background runtime toggles, keep-on-quit controls, detached lifetime, expiration, Agent completion cleanup), shell integration |
+| Input & Controls | Quick Input (composer height/opacity, auto-open on Agent start/complete, Control-J newline, Agent draft import), Sent History, text selection, clipboard permissions/paste safety, mouse focus, Option-as-Alt |
+| Editor | File/directory destination, editor keymap, wrapping/pairs, typography, inline Editor Theme (background mode, syntax theme, opacity, blur), reset |
+| Shortcuts | Quick Input, sidebar/inbox/inspector/workspace shortcut recorders, number shortcut families, Ghostty keybinding configuration access |
+| AI | Unified Model Services (API services managed via modal sheets without draft leakage, alongside Local CLI model sheets in consistent `Codex`, `Claude Code`, `Pi`, `OpenCode` order), Terminal Coding Agents (live status toggle & local status extension/CLI setup), Agent History (session limit & background indexing) |
+| Git | Auto-fetch interval, and AI Commit & PR Messages (ordered fallback models added from one unified API + Local CLI picker sheet, plus custom commit prompt sheet) |
+| Remote Machines | Explicit SSH host registration, connection setup, inline host discovery toggle, and cached Agent inventory |
 | Mobile Devices | LAN / Tailscale mobile gateway pairing and provisioning |
-| Plugins | Official and local plugin installation/management |
-| Advanced | OMG/Ghostty config locations, precedence, open/reload/reveal actions |
+| Plugins | Official and local plugin installation/management with inline version and update controls |
+| Advanced | OMG/Ghostty config locations, precedence, open/reload/reveal actions, and OMG Doctor diagnostics |
 
 ## Search and shared layout
 
 Sidebar search accepts Chinese/English terms and persisted setting IDs. Results
-navigate to their owning section, rather than inventing a second editable copy.
-`SettingsSearchCatalog` maps descriptors by the most specific key prefix; unknown
-future descriptors fall back to Advanced. Tests require exactly one destination per
-descriptor. `OMGSettingsRow` provides a label/caption with a trailing control;
-`OMGSettingsSection` gives sections stable scroll anchors and themed cards. Controls
-must remain usable at the 720-point minimum window width, in both languages and
-appearances. Long warnings and destructive actions retain their original semantics.
-
-Settings controls share a 32-point action height, subtle themed background/border,
-consistent corner radius and trailing alignment. `OMGSettingsPicker` draws a full-width
-trigger with a single trailing chevron; its transparent native button opens an `NSMenu`
-for keyboard/type-ahead and accessibility, with a checkmark on the current value.
-This avoids the macOS SwiftUI Menu bridge discarding custom label layouts. Menu
-selection uses captured values, not mutable list positions. Disabled controls cannot
-commit changes. Short choices use `OMGSettingsSegments`; numeric fields use direct
-editing plus minus/plus controls. Destructive buttons remain red and keep their
-existing confirmations. The AI page keeps its `.agents` identifier, so deep links
-and the `agents.*` setting keys are unchanged, but is labelled **AI** everywhere:
-it lists the model providers and the model chosen for each task above the Agent
-integration it already held.
+navigate directly to their owning section on the page without redundant secondary
+menus or duplicate editable copies. `SettingsSearchCatalog` maps descriptors by
+the most specific key prefix; unknown future descriptors fall back to Advanced.
+Tests require exactly one destination per descriptor and verify that every search
+entry resolves to a live anchor on its destination page. Modal configuration tasks
+(creating/editing an API service, inspecting CLI models, choosing task models,
+editing custom prompts, adding an SSH host) use native AppKit sheets rather than
+mutating settings eagerly or pushing multi-level navigation stacks. The AI page
+keeps its `.agents` identifier so deep links and `agents.*` setting keys remain
+unchanged while presenting general-purpose AI providers and Coding Agent setup.
 
 ## Optional core behavior overrides
 

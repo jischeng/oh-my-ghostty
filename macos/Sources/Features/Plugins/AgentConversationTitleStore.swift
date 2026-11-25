@@ -335,7 +335,7 @@ final class AgentConversationTitleStore: ObservableObject {
         var result = ""
         var firstDropped: Character?
         for character in line {
-            let width = isWide(character) ? 2 : 1
+            let width = AITitleSanitizer.displayWidth(of: character)
             guard used + width <= columns else {
                 firstDropped = character
                 break
@@ -347,8 +347,8 @@ final class AgentConversationTitleStore: ObservableObject {
         if let lastKept = result.last,
            !lastKept.isWhitespace,
            !firstDropped.isWhitespace,
-           !isWide(lastKept),
-           !isWide(firstDropped),
+           AITitleSanitizer.displayWidth(of: lastKept) == 1,
+           AITitleSanitizer.displayWidth(of: firstDropped) == 1,
            let spaceIndex = result.lastIndex(where: \.isWhitespace) {
             let wordBounded = String(result[..<spaceIndex]).trimmingCharacters(in: .whitespaces)
             if !wordBounded.isEmpty {
@@ -383,18 +383,5 @@ final class AgentConversationTitleStore: ObservableObject {
 
     nonisolated private static func isDirectionOverride(_ scalar: Unicode.Scalar) -> Bool {
         (0x202A...0x202E).contains(scalar.value) || (0x2066...0x2069).contains(scalar.value)
-    }
-
-    /// East Asian wide and emoji characters occupy two columns in a tab row.
-    nonisolated private static func isWide(_ character: Character) -> Bool {
-        guard let value = character.unicodeScalars.first?.value else { return false }
-        switch value {
-        case 0x1100...0x115F, 0x2E80...0xA4CF, 0xAC00...0xD7A3, 0xF900...0xFAFF,
-             0xFE30...0xFE4F, 0xFF00...0xFF60, 0xFFE0...0xFFE6,
-             0x1F300...0x1FAFF, 0x20000...0x3FFFD:
-            return true
-        default:
-            return false
-        }
     }
 }

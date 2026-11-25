@@ -55,36 +55,29 @@ extension NativeSettingsController {
             !official.contains { $0.id == installed.id }
         }
         for manifest in manifests {
-            let enabled = manager.isEnabled(manifest.id)
+            let enabled = manager.isInstalled(manifest.id) && manager.isEnabled(manifest.id)
             let name = manifest.id == SSHPlugin.pluginID ? "SSH" : manifest.id
+            let caption = manifest.id == SSHPlugin.pluginID
+                ? strings.sshPluginCaption
+                : strings.genericPluginCaption
+            let subtitle = "v\(manifest.version) · \(caption)"
             let control = SettingsSwitch(value: enabled) { [weak self] on in
                 do {
                     if !manager.isInstalled(manifest.id) { try manager.installOfficial(manifest.id) }
                     if on { try manager.enable(manifest.id) } else { try manager.disable(manifest.id) }
                 } catch { self?.showError(error) }
             }
-            let details = SettingsActionButton(text("Details…", "详情…")) { [weak self] in
-                guard let self else { return }
-                self.push(name, previous: { [weak self] in self?.select(.plugins) }, build: { page in
-                    page.section(name)
-                    page.row(self.text("Version", "版本"), control: NSTextField(labelWithString: manifest.version))
-                    if official.contains(where: { $0.id == manifest.id }) {
-                        page.row(
-                            self.text("Update package", "更新插件包"),
-                            control: SettingsActionButton(self.text("Update", "更新")) { [weak self] in
-                                do { try manager.installOfficial(manifest.id) } catch { self?.showError(error) }
-                            }
-                        )
-                    }
-                    page.note(
-                        manifest.id == SSHPlugin.pluginID
-                            ? self.strings.sshPluginCaption
-                            : self.strings.genericPluginCaption
-                    )
-                    page.note(manifest.capabilities.map { String(describing: $0) }.joined(separator: " · "))
-                })
+            var actions: [NSView] = []
+            if official.contains(where: { $0.id == manifest.id }), manager.isInstalled(manifest.id) {
+                let update = SettingsActionButton(text("Update", "更新")) { [weak self] in
+                    do { try manager.installOfficial(manifest.id) } catch { self?.showError(error) }
+                }
+                actions.append(update)
             }
-            form.row(name, control: NSStackView(views: [control, details]))
+            actions.append(control)
+            let controlStack = NSStackView(views: actions)
+            controlStack.spacing = 10
+            form.row(name, subtitle: subtitle, control: controlStack)
         }
         form.note(strings.officialPluginsCaption)
 

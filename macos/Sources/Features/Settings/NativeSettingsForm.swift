@@ -329,12 +329,12 @@ final class NativeSettingsForm: NSViewController {
         scroll.documentView = document
         view = scroll
         // Fill the window up to a readable width instead of stretching rows on wide windows.
-        let fill = stack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -28)
+        let fill = stack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -32)
         fill.priority = .defaultHigh
         NSLayoutConstraint.activate([
             document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
             stack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 28),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: document.trailingAnchor, constant: -28),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: document.trailingAnchor, constant: -32),
             fill,
             stack.widthAnchor.constraint(lessThanOrEqualToConstant: 880),
             stack.topAnchor.constraint(equalTo: document.topAnchor, constant: 24),
@@ -497,6 +497,10 @@ final class NativeSettingsForm: NSViewController {
 
     func toggle(_ title: String, value: Bool, help: String? = nil, change: @escaping (Bool) -> Void) {
         row(title, control: SettingsSwitch(value: value, change: change), help: help)
+    }
+
+    func hasAnchor(_ title: String) -> Bool {
+        anchors[title] != nil
     }
 
     func scrollTo(_ title: String) {

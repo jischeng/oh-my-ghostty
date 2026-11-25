@@ -321,6 +321,7 @@ enum GitCommitAISettingsPanel {
 class GitCommitSettingsPanelController: NSViewController, NSWindowDelegate {
     private(set) var finished = false
     private weak var panelWindow: NSWindow?
+    var onSheetDidEnd: (() -> Void)?
 
     override func viewDidAppear() {
         super.viewDidAppear()
@@ -331,11 +332,17 @@ class GitCommitSettingsPanelController: NSViewController, NSWindowDelegate {
     func closePanel() {
         guard !finished else { return }
         finished = true
-        guard let window = panelWindow ?? view.window else { return }
+        guard let window = panelWindow ?? view.window else {
+            didEndSheet()
+            onSheetDidEnd?()
+            return
+        }
         if let parent = window.sheetParent {
             parent.endSheet(window)
         } else {
             window.orderOut(nil)
+            didEndSheet()
+            onSheetDidEnd?()
         }
     }
 
@@ -346,6 +353,7 @@ class GitCommitSettingsPanelController: NSViewController, NSWindowDelegate {
         panel?.contentViewController = nil
         panelWindow = nil
         didEndSheet()
+        onSheetDidEnd?()
     }
 
     func didEndSheet() {}
@@ -470,6 +478,7 @@ final class GitCommitAIPromptController: GitCommitSettingsPanelController, NSTex
 final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
     NSSearchFieldDelegate, NSTableViewDataSource, NSTableViewDelegate {
     private let add: (GitCommitAgent, [String]) -> Void
+    private let catalog: AIAgentModelCatalog
     private var agentTabs: [GitCommitAgentTab] = []
     private let searchField = NSSearchField()
     private let modelTable = NSTableView()
@@ -486,10 +495,10 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
     private let retryButton = NSButton()
     private let selectionField = NSTextField(labelWithString: "")
     private let addButton = NSButton()
-    private var agent = GitCommitAgent.claude
+    private var agent = GitCommitAgent.allCases.first ?? .codex
     private var query = ""
     private var models: [String] = []
-    private var selected: Set<String> = []
+    private var selected: [String] = []
     private var loading = false
     private var loadingID = UUID()
     private var updateInfo: GitACPAdapterUpdateInfo?
@@ -497,8 +506,14 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
     private var updating = false
     private var reloadTask: Task<Void, Never>?
 
-    init(add: @escaping (GitCommitAgent, [String]) -> Void) {
+    init(
+        catalog: AIAgentModelCatalog? = nil,
+        add: @escaping (GitCommitAgent, [String]) -> Void
+    ) {
+        let resolvedCatalog = catalog ?? .shared
+        self.catalog = resolvedCatalog
         self.add = add
+        self.models = resolvedCatalog.entry(GitCommitAgent.allCases.first ?? .codex).models ?? []
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -690,7 +705,7 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
     override func viewDidAppear() {
         super.viewDidAppear()
         view.window?.makeFirstResponder(searchField)
-        if reloadTask == nil { loadModels() }
+        if models.isEmpty, reloadTask == nil { loadModels() }
     }
 
     deinit { reloadTask?.cancel() }
@@ -732,7 +747,11 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
     @objc private func toggleModel(_ sender: NSButton) {
         guard visibleModels.indices.contains(sender.tag) else { return }
         let model = visibleModels[sender.tag]
-        if !selected.insert(model).inserted { selected.remove(model) }
+        if let index = selected.firstIndex(of: model) {
+            selected.remove(at: index)
+        } else {
+            selected.append(model)
+        }
         modelTable.reloadData()
         updateButtons()
     }
@@ -743,13 +762,17 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
         agentTabs.forEach { $0.isSelected = $0.agent == value }
         selected = []
         query = ""
-        models = []
+        models = catalog.entry(value).models ?? []
         searchField.stringValue = ""
         updateInfo = nil
         errorField.stringValue = ""
         updateStatus.stringValue = ""
         modelTable.reloadData()
-        loadModels()
+        if models.isEmpty {
+            loadModels()
+        } else {
+            updateButtons()
+        }
     }
 
     @objc private func reload() { loadModels() }
@@ -777,7 +800,9 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
                 let result = try await GitCommitAIService.models(agent: requestedAgent)
                 guard !finished, !Task.isCancelled, loadingID == id, agent == requestedAgent else { return }
                 models = result
-                selected.formIntersection(Set(result))
+                catalog.recordModels(result, for: requestedAgent)
+                let allowed = Set(result)
+                selected.removeAll { !allowed.contains($0) }
                 modelTable.reloadData()
                 if result.isEmpty {
                     errorField.stringValue = GitL10n.text(
@@ -856,7 +881,9 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
                 )
             } else {
                 models = refreshed
-                selected.formIntersection(Set(refreshed))
+                catalog.recordModels(refreshed, for: .codex)
+                let allowed = Set(refreshed)
+                selected.removeAll { !allowed.contains($0) }
                 updateStatus.stringValue = GitL10n.format("Codex ACP {0} updated; models reloaded.", version)
                 modelTable.reloadData()
             }
@@ -893,7 +920,7 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
     }
 
     @objc private func addSelected() {
-        let routes = GitCommitAIRoute.adding(agent: agent, models: models.filter(selected.contains), to: [])
+        let routes = GitCommitAIRoute.adding(agent: agent, models: selected, to: [])
         guard !routes.isEmpty, !loading, !updating else { return }
         add(agent, routes.map(\.model))
         closePanel()

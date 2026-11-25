@@ -144,7 +144,7 @@ struct GitCommitComposer: View {
     }
 
     private func requestGeneration(from window: NSWindow?) {
-        guard !settings.gitCommitAIRoutes.isEmpty else { SettingsNavigation.open(.agents); return }
+        guard !settings.gitCommitAIRoutes.isEmpty else { SettingsNavigation.open(.git); return }
         guard !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             startGeneration()
             return

@@ -68,6 +68,34 @@ final class AIAgentModelCatalog: ObservableObject {
         }
     }
 
+    /// Refreshes and awaits discovery for `agent`, sharing any in-flight request and updating the catalog.
+    func refreshAsync(_ agent: GitCommitAgent) async throws -> [String] {
+        if let existingTask = tasks[agent] {
+            await existingTask.value
+            if let error = entry(agent).error {
+                throw NSError(domain: "OMGAIAgentModelCatalog", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: error])
+            }
+            return entry(agent).models ?? []
+        }
+        refresh(agent)
+        if let started = tasks[agent] {
+            await started.value
+        }
+        if let error = entry(agent).error {
+            throw NSError(domain: "OMGAIAgentModelCatalog", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: error])
+        }
+        return entry(agent).models ?? []
+    }
+
+    /// Records externally loaded models so every picker and page observes one consistent list and order.
+    func recordModels(_ models: [String], for agent: GitCommitAgent) {
+        let normalized = models.compactMap(AIModelID.normalized)
+        entries[agent] = Entry(models: normalized, checkedAt: Date(), isLoading: false, error: nil)
+        save()
+    }
+
     private func finish(_ agent: GitCommitAgent, _ result: Result<[String], Error>) {
         tasks[agent] = nil
         var entry = entry(agent)

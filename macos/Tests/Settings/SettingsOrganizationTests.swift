@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import GhosttyKit
 import Testing
@@ -19,9 +20,13 @@ struct SettingsOrganizationTests {
                 #expect(entries.contains { $0.matches(descriptor.id) })
             }
             #expect(entries.first { $0.settingIDs.contains("agents.historyLimit") }?.tab == .agents)
+            #expect(entries.first { $0.settingIDs.contains("notifications.taskComplete") }?.tab == .general)
+            #expect(entries.first { $0.settingIDs.contains("notifications.soundTone") }?.tab == .general)
             #expect(entries.first { $0.settingIDs.contains("sessions.startupMode") }?.tab == .terminal)
             #expect(entries.first { $0.settingIDs.contains("keyboard.quickInputHistoryScope") }?.tab == .controls)
             #expect(entries.first { $0.settingIDs.contains("keyboard.quickInputOpacity") }?.tab == .controls)
+            #expect(entries.first { $0.settingIDs.contains("agents.openQuickInputOnStart") }?.tab == .controls)
+            #expect(entries.first { $0.settingIDs.contains("agents.openQuickInputOnComplete") }?.tab == .controls)
             #expect(entries.first { $0.settingIDs.contains("keyboard.quickInput") }?.tab == .keyboard)
             #expect(entries.first { $0.settingIDs.contains("keyboard.toggleInbox") }?.tab == .keyboard)
             #expect(entries.first { $0.settingIDs.contains("appearance.tabIconSize") }?.tab == .tabs)
@@ -31,23 +36,28 @@ struct SettingsOrganizationTests {
             #expect(entries.first { $0.settingIDs.contains("tabs.inboxGrouping") }?.tab == .tabs)
             #expect(entries.first { $0.settingIDs.contains("tabs.inboxOrdering") }?.tab == .tabs)
             #expect(entries.first { $0.settingIDs.contains("tabs.inboxContinueMinutes") }?.tab == .tabs)
+            #expect(entries.first { $0.settingIDs.contains("editor.backgroundMode") }?.tab == .editor)
             let copy = SettingsStrings(language: language)
             #expect(entries.first { $0.settingIDs.contains("tabs.inboxGrouping") }?.title == copy.inboxViewSection)
             #expect(entries.first { $0.settingIDs.contains("tabs.grouping") }?.title == copy.organizationSection)
             #expect(entries.first { $0.settingIDs.contains("sessions.newTabInheritance") }?.tab == .terminal)
             #expect(entries.first { $0.settingIDs.contains("keyboard.quickInputImportShortcut") }?.tab == .controls)
-            #expect(entries.first { $0.settingIDs.contains("agents.sessionTitle.mode") }?.tab == .agents)
+            #expect(entries.first { $0.settingIDs.contains("agents.sessionTitle.mode") }?.tab == .tabs)
+            #expect(entries.first { $0.prefixes.contains("ai.routes.title") }?.tab == .tabs)
+            #expect(entries.first { $0.prefixes.contains("ai.routes.commit") }?.tab == .git)
+            #expect(entries.first { $0.prefixes.contains("git.commitAI") }?.tab == .git)
             #expect(!entries.contains { entry in entry.settingIDs.contains { $0.hasPrefix("ai.endpoint.") } })
             #expect(entries.contains { $0.matches("inbox") && $0.tab == .tabs })
             #expect(entries.contains { $0.matches("anthropic") && $0.tab == .agents })
-            // The AI page is found by its name and by what it now holds.
+            // The AI page holds general-purpose model services, coding agent hooks, and history.
             #expect(entries.contains { $0.matches("AI") && $0.tab == .agents })
             #expect(entries.first { $0.matches("provider api key") }?.title == copy.aiProvidersSection)
             #expect(entries.first { $0.matches("commit fallback") }?.title == copy.aiTaskModelsSection)
+            #expect(entries.first { $0.matches("commit fallback") }?.tab == .git)
             #expect(entries.contains { $0.matches("提供商") && $0.tab == .agents })
             #expect(entries.contains { $0.matches("context window") && $0.tab == .agents })
             #expect(entries.contains { $0.matches("收件箱") && $0.tab == .tabs })
-            #expect(entries.contains { $0.matches("会话标题") && $0.tab == .agents })
+            #expect(entries.contains { $0.matches("会话标题") && $0.tab == .tabs })
             let focus = entries.first { $0.settingIDs.contains("terminal.focusedSplitBorderPosition") }
             #expect(focus?.tab == .appearance)
             #expect(focus?.anchor == SettingsStrings(language: language).focusedSplitBorderSection)
@@ -61,6 +71,22 @@ struct SettingsOrganizationTests {
             #expect(entries.contains { $0.matches("Shell 集成") && $0.tab == .terminal })
             #expect(!entries.contains { $0.matches("   ") })
             #expect(!entries.contains { $0.matches("not-a-setting-xyz") })
+        }
+    }
+
+    @Test func everySearchCatalogEntryNavigatesToAnExistingAnchorOnItsOwningPage() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        for language in [OhMyGhosttyLanguage.english, .simplifiedChinese] {
+            let settings = OhMyGhosttySettings(fileURL: root.appendingPathComponent("settings-\(language.rawValue).json"))
+            settings.language = language
+            let controller = NativeSettingsController(settings: settings, initialSelection: .general)
+            _ = controller.view
+            for entry in SettingsSearchCatalog.entries(strings: .init(language: language)) {
+                controller.navigate(to: entry)
+                let form = try #require(controller.children.compactMap { $0 as? NativeSettingsForm }.first)
+                #expect(form.hasAnchor(entry.anchor), "Missing anchor '\(entry.anchor)' for \(entry.id) on \(entry.tab)")
+            }
         }
     }
 

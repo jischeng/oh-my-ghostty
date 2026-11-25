@@ -45,7 +45,11 @@ struct GitCommitAISettingsNativeTests {
     }
 
     @Test func addModelsPanelUsesNativePickerSearchAndTableWithoutStartingNetworkWork() {
-        let controller = GitCommitAIAddModelsController { _, _ in }
+        var added: (GitCommitAgent, [String])?
+        let catalog = AIAgentModelCatalog { agent in
+            ["\(agent.rawValue)-alpha", "\(agent.rawValue)-beta", "\(agent.rawValue)-gamma"]
+        }
+        let controller = GitCommitAIAddModelsController(catalog: catalog) { added = ($0, $1) }
         let root = controller.view
         root.frame = NSRect(x: 0, y: 0, width: 520, height: 520)
         root.layoutSubtreeIfNeeded()
@@ -58,10 +62,26 @@ struct GitCommitAISettingsNativeTests {
         #expect(!containsHostingView(root))
         #expect(root.subviews.contains { $0 is NSStackView })
         let tabs = root.findViews(of: GitCommitAgentTab.self)
-        #expect(tabs.map(\.agent) == GitCommitAgent.allCases)
-        #expect(tabs.filter(\.isSelected).map(\.agent) == [.claude])
+        #expect(tabs.map(\.agent) == [.codex, .claude, .pi, .opencode])
+        #expect(tabs.filter(\.isSelected).map(\.agent) == [.codex])
         #expect(root.findViews(of: NSSearchField.self).count == 1)
         #expect(root.findViews(of: NSTableView.self).contains { $0.numberOfColumns == 1 })
+
+        // Pre-populated catalog models share state with the picker and preserve click order.
+        catalog.recordModels(["codex-1", "codex-2", "codex-3"], for: .codex)
+        let preloaded = GitCommitAIAddModelsController(catalog: catalog) { added = ($0, $1) }
+        _ = preloaded.view
+        let table = preloaded.view.findViews(of: NSTableView.self).first
+        #expect(table?.numberOfRows == 3)
+        let row2 = table?.view(atColumn: 0, row: 2, makeIfNecessary: true)
+        let row0 = table?.view(atColumn: 0, row: 0, makeIfNecessary: true)
+        row2?.findViews(of: NSButton.self).first?.performClick(nil)
+        row0?.findViews(of: NSButton.self).first?.performClick(nil)
+        let addBtn = preloaded.view.findViews(of: NSButton.self)
+            .first { $0.accessibilityIdentifier() == "git.commit-ai.models.add" }
+        addBtn?.performClick(nil)
+        #expect(added?.0 == .codex)
+        #expect(added?.1 == ["codex-3", "codex-1"])
     }
 }
 

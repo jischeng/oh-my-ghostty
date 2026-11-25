@@ -33,13 +33,16 @@ enum NativeTabContextMenu {
         let strings = ChromeStrings.current
         let workspaces = tab.workspaceCoordinator.store.workspaces
         let isRenaming = tab.isGeneratingTabTitle
+        let canAutoRename = !isRenaming
+            && tab.canAutoRenameTab
+            && OhMyGhosttySettings.shared.agentSessionTitleMode != .off
         var entries: [NativeMenuEntry] = [
             .action(strings.newTab, symbol: "plus") { [weak tab] in tab?.newVerticalTab() },
             .action(strings.renameTab, symbol: "pencil") { [weak tab] in tab?.promptTabTitle() },
             .action(
                 isRenaming ? strings.renamingTab : strings.autoRenameTab,
                 symbol: "sparkles",
-                enabled: !isRenaming
+                enabled: canAutoRename
             ) { [weak tab] in tab?.autoRenameTab(force: true) },
             .separator,
         ]

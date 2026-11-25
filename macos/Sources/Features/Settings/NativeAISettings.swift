@@ -2,203 +2,119 @@ import AppKit
 import Combine
 
 extension NativeSettingsController {
-    /// The AI page: 5 focused cards covering model services, automatic tab titles,
-    /// Git commit/PR generation, terminal coding agents, and notifications/history.
+    /// The AI page: general-purpose Model Services (API + Local CLIs), Terminal Coding Agents,
+    /// and Agent History. Feature-specific model assignments live on their owning pages
+    /// (`Automatic Tab Titles` in `Views & Tabs`, `AI Commit & PR Messages` in `Git`).
     func aiOverview(_ form: NativeSettingsForm) {
         aiModelServicesSection(form)
-        aiTitleSection(form)
-        aiCommitSection(form)
         agentOverview(form)
     }
 
-    // MARK: Card 1 — Model Services
+    // MARK: Unified Model Services (API + Local CLIs)
 
     private func aiModelServicesSection(_ form: NativeSettingsForm) {
         form.section(strings.aiProvidersSection, caption: strings.aiProvidersFootnote)
+
         for provider in settings.aiProviders {
             let id = provider.id
-            let link = form.link(provider.name, subtitle: strings.aiProviderSummary(provider)) { [weak self] in
-                self?.showAIProvider(id)
+            let enabled = SettingsSwitch(value: provider.enabled) { [weak self] isOn in
+                self?.settings.updateAIProvider(id) { $0.enabled = isOn }
             }
-            link?.setAccessibilityIdentifier("settings.ai.provider." + id.uuidString)
+            enabled.setAccessibilityLabel(provider.name + " · " + text("Enabled", "启用"))
+            let editButton = SettingsActionButton(text("Edit…", "编辑…")) { [weak self] in
+                self?.presentAIProviderSheet(id: id)
+            }
+            editButton.setAccessibilityIdentifier("settings.ai.provider." + id.uuidString)
+            let controls = NSStackView(views: [enabled, editButton])
+            controls.spacing = 10
+            let row = form.row(provider.name, subtitle: strings.aiProviderSummary(provider), control: controls)
+            form.refreshers.append { [weak self, weak enabled] in
+                guard let self, let latest = self.settings.aiProvider(id) else { return }
+                enabled?.state = latest.enabled ? .on : .off
+                row?.setSubtitle(self.strings.aiProviderSummary(latest))
+            }
         }
 
         let addServiceButton = SettingsActionButton(strings.aiAddConnection) { [weak self] in
-            self?.addConnection()
+            self?.presentAIProviderSheet(id: nil)
         }
         addServiceButton.isEnabled = settings.aiProviders.count < AIProvider.maxProviders
         addServiceButton.setAccessibilityLabel(strings.aiAddConnectionHelp)
         addServiceButton.setAccessibilityIdentifier("settings.ai.provider.add")
         let addSubtitle = settings.aiProviders.isEmpty
-            ? text("Add an OpenAI-compatible or Anthropic API endpoint for tab titles and Git messages.",
-                   "添加 OpenAI 兼容或 Anthropic 接口，用于标签页自动命名与 Git 信息生成。")
+            ? text("Connect an OpenAI-compatible or Anthropic endpoint for tab titles and Git messages.",
+                   "连接 OpenAI 兼容或 Anthropic 接口，供标签页命名与 Git 信息生成通用调用。")
             : text("Connect another OpenAI-compatible or Anthropic API endpoint.",
-                   "连接新的 OpenAI 兼容或 Anthropic 接口。")
+                   "添加另一个 OpenAI 兼容或 Anthropic 接口。")
         form.row(strings.aiAddServiceLabel, subtitle: addSubtitle, control: addServiceButton)
 
-        let localCLILink = form.link(
-            strings.aiLocalCLIModelsLabel,
-            subtitle: aiLocalCLIModelsSummary()
-        ) { [weak self] in
-            self?.showAILocalCLIModels()
-        }
-        localCLILink?.setAccessibilityIdentifier("settings.ai.local-cli-models")
-    }
-
-    /// Summary of local CLI model sources without starting any child process.
-    private func aiLocalCLIModelsSummary() -> String {
         let snapshot = agents.snapshot(for: AgentIntegrationManager.localID)
-        let installedNames = GitCommitAgent.allCases.filter { agent in
-            SupportedAgent(rawValue: agent.rawValue).flatMap { snapshot?.cli[$0]?.path } != nil
-        }.map(\.title)
-        let discoveredModels = GitCommitAgent.allCases.reduce(0) { total, agent in
-            total + (aiAgentCatalog.entry(agent).models?.count ?? 0)
-        }
-        var parts: [String] = []
-        if installedNames.isEmpty {
-            parts.append(GitCommitAgent.allCases.map(\.title).joined(separator: text(", ", "、")))
-        } else {
-            parts.append(installedNames.joined(separator: text(", ", "、")))
-        }
-        if discoveredModels > 0 {
-            parts.append(strings.aiModelCount(discoveredModels))
-        } else {
-            parts.append(text("Reuse logged-in CLIs for Git messages without an API key",
-                              "无需 API 密钥，直接复用已登录 CLI 生成 Git 信息"))
-        }
-        return parts.joined(separator: " · ")
-    }
-
-    func showAILocalCLIModels(push: Bool = true) {
-        let title = strings.aiLocalCLIModelsLabel
-        let route = "ai-local-cli-models"
-        let build: (NativeSettingsForm) -> Void = { [weak self] form in
-            guard let self else { return }
-            form.section(
-                title,
-                caption: self.text(
-                    "Use your logged-in local coding CLIs to generate Git commit, tag, and PR messages without entering an API key. Select a CLI to inspect its available models.",
-                    "直接复用本机已登录的编码 CLI 生成 Git 提交、标签与 PR 信息，无需额外配置 API 密钥。点击可查看该 CLI 支持的模型。"
-                )
-            )
-            let snapshot = self.agents.snapshot(for: AgentIntegrationManager.localID)
-            for agent in GitCommitAgent.allCases {
-                let link = form.link(agent.title, subtitle: self.aiAgentSummary(agent, snapshot: snapshot)) { [weak self] in
-                    self?.showAIAgent(agent)
-                }
-                link?.setAccessibilityIdentifier("settings.ai.agent." + agent.rawValue)
+        for agent in GitCommitAgent.allCases {
+            let inspectButton = SettingsActionButton(text("Models…", "模型…")) { [weak self] in
+                self?.presentAICLIProviderSheet(agent)
             }
+            inspectButton.setAccessibilityIdentifier("settings.ai.agent." + agent.rawValue)
+            let row = form.row(
+                agent.title,
+                subtitle: aiAgentSummary(agent, snapshot: snapshot),
+                control: inspectButton
+            )
+            let token = aiAgentCatalog.$entries.receive(on: RunLoop.main).sink { [weak self] _ in
+                guard let self else { return }
+                let latestSnapshot = self.agents.snapshot(for: AgentIntegrationManager.localID)
+                row?.setSubtitle(self.aiAgentSummary(agent, snapshot: latestSnapshot))
+            }
+            form.retained.append(token)
         }
-        if push {
-            self.push(title, route: route, previous: { [weak self] in self?.select(.agents) }, build: build)
-        } else {
-            setRoute(route)
-            let form = NativeSettingsForm()
-            build(form)
-            present(form, title: title)
-        }
-    }
-
-    /// A new connection starts as a draft with nothing in it. Leaving it
-    /// untouched discards it, so the list never collects empty connections.
-    func addConnection() {
-        guard settings.aiProviders.count < AIProvider.maxProviders,
-              let provider = settings.addAIProvider(name: strings.aiNewConnectionName) else { return }
-        showAIProvider(provider.id)
-        aiConnectionDraft = provider.id
-    }
-
-    /// Called when an edited connection page is left.
-    private func discardPristineConnection(_ id: UUID) {
-        guard aiConnectionDraft == id else { return }
-        aiConnectionDraft = nil
-        guard let provider = settings.aiProvider(id),
-              provider.baseURL.isEmpty, provider.models.isEmpty,
-              provider.name == strings.aiNewConnectionName,
-              !aiCredentials.hasAPIKey(for: id) else { return }
-        try? settings.removeAIProvider(id)
-    }
-
-    /// Anchors the model-source menu directly beneath the invoking button.
-    private func showAddModelsMenu(from button: NSButton) {
-        let menu = NSMenu()
-        let api = NSMenuItem(title: text("From API Service…", "从 API 服务添加…"), action: nil, keyEquivalent: "")
-        api.action = #selector(addProviderModelsFromPage)
-        api.target = self
-        let agent = NSMenuItem(title: text("From Local CLI…", "从本机 CLI 添加…"), action: nil, keyEquivalent: "")
-        agent.action = #selector(addAgentModelsFromPage)
-        agent.target = self
-        menu.addItem(api)
-        menu.addItem(agent)
-        let origin = NSPoint(x: 0, y: button.isFlipped ? button.bounds.height + 4 : -4)
-        menu.popUp(positioning: nil, at: origin, in: button)
-    }
-
-    @objc private func addAgentModelsFromPage() {
-        GitCommitAISettingsPanel.presentAddModels(settings: settings, from: view.window)
-    }
-
-    @objc private func addProviderModelsFromPage() {
-        GitCommitAISettingsPanel.presentAddProviderModels(
-            settings: settings,
-            from: view.window,
-            onAddProvider: { [weak self] in self?.addConnection() }
-        )
     }
 
     /// CLI state from the last Agent check, then the model count once known.
-    private func aiAgentSummary(_ agent: GitCommitAgent, snapshot: AgentIntegrationSnapshot?) -> String {
+    func aiAgentSummary(_ agent: GitCommitAgent, snapshot: AgentIntegrationSnapshot?) -> String {
         let cli = SupportedAgent(rawValue: agent.rawValue).flatMap { snapshot?.cli[$0] }
         let version = cli?.displayVersion?.replacingOccurrences(
             of: " (" + agent.title + ")", with: "", options: .anchored)
-        var parts = [cli?.path == nil ? text("Not installed", "未安装")
-                     : version ?? text("Installed", "已安装")]
+        var parts = [
+            text("Local CLI", "本机 CLI"),
+            cli?.path == nil ? text("Not installed", "未安装") : (version ?? text("Installed", "已安装")),
+        ]
         if let models = aiAgentCatalog.entry(agent).models {
             parts.append(strings.aiModelCount(models.count))
         }
         return parts.joined(separator: " · ")
     }
 
-    func showAIAgent(_ agent: GitCommitAgent) {
-        let fromCLIList = isShowing("ai-local-cli-models")
-        push(agent.title, route: "ai-agent:" + agent.rawValue,
-             previous: { [weak self] in
-                 if fromCLIList {
-                     self?.showAILocalCLIModels(push: false)
-                 } else {
-                     self?.select(.agents)
-                 }
-             },
-             build: { [weak self] form in
-                 guard let self else { return }
-                 let page = AIAgentPage(controller: self, agent: agent)
-                 page.build(in: form)
-                 form.retained.append(page)
-             })
-    }
-
-    func showAIProvider(_ id: UUID) {
-        guard let provider = settings.aiProvider(id) else {
-            select(.agents)
-            return
+    func presentAIProviderSheet(id: UUID?) {
+        if let id, settings.aiProvider(id) == nil { return }
+        let isEditing = id != nil
+        let heading = isEditing
+            ? text("Edit API Service", "编辑 API 服务")
+            : text("Add API Service", "添加 API 服务")
+        let sheet = AIProviderSheetController(
+            controller: self,
+            providerID: id
+        ) { [weak self] in
+            guard let self else { return }
+            self.select(self.selection)
         }
-        let route = "ai-provider:" + id.uuidString
-        push(provider.name, route: route,
-             previous: { [weak self] in
-                 self?.select(.agents)
-                 self?.discardPristineConnection(id)
-             },
-             build: { [weak self] form in
-                 guard let self else { return }
-                 let page = AIProviderPage(controller: self, provider: id, route: route)
-                 page.build(in: form)
-                 form.retained.append(page)
-             })
+        presentModalSheet(sheet, title: heading, size: NSSize(width: 600, height: isEditing ? 620 : 580))
     }
 
-    // MARK: Card 2 — Automatic Tab Titles
+    func presentAICLIProviderSheet(_ agent: GitCommitAgent) {
+        let sheet = AICLIProviderSheetController(controller: self, agent: agent)
+        presentModalSheet(sheet, title: agent.title, size: NSSize(width: 560, height: 540))
+    }
 
-    private func aiTitleSection(_ form: NativeSettingsForm) {
+    func presentCommitPromptSheet() {
+        let title = GitL10n.text("Custom commit prompt")
+        let sheet = GitCommitAIPromptController(prompt: settings.gitCommitAIPrompt) { [weak settings] in
+            settings?.gitCommitAIPrompt = $0
+        }
+        presentModalSheet(sheet, title: title, size: NSSize(width: 560, height: 440))
+    }
+
+    // MARK: Automatic Tab Titles (owned by Views & Tabs)
+
+    func aiTitleSection(_ form: NativeSettingsForm) {
         form.section(strings.aiTitleModelGroup)
         let titleModes = AgentSessionTitleMode.allCases
         let titlePopup = SettingsPopup(
@@ -223,11 +139,7 @@ extension NativeSettingsController {
 
         let choose = SettingsActionButton(text("Choose…", "选择…")) { [weak self] in
             guard let self else { return }
-            GitCommitAISettingsPanel.presentTitleModel(
-                settings: self.settings,
-                from: self.view.window,
-                onAddProvider: { [weak self] in self?.addConnection() }
-            )
+            GitCommitAISettingsPanel.presentTitleModel(settings: self.settings, from: self)
         }
         choose.setAccessibilityIdentifier("settings.ai.title.choose-model")
         let clear = SettingsActionButton(text("Clear", "清除")) { [weak settings] in settings?.aiTitleRoute = nil }
@@ -248,14 +160,17 @@ extension NativeSettingsController {
         form.refreshers.append(syncTitleModel)
     }
 
-    // MARK: Card 3 — Git Commit & PR Messages
+    // MARK: Git Commit & PR Messages (owned by Git)
 
-    private func aiCommitSection(_ form: NativeSettingsForm) {
+    func aiCommitSection(_ form: NativeSettingsForm) {
         form.section(strings.aiTaskModelsSection)
-        let addModels = SettingsActionButton(strings.aiAddModels) {}
-        addModels.invoke = { [weak self, weak addModels] in
-            guard let self, let addModels else { return }
-            self.showAddModelsMenu(from: addModels)
+        let addModels = SettingsActionButton(strings.aiAddModels) { [weak self] in
+            guard let self else { return }
+            GitCommitAISettingsPanel.presentUnifiedAddModels(
+                settings: self.settings,
+                catalog: self.aiAgentCatalog,
+                from: self
+            )
         }
         addModels.setAccessibilityIdentifier("settings.ai.commit.add-models")
         let models = form.row(text("Generation Models", "生成模型"), control: addModels)
@@ -272,8 +187,8 @@ extension NativeSettingsController {
             height?.constant = CGFloat(list.count) * GitCommitAIRoutesTable.rowHeight
             routes?.isHidden = list.isEmpty
             models?.setSubtitle(list.isEmpty
-                ? copy.t("No models yet. Add one to generate commit, tag, and PR messages.",
-                         "尚未添加模型。添加后即可一键生成提交、标签与 PR 信息。")
+                ? copy.t("No models yet. Add models from your API services or local CLIs.",
+                         "尚未添加模型。可从 API 服务或本机 CLI 添加生成模型。")
                 : copy.t("Tried from top to bottom with automatic fallback. Drag or use arrows to reorder.",
                          "按从上到下的顺序尝试，失败时自动切换备用模型；可拖动或用箭头调整顺序。"))
         }
@@ -286,8 +201,7 @@ extension NativeSettingsController {
         })
 
         let editPrompt = SettingsActionButton(text("Edit…", "编辑…")) { [weak self] in
-            guard let self else { return }
-            GitCommitAISettingsPanel.presentPrompt(settings: self.settings, from: self.view.window)
+            self?.presentCommitPromptSheet()
         }
         editPrompt.setAccessibilityIdentifier("settings.ai.commit.edit-prompt")
         let promptRow = form.row(
@@ -325,16 +239,16 @@ extension NativeSettingsController {
     }
 }
 
-/// Detail page of a local coding CLI: how it is reached and the models it advertises.
+/// Modal sheet for inspecting a local CLI's discovered models and Codex ACP helper state.
 @MainActor
-final class AIAgentPage {
-    private weak var controller: NativeSettingsController?
-    private let agent: GitCommitAgent
+final class AICLIProviderSheetController: GitCommitSettingsPanelController {
+    private weak var settingsController: NativeSettingsController?
+    let agent: GitCommitAgent
     private let catalog: AIAgentModelCatalog
     private let strings: SettingsStrings
-    private let list: AIModelListController
-    private let refreshButton = SettingsActionButton("") {}
-    private let adapterButton = SettingsActionButton("") {}
+    let list: AIModelListController
+    let refreshButton = SettingsActionButton("") {}
+    let adapterButton = SettingsActionButton("") {}
     private var modelsRow: NativeSettingsRow?
     private var filterRow: NativeSettingsRow?
     private var adapterRow: NativeSettingsRow?
@@ -345,30 +259,42 @@ final class AIAgentPage {
     private var subscription: AnyCancellable?
 
     init(controller: NativeSettingsController, agent: GitCommitAgent) {
-        self.controller = controller
+        self.settingsController = controller
         self.agent = agent
-        catalog = controller.aiAgentCatalog
-        strings = controller.strings
-        list = AIModelListController(editable: false, strings: controller.strings)
+        self.catalog = controller.aiAgentCatalog
+        self.strings = controller.strings
+        self.list = AIModelListController(editable: false, strings: controller.strings)
+        super.init(nibName: nil, bundle: nil)
     }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     deinit { adapterTask?.cancel() }
 
     private func text(_ en: String, _ zh: String) -> String { strings.t(en, zh) }
 
-    func build(in form: NativeSettingsForm) {
-        guard let controller else { return }
-        form.section(agent.title)
+    override func loadView() {
+        let root = OMGNativeSurfaceView()
+        let title = NSTextField(labelWithString: agent.title)
+        title.font = .systemFont(ofSize: 15, weight: .semibold)
+
+        let form = NativeSettingsForm()
+        addChild(form)
+        form.section(text("Local CLI", "本机 CLI"))
         let cli = SupportedAgent(rawValue: agent.rawValue).flatMap {
-            controller.agents.snapshot(for: AgentIntegrationManager.localID)?.cli[$0]
+            settingsController?.agents.snapshot(for: AgentIntegrationManager.localID)?.cli[$0]
         }
-        form.row(text("Command line tool", "命令行工具"),
-                 subtitle: cli?.path ?? text("Not detected by the last Agent check.", "上次检查未发现此命令行工具。"),
-                 control: NSTextField(labelWithString: cli?.displayVersion ?? "—"))
-        form.row(text("Local helper command", "本机调用命令"),
-                 subtitle: text("OMG invokes this local command with the CLI's own login.",
-                                "OMG 通过这条本机命令复用该 CLI 的登录状态。"),
-                 control: NSTextField(labelWithString: agent.acpCommand.joined(separator: " ")))
+        form.row(
+            text("Command line tool", "命令行工具"),
+            subtitle: cli?.path ?? text("Not detected by the last Agent check.", "上次检查未发现此命令行工具。"),
+            control: NSTextField(labelWithString: cli?.displayVersion ?? "—")
+        )
+        form.row(
+            text("Local helper command", "本机调用命令"),
+            subtitle: text("Reuses this CLI's local login without an API key.", "直接复用该 CLI 的本机登录状态，无需配置 API 密钥。"),
+            control: NSTextField(labelWithString: agent.acpCommand.joined(separator: " "))
+        )
         if agent == .codex {
             adapterButton.invoke = { [weak self] in self?.adapterAction() }
             adapterButton.setAccessibilityIdentifier("settings.ai.agent.codex.adapter-update")
@@ -376,9 +302,7 @@ final class AIAgentPage {
             refreshAdapter(failure: nil)
         }
 
-        form.section(text("Available Models", "可用模型"),
-                     caption: text("Discovered from this CLI's local login. Add them under Git Commit & PR Messages on the AI page.",
-                                   "读取自该 CLI 当前本机登录账号。可在「Git 提交与 PR 信息生成」中添加使用。"))
+        form.section(text("Available Models", "可用模型"))
         refreshButton.title = text("Refresh", "刷新")
         refreshButton.invoke = { [weak self] in
             guard let self else { return }
@@ -393,9 +317,44 @@ final class AIAgentPage {
         listSeparator = form.embedSeparator
         list.onHeightChange = { [weak self] in self?.applyListHeight($0) }
 
+        let doneButton = NSButton(title: text("Done", "完成"), target: self, action: #selector(closeSheet))
+        doneButton.bezelStyle = .rounded
+        doneButton.keyEquivalent = "\r"
+        doneButton.setAccessibilityIdentifier("settings.ai.agent.done")
+        let actions = NSStackView(views: [NSView(), doneButton])
+        actions.orientation = .horizontal
+
+        let formView = form.view
+        let stack = NSStackView(views: [title, formView, actions])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 10
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
+            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
+            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 16),
+            stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14),
+            formView.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            actions.widthAnchor.constraint(equalTo: stack.widthAnchor),
+        ])
+        view = root
+
         sync()
         subscription = catalog.$entries.receive(on: RunLoop.main).sink { [weak self] _ in self?.sync() }
-        if catalog.entry(agent).models == nil, !catalog.entry(agent).isLoading { catalog.refresh(agent) }
+        if catalog.entry(agent).models == nil, !catalog.entry(agent).isLoading {
+            catalog.refresh(agent)
+        }
+    }
+
+    @objc private func closeSheet() {
+        adapterTask?.cancel()
+        closePanel()
+    }
+
+    override func didEndSheet() {
+        adapterTask?.cancel()
     }
 
     private func applyListHeight(_ height: CGFloat) {
@@ -419,7 +378,7 @@ final class AIAgentPage {
         } else if entry.models == nil {
             status = text("Not loaded yet.", "尚未加载。")
         } else if models.isEmpty {
-            status = text("No models found. Make sure the CLI and its local helper command are installed and logged in.",
+            status = text("No models found. Make sure the CLI and helper command are installed and logged in.",
                           "未发现模型，请确认该 CLI 与本机调用命令已安装并完成登录。")
         } else {
             let checked = entry.checkedAt.map { " · " + $0.formatted(date: .abbreviated, time: .shortened) } ?? ""
@@ -428,21 +387,13 @@ final class AIAgentPage {
         modelsRow?.setSubtitle(status)
     }
 
-    // MARK: Codex helper package
-
     private func adapterAction() {
         guard adapterTask == nil else { return }
         guard let update = adapterUpdate, update.updateAvailable else {
             checkAdapter()
             return
         }
-        controller?.confirm(
-            GitL10n.text("Update Codex ACP for OMG?"),
-            message: GitL10n.text(
-                "OMG will install this stable Codex ACP version in its own Application Support folder. Your global npm installation will not be changed."
-            ),
-            actionTitle: GitL10n.text("Update and reload")
-        ) { [weak self] in self?.installAdapter(update.latestVersion) }
+        installAdapter(update.latestVersion)
     }
 
     private func checkAdapter() {
@@ -502,114 +453,184 @@ final class AIAgentPage {
     }
 }
 
-/// Detail page of an API connection: where it is, its key, and the models it offers.
+/// Modal sheet for creating or editing an API service without polluting `settings.aiProviders`
+/// until the user confirms with Save / Add.
 @MainActor
-final class AIProviderPage {
-    private weak var controller: NativeSettingsController?
+final class AIProviderSheetController: GitCommitSettingsPanelController {
+    private weak var settingsController: NativeSettingsController?
     private let settings: OhMyGhosttySettings
     private let credentials: AICredentialStore
     private let client: AIHTTPClient
     private let strings: SettingsStrings
-    private let id: UUID
-    private let route: String
-    private let list: AIModelListController
-    private let nameField = SettingsTextField("") { _ in }
-    private let urlField = SettingsTextField("") { _ in }
-    private let keyField = SettingsSecureField("") { _ in }
-    private let clearKeyButton = SettingsActionButton("") {}
-    private let fetchButton = SettingsActionButton("") {}
-    private let addField = SettingsTextField("", placeholder: "model-id") { _ in }
-    private let addButton = SettingsActionButton("") {}
+    let existingID: UUID?
+    private let onSavedOrRemoved: () -> Void
+
+    private(set) var draft: AIProvider
+    private var pendingKey: String?
+    private var clearedExistingKey = false
+
+    let list: AIModelListController
+    let nameField = SettingsTextField("") { _ in }
+    let kindPopup: SettingsPopup
+    let urlField = SettingsTextField("") { _ in }
+    let keyField = SettingsSecureField("") { _ in }
+    let clearKeyButton = SettingsActionButton("") {}
+    let enabledSwitch: SettingsSwitch
+    let fetchButton = SettingsActionButton("") {}
+    let addField = SettingsTextField("", placeholder: "model-id") { _ in }
+    let addButton = SettingsActionButton("") {}
+    let removeButton = SettingsActionButton("") {}
+    let cancelButton = NSButton()
+    let saveButton = NSButton()
+
     private var urlRow: NativeSettingsRow?
     private var keyRow: NativeSettingsRow?
     private var modelsRow: NativeSettingsRow?
     private var filterRow: NativeSettingsRow?
     private var listHeight: NSLayoutConstraint?
     private var listSeparator: NSView?
-    /// Outcome of the last fetch or add, shown instead of the model count until the list changes.
     private var notice: String?
     private var fetchTask: Task<Void, Never>?
-    private var subscription: AnyCancellable?
 
-    init(controller: NativeSettingsController, provider id: UUID, route: String) {
-        self.controller = controller
-        self.id = id
-        self.route = route
-        settings = controller.settings
-        credentials = controller.aiCredentials
-        client = controller.aiHTTPClient
-        strings = controller.strings
-        list = AIModelListController(editable: true, strings: controller.strings)
+    init(
+        controller: NativeSettingsController,
+        providerID: UUID?,
+        onSavedOrRemoved: @escaping () -> Void = {}
+    ) {
+        self.settingsController = controller
+        self.settings = controller.settings
+        self.credentials = controller.aiCredentials
+        self.client = controller.aiHTTPClient
+        self.strings = controller.strings
+        self.existingID = providerID
+        self.onSavedOrRemoved = onSavedOrRemoved
+        let current = providerID.flatMap { controller.settings.aiProvider($0) }
+            ?? AIProvider(name: "")
+        self.draft = current
+        self.list = AIModelListController(editable: true, strings: controller.strings)
+        let kinds = AIEndpointProtocol.allCases
+        self.kindPopup = SettingsPopup(
+            titles: kinds.map { controller.strings.aiProviderKindTitle($0) },
+            selected: kinds.firstIndex(of: current.kind) ?? 0
+        ) { _ in }
+        self.enabledSwitch = SettingsSwitch(value: current.enabled) { _ in }
+        super.init(nibName: nil, bundle: nil)
     }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     deinit { fetchTask?.cancel() }
 
     private func text(_ en: String, _ zh: String) -> String { strings.t(en, zh) }
 
-    func build(in form: NativeSettingsForm) {
-        guard let provider = settings.aiProvider(id) else { return }
-        buildConnection(provider, in: form)
-        buildModels(provider, in: form)
+    override func loadView() {
+        let root = OMGNativeSurfaceView()
+        let heading = existingID == nil
+            ? text("Add API Service", "添加 API 服务")
+            : text("Edit API Service", "编辑 API 服务")
+        let title = NSTextField(labelWithString: heading)
+        title.font = .systemFont(ofSize: 15, weight: .semibold)
 
-        form.section(text("Manage", "管理"))
-        let remove = SettingsActionButton(text("Remove…", "移除…")) { [weak self] in self?.confirmRemoval() }
-        remove.setAccessibilityIdentifier("settings.ai.provider.remove")
-        form.row(text("Remove this service", "移除此 API 服务"), control: remove,
-                 help: text("Also deletes its stored API key and any model choices that use it.",
-                            "同时删除已保存的 API 密钥，以及使用它的模型配置。"))
+        let form = NativeSettingsForm()
+        addChild(form)
+        buildConnectionSection(in: form)
+        buildModelsSection(in: form)
 
-        subscription = settings.$aiProviders.receive(on: RunLoop.main).sink { [weak self] _ in self?.sync() }
+        removeButton.title = text("Remove Service…", "移除服务…")
+        removeButton.invoke = { [weak self] in self?.requestRemoval() }
+        removeButton.isHidden = existingID == nil
+        removeButton.setAccessibilityIdentifier("settings.ai.provider.remove")
+
+        cancelButton.title = text("Cancel", "取消")
+        cancelButton.bezelStyle = .rounded
+        cancelButton.target = self
+        cancelButton.action = #selector(cancel)
+        cancelButton.keyEquivalent = "\u{1b}"
+        cancelButton.keyEquivalentModifierMask = []
+        cancelButton.setAccessibilityIdentifier("settings.ai.provider.cancel")
+
+        saveButton.title = existingID == nil ? text("Add", "添加") : text("Save", "保存")
+        saveButton.bezelStyle = .rounded
+        saveButton.bezelColor = .controlAccentColor
+        saveButton.target = self
+        saveButton.action = #selector(save)
+        saveButton.keyEquivalent = "\r"
+        saveButton.setAccessibilityIdentifier("settings.ai.provider.save")
+
+        let actions = NSStackView(views: [removeButton, NSView(), cancelButton, saveButton])
+        actions.orientation = .horizontal
+        actions.spacing = 8
+
+        let formView = form.view
+        let stack = NSStackView(views: [title, formView, actions])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 10
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
+            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
+            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 16),
+            stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14),
+            formView.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            actions.widthAnchor.constraint(equalTo: stack.widthAnchor),
+        ])
+        view = root
     }
 
-    private func buildConnection(_ provider: AIProvider, in form: NativeSettingsForm) {
+    private func buildConnectionSection(in form: NativeSettingsForm) {
         form.section(text("Service Endpoint", "服务连接"))
-        nameField.stringValue = provider.name
-        nameField.commit = { [weak self] in self?.rename($0) }
+        nameField.stringValue = draft.name
+        nameField.placeholderString = text("e.g. OpenAI / Anthropic / Proxy", "例如 OpenAI / Anthropic / 公司代理")
+        nameField.commit = { [weak self] in self?.updateDraftName($0) }
         nameField.setAccessibilityIdentifier("settings.ai.provider.name")
         form.row(text("Name", "名称"), control: nameField)
 
         let kinds = AIEndpointProtocol.allCases
-        let kind = SettingsPopup(
-            titles: kinds.map { strings.aiProviderKindTitle($0) },
-            selected: kinds.firstIndex(of: provider.kind) ?? 0
-        ) { [weak self] index in
+        kindPopup.change = { [weak self] index in
             guard let self, kinds.indices.contains(index) else { return }
-            self.settings.updateAIProvider(self.id) { $0.kind = kinds[index] }
+            self.draft.kind = kinds[index]
             self.urlField.placeholderString = SettingsStrings.aiBaseURLPlaceholder(kinds[index])
         }
-        kind.setAccessibilityIdentifier("settings.ai.provider.kind")
-        form.row(text("Protocol", "接口协议"), control: kind)
+        kindPopup.setAccessibilityIdentifier("settings.ai.provider.kind")
+        form.row(text("Protocol", "接口协议"), control: kindPopup)
 
-        urlField.stringValue = provider.baseURL
-        urlField.placeholderString = SettingsStrings.aiBaseURLPlaceholder(provider.kind)
-        urlField.commit = { [weak self] in self?.commitURL($0) }
+        urlField.stringValue = draft.baseURL
+        urlField.placeholderString = SettingsStrings.aiBaseURLPlaceholder(draft.kind)
+        urlField.commit = { [weak self] in _ = self?.validateAndStageURL($0) }
         urlField.setAccessibilityIdentifier("settings.ai.provider.base-url")
         urlRow = form.row(text("Base URL", "基础 URL"), control: urlField)
 
-        keyField.commit = { [weak self] in self?.commitKey($0) }
+        keyField.commit = { [weak self] in self?.stageKey($0) }
         keyField.setAccessibilityLabel(text("API key", "API 密钥"))
         keyField.setAccessibilityIdentifier("settings.ai.provider.api-key")
         clearKeyButton.title = text("Clear", "清除")
-        clearKeyButton.invoke = { [weak self] in self?.clearKey() }
+        clearKeyButton.invoke = { [weak self] in self?.clearStagedOrStoredKey() }
         clearKeyButton.setAccessibilityIdentifier("settings.ai.provider.clear-api-key")
         let keyControls = NSStackView(views: [keyField, clearKeyButton])
         keyControls.spacing = 8
         keyRow = form.row(text("API key", "API 密钥"), control: keyControls)
         refreshKeyStatus(problem: nil)
 
-        let enabled = SettingsSwitch(value: provider.enabled) { [weak self] value in
-            guard let self else { return }
-            self.settings.updateAIProvider(self.id) { $0.enabled = value }
-        }
-        enabled.setAccessibilityIdentifier("settings.ai.provider.enabled")
-        form.row(text("Enabled", "启用"), control: enabled,
-                 help: text("When off, tasks skip this service's models.", "停用后，各功能会跳过此服务的模型。"))
+        enabledSwitch.change = { [weak self] value in self?.draft.enabled = value }
+        enabledSwitch.setAccessibilityIdentifier("settings.ai.provider.enabled")
+        form.row(
+            text("Enabled", "启用"),
+            control: enabledSwitch,
+            help: text("When off, tasks skip this service's models.", "停用后，各功能会跳过此服务的模型。")
+        )
     }
 
-    private func buildModels(_ provider: AIProvider, in form: NativeSettingsForm) {
-        form.section(text("Models", "模型"),
-                     caption: text("Token limits accept values like 128k. Left blank, OMG requests 1,024 output tokens for tab titles and 4,096 for Git messages.",
-                                   "Token 上限支持填写如 128k。留空时，标签标题默认请求 1,024 输出 token，Git 信息默认请求 4,096。"))
+    private func buildModelsSection(in form: NativeSettingsForm) {
+        form.section(
+            text("Models", "模型"),
+            caption: text(
+                "Token limits accept values like 128k. Drag or use arrows to adjust display order.",
+                "Token 上限支持填写如 128k；可拖动或用箭头调整模型排列顺序。"
+            )
+        )
         fetchButton.title = text("Fetch Models", "获取模型")
         fetchButton.invoke = { [weak self] in self?.fetchModels() }
         fetchButton.setAccessibilityIdentifier("settings.ai.provider.fetch-models")
@@ -621,14 +642,17 @@ final class AIProviderPage {
         addButton.title = text("Add", "添加")
         addButton.invoke = { [weak self] in
             guard let self else { return }
-            self.controller?.view.window?.makeFirstResponder(nil)
+            self.view.window?.makeFirstResponder(nil)
             self.addModel(self.addField.stringValue)
         }
         addButton.setAccessibilityIdentifier("settings.ai.provider.add-model")
         let addControls = NSStackView(views: [addField, addButton])
         addControls.spacing = 8
-        form.row(text("Add a model ID", "手动添加模型 ID"), control: addControls,
-                 help: text("For services that do not expose a /models endpoint.", "适用于不提供模型列表查询接口的服务。"))
+        form.row(
+            text("Add a model ID", "手动添加模型 ID"),
+            control: addControls,
+            help: text("For services that do not expose a /models endpoint.", "适用于不提供模型列表查询接口的服务。")
+        )
 
         form.addChild(list)
         _ = list.view
@@ -636,107 +660,85 @@ final class AIProviderPage {
         listHeight = form.embed(list.view, height: 0)
         listSeparator = form.embedSeparator
         list.onHeightChange = { [weak self] in self?.applyListHeight($0) }
-        list.onChange = { [weak self] model in
-            guard let self else { return }
-            self.settings.updateAIProvider(self.id) { provider in
-                guard let index = provider.models.firstIndex(where: { $0.id == model.id }) else { return }
-                provider.models[index] = model
-            }
+        list.onChange = { [weak self] updated in
+            guard let self, let index = self.draft.models.firstIndex(where: { $0.id == updated.id }) else { return }
+            self.draft.models[index] = updated
         }
-        list.onRemove = { [weak self] model in
+        list.onReorder = { [weak self] reordered in
+            self?.draft.models = reordered
+        }
+        list.onRemove = { [weak self] modelID in
             guard let self else { return }
             self.notice = nil
-            self.settings.removeAIProviderModel(model, from: self.id)
+            self.draft.models.removeAll { $0.id == modelID }
+            self.showDraftModels()
         }
-        showModels(of: provider)
+        showDraftModels()
     }
 
-    // MARK: Connection
-
-    private func rename(_ value: String) {
-        let name = AIProvider.normalizedName(value)
-        guard !name.isEmpty else {
-            nameField.stringValue = settings.aiProvider(id)?.name ?? ""
-            return
-        }
-        nameField.stringValue = name
-        settings.updateAIProvider(id) { $0.name = name }
-        if controller?.isShowing(route) == true { controller?.retitle(name) }
+    private var hasEffectiveKey: Bool {
+        if let pendingKey, !pendingKey.isEmpty { return true }
+        if clearedExistingKey { return false }
+        return existingID.map { credentials.hasAPIKey(for: $0) } ?? false
     }
 
-    private func commitURL(_ value: String) {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    private var effectiveKeyValue: String? {
+        if let pendingKey, !pendingKey.isEmpty { return pendingKey }
+        if clearedExistingKey { return nil }
+        return existingID.flatMap { credentials.apiKey(for: $0) }
+    }
+
+    private func updateDraftName(_ raw: String) {
+        let normalized = AIProvider.normalizedName(raw)
+        draft.name = normalized
+        nameField.stringValue = normalized
+    }
+
+    @discardableResult
+    private func validateAndStageURL(_ raw: String) -> Bool {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            settings.updateAIProvider(id) { $0.baseURL = "" }
+            draft.baseURL = ""
             urlRow?.setSubtitle("")
-            return
+            return true
         }
         do {
             let normalized = try AIEndpoint.validatedBaseURL(trimmed).absoluteString
-            settings.updateAIProvider(id) { $0.baseURL = normalized }
+            draft.baseURL = normalized
             urlField.stringValue = normalized
             urlRow?.setSubtitle("")
+            return true
         } catch {
             urlRow?.setSubtitle(strings.aiBaseURLProblem(error as? AIEndpointError ?? .invalidURL))
+            return false
         }
     }
 
-    private func commitKey(_ value: String) {
-        let key = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else { return }
-        do {
-            try credentials.setAPIKey(key, for: id)
-            keyField.stringValue = ""
-            refreshKeyStatus(problem: nil)
-        } catch {
-            refreshKeyStatus(problem: text("The API key could not be saved.", "无法保存 API 密钥。"))
-        }
-    }
-
-    private func clearKey() {
+    private func stageKey(_ raw: String) {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        pendingKey = trimmed
+        clearedExistingKey = false
         keyField.stringValue = ""
-        do {
-            try credentials.removeAPIKey(for: id)
-            refreshKeyStatus(problem: nil)
-        } catch {
-            refreshKeyStatus(problem: text("The API key could not be removed.", "无法移除 API 密钥。"))
-        }
+        refreshKeyStatus(problem: nil)
     }
 
-    /// Says whether a key is stored without ever reading it into a control.
+    private func clearStagedOrStoredKey() {
+        keyField.stringValue = ""
+        pendingKey = nil
+        clearedExistingKey = true
+        refreshKeyStatus(problem: nil)
+    }
+
     private func refreshKeyStatus(problem: String?) {
-        let stored = credentials.hasAPIKey(for: id)
+        let stored = hasEffectiveKey
         keyField.placeholderString = stored ? text("Stored. Type to replace.", "已保存，输入可替换") : "sk-…"
         clearKeyButton.isEnabled = stored
         keyRow?.setSubtitle(problem ?? (stored
             ? text("Stored in a private file on this Mac, outside settings.json.",
-                   "已保存在本机的私有文件中，不在 settings.json 内。")
+                   "保存在本机独立私有文件中，不写入 settings.json。")
             : text("Not set. Requests are sent without authentication.", "未设置，请求将不带认证信息。")))
     }
-
-    private func confirmRemoval() {
-        let name = settings.aiProvider(id)?.name ?? ""
-        controller?.confirm(
-            text("Remove \(name)?", "移除 \(name)？"),
-            message: text("Its stored API key is deleted, and its models are removed from Git messages and tab titles.",
-                          "已保存的 API 密钥会被删除，其模型也会从 Git 信息和标签标题的选择中移除。"),
-            actionTitle: text("Remove", "移除")
-        ) { [weak self] in
-            guard let self else { return }
-            self.fetchTask?.cancel()
-            let controller = self.controller
-            var failure: Error?
-            do {
-                try self.settings.removeAIProvider(self.id, credentials: self.credentials)
-            } catch {
-                failure = error
-            }
-            controller?.select(.agents)
-            if let failure { controller?.showError(failure) }
-        }
-    }
-
-    // MARK: Models
 
     private func applyListHeight(_ height: CGFloat) {
         listHeight?.constant = height
@@ -744,48 +746,43 @@ final class AIProviderPage {
         listSeparator?.isHidden = height == 0
     }
 
-    private func showModels(of provider: AIProvider) {
-        list.setModels(provider.models)
+    private func showDraftModels() {
+        list.setModels(draft.models)
         applyListHeight(list.preferredHeight)
-        filterRow?.setVisible(provider.models.count > AIModelListController.filterThreshold)
-        modelsRow?.setSubtitle(notice ?? (provider.models.isEmpty
+        filterRow?.setVisible(draft.models.count > AIModelListController.filterThreshold)
+        modelsRow?.setSubtitle(notice ?? (draft.models.isEmpty
             ? text("No models yet. Fetch the list, or add model IDs by hand.", "尚无模型。可点击获取模型，或手动添加模型 ID。")
-            : strings.aiModelCount(provider.models.count)))
+            : strings.aiModelCount(draft.models.count)))
     }
 
-    /// Follows changes made elsewhere, and leaves when the connection is gone.
-    private func sync() {
-        guard let provider = settings.aiProvider(id) else {
-            if controller?.isShowing(route) == true { controller?.select(.agents) }
-            return
-        }
-        showModels(of: provider)
-    }
-
-    private func addModel(_ value: String) {
-        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+    private func addModel(_ raw: String) {
+        guard !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         addField.stringValue = ""
-        var added = 0
-        settings.updateAIProvider(id) { added = $0.mergeModels([value]) }
-        notice = added == 0 ? text("That model ID is already listed, or is not valid.", "该模型 ID 已在列表中，或格式无效。") : nil
-        if let provider = settings.aiProvider(id) { showModels(of: provider) }
+        let added = draft.mergeModels([raw])
+        notice = added == 0
+            ? text("That model ID is already listed, or is not valid.", "该模型 ID 已在列表中，或格式无效。")
+            : nil
+        showDraftModels()
     }
 
-    private func fetchModels() {
-        controller?.view.window?.makeFirstResponder(nil)
-        guard fetchTask == nil, let provider = settings.aiProvider(id) else { return }
-        let key = credentials.apiKey(for: id)
+    func fetchModels() {
+        view.window?.makeFirstResponder(nil)
+        if !keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            stageKey(keyField.stringValue)
+        }
+        guard validateAndStageURL(urlField.stringValue), fetchTask == nil else { return }
+        let key = effectiveKeyValue
         let endpoint: AIEndpoint
         do {
-            endpoint = try provider.listEndpoint(apiKey: key)
+            endpoint = try draft.listEndpoint(apiKey: key)
         } catch {
             notice = strings.aiBaseURLProblem(error as? AIEndpointError ?? .invalidURL)
-            showModels(of: provider)
+            showDraftModels()
             return
         }
         fetchButton.isEnabled = false
         notice = text("Fetching models…", "正在获取模型…")
-        showModels(of: provider)
+        showDraftModels()
         let client = client
         fetchTask = Task { @MainActor [weak self] in
             let result: Result<[String], Error>
@@ -803,51 +800,131 @@ final class AIProviderPage {
 
     private func finishFetch(_ result: Result<[String], Error>, key: String?) {
         switch result {
-        case .success(let models):
-            var added = 0
-            settings.updateAIProvider(id) { added = $0.mergeModels(models) }
-            if models.isEmpty {
-                notice = text("The service returned no models. Add model IDs by hand.", "服务未返回任何模型，请手动添加模型 ID。")
-            } else if added == 0 {
-                notice = text("Up to date: all \(models.count) models are already listed.",
-                              "已是最新：返回的 \(models.count) 个模型均已在列表中。")
-            } else {
-                notice = text("Added \(added) of \(models.count) models.", "已添加 \(models.count) 个模型中的 \(added) 个。")
-            }
+        case .success(let ids):
+            let added = draft.mergeModels(ids)
+            notice = ids.isEmpty
+                ? text("The service returned an empty model list.", "该服务返回了空的模型列表。")
+                : (added == 0
+                    ? text("All \(ids.count) returned models are already listed.",
+                           "接口返回的 \(ids.count) 个模型均已在列表中。")
+                    : nil)
+        case .failure(let error as AIHTTPError):
+            notice = describe(error, hiding: key)
         case .failure(let error):
-            notice = fetchProblem(error, key: key)
+            notice = AISecretRedactor.redact(error.localizedDescription, hiding: key)
         }
-        if let provider = settings.aiProvider(id) { showModels(of: provider) }
+        showDraftModels()
     }
 
-    /// Why the model list could not be loaded. The service's own words pass through
-    /// the redactor with the key that was sent, so the key cannot come back in an error.
-    private func fetchProblem(_ error: Error, key: String?) -> String {
+    private func describe(_ error: AIHTTPError, hiding key: String?) -> String {
         switch error {
-        case AIHTTPError.invalidEndpoint(let reason):
-            return strings.aiBaseURLProblem(reason)
-        case AIHTTPError.httpStatus(let status, let detail):
-            switch status {
-            case 401, 403:
-                return text("HTTP \(status). Check the API key.", "HTTP \(status)，请检查 API 密钥。")
-            case 404, 405:
-                return text("HTTP \(status). This service may not list its models: check the base URL, or add model IDs by hand.",
-                            "HTTP \(status)。此服务可能不提供模型列表接口：请检查基础 URL，或手动添加模型 ID。")
-            default:
-                let words = detail.map { ": " + AISecretRedactor.redact($0, hiding: key) } ?? ""
-                return "HTTP \(status)" + words
-            }
-        case AIHTTPError.redirected:
-            return text("The service answered with a redirect, which OMG does not follow. Check the base URL.",
-                        "服务返回了重定向，OMG 不会跟随。请检查基础 URL。")
-        case AIHTTPError.responseTooLarge:
-            return text("The model list is too large to read. Add model IDs by hand.", "模型列表过大，无法读取，请手动添加模型 ID。")
-        case is AIHTTPError:
-            return text("The service did not return a model list. Add model IDs by hand.", "服务未返回模型列表，请手动添加模型 ID。")
-        case let error as URLError:
-            return error.localizedDescription
-        default:
-            return text("The model list could not be loaded.", "无法加载模型列表。")
+        case .httpStatus(let code, let detail?):
+            return "HTTP \(code): " + AISecretRedactor.redact(detail, hiding: key)
+        case .httpStatus(let code, nil):
+            return "HTTP \(code)"
+        case .invalidEndpoint(let endpointError):
+            return strings.aiBaseURLProblem(endpointError)
+        case .redirected, .responseTooLarge, .malformedResponse, .truncatedOutput, .emptyOutput:
+            return AISecretRedactor.redact(error.localizedDescription, hiding: key)
         }
+    }
+
+    @objc func cancel() {
+        fetchTask?.cancel()
+        closePanel()
+    }
+
+    override func didEndSheet() {
+        fetchTask?.cancel()
+    }
+
+    @objc func save() {
+        view.window?.makeFirstResponder(nil)
+        if !keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            stageKey(keyField.stringValue)
+        }
+        guard validateAndStageURL(urlField.stringValue) else { return }
+        let typedName = AIProvider.normalizedName(nameField.stringValue)
+        draft.name = typedName.isEmpty ? AIProvider.suggestedName(baseURL: draft.baseURL) : typedName
+
+        let targetID: UUID
+        if let existingID {
+            targetID = existingID
+            let previousIDs = Set(settings.aiProvider(existingID)?.models.map(\.id) ?? [])
+            let remainingIDs = Set(draft.models.map(\.id))
+            for removedModel in previousIDs.subtracting(remainingIDs) {
+                settings.removeAIProviderModel(removedModel, from: existingID)
+            }
+            if let route = settings.aiTitleRoute,
+               route.provider == existingID,
+               !remainingIDs.contains(route.model) {
+                settings.aiTitleRoute = nil
+            }
+            settings.gitCommitAIRoutes.removeAll { route in
+                route.target == .provider(existingID) && !remainingIDs.contains(route.model)
+            }
+            settings.updateAIProvider(existingID) { provider in
+                provider.name = draft.name
+                provider.kind = draft.kind
+                provider.baseURL = draft.baseURL
+                provider.enabled = draft.enabled
+                provider.models = draft.models
+            }
+        } else {
+            guard settings.aiProviders.count < AIProvider.maxProviders else { return }
+            targetID = draft.id
+            settings.aiProviders.append(draft)
+        }
+
+        do {
+            if let pendingKey, !pendingKey.isEmpty {
+                try credentials.setAPIKey(pendingKey, for: targetID)
+            } else if clearedExistingKey {
+                try credentials.removeAPIKey(for: targetID)
+            }
+        } catch {
+            refreshKeyStatus(problem: text("The API key could not be saved.", "无法保存 API 密钥。"))
+            return
+        }
+
+        fetchTask?.cancel()
+        closePanel()
+        onSavedOrRemoved()
+    }
+
+    private func requestRemoval() {
+        guard existingID != nil else { return }
+        guard let window = view.window else {
+            deleteProviderConfirmed()
+            return
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = text("Remove \(draft.name)?", "移除 \(draft.name)？")
+        alert.informativeText = text(
+            "Its stored API key is deleted, and its models are removed from Git messages and tab titles.",
+            "已保存的 API 密钥会被删除，其模型也会从 Git 信息和标签标题的选择中移除。"
+        )
+        alert.addButton(withTitle: text("Remove", "移除"))
+        alert.addButton(withTitle: text("Cancel", "取消"))
+        alert.beginSheetModal(for: window) { [weak self] response in
+            if response == .alertFirstButtonReturn {
+                self?.deleteProviderConfirmed()
+            }
+        }
+    }
+
+    func deleteProviderConfirmed() {
+        guard let existingID else { return }
+        fetchTask?.cancel()
+        var failure: Error?
+        do {
+            try settings.removeAIProvider(existingID, credentials: credentials)
+        } catch {
+            failure = error
+        }
+        closePanel()
+        onSavedOrRemoved()
+        if let failure { settingsController?.showError(failure) }
     }
 }

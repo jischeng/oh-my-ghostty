@@ -1,8 +1,9 @@
 import Foundation
 
 /// All four agents use the same ACP transport; adapters must already be installed.
+/// Ordered consistently with `SupportedAgent` (`codex`, `claude`, `pi`, `opencode`).
 enum GitCommitAgent: String, Codable, CaseIterable, Identifiable, Sendable {
-    case claude, pi, codex, opencode
+    case codex, claude, pi, opencode
     var id: String { rawValue }
     var title: String {
         switch self {

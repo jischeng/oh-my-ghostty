@@ -4,70 +4,23 @@ import Combine
 extension NativeSettingsController {
     func build(_ tab: OhMyGhosttySettingsTab, into form: NativeSettingsForm) {
         switch tab {
-        case .general:
-            form.section(text("Language & Quit", "语言与退出"))
-            picker(form, strings.languageLabel, \.language, [(.system, strings.languageSystem), (.english, "English"), (.simplifiedChinese, "简体中文")])
-            toggle(form, strings.quitWithoutConfirmationLabel, \.quitWithoutConfirmation)
-            core(.lifecycle, in: form)
+        case .general: general(form)
         case .appearance: appearance(form)
-        case .tabs:
-            form.section(strings.layoutSection)
-            picker(form, strings.tabLayoutLabel, \.tabLayout, [(.vertical, strings.verticalOption), (.horizontal, strings.horizontalOption)])
-            toggle(form, strings.showSidebarLabel, \.sidebarVisible)
-            number(form, strings.sidebarWidthLabel, \.defaultSidebarWidth, range: 176...480)
-            toggle(form, strings.rememberSidebarWidthLabel, \.rememberSidebarWidth)
-            form.section(strings.organizationSection)
-            picker(form, strings.groupingLabel, \.groupingMode, GhosttyTabGroupingMode.allCases.map { ($0, strings.groupingTitle($0)) })
-            picker(form, strings.orderingLabel, \.orderingMode, GhosttyTabOrderingMode.allCases.map { ($0, strings.orderingTitle($0)) })
-            picker(form, strings.pathDisplayLabel, \.tabPathDisplay, OhMyGhosttyTabPathDisplay.allCases.map { ($0, strings.pathDisplayTitle($0)) })
-            form.section(strings.inboxViewSection)
-            picker(form, strings.inboxGroupingLabel, \.tabInboxGroupingMode,
-                   GhosttyTabGroupingMode.allCases.map { ($0, strings.groupingTitle($0)) })
-            picker(form, strings.inboxOrderingLabel, \.tabInboxOrderingMode,
-                   GhosttyTabOrderingMode.allCases.map { ($0, strings.orderingTitle($0)) })
-            picker(form, strings.inboxContinueMinutesLabel, \.tabInboxContinueMinutes,
-                   OhMyGhosttySettings.inboxContinueMinuteOptions.map { ($0, strings.inboxContinueMinutesTitle($0)) })
-            form.section(strings.tabsDisplaySection)
-            picker(form, strings.rowDensityLabel, \.tabRowDensity, OhMyGhosttyTabRowDensity.allCases.map { ($0, strings.densityTitle($0)) })
-            number(form, strings.tabIconSizeLabel, \.tabIconSize, range: 12...20)
-            toggle(form, strings.showShortcutLabelsLabel, \.showShortcutLabels)
-            picker(form, strings.terminalResizeRenderingLabel, \.terminalResizeRendering,
-                   TerminalResizeRenderingMode.allCases.map { ($0, strings.terminalResizeRenderingTitle($0)) })
-            form.row(strings.resetTabsButton, control: SettingsActionButton(text("Reset", "重置")) { [weak self] in
-                self?.settings.resetTabs(); self?.select(.tabs)
-            })
+        case .tabs: tabsPage(form)
         case .terminal: terminal(form)
         case .controls: controls(form)
         case .editor: editor(form)
         case .keyboard: keyboard(form)
         case .git:
             form.section(strings.gitSection)
-            picker(form, strings.gitAutoFetchLabel, \.gitAutoFetchInterval,
-                   Array(Set([0, 1, 2, 5, 10, 15, 30, 60, settings.gitAutoFetchInterval])).sorted().map { ($0, strings.gitAutoFetchIntervalTitle($0)) })
-            form.section(strings.gitAISettingsTitle)
-            let routes = settings.gitCommitAIRoutes
-            let first = routes.first?.title(providers: settings.aiProviders) ?? ""
-            let summary = routes.isEmpty
-                ? text("No models yet. Choose them in AI settings to generate commit, tag, and PR messages.",
-                       "尚未选择模型。前往 AI 页面添加后，即可生成提交、标签与 PR 信息。")
-                : text("\(strings.aiModelCount(routes.count)), tried in order, starting with \(first). Managed in AI settings.",
-                       "\(strings.aiModelCount(routes.count))，按顺序尝试，首选 \(first)。在 AI 页面管理。")
-            let models = form.link(text("AI models", "AI 模型"), subtitle: summary) { [weak self] in
-                self?.select(.agents)
-            }
-            models?.setAccessibilityIdentifier("settings.git.ai-models")
-            let promptRow = form.row(
-                strings.gitCustomPromptLabel,
-                subtitle: commitPromptSummary(),
-                control: SettingsActionButton(text("Edit…", "编辑…")) { [weak self] in
-                    guard let self else { return }
-                    GitCommitAISettingsPanel.presentPrompt(settings: self.settings, from: self.view.window)
-                }
+            picker(
+                form,
+                strings.gitAutoFetchLabel,
+                \.gitAutoFetchInterval,
+                Array(Set([0, 1, 2, 5, 10, 15, 30, 60, settings.gitAutoFetchInterval])).sorted()
+                    .map { ($0, strings.gitAutoFetchIntervalTitle($0)) }
             )
-            form.refreshers.append { [weak self] in
-                guard let self else { return }
-                promptRow?.setSubtitle(self.commitPromptSummary())
-            }
+            aiCommitSection(form)
         case .ssh: remoteHosts(form)
         case .mobile: mobileAccess(form)
         case .agents: aiOverview(form)
@@ -101,26 +54,105 @@ extension NativeSettingsController {
         }
     }
 
+    private func general(_ form: NativeSettingsForm) {
+        form.section(CoreSetting.Group.lifecycle.title(strings))
+        picker(
+            form,
+            strings.languageLabel,
+            \.language,
+            [(.system, strings.languageSystem), (.english, "English"), (.simplifiedChinese, "简体中文")]
+        )
+        toggle(form, strings.quitWithoutConfirmationLabel, \.quitWithoutConfirmation, help: strings.quitWithoutConfirmationCaption)
+        for field in CoreSetting.all where field.group == .lifecycle {
+            core(field.key, in: form)
+        }
+
+        form.section(strings.notificationsSection)
+        core("desktop-notifications", in: form)
+        toggle(form, strings.notifyTaskCompleteLabel, \.notifyTaskComplete)
+        toggle(form, strings.notifyAttentionLabel, \.notifyAttention)
+        toggle(form, strings.notificationSoundLabel, \.notificationSound)
+        let tones = AgentNotificationSoundTone.allCases
+        let tonePopup = SettingsPopup(
+            titles: tones.map { strings.notificationSoundToneTitle($0) },
+            selected: tones.firstIndex(of: settings.notificationSoundTone) ?? 0
+        ) { [weak settings] index in
+            guard tones.indices.contains(index) else { return }
+            let tone = tones[index]
+            settings?.notificationSoundTone = tone
+            AgentActivityNotification.previewSound(tone)
+        }
+        tonePopup.isEnabled = settings.notificationSound
+        form.row(strings.notificationSoundToneLabel, control: tonePopup)
+        let syncToneControl = { [weak settings, weak tonePopup] in
+            guard let settings, let tonePopup else { return }
+            tonePopup.isEnabled = settings.notificationSound
+            tonePopup.selectItem(at: tones.firstIndex(of: settings.notificationSoundTone) ?? 0)
+        }
+        form.refreshers.append(syncToneControl)
+        form.retained.append(
+            settings.$notificationSound.combineLatest(settings.$notificationSoundTone)
+                .receive(on: RunLoop.main)
+                .sink { _ in syncToneControl() }
+        )
+    }
+
+    private func tabsPage(_ form: NativeSettingsForm) {
+        form.section(strings.layoutSection)
+        picker(
+            form,
+            strings.tabLayoutLabel,
+            \.tabLayout,
+            [(.vertical, strings.verticalOption), (.horizontal, strings.horizontalOption)]
+        )
+        picker(
+            form,
+            strings.sidebarViewModeLabel,
+            \.tabSidebarViewMode,
+            GhosttyTabSidebarViewMode.allCases.map { ($0, strings.sidebarViewModeTitle($0)) }
+        )
+        toggle(form, strings.showSidebarLabel, \.sidebarVisible)
+        number(form, strings.sidebarWidthLabel, \.defaultSidebarWidth, range: 176...480)
+        toggle(form, strings.rememberSidebarWidthLabel, \.rememberSidebarWidth)
+
+        form.section(strings.organizationSection)
+        picker(form, strings.groupingLabel, \.groupingMode, GhosttyTabGroupingMode.allCases.map { ($0, strings.groupingTitle($0)) })
+        picker(form, strings.orderingLabel, \.orderingMode, GhosttyTabOrderingMode.allCases.map { ($0, strings.orderingTitle($0)) })
+        picker(form, strings.pathDisplayLabel, \.tabPathDisplay, OhMyGhosttyTabPathDisplay.allCases.map { ($0, strings.pathDisplayTitle($0)) })
+
+        form.section(strings.inboxViewSection)
+        picker(form, strings.inboxGroupingLabel, \.tabInboxGroupingMode,
+               GhosttyTabGroupingMode.allCases.map { ($0, strings.groupingTitle($0)) })
+        picker(form, strings.inboxOrderingLabel, \.tabInboxOrderingMode,
+               GhosttyTabOrderingMode.allCases.map { ($0, strings.orderingTitle($0)) })
+        picker(form, strings.inboxContinueMinutesLabel, \.tabInboxContinueMinutes,
+               OhMyGhosttySettings.inboxContinueMinuteOptions.map { ($0, strings.inboxContinueMinutesTitle($0)) })
+
+        aiTitleSection(form)
+
+        form.section(strings.tabsDisplaySection)
+        picker(form, strings.rowDensityLabel, \.tabRowDensity, OhMyGhosttyTabRowDensity.allCases.map { ($0, strings.densityTitle($0)) })
+        number(form, strings.tabIconSizeLabel, \.tabIconSize, range: 12...20)
+        toggle(form, strings.showShortcutLabelsLabel, \.showShortcutLabels)
+        picker(form, strings.terminalResizeRenderingLabel, \.terminalResizeRendering,
+               TerminalResizeRenderingMode.allCases.map { ($0, strings.terminalResizeRenderingTitle($0)) })
+        form.row(strings.resetTabsButton, control: SettingsActionButton(text("Reset", "重置")) { [weak self] in
+            self?.settings.resetTabs(); self?.select(.tabs)
+        })
+    }
+
     private func terminal(_ form: NativeSettingsForm) {
-        form.section(text("On launch", "启动时"))
+        form.section(strings.sessionRecoverySection)
         picker(form, strings.startupModeLabel, \.startupMode, OMGStartupMode.allCases.map { ($0, strings.startupModeTitle($0)) })
+
         form.section(strings.newSessionInheritanceSection, caption: strings.newSessionInheritanceCaption)
         picker(form, strings.newTabInheritanceLabel, \.newTabInheritance,
                NewSessionInheritance.allCases.map { ($0, strings.newSessionInheritanceTitle($0)) })
         picker(form, strings.newSplitInheritanceLabel, \.newSplitInheritance,
                NewSessionInheritance.allCases.map { ($0, strings.newSessionInheritanceTitle($0)) })
         form.note(strings.newSessionInheritanceResumeWarning)
-        form.section(text("When quitting OMG", "退出 OMG 时"),
-                     caption: text("Leave a switch off to keep those sessions running in the background.", "关闭开关后，相应会话会在退出 OMG 后继续运行。"))
-        for (title, key) in [(text("Close local sessions on quit", "退出时关闭本地会话"), \OhMyGhosttySettings.keepLocalSessionsOnQuit),
-                             (text("Close SSH sessions on quit", "退出时关闭 SSH 会话"), \OhMyGhosttySettings.keepSSHSessionsOnQuit)] {
-            let control = SettingsSwitch(value: !settings[keyPath: key]) { [weak settings] in settings?[keyPath: key] = !$0 }
-            form.row(title, control: control)
-            form.refreshers.append { [weak settings, weak control] in
-                if let settings { control?.state = settings[keyPath: key] ? .off : .on }
-            }
-        }
-        form.section(text("Session management", "会话管理"))
+
+        form.section(strings.runtimeTitle, caption: strings.runtimeKeepOnQuitCaption)
         form.row(text("Local and SSH sessions", "本地与 SSH 会话"),
                  control: SettingsActionButton(text("View all sessions…", "查看所有会话…")) { SessionRuntimeOverview.show() },
                  help: "omg +sessions list · omg +sessions close --all --yes")
@@ -144,35 +176,34 @@ extension NativeSettingsController {
             pending?.setVisible(!requests.isEmpty)
         }
         form.retained.append(pendingToken)
-        more(form, text("Session options", "会话选项")) { [weak self] page in
-            guard let self else { return }
-            page.section(self.text("Retention", "保留"))
-            self.number(page, self.text("Disconnected lifetime (hours)", "断开后保留时长（小时）"), \.runtimeDetachedHours, range: 0...8760,
-                        help: self.text("0 means no time limit.", "0 表示不限时长。"))
-            let formatter = ISO8601DateFormatter()
-            let date = SettingsDatePicker(value: formatter.date(from: self.settings.runtimeExpiration) ?? Date().addingTimeInterval(86_400)) { [weak settings = self.settings] in settings?.runtimeExpiration = formatter.string(from: $0)
-            }
-            date.isEnabled = !self.settings.runtimeExpiration.isEmpty
-            let enabled = SettingsSwitch(value: date.isEnabled) { [weak settings = self.settings, weak date] value in
-                date?.isEnabled = value
-                settings?.runtimeExpiration = value ? formatter.string(from: date?.dateValue ?? Date()) : ""
-            }
-            page.row(self.text("Expiration date", "截止时间"), control: NSStackView(views: [enabled, date]))
-            self.toggle(page, self.text("Clean up completed Agent sessions", "回收已完成的 Agent 会话"), \.runtimeCloseOnAgentDone,
-                        help: self.strings.runtimeCloseOnDoneCaption)
-            self.number(page, self.strings.runtimeDoneGrace, \.runtimeDoneGraceSeconds, range: 1...86400)
-            page.section(self.text("Local terminals", "本地终端"))
-            self.toggle(page, self.text("Use background sessions for new terminals", "新终端使用后台会话"), \.localRuntimeEnabled,
-                        help: self.strings.runtimeLocalRuntimeCaption)
-            self.toggle(page, self.text("Persist Quick Terminal in background session", "快捷终端启用持久化后台会话"), \.quickTerminalRuntimeEnabled,
-                        help: self.strings.runtimeQuickTerminalCaption)
+
+        toggle(form, text("Use background sessions for new terminals", "新终端使用后台会话"), \.localRuntimeEnabled,
+               help: strings.runtimeLocalRuntimeCaption)
+        toggle(form, text("Persist Quick Terminal in background session", "快捷终端启用持久化后台会话"), \.quickTerminalRuntimeEnabled,
+               help: strings.runtimeQuickTerminalCaption)
+        toggle(form, strings.runtimeKeepLocalOnQuit, \.keepLocalSessionsOnQuit)
+        toggle(form, strings.runtimeKeepSSHOnQuit, \.keepSSHSessionsOnQuit)
+        number(form, text("Disconnected lifetime (hours)", "断开后保留时长（小时）"), \.runtimeDetachedHours, range: 0...8760,
+               help: text("0 means no time limit.", "0 表示不限时长。"))
+        let formatter = ISO8601DateFormatter()
+        let date = SettingsDatePicker(value: formatter.date(from: settings.runtimeExpiration) ?? Date().addingTimeInterval(86_400)) { [weak settings] in
+            settings?.runtimeExpiration = formatter.string(from: $0)
         }
+        date.isEnabled = !settings.runtimeExpiration.isEmpty
+        let enabled = SettingsSwitch(value: date.isEnabled) { [weak settings, weak date] value in
+            date?.isEnabled = value
+            settings?.runtimeExpiration = value ? formatter.string(from: date?.dateValue ?? Date()) : ""
+        }
+        form.row(text("Expiration date", "截止时间"), control: NSStackView(views: [enabled, date]))
+        toggle(form, text("Clean up completed Agent sessions", "回收已完成的 Agent 会话"), \.runtimeCloseOnAgentDone,
+               help: strings.runtimeCloseOnDoneCaption)
+        number(form, strings.runtimeDoneGrace, \.runtimeDoneGraceSeconds, range: 1...86400)
+
         core(.shell, in: form)
-        more(form, text("Terminal notifications", "终端通知")) { [weak self] page in self?.core(.notifications, in: page) }
     }
 
     private func appearance(_ form: NativeSettingsForm) {
-        form.section(text("Theme", "主题"))
+        form.section(strings.terminalThemeSection)
         picker(form, strings.appearancePickerLabel, \.windowThemeOverride, [
             (nil, text("Follow terminal", "跟随终端")), (.system, text("System", "系统")), (.light, text("Light", "浅色")), (.dark, text("Dark", "深色"))
         ])
@@ -276,52 +307,73 @@ extension NativeSettingsController {
         picker(form, strings.editorFontFamilyLabel, \.editorFontFamily, EditorFontFamily.allCases.map { ($0, strings.editorFontFamilyTitle($0)) })
         number(form, strings.editorFontSizeLabel, \.editorFontSize, range: 8...36, step: 0.5)
         number(form, strings.editorTabWidthLabel, \.editorTabWidth, range: 1...12)
-        more(form, strings.editorThemeSection) { [weak self] page in
-            guard let self else { return }
-            page.section(self.strings.editorThemeSection)
-            let catalogs = Array(Set(GhosttyThemeCatalog.availableThemes() + [self.settings.editorThemeName].compactMap { $0 })).sorted()
-            let options = [("follow", self.strings.editorSyntaxThemeTitle(.followTerminal))] +
-                catalogs.map { ("catalog:" + $0, $0) } +
-                EditorSyntaxTheme.allCases.filter { $0 != .followTerminal }.map { ("builtin:" + $0.rawValue, self.strings.editorSyntaxThemeTitle($0)) }
-            let selected = self.settings.editorThemeName.map { "catalog:" + $0 } ??
-                (self.settings.editorSettings.followsOMG ? "follow" : "builtin:" + self.settings.editorSyntaxTheme.rawValue)
-            page.row(self.strings.editorSyntaxThemeLabel, control: SettingsPopup(titles: options.map(\.1),
-                selected: options.firstIndex { $0.0 == selected } ?? 0) { [weak settings = self.settings] index in
-                    let value = options[index].0
-                    if value.hasPrefix("catalog:") { settings?.editorThemeName = String(value.dropFirst(8)) } else {
-                        settings?.editorThemeName = nil
-                        settings?.editorSyntaxTheme = value == "follow" ? .followTerminal :
-                            EditorSyntaxTheme(rawValue: String(value.dropFirst(8))) ?? .followTerminal
-                    }
-                })
-            let opacity = SettingsNumberField(value: self.settings.editorOpacity, range: 0.05...1, step: 0.05) { [weak settings = self.settings] in settings?.editorOpacity = $0
+
+        form.section(strings.editorThemeSection)
+        picker(
+            form,
+            strings.editorBackgroundModeLabel,
+            \.editorBackgroundMode,
+            EditorBackgroundMode.allCases.map { ($0, strings.editorBackgroundModeTitle($0)) }
+        )
+        let catalogs = Array(Set(GhosttyThemeCatalog.availableThemes() + [settings.editorThemeName].compactMap { $0 })).sorted()
+        let options = [("follow", strings.editorSyntaxThemeTitle(.followTerminal))] +
+            catalogs.map { ("catalog:" + $0, $0) } +
+            EditorSyntaxTheme.allCases.filter { $0 != .followTerminal }.map { ("builtin:" + $0.rawValue, strings.editorSyntaxThemeTitle($0)) }
+        let selected = settings.editorThemeName.map { "catalog:" + $0 } ??
+            (settings.editorSettings.followsOMG ? "follow" : "builtin:" + settings.editorSyntaxTheme.rawValue)
+        let syntaxPopup = SettingsPopup(
+            titles: options.map(\.1),
+            selected: options.firstIndex { $0.0 == selected } ?? 0
+        ) { [weak settings] index in
+            guard options.indices.contains(index) else { return }
+            let value = options[index].0
+            if value.hasPrefix("catalog:") {
+                settings?.editorThemeName = String(value.dropFirst(8))
+            } else {
+                settings?.editorThemeName = nil
+                settings?.editorSyntaxTheme = value == "follow" ? .followTerminal :
+                    EditorSyntaxTheme(rawValue: String(value.dropFirst(8))) ?? .followTerminal
             }
-            opacity.field.isEnabled = !self.settings.editorSettings.followsOMG
-            opacity.stepper.isEnabled = !self.settings.editorSettings.followsOMG
-            page.row(self.strings.backgroundOpacityLabel, control: opacity)
-            let blur = SettingsPopup(titles: OhMyGhosttyBackgroundBlur.allCases.map { self.strings.blurTitle($0) },
-                                     selected: OhMyGhosttyBackgroundBlur.allCases.firstIndex(of: self.settings.editorBlur) ?? 0) { [weak settings = self.settings] in settings?.editorBlur = OhMyGhosttyBackgroundBlur.allCases[$0]
-            }
-            blur.isEnabled = !self.settings.editorSettings.followsOMG
-            page.row(self.strings.backgroundBlurLabel, control: blur)
-            let refresh = { [weak self, weak opacity, weak blur] in
-                guard let self else { return }
-                let editable = !self.settings.editorSettings.followsOMG
-                opacity?.field.isEnabled = editable
-                opacity?.stepper.isEnabled = editable
-                blur?.isEnabled = editable
-                if opacity?.field.currentEditor() == nil {
-                    let value = editable ? self.settings.editorOpacity :
-                        self.settings.effectiveAppearance(using: self.inheritedConfig).backgroundOpacity.effectiveValue
-                    opacity?.field.doubleValue = value
-                    opacity?.stepper.doubleValue = value
-                }
-                let value = editable ? self.settings.editorBlur : self.settings.backgroundBlurOverride ?? self.inheritedConfig.editorBackgroundBlur
-                blur?.selectItem(at: OhMyGhosttyBackgroundBlur.allCases.firstIndex(of: value) ?? 0)
-            }
-            refresh()
-            page.refreshers.append(refresh)
         }
+        form.row(strings.editorSyntaxThemeLabel, control: syntaxPopup)
+
+        let opacity = SettingsNumberField(value: settings.editorOpacity, range: 0.05...1, step: 0.05) { [weak settings] in
+            settings?.editorOpacity = $0
+        }
+        opacity.field.isEnabled = !settings.editorSettings.followsOMG
+        opacity.stepper.isEnabled = !settings.editorSettings.followsOMG
+        form.row(strings.backgroundOpacityLabel, control: opacity)
+
+        let blur = SettingsPopup(
+            titles: OhMyGhosttyBackgroundBlur.allCases.map { strings.blurTitle($0) },
+            selected: OhMyGhosttyBackgroundBlur.allCases.firstIndex(of: settings.editorBlur) ?? 0
+        ) { [weak settings] in
+            settings?.editorBlur = OhMyGhosttyBackgroundBlur.allCases[$0]
+        }
+        blur.isEnabled = !settings.editorSettings.followsOMG
+        form.row(strings.backgroundBlurLabel, control: blur)
+
+        let refreshThemeControls = { [weak self, weak syntaxPopup, weak opacity, weak blur] in
+            guard let self else { return }
+            let currentSelected = self.settings.editorThemeName.map { "catalog:" + $0 } ??
+                (self.settings.editorSettings.followsOMG ? "follow" : "builtin:" + self.settings.editorSyntaxTheme.rawValue)
+            syntaxPopup?.selectItem(at: options.firstIndex { $0.0 == currentSelected } ?? 0)
+            let editable = !self.settings.editorSettings.followsOMG
+            opacity?.field.isEnabled = editable
+            opacity?.stepper.isEnabled = editable
+            blur?.isEnabled = editable
+            if opacity?.field.currentEditor() == nil {
+                let value = editable ? self.settings.editorOpacity :
+                    self.settings.effectiveAppearance(using: self.inheritedConfig).backgroundOpacity.effectiveValue
+                opacity?.field.doubleValue = value
+                opacity?.stepper.doubleValue = value
+            }
+            let blurValue = editable ? self.settings.editorBlur : self.settings.backgroundBlurOverride ?? self.inheritedConfig.editorBackgroundBlur
+            blur?.selectItem(at: OhMyGhosttyBackgroundBlur.allCases.firstIndex(of: blurValue) ?? 0)
+        }
+        refreshThemeControls()
+        form.refreshers.append(refreshThemeControls)
+
         form.section(text("Reset", "重置"))
         form.row(strings.resetEditorButton, control: SettingsActionButton(text("Reset", "重置")) { [weak self] in
             guard let self else { return }
@@ -364,6 +416,10 @@ extension NativeSettingsController {
         form.refreshers.append { [weak settings, weak quickInputOpacity] in
             if let settings { quickInputOpacity?.setValue(settings.quickInputOpacity) }
         }
+        toggle(form, strings.openQuickInputOnAgentStartLabel, \.openQuickInputOnAgentStart,
+               help: strings.openQuickInputOnAgentStartCaption)
+        toggle(form, strings.openQuickInputOnAgentCompleteLabel, \.openQuickInputOnAgentComplete,
+               help: strings.openQuickInputOnAgentCompleteCaption)
         toggle(form, strings.quickInputControlJNewlineLabel, \.quickInputControlJNewline)
         form.toggle(strings.quickInputImportLabel, value: !settings.quickInputImportShortcut.isEmpty) { [weak settings] in
             settings?.quickInputImportShortcut = $0 ? "auto" : ""
@@ -372,38 +428,37 @@ extension NativeSettingsController {
            QuickInputDraftBridge.keys(settings.quickInputImportShortcut) == nil {
             form.note(strings.quickInputImportInvalid)
         }
-        more(form, strings.quickInputHistoryTitle) { [weak self] page in
+
+        form.section(strings.quickInputHistoryTitle)
+        picker(form, strings.quickInputHistoryScopeLabel, \.quickInputHistoryScope, QuickInputHistoryScope.allCases.map { ($0, strings.quickInputHistoryScopeName($0)) })
+        let shareByDirectory = SettingsSwitch(value: settings.quickInputHistoryShareByDirectory) { [weak settings] in
+            settings?.quickInputHistoryShareByDirectory = $0
+        }
+        shareByDirectory.isEnabled = settings.quickInputHistoryScope != .global
+        form.row(
+            strings.quickInputHistoryShareByDirectoryLabel,
+            control: shareByDirectory,
+            help: strings.quickInputHistoryShareByDirectoryCaption
+        )
+        form.refreshers.append { [weak settings, weak shareByDirectory] in
+            guard let settings else { return }
+            shareByDirectory?.state = settings.quickInputHistoryShareByDirectory ? .on : .off
+            shareByDirectory?.isEnabled = settings.quickInputHistoryScope != .global
+        }
+        picker(form, strings.quickInputHistoryInsertionLabel, \.quickInputHistoryInsertionMode, QuickInputHistoryInsertionMode.allCases.map { ($0, strings.quickInputHistoryInsertionName($0)) })
+        number(form, strings.quickInputHistoryRetentionLabel, \.quickInputHistoryRetentionDays, range: 1...365)
+        toggle(form, strings.quickInputHistoryKeepLabel, \.quickInputHistoryKeepAfterQuit, help: strings.quickInputHistoryPrivacyCaption)
+        form.row(strings.quickInputHistoryClearButton, control: SettingsActionButton(text("Clear…", "清除…")) { [weak self] in
             guard let self else { return }
-            page.section(self.strings.quickInputHistoryTitle)
-            self.picker(page, self.strings.quickInputHistoryScopeLabel, \.quickInputHistoryScope, QuickInputHistoryScope.allCases.map { ($0, self.strings.quickInputHistoryScopeName($0)) })
-            let shareByDirectory = SettingsSwitch(value: self.settings.quickInputHistoryShareByDirectory) { [weak settings = self.settings] in
-                settings?.quickInputHistoryShareByDirectory = $0
-            }
-            shareByDirectory.isEnabled = self.settings.quickInputHistoryScope != .global
-            page.row(
-                self.strings.quickInputHistoryShareByDirectoryLabel,
-                control: shareByDirectory,
-                help: self.strings.quickInputHistoryShareByDirectoryCaption
-            )
-            page.refreshers.append { [weak settings = self.settings, weak shareByDirectory] in
-                guard let settings else { return }
-                shareByDirectory?.state = settings.quickInputHistoryShareByDirectory ? .on : .off
-                shareByDirectory?.isEnabled = settings.quickInputHistoryScope != .global
-            }
-            self.picker(page, self.strings.quickInputHistoryInsertionLabel, \.quickInputHistoryInsertionMode, QuickInputHistoryInsertionMode.allCases.map { ($0, self.strings.quickInputHistoryInsertionName($0)) })
-            self.number(page, self.strings.quickInputHistoryRetentionLabel, \.quickInputHistoryRetentionDays, range: 1...365)
-            self.toggle(page, self.strings.quickInputHistoryKeepLabel, \.quickInputHistoryKeepAfterQuit, help: self.strings.quickInputHistoryPrivacyCaption)
-            page.row(self.strings.quickInputHistoryClearButton, control: SettingsActionButton(self.text("Clear…", "清除…")) { [weak self] in
-                guard let self else { return }
-                self.confirm(self.strings.quickInputHistoryClearTitle, message: self.strings.quickInputHistoryClearMessage,
-                             actionTitle: self.strings.quickInputHistoryClearConfirm) { QuickInputHistoryStore.shared.clear() }
-            })
-            if QuickInputHistoryStore.shared.storageError != nil { page.note(self.strings.quickInputHistoryStorageError) }
-        }
+            self.confirm(self.strings.quickInputHistoryClearTitle, message: self.strings.quickInputHistoryClearMessage,
+                         actionTitle: self.strings.quickInputHistoryClearConfirm) { QuickInputHistoryStore.shared.clear() }
+        })
+        if QuickInputHistoryStore.shared.storageError != nil { form.note(strings.quickInputHistoryStorageError) }
+
         core(.selection, in: form)
-        more(form, text("Clipboard, mouse, and Option key", "剪贴板、鼠标与 Option 键")) { [weak self] page in
-            self?.core(.clipboard, in: page); self?.core(.mouse, in: page); self?.core(.keyboard, in: page)
-        }
+        core(.clipboard, in: form)
+        core(.mouse, in: form)
+        core(.keyboard, in: form)
     }
 
     private func keyboard(_ form: NativeSettingsForm) {
@@ -470,8 +525,6 @@ extension NativeSettingsController {
             }
             form.row(label, subtitle: range, control: popup)
             families.append(.init(options: all, current: current, popup: popup))
-            // Families are always one "modifier + number" pattern; per-digit
-            // values from older versions collapse to the shown choice.
             if mixed, let shown = all[selected] { apply(shown) }
         }
         family(text("Left Sidebar Tabs", "左侧标签页"), range: text("Tabs 1–9", "标签页 1–9"),
@@ -515,7 +568,6 @@ extension NativeSettingsController {
         }
         update(value)
         var current = value
-        // A fixed width keeps the column aligned while the title changes during recording.
         button.widthAnchor.constraint(equalToConstant: 120).isActive = true
         button.toolTip = text("Click, then press a new shortcut", "点击后按下新的快捷键")
         let reset = SettingsActionButton("") {}

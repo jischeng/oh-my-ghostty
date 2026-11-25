@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import Testing
 @testable import Ghostty
 
@@ -79,20 +80,21 @@ struct NativeSettingsTests {
         #expect(box.fillColor == palette.background.blended(withFraction: 0.045, of: palette.foreground))
     }
 
-    @Test func closeOnQuitControlsInvertExistingKeepPreferencesWithoutChangingDefaults() throws {
+    @Test func keepOnQuitControlsDirectlyReflectKeepPreferencesWithoutChangingDefaults() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let settings = OhMyGhosttySettings(fileURL: root.appendingPathComponent("settings.json"))
         settings.language = .english
+        let strings = SettingsStrings(language: .english)
         let controller = NativeSettingsController(settings: settings, initialSelection: .terminal)
         _ = controller.view
         let local = try #require(descendants(controller.view).compactMap { $0 as? SettingsSwitch }
-            .first { $0.accessibilityLabel() == "Close local sessions on quit" })
-        #expect(local.state == .off && settings.keepLocalSessionsOnQuit)
-        local.state = .on
+            .first { $0.accessibilityLabel() == strings.runtimeKeepLocalOnQuit })
+        #expect(local.state == .on && settings.keepLocalSessionsOnQuit)
+        local.state = .off
         local.sendAction(local.action, to: local.target)
         #expect(!settings.keepLocalSessionsOnQuit && settings.keepSSHSessionsOnQuit)
-        local.state = .off
+        local.state = .on
         local.sendAction(local.action, to: local.target)
         #expect(settings.keepLocalSessionsOnQuit)
     }
@@ -207,13 +209,21 @@ struct NativeSettingsTests {
             try #require(descendants(controller.view).compactMap { $0 as? NSButton }
                 .first { $0.accessibilityLabel() == label })
         }
-        try button(strings.editorThemeSection).performClick(nil)
+        let backgroundMode = try #require(descendants(controller.view).compactMap { $0 as? SettingsPopup }
+            .first { $0.accessibilityLabel() == strings.editorBackgroundModeLabel })
+        backgroundMode.selectItem(at: 1) // .system
+        backgroundMode.sendAction(backgroundMode.action, to: backgroundMode.target)
+        #expect(settings.editorBackgroundMode == .system)
+
         let theme = try #require(descendants(controller.view).compactMap { $0 as? SettingsPopup }
             .first { $0.accessibilityLabel() == strings.editorSyntaxThemeLabel })
-        let opacity = try #require(descendants(controller.view).compactMap { $0 as? SettingsNumberField }.first)
+        let opacity = try #require(descendants(controller.view).compactMap { $0 as? SettingsNumberField }
+            .first { $0.accessibilityLabel() == strings.backgroundOpacityLabel })
         #expect(opacity.field.isEnabled)
         theme.selectItem(at: 0)
         theme.sendAction(theme.action, to: theme.target)
+        backgroundMode.selectItem(at: 0) // .followTerminal
+        backgroundMode.sendAction(backgroundMode.action, to: backgroundMode.target)
         try await Task.sleep(for: .milliseconds(30))
         #expect(settings.editorThemeName == nil)
         #expect(settings.editorSettings.followsOMG)
@@ -246,13 +256,8 @@ struct NativeSettingsTests {
         let first = GitCommitAIRoute(agent: .codex, model: "first")
         let second = GitCommitAIRoute(agent: .claude, model: "second")
         settings.gitCommitAIRoutes = [first, second]
-        // The Git page now only summarises the models and links to the AI page that owns them.
+        // The Git page owns its commit/PR generation model routes inline.
         controller.select(.git)
-        #expect(!descendants(controller.view).contains { $0.accessibilityIdentifier() == "git.commit-ai.routes" })
-        let models = try #require(descendants(controller.view).compactMap { $0 as? NSButton }
-            .first { $0.accessibilityIdentifier() == "settings.git.ai-models" })
-        models.performClick(nil)
-        #expect(controller.isShowing("agents"))
         let table = try #require(descendants(controller.view).compactMap { $0 as? NSTableView }
             .first { $0.accessibilityIdentifier() == "git.commit-ai.routes" })
         let coordinator = try #require(table.delegate as? GitCommitAIRoutesTable.Coordinator)
@@ -492,6 +497,45 @@ struct NativeSettingsTests {
         resetButton.performClick(nil)
         #expect(settings.quickInputOpacity == 0.70)
         #expect(opacitySlider.doubleValue == 70)
+    }
+
+    @Test func settingsWindowDefaultsToGeneralAndResolvesContrastSafeThemePalettes() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let settings = OhMyGhosttySettings(fileURL: root.appendingPathComponent("settings.json"))
+        let windowController = OhMyGhosttySettingsWindowController(settings: settings)
+        defer { windowController.close() }
+        let window = try #require(windowController.window)
+        #expect(window.styleMask.contains(.fullSizeContentView))
+        #expect(window.titleVisibility == .hidden)
+        let rootController = try #require(window.contentViewController as? NativeSettingsController)
+        #expect(rootController.selection == .general)
+
+        let darkTerminal = OMGThemePalette(
+            background: NSColor(srgbRed: 0.16, green: 0.17, blue: 0.20, alpha: 1),
+            foreground: NSColor(srgbRed: 0.85, green: 0.87, blue: 0.90, alpha: 1)
+        )
+        settings.windowThemeOverride = .light
+        let lightResolved = OhMyGhosttySettingsWindowController.resolvedPalette(
+            for: settings,
+            terminalPalette: darkTerminal,
+            systemAppearance: try #require(NSAppearance(named: .darkAqua))
+        )
+        #expect(lightResolved.palette.colorScheme == .light)
+        #expect(lightResolved.appearance?.name == .aqua)
+
+        let lightTerminal = OMGThemePalette(
+            background: NSColor(srgbRed: 0.98, green: 0.98, blue: 0.98, alpha: 1),
+            foreground: NSColor(srgbRed: 0.12, green: 0.12, blue: 0.14, alpha: 1)
+        )
+        settings.windowThemeOverride = .dark
+        let darkResolved = OhMyGhosttySettingsWindowController.resolvedPalette(
+            for: settings,
+            terminalPalette: lightTerminal,
+            systemAppearance: try #require(NSAppearance(named: .aqua))
+        )
+        #expect(darkResolved.palette.colorScheme == .dark)
+        #expect(darkResolved.appearance?.name == .darkAqua)
     }
 
     private func capture(_ view: NSView, name: String) throws {

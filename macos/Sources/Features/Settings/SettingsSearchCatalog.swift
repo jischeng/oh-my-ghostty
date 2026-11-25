@@ -55,7 +55,7 @@ enum SettingsSearchCatalog {
             item(.agents, \.notificationsSection, ["notifications."], "notification sound tone permission 通知 声音 提示音 音色 等待"),
             item(.tabs, \.layoutSection, ["tabs.layout", "tabs.sidebar", "tabs.remember"], "vertical horizontal 垂直 水平 侧栏"),
             item(.tabs, \.organizationSection, ["tabs.group", "tabs.order", "tabs.path", "tabs.show", "tabs.inbox"],
-                 "group directory order inbox continue today yesterday recent created 分组 路径 排序 收件箱 最近 创建"),
+                 "group directory order inbox continue window minutes today yesterday recent created 分组 路径 排序 收件箱 继续 保留 时长 最近 创建"),
             item(.tabs, \.appearanceTabsSection, ["appearance.tab"], "density icon 行高 图标 密度"),
             item(.tabs, \.resizeRenderingSection, ["terminal.resize"], "resize rendering 调整窗口 渲染"),
             item(.appearance, \.terminalThemeSection, ["appearance.window", "appearance.light", "appearance.dark"], "theme light dark system 主题 深色 浅色 系统"),

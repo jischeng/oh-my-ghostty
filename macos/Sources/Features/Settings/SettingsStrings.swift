@@ -589,6 +589,10 @@ struct SettingsStrings: Equatable, Sendable {
     var quickInputHistoryClearCancel: String { t("Cancel", "取消") }
     var resetShortcutButton: String { t("Reset", "重置") }
     var toggleInboxShortcutLabel: String { t("Toggle Inbox", "切换收件箱") }
+    var inboxContinueMinutesLabel: String { t("Inbox Continue Window", "收件箱「继续」保留时长") }
+    func inboxContinueMinutesTitle(_ minutes: Int) -> String {
+        t("\(minutes) min", "\(minutes) 分钟")
+    }
     var numberShortcutsSection: String { t("Number Shortcuts", "数字快捷键") }
     var rightSidebarShortcutsSection: String { t("Right Sidebar Shortcuts", "右侧边栏快捷键") }
     var rightSidebarShortcutsCaption: String {

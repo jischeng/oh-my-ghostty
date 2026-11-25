@@ -654,6 +654,15 @@
       "enum": ["manual", "created", "recentlyUsed"],
       "type": "string"
     },
+    "tabs.inboxContinueMinutes": {
+      "category": "tabs",
+      "default": 15,
+      "description": "Minutes a recently active or handled tab stays in the Inbox Continue section.",
+      "enum": [1, 3, 5, 10, 15, 30, 60],
+      "maximum": 60,
+      "minimum": 1,
+      "type": "integer"
+    },
     "tabs.layout": {
       "apply": "new-window",
       "category": "tabs",

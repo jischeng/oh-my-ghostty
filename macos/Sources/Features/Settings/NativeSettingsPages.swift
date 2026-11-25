@@ -19,6 +19,8 @@ extension NativeSettingsController {
             picker(form, strings.groupingLabel, \.groupingMode, GhosttyTabGroupingMode.allCases.map { ($0, strings.groupingTitle($0)) })
             picker(form, strings.orderingLabel, \.orderingMode, GhosttyTabOrderingMode.allCases.map { ($0, strings.orderingTitle($0)) })
             picker(form, strings.pathDisplayLabel, \.tabPathDisplay, OhMyGhosttyTabPathDisplay.allCases.map { ($0, strings.pathDisplayTitle($0)) })
+            picker(form, strings.inboxContinueMinutesLabel, \.tabInboxContinueMinutes,
+                   OhMyGhosttySettings.inboxContinueMinuteOptions.map { ($0, strings.inboxContinueMinutesTitle($0)) })
             form.section(text("Display", "显示"))
             picker(form, strings.rowDensityLabel, \.tabRowDensity, OhMyGhosttyTabRowDensity.allCases.map { ($0, strings.densityTitle($0)) })
             toggle(form, strings.showShortcutLabelsLabel, \.showShortcutLabels)

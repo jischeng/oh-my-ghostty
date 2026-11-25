@@ -1195,6 +1195,30 @@ struct OhMyGhosttySettingsTests {
         #expect(settings.toggleInboxShortcut == "shift+command+i")
     }
 
+    @Test func tabInboxContinueMinutesDefaultsPersistsAndValidatesAllowedOptions() throws {
+        let (settings, url) = temporarySettings()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        #expect(settings.tabInboxContinueMinutes == 15)
+        let descriptor = OhMyGhosttySettings.descriptors.first { $0.id == "tabs.inboxContinueMinutes" }
+        #expect(descriptor?.defaultValue == "15")
+        #expect(descriptor?.category == "tabs")
+
+        settings.tabInboxContinueMinutes = 3
+        let restored = OhMyGhosttySettings(fileURL: url)
+        #expect(restored.tabInboxContinueMinutes == 3)
+
+        settings.tabInboxContinueMinutes = 7
+        #expect(settings.tabInboxContinueMinutes == 15)
+
+        try #"{"tabs.inboxContinueMinutes":60}"#.write(to: url, atomically: true, encoding: .utf8)
+        settings.reloadFromDisk()
+        #expect(settings.tabInboxContinueMinutes == 60)
+
+        try #"{"tabs.inboxContinueMinutes":999}"#.write(to: url, atomically: true, encoding: .utf8)
+        settings.reloadFromDisk()
+        #expect(settings.tabInboxContinueMinutes == 15)
+    }
+
     private func temporarySettings() -> (OhMyGhosttySettings, URL) {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)

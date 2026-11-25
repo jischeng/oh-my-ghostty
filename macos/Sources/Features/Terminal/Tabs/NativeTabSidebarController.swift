@@ -183,7 +183,7 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
         let needsTimer = isInbox && OhMyGhosttySettings.shared.tabInboxGroupingMode == .date
         if needsTimer {
             guard inboxExpiryTimerSubscription == nil else { return }
-            inboxExpiryTimerSubscription = Timer.publish(every: 60, on: .main, in: .common)
+            inboxExpiryTimerSubscription = Timer.publish(every: 30, on: .main, in: .common)
                 .autoconnect()
                 .sink { [weak self] _ in self?.scheduleRefresh() }
         } else {
@@ -477,7 +477,8 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
             grouping: grouping,
             ordering: ordering,
             organization: organization,
-            activities: configuration.statusStore
+            activities: configuration.statusStore,
+            activeWindow: TimeInterval(settings.tabInboxContinueMinutes * 60)
         )
         let freshRows = TabInboxModel.rows(fresh)
         var shown = freshRows

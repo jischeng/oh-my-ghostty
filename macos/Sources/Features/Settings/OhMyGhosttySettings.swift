@@ -355,6 +355,11 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Ordering of the inbox view of Vertical Tabs; manual follows the native tab order.",
             requiresNewWindow: false, category: "tabs"),
         .init(
+            id: "tabs.inboxContinueMinutes", type: .number, defaultValue: "15",
+            allowedValues: Self.inboxContinueMinuteOptions.map(String.init), minimum: 1, maximum: 60,
+            description: "Minutes a recently active or handled tab stays in the Inbox Continue section.",
+            requiresNewWindow: false, category: "tabs"),
+        .init(
             id: "tabs.pathDisplay", type: .enumeration, defaultValue: "folderName",
             allowedValues: OhMyGhosttyTabPathDisplay.allCases.map(\.rawValue),
             minimum: nil, maximum: nil,
@@ -805,8 +810,21 @@ final class OhMyGhosttySettings: ObservableObject {
     @Published var tabInboxGroupingMode: GhosttyTabGroupingMode = .date {
         didSet { persist("tabs.inboxGrouping", tabInboxGroupingMode.rawValue) }
     }
+    static let inboxContinueMinuteOptions: [Int] = [1, 3, 5, 10, 15, 30, 60]
+
     @Published var tabInboxOrderingMode: GhosttyTabOrderingMode = .recentlyUsed {
         didSet { persist("tabs.inboxOrdering", tabInboxOrderingMode.rawValue) }
+    }
+    @Published var tabInboxContinueMinutes: Int = 15 {
+        didSet {
+            let normalized = Self.inboxContinueMinuteOptions.contains(tabInboxContinueMinutes)
+                ? tabInboxContinueMinutes : 15
+            if tabInboxContinueMinutes != normalized {
+                tabInboxContinueMinutes = normalized
+            } else {
+                persist("tabs.inboxContinueMinutes", normalized)
+            }
+        }
     }
     @Published var tabPathDisplay: OhMyGhosttyTabPathDisplay = .folderName {
         didSet { persist("tabs.pathDisplay", tabPathDisplay.rawValue) }
@@ -1564,6 +1582,9 @@ final class OhMyGhosttySettings: ObservableObject {
             tabSidebarViewMode = enumValue("tabs.sidebarView", fallback: .tabs)
             tabInboxGroupingMode = enumValue("tabs.inboxGrouping", fallback: .date)
             tabInboxOrderingMode = enumValue("tabs.inboxOrdering", fallback: .recentlyUsed)
+            let rawContinueMinutes = Int(numberValue("tabs.inboxContinueMinutes", fallback: 15, range: 1...60).rounded())
+            tabInboxContinueMinutes = Self.inboxContinueMinuteOptions.contains(rawContinueMinutes)
+                ? rawContinueMinutes : 15
             tabPathDisplay = enumValue("tabs.pathDisplay", fallback: .folderName)
             showShortcutLabels = boolValue("tabs.showShortcutLabels", fallback: true)
             rememberSidebarWidth = boolValue("tabs.rememberSidebarWidth", fallback: true)

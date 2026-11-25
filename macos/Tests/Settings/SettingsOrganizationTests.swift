@@ -30,6 +30,7 @@ struct SettingsOrganizationTests {
             #expect(entries.first { $0.settingIDs.contains("tabs.sidebarView") }?.tab == .tabs)
             #expect(entries.first { $0.settingIDs.contains("tabs.inboxGrouping") }?.tab == .tabs)
             #expect(entries.first { $0.settingIDs.contains("tabs.inboxOrdering") }?.tab == .tabs)
+            #expect(entries.first { $0.settingIDs.contains("tabs.inboxContinueMinutes") }?.tab == .tabs)
             #expect(entries.first { $0.settingIDs.contains("agents.sessionTitle.mode") }?.tab == .agents)
             #expect(!entries.contains { entry in entry.settingIDs.contains { $0.hasPrefix("ai.endpoint.") } })
             #expect(entries.contains { $0.matches("inbox") && $0.tab == .tabs })

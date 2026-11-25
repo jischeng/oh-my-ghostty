@@ -335,4 +335,45 @@ struct VerticalTabInboxInteractionTests {
         #expect(expiredRecent.map(\.id) == [TabInboxSection.today.groupID])
         #expect(expiredCreated.map(\.id) == [TabInboxSection.yesterday.groupID])
     }
+
+    @Test func handlingWaitingAgentStartsContinueWindowWithoutMutatingAgentActivityRecency() throws {
+        let yesterday = try #require(calendar.date(from: DateComponents(year: 2026, month: 11, day: 23, hour: 15)))
+        let doneAt = try #require(calendar.date(from: DateComponents(year: 2026, month: 11, day: 24, hour: 11, minute: 30)))
+        let handledAt = try #require(calendar.date(from: DateComponents(year: 2026, month: 11, day: 24, hour: 12, minute: 0)))
+        let controller = try terminal(created: yesterday)
+        defer { close([controller]) }
+
+        // Agent finishes 30 minutes before the user handles it.
+        controller.noteTabAgentActivityTransition(from: .working, to: .done, at: doneAt)
+        #expect(controller.tabLastAgentActivityAt == doneAt)
+        #expect(controller.tabLastAcknowledgedAgentAt == nil)
+
+        // User handles/acknowledges the response (.done -> .idle): stamps tabLastAcknowledgedAgentAt
+        // without mutating tabLastAgentActivityAt.
+        controller.noteTabAgentActivityTransition(from: .done, to: .idle, at: handledAt)
+        #expect(controller.tabLastAgentActivityAt == doneAt)
+        #expect(controller.tabLastAcknowledgedAgentAt == handledAt)
+
+        // Stays in Continue for the full custom 3-minute activeWindow, then drops back.
+        let customWindow: TimeInterval = 3 * 60
+        let stillActive = TabInboxModel.groups(
+            tabs: [controller], grouping: .date, ordering: .recentlyUsed,
+            now: handledAt.addingTimeInterval(2 * 60 + 59), calendar: calendar,
+            activeWindow: customWindow
+        )
+        #expect(stillActive.map(\.id) == [TabInboxSection.continue.groupID])
+
+        let expiredRecent = TabInboxModel.groups(
+            tabs: [controller], grouping: .date, ordering: .recentlyUsed,
+            now: handledAt.addingTimeInterval(customWindow), calendar: calendar,
+            activeWindow: customWindow
+        )
+        let expiredCreated = TabInboxModel.groups(
+            tabs: [controller], grouping: .date, ordering: .created,
+            now: handledAt.addingTimeInterval(customWindow), calendar: calendar,
+            activeWindow: customWindow
+        )
+        #expect(expiredRecent.map(\.id) == [TabInboxSection.today.groupID])
+        #expect(expiredCreated.map(\.id) == [TabInboxSection.yesterday.groupID])
+    }
 }

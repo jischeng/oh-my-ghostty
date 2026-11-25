@@ -345,6 +345,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     var tabLastAgentActivityAtPublisher: AnyPublisher<Date?, Never> {
         tabLastAgentActivityAtSubject.eraseToAnyPublisher()
     }
+    /// When the user last acknowledged/handled a finished or waiting agent in this tab
+    /// (`.done`/`.needsAttention`/`.error` -> `.idle`/`nil`). Not persisted, and never
+    /// mutates `tabLastAgentActivityAt` so Recently Used ordering stays pure.
+    private(set) var tabLastAcknowledgedAgentAt: Date?
     /// When the user last sent terminal input or Quick Input to this tab.
     /// Selecting or viewing the tab never changes it. Persisted with the session.
     /// Backed by a subject rather than `@Published` so typing and Quick Input
@@ -367,6 +371,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard tabLastAgentActivityAt != date else { return }
         tabLastAgentActivityAtSubject.send(date)
         scheduleRecentlyUsedTabReconciliation()
+    }
+
+    func recordTabAcknowledgedAgent(at date: Date) {
+        tabLastAcknowledgedAgentAt = date
     }
 
     /// The real AppKit tabs in this controller's tab group, in display order.

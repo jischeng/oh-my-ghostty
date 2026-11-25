@@ -92,15 +92,19 @@ extension TerminalController {
     }
 
     /// Records meaningful agent activity state transitions (`working` start or
-    /// `done`/`needsAttention`/`error` arrival). Clearing or acknowledging back
-    /// to `.idle` or `nil` never stamps recency.
+    /// `done`/`needsAttention`/`error` arrival). Handling/acknowledging a
+    /// waiting state back to `.idle` or `nil` never stamps recency, and instead
+    /// starts the Continue active window from the handling time.
     func noteTabAgentActivityTransition(
         from previous: TabActivityState?,
         to next: TabActivityState?,
         at now: Date = Date()
     ) {
-        guard TabInboxModel.shouldRecordAgentActivityTransition(from: previous, to: next) else { return }
-        recordTabAgentActivity(at: now)
+        if TabInboxModel.shouldRecordAgentActivityTransition(from: previous, to: next) {
+            recordTabAgentActivity(at: now)
+        } else if TabInboxModel.shouldRecordAgentAcknowledgment(from: previous, to: next) {
+            recordTabAcknowledgedAgent(at: now)
+        }
     }
 
     private func stampTabInteraction(at date: Date) {

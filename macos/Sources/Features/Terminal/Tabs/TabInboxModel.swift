@@ -33,6 +33,8 @@ struct TabInboxItem: Equatable {
     /// When the user last sent terminal input or Quick Input to the tab.
     var lastInteractionAt: Date
     var lastAgentActivityAt: Date?
+    /// When the user last acknowledged/handled a finished or waiting agent response.
+    var lastAcknowledgedAgentAt: Date?
 }
 
 /// One group of inbox rows, by identity only: what the sidebar keeps of the
@@ -87,10 +89,14 @@ enum TabInboxModel {
     }
 
     /// A tab belongs in Continue while an agent is active/waiting OR its
-    /// recency (creation, terminal input, or agent activity) is within the
-    /// 15-minute active window.
-    static func isContinue(_ item: TabInboxItem, now: Date) -> Bool {
-        isContinue(item.state) || now.timeIntervalSince(recency(item)) < continueActiveWindow
+    /// Continue anchor (recency or last handled agent response) is within
+    /// `activeWindow`.
+    static func isContinue(
+        _ item: TabInboxItem,
+        now: Date,
+        activeWindow: TimeInterval = TabInboxModel.continueActiveWindow
+    ) -> Bool {
+        isContinue(item.state) || now.timeIntervalSince(continueAnchor(item)) < activeWindow
     }
 
     /// Order inside Continue: tabs waiting for the user come first.
@@ -131,6 +137,15 @@ enum TabInboxModel {
         }
     }
 
+    /// Whether an agent transition represents the user handling/acknowledging a
+    /// waiting response (`.done`/`.needsAttention`/`.error` -> `.idle` or `nil`).
+    static func shouldRecordAgentAcknowledgment(
+        from previous: TabActivityState?,
+        to next: TabActivityState?
+    ) -> Bool {
+        waitsForUser(previous) && (next == .idle || next == nil)
+    }
+
     /// When the tab was last used: by the user, or by an agent changing state.
     static func recency(createdAt: Date, lastInteractionAt: Date, lastAgentActivityAt: Date?) -> Date {
         max(createdAt, lastInteractionAt, lastAgentActivityAt ?? .distantPast)
@@ -139,6 +154,12 @@ enum TabInboxModel {
     static func recency(_ item: TabInboxItem) -> Date {
         recency(createdAt: item.createdAt, lastInteractionAt: item.lastInteractionAt,
                 lastAgentActivityAt: item.lastAgentActivityAt)
+    }
+
+    /// The timestamp that anchors how long a tab stays in Continue after
+    /// activity or after the user handles an agent response.
+    static func continueAnchor(_ item: TabInboxItem) -> Date {
+        max(recency(item), item.lastAcknowledgedAgentAt ?? .distantPast)
     }
 
     /// The date that puts a tab in a date section, and that orders it unless
@@ -162,9 +183,10 @@ enum TabInboxModel {
         for item: TabInboxItem,
         ordering: GhosttyTabOrderingMode,
         now: Date,
-        calendar: Calendar = .current
+        calendar: Calendar = .current,
+        activeWindow: TimeInterval = TabInboxModel.continueActiveWindow
     ) -> TabInboxSection {
-        if isContinue(item, now: now) { return .continue }
+        if isContinue(item, now: now, activeWindow: activeWindow) { return .continue }
         let used = date(item, ordering: ordering)
         let today = calendar.startOfDay(for: now)
         if used >= today { return .today }
@@ -178,23 +200,30 @@ enum TabInboxModel {
         items: [TabInboxItem],
         ordering: GhosttyTabOrderingMode,
         now: Date,
-        calendar: Calendar = .current
+        calendar: Calendar = .current,
+        activeWindow: TimeInterval = TabInboxModel.continueActiveWindow
     ) -> [TabInboxSection: [Int]] {
         var result: [TabInboxSection: [Int]] = [:]
         for index in order(items: items, ordering: ordering) {
-            let target = section(for: items[index], ordering: ordering, now: now, calendar: calendar)
+            let target = section(
+                for: items[index],
+                ordering: ordering,
+                now: now,
+                calendar: calendar,
+                activeWindow: activeWindow
+            )
             result[target, default: []].append(index)
         }
         // Continue is independent of the ordering mode: urgency rank ascending,
-        // then recency descending, then native index ascending.
+        // then continueAnchor descending, then native index ascending.
         if let active = result[.continue] {
             result[.continue] = active.sorted { lhs, rhs in
                 let lhsRank = continueRank(items[lhs].state)
                 let rhsRank = continueRank(items[rhs].state)
                 if lhsRank != rhsRank { return lhsRank < rhsRank }
-                let lhsRecency = recency(items[lhs])
-                let rhsRecency = recency(items[rhs])
-                if lhsRecency != rhsRecency { return lhsRecency > rhsRecency }
+                let lhsAnchor = continueAnchor(items[lhs])
+                let rhsAnchor = continueAnchor(items[rhs])
+                if lhsAnchor != rhsAnchor { return lhsAnchor > rhsAnchor }
                 return lhs < rhs
             }
         }
@@ -238,7 +267,8 @@ enum TabInboxModel {
             state: activity?.state,
             createdAt: controller.tabCreatedAt,
             lastInteractionAt: controller.tabLastInteractionAt,
-            lastAgentActivityAt: controller.tabLastAgentActivityAt
+            lastAgentActivityAt: controller.tabLastAgentActivityAt,
+            lastAcknowledgedAgentAt: controller.tabLastAcknowledgedAgentAt
         )
     }
 
@@ -266,14 +296,21 @@ enum TabInboxModel {
         organization: GhosttyTabOrganizationModel? = nil,
         now: Date = Date(),
         calendar: Calendar = .current,
-        activities: TabActivityStore? = nil
+        activities: TabActivityStore? = nil,
+        activeWindow: TimeInterval = TabInboxModel.continueActiveWindow
     ) -> [GhosttyTabGroupPresentation] {
         let items = tabs.map { item(for: $0, activities: activities) }
         func organized(_ indices: [Int]) -> [GhosttyOrganizedTab] {
             indices.map { GhosttyOrganizedTab(controller: tabs[$0], actualIndex: $0 + 1) }
         }
         if grouping == .date {
-            let sections = arrangement(items: items, ordering: ordering, now: now, calendar: calendar)
+            let sections = arrangement(
+                items: items,
+                ordering: ordering,
+                now: now,
+                calendar: calendar,
+                activeWindow: activeWindow
+            )
             let strings = ChromeStrings.current
             return TabInboxSection.allCases.compactMap { section -> GhosttyTabGroupPresentation? in
                 guard let indices = sections[section], !indices.isEmpty else { return nil }

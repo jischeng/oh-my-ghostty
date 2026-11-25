@@ -175,6 +175,53 @@ struct VerticalTabInboxModelTests {
         ])
     }
 
+    @Test func waitingAgentStaysInContinueIndefinitelyAndWindowStartsWhenHandled() throws {
+        let thirtyMinAgo = try date(24, 11, 30, 0)
+        let now = try date(24, 12, 0, 0)
+
+        // (a) 30-minute-old .done / .needsAttention / .error tabs remain in Continue indefinitely.
+        for waitingState in [TabActivityState.done, .needsAttention, .error] {
+            let waiting = item(waitingState, created: try date(23, 9), interacted: try date(23, 9), agent: thirtyMinAgo)
+            #expect(TabInboxModel.isContinue(waiting, now: now))
+            #expect(TabInboxModel.isContinue(waiting, now: now.addingTimeInterval(3_600), activeWindow: 60))
+        }
+
+        // (b) Once handled (.done -> .idle), lastAcknowledgedAgentAt anchors the activeWindow.
+        let handledAt = now
+        let handled = TabInboxItem(
+            state: .idle,
+            createdAt: try date(23, 9),
+            lastInteractionAt: try date(23, 9),
+            lastAgentActivityAt: thirtyMinAgo,
+            lastAcknowledgedAgentAt: handledAt
+        )
+        #expect(TabInboxModel.continueAnchor(handled) == handledAt)
+        // Recency itself is unaffected by acknowledgment.
+        #expect(TabInboxModel.recency(handled) == thirtyMinAgo)
+
+        // Default 15-minute window: still in Continue at +14m59s, drops back at +15m00s.
+        #expect(TabInboxModel.isContinue(handled, now: handledAt.addingTimeInterval(14 * 60 + 59)))
+        #expect(!TabInboxModel.isContinue(handled, now: handledAt.addingTimeInterval(15 * 60)))
+
+        // Custom 3-minute window: stays in Continue at +2m59s, drops to Today (recentlyUsed) / Yesterday (created) at +3m00s.
+        let customWindow: TimeInterval = 3 * 60
+        #expect(TabInboxModel.section(
+            for: handled, ordering: .recentlyUsed,
+            now: handledAt.addingTimeInterval(2 * 60 + 59),
+            calendar: calendar, activeWindow: customWindow
+        ) == .continue)
+        #expect(TabInboxModel.section(
+            for: handled, ordering: .recentlyUsed,
+            now: handledAt.addingTimeInterval(3 * 60),
+            calendar: calendar, activeWindow: customWindow
+        ) == .today)
+        #expect(TabInboxModel.section(
+            for: handled, ordering: .created,
+            now: handledAt.addingTimeInterval(3 * 60),
+            calendar: calendar, activeWindow: customWindow
+        ) == .yesterday)
+    }
+
     @Test func acknowledgedOrAbsentAgentsAreNotInContinue() {
         #expect(!TabInboxModel.isContinue(.idle))
         #expect(!TabInboxModel.isContinue(nil))

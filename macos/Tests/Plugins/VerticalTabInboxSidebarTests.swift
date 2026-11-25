@@ -775,7 +775,7 @@ struct VerticalTabInboxSidebarTests {
         #expect(header.titleLabel.frame.minX == 20)
         #expect(abs(header.countLabel.frame.maxX - (expectedWidth - 8)) <= 0.5)
 
-        // Row 1: 1-line 34pt row centered at midY = 17pt
+        // Row 1: 1-line 34pt row centered at midY = 17pt, 22×22pt icon centered in 26pt column at x = 10pt
         let row1 = try #require(inbox.rowView(for: controllers[0]))
         #expect(row1.frame.minX == 8)
         #expect(row1.frame.width == expectedWidth)
@@ -783,8 +783,12 @@ struct VerticalTabInboxSidebarTests {
         #expect(row1.hoverRect == row1.selectionRect)
         #expect(row1.highlightRect == row1.bounds)
         #expect(NativeInboxRowView.cornerRadius == 6)
-        #expect(row1.iconView.frame == NSRect(x: 8, y: 8, width: 18, height: 18))
-        #expect(row1.titleLabel.frame.minX == 33)
+        #expect(row1.iconView.customSizing == NativeInboxMetrics.singleLineIconSizing)
+        #expect(row1.iconView.frame == NSRect(x: 10, y: 6, width: 22, height: 22))
+        let row1Marks = row1.iconView.subviews.compactMap { $0 as? NSImageView }
+        #expect(row1Marks.count == 1)
+        #expect(row1Marks[0].frame.size == NSSize(width: 20, height: 20))
+        #expect(row1.titleLabel.frame.minX == 41)
         #expect(abs(row1.titleLabel.frame.midY - 17) <= 0.5)
         #expect(abs(row1.shortcutLabel.frame.maxX - (expectedWidth - 8)) <= 0.5)
         #expect(abs(row1.shortcutLabel.frame.midY - 17) <= 0.5)
@@ -807,7 +811,7 @@ struct VerticalTabInboxSidebarTests {
         #expect(row1.isCloseHovered)
         #expect(row1.closeButton.showsHoverDisc)
 
-        // Row 2: 2-line 48pt local named session row (top midY = 16pt, bottom midY = 34.5pt at x = 33pt)
+        // Row 2: 2-line 48pt local named session row (26×26pt icon centered across Title+Path at midY = 24.5pt, text at x = 41pt)
         let row2 = try #require(inbox.rowView(for: controllers[1]))
         #expect(row2.frame.minX == 8)
         #expect(row2.frame.width == expectedWidth)
@@ -815,9 +819,14 @@ struct VerticalTabInboxSidebarTests {
         #expect(row2.frame.minY - row1.frame.maxY == 2, "2pt vertical gap between rows")
         #expect(row2.isSelected)
         #expect(row2.titleLabel.font == .systemFont(ofSize: 13, weight: .medium))
-        #expect(row2.iconView.frame == NSRect(x: 8, y: 7, width: 18, height: 18))
-        #expect(row2.iconView.frame.midY == 16)
-        #expect(row2.titleLabel.frame.minX == 33)
+        #expect(row2.iconView.customSizing == NativeInboxMetrics.twoLineIconSizing)
+        #expect(row2.iconView.frame == NSRect(x: 8, y: 11.5, width: 26, height: 26))
+        #expect(abs(row2.iconView.frame.midY - 24.5) <= 1)
+        let row2Marks = row2.iconView.subviews.compactMap { $0 as? NSImageView }
+        #expect(row2Marks.count == 1)
+        #expect(row2Marks[0].frame.size == NSSize(width: 22, height: 22))
+        #expect(row2.titleLabel.frame.minX == 41)
+        #expect(row1.titleLabel.frame.minX == row2.titleLabel.frame.minX)
         #expect(abs(row2.titleLabel.frame.midY - 16) <= 0.5)
         #expect(abs(row2.shortcutLabel.frame.midY - 16) <= 0.5)
         #expect(row2.closeButton.frame.midY == 16)
@@ -825,6 +834,7 @@ struct VerticalTabInboxSidebarTests {
         #expect(row2.subtitleCloudView.isHidden)
         #expect(row2.subtitleLabel.frame.minX == row2.titleLabel.frame.minX)
         #expect(abs(row2.subtitleLabel.frame.midY - 34.5) <= 0.5)
+        #expect(row2.subtitleLabel.frame.width == expectedWidth - 8 - 41)
 
         // Row 3: 2-line 48pt remote SSH named session row (unselected uses .regular, inline cloud before subtitle)
         let row3 = try #require(inbox.rowView(for: controllers[2]))
@@ -832,18 +842,18 @@ struct VerticalTabInboxSidebarTests {
         #expect(!row3.isSelected)
         #expect(row3.titleLabel.font == .systemFont(ofSize: 13, weight: .regular))
         #expect(!row3.subtitleCloudView.isHidden)
-        #expect(row3.subtitleCloudView.frame.minX == 33)
+        #expect(row3.subtitleCloudView.frame.minX == 41)
         #expect(abs(row3.subtitleCloudView.frame.midY - 34.5) <= 0.5)
-        #expect(row3.subtitleLabel.frame.minX == 33 + NativeInboxMetrics.cloudIconWidth + NativeInboxMetrics.cloudIconGap)
+        #expect(row3.subtitleLabel.frame.minX == 41 + NativeInboxMetrics.cloudIconWidth + NativeInboxMetrics.cloudIconGap)
         #expect(abs(row3.subtitleLabel.frame.midY - 34.5) <= 0.5)
 
         // Row 4: 1-line 34pt remote SSH row (inline cloud before remoteBreadcrumb)
         let row4 = try #require(inbox.rowView(for: controllers[3]))
         #expect(row4.frame.height == 34)
         #expect(!row4.remoteCloudView.isHidden)
-        #expect(row4.remoteCloudView.frame.minX == 33)
+        #expect(row4.remoteCloudView.frame.minX == 41)
         #expect(abs(row4.remoteCloudView.frame.midY - 17) <= 0.5)
-        #expect(row4.titleLabel.frame.minX == 33 + NativeInboxMetrics.cloudIconWidth + NativeInboxMetrics.cloudIconGap)
+        #expect(row4.titleLabel.frame.minX == 41 + NativeInboxMetrics.cloudIconWidth + NativeInboxMetrics.cloudIconGap)
 
         // Native context menu includes Rename Tab…, New Tab, Move Tab to New Window, Close Tab, etc.
         let strings = ChromeStrings.current
@@ -854,5 +864,75 @@ struct VerticalTabInboxSidebarTests {
         #expect(menuTitles.contains(strings.moveTabToNewWindow))
         #expect(menuTitles.contains(strings.closeOtherTabs))
         #expect(menuTitles.contains(strings.closeTab))
+    }
+
+    @Test func inboxSplitPaneIconsMaintainCrispSeparationWhileNormalTabsStayDefault() throws {
+        let fixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { fixture.close() }
+        let controller = try fixture.tab()
+        let left = try #require(controller.surfaceTree.first)
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        _ = try #require(controller.newSplit(at: left, direction: .right, baseConfig: config))
+
+        // Normal Tabs (.tabs) icon view keeps default nil customSizing.
+        let normalIcon = NativeTabIconView(frame: NSRect(x: 0, y: 0, width: 26, height: 26))
+        #expect(normalIcon.customSizing == nil)
+        normalIcon.configure(controller: controller, icon: .asset("AgentOpenAILogo"), selected: false, activity: nil)
+        normalIcon.layoutSubtreeIfNeeded()
+        let normalMarks = normalIcon.subviews.compactMap { $0 as? NSImageView }
+        #expect(normalMarks.count == 2)
+        #expect(normalMarks.allSatisfy { $0.frame.size == NSSize(width: TabIconMetrics.pane, height: TabIconMetrics.pane) })
+
+        let organized = GhosttyOrganizedTab(controller: controller, actualIndex: 1)
+
+        // 2-line Inbox split row: 26×26pt iconView centered at midY = 24.5pt with non-overlapping 12×12pt marks.
+        let twoLineRow = NativeInboxRowView(frame: NSRect(x: 0, y: 0, width: 234, height: 48))
+        twoLineRow.configure(tab: organized, selected: false, canClose: true) { _ in
+            .init(
+                title: "Split pane session",
+                remoteBreadcrumb: nil,
+                subtitle: "~/work/otty",
+                shortcut: "⌘1",
+                icon: .asset("AgentOpenAILogo"),
+                activity: nil,
+                selected: false,
+                hovered: false
+            )
+        }
+        twoLineRow.layoutSubtreeIfNeeded()
+        #expect(twoLineRow.iconView.frame == NSRect(x: 8, y: 11.5, width: 26, height: 26))
+        #expect(abs(twoLineRow.iconView.frame.midY - 24.5) <= 1)
+        let twoLineMarks = twoLineRow.iconView.subviews.compactMap { $0 as? NSImageView }
+        #expect(twoLineMarks.count == 2)
+        #expect(twoLineMarks[0].frame.size == NSSize(width: 12, height: 12))
+        #expect(twoLineMarks[1].frame.size == NSSize(width: 12, height: 12))
+        #expect(twoLineMarks[0].frame.intersects(twoLineMarks[1].frame) == false)
+        #expect(twoLineMarks[1].frame.minX - twoLineMarks[0].frame.maxX >= 1)
+
+        // 1-line Inbox split row: 22×22pt iconView centered at x = 10pt, midY = 17pt with non-overlapping 10×10pt marks.
+        let oneLineRow = NativeInboxRowView(frame: NSRect(x: 0, y: 0, width: 234, height: 34))
+        oneLineRow.configure(tab: organized, selected: false, canClose: true) { _ in
+            .init(
+                title: "~/work/otty",
+                remoteBreadcrumb: nil,
+                subtitle: nil,
+                shortcut: "⌘1",
+                icon: .systemSymbol("terminal"),
+                activity: nil,
+                selected: false,
+                hovered: false
+            )
+        }
+        oneLineRow.layoutSubtreeIfNeeded()
+        #expect(oneLineRow.iconView.frame == NSRect(x: 10, y: 6, width: 22, height: 22))
+        #expect(oneLineRow.titleLabel.frame.minX == twoLineRow.titleLabel.frame.minX)
+        #expect(oneLineRow.titleLabel.frame.minX == 41)
+        let oneLineMarks = oneLineRow.iconView.subviews.compactMap { $0 as? NSImageView }
+        #expect(oneLineMarks.count == 2)
+        #expect(oneLineMarks[0].frame.size == NSSize(width: 10, height: 10))
+        #expect(oneLineMarks[1].frame.size == NSSize(width: 10, height: 10))
+        #expect(oneLineMarks[0].frame.intersects(oneLineMarks[1].frame) == false)
+        #expect(oneLineMarks[1].frame.minX - oneLineMarks[0].frame.maxX >= 1)
     }
 }

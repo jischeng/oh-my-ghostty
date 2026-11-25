@@ -347,13 +347,20 @@ Where this section contradicts earlier iterations, this section wins.
   `NativeTabOutlineController` and toggles visibility by `tabSidebarViewMode`.
   `NativeInboxViewController` lays out reusable `NativeInboxSectionHeaderView`
   (`26pt` height, `chevron.down` with `-90°` collapsed rotation, flush-right
-  count) and `NativeInboxRowView` (`34pt` single-line at `midY = 17pt`, `48pt`
-  two-line session row with `midY = 16pt` top band and `midY = 34.5pt` bottom
-  path band aligned at `x = 33pt`, `.regular` unselected / `.medium` selected
-  `13pt` titles, button-only `✕` hover backing, inline `cloud` symbol before
-  remote paths) inside a flipped document view (`x = 8, width = panelWidth - 16`,
-  `2pt` gap, unified borderless `cornerRadius = 6` `theme.selectedFill` /
-  `theme.hoverFill` pill matching `NativeTabRowView`).
+  count) and `NativeInboxRowView` (`26pt` leading icon column at `x = 8..34pt` +
+  `7pt` gap -> shared `textLeadingX = 41pt`; `34pt` single-line row at
+  `midY = 17pt` with `22×22pt` `iconView` at `x = 10pt` rendering `18pt` single
+  Agent logos / `20pt` SF Symbols / `10pt` split-pane marks; `48pt` two-line
+  session row with `midY = 16pt` top band, `midY = 34.5pt` bottom path band, and
+  `26×26pt` `iconView` at `x = 8pt` centered across `Title + Path` at
+  `midY = 24.5pt` rendering `22pt` single Agent logos / `24pt` SF Symbols /
+  `12pt` non-overlapping split-pane marks while trailing controls stay anchored
+  on `topMidY = 16pt`; `.regular` unselected / `.medium` selected `13pt` titles,
+  button-only `✕` hover backing, inline `cloud` symbol before remote paths)
+  inside a flipped document view (`x = 8, width = panelWidth - 16`, `2pt` gap,
+  unified borderless `cornerRadius = 6` `theme.selectedFill` / `theme.hoverFill`
+  pill matching `NativeTabRowView`). `NativeTabIconView.customSizing` defaults to
+  `nil` so Normal Tabs (`.tabs`) icon sizing remains untouched.
 - **Visible-row `⌘1..9` order & borderless header toggle**: collapsing an Inbox
   section persists its `inbox:` group ID in `collapsedGroupIDs` and excludes
   hidden rows from `publishInboxDisplayOrder`, so `⌘1..9` and row `⌘N` labels

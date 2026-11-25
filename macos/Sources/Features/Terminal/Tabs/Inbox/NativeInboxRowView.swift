@@ -142,6 +142,7 @@ final class NativeInboxRowView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
+        iconView.customSizing = NativeInboxMetrics.singleLineIconSizing
 
         titleLabel.font = .systemFont(ofSize: 13, weight: .regular)
         titleLabel.lineBreakMode = .byTruncatingMiddle
@@ -274,6 +275,9 @@ final class NativeInboxRowView: NSView {
         remoteCloudView.isHidden = !hasRemoteBreadcrumb
 
         shortcutLabel.stringValue = value.shortcut ?? ""
+        iconView.customSizing = showsSubtitle
+            ? NativeInboxMetrics.twoLineIconSizing
+            : NativeInboxMetrics.singleLineIconSizing
         iconView.configure(
             controller: tab.controller,
             icon: value.icon,
@@ -321,10 +325,22 @@ final class NativeInboxRowView: NSView {
         super.layout()
         let pad = NativeInboxMetrics.rowHorizontalPadding
         let topMidY = showsSubtitle ? NativeInboxMetrics.twoLineTopMidY : NativeInboxMetrics.singleLineMidY
-        let iconEdge = NativeInboxMetrics.iconSize
+        let targetSizing = showsSubtitle
+            ? NativeInboxMetrics.twoLineIconSizing
+            : NativeInboxMetrics.singleLineIconSizing
+        if iconView.customSizing != targetSizing {
+            iconView.customSizing = targetSizing
+        }
+        let iconEdge = showsSubtitle
+            ? NativeInboxMetrics.twoLineIconSize
+            : NativeInboxMetrics.singleLineIconSize
+        let iconMidY = showsSubtitle
+            ? NativeInboxMetrics.twoLineIconMidY
+            : NativeInboxMetrics.singleLineMidY
+        let iconX = pad + (NativeInboxMetrics.iconColumnWidth - iconEdge) / 2
         iconView.frame = NSRect(
-            x: pad,
-            y: topMidY - iconEdge / 2,
+            x: iconX,
+            y: iconMidY - iconEdge / 2,
             width: iconEdge,
             height: iconEdge
         )

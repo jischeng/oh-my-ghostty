@@ -19,12 +19,27 @@ enum NativeInboxMetrics {
     static let twoLineRowHeight: CGFloat = 48
     static let twoLineTopMidY: CGFloat = 16
     static let twoLineBottomMidY: CGFloat = 34.5
+    static let twoLineIconMidY: CGFloat = 24.5
     static let rowVerticalGap: CGFloat = 2
     static let rowCornerRadius: CGFloat = 6
     static let rowHorizontalPadding: CGFloat = 8
-    static let iconSize: CGFloat = 18
+    static let iconColumnWidth: CGFloat = 26
+    static let singleLineIconSize: CGFloat = 22
+    static let twoLineIconSize: CGFloat = 26
     static let iconToTitleGap: CGFloat = 7
-    static let textLeadingX: CGFloat = rowHorizontalPadding + iconSize + iconToTitleGap // 33pt
+    static let textLeadingX: CGFloat = rowHorizontalPadding + iconColumnWidth + iconToTitleGap // 41pt
+    static let singleLineIconSizing = NativeTabIconView.CustomSizing(
+        composition: 22,
+        singleLogo: 18,
+        symbolBonus: 2,
+        paneSize: 10
+    )
+    static let twoLineIconSizing = NativeTabIconView.CustomSizing(
+        composition: 26,
+        singleLogo: 22,
+        symbolBonus: 2,
+        paneSize: 12
+    )
     static let statusBadgeSize: CGFloat = 14
     static let closeButtonSize: CGFloat = 18
     static let cloudIconWidth: CGFloat = 13

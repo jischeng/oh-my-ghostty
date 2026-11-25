@@ -64,4 +64,80 @@ struct GitACPConnectionTests {
         }
         await client.stop()
     }
+
+    @Test func generateTitleSerializesConcurrentTurnsOnWarmSessionAndStripsThinkBlocks() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let script = root.appendingPathComponent("mock_title_acp.py")
+        try #"""
+        import json, sys, time
+        turn = 0
+        def send(x):
+            print(json.dumps(dict(jsonrpc="2.0", **x)), flush=True)
+        for line in sys.stdin:
+            r = json.loads(line)
+            method = r.get("method")
+            if method == "initialize":
+                send(dict(id=r["id"], result={"protocolVersion": 1}))
+            elif method == "session/new":
+                send(dict(id=r["id"], result={
+                    "sessionId": "title-session",
+                    "models": {"availableModels": [{"modelId": "gpt-5-codex"}]}
+                }))
+            elif method == "session/set_model":
+                send(dict(id=r["id"], result={}))
+            elif method == "session/prompt":
+                turn += 1
+                time.sleep(0.03)
+                text = json.dumps(r.get("params", {}))
+                if "EMPTY_THINK" in text:
+                    reply = "<think>only internal reasoning</think>"
+                else:
+                    reply = f"<think>pondering</think> \"精简会话 {turn}…\""
+                send(dict(method="session/update", params={
+                    "sessionId": "title-session",
+                    "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": reply}}
+                }))
+                send(dict(id=r["id"], result={"stopReason": "end_turn"}))
+        """#.write(to: script, atomically: true, encoding: .utf8)
+
+        actor SpawnCounter {
+            var count = 0
+            func increment() { count += 1 }
+        }
+        let spawns = SpawnCounter()
+        let service = GitACPService(
+            store: GitACPSessionStore(root: root.appendingPathComponent("Sessions")),
+            launcher: { _, cwd, connection in
+                await spawns.increment()
+                try await connection.start(
+                    executable: "/usr/bin/python3",
+                    arguments: [script.path],
+                    cwd: cwd,
+                    environment: ProcessInfo.processInfo.environment
+                )
+            }
+        )
+        defer { Task { await service.shutdown() } }
+
+        // Two concurrent title calls on the same (agent, model) serialize cleanly on ONE warm session
+        // instead of failing with "This ACP session is busy" or spawning two adapter processes.
+        async let first = service.generateTitle(
+            agent: .codex, model: "gpt-5-codex", system: "System", user: "<first_prompt>one</first_prompt>"
+        )
+        async let second = service.generateTitle(
+            agent: .codex, model: "gpt-5-codex", system: "System", user: "<first_prompt>two</first_prompt>"
+        )
+        let titles = try await [first, second].compactMap { $0 }.sorted()
+        #expect(titles == ["精简会话 1", "精简会话 2"])
+        #expect(await spawns.count == 1)
+
+        await #expect(throws: AIHTTPError.emptyOutput) {
+            _ = try await service.generateTitle(
+                agent: .codex, model: "gpt-5-codex", system: "System", user: "EMPTY_THINK"
+            )
+        }
+        await service.shutdown()
+    }
 }

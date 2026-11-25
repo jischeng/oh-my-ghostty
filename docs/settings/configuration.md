@@ -93,18 +93,19 @@ loopback, private-range and link-local hosts; redirects are never followed.
 
 **AI** separates each AI-powered feature into its own task card:
 
-- **Automatic Tab Titles**: `agents.sessionTitle.mode` (`off`, `native`, or `generate`),
-  `agents.sessionTitle.alwaysUseAI`, and one model of an enabled API service saved as
-  `ai.routes.title`. When no API service has models yet, the model picker offers a direct
-  **Add API Service…** action. Local CLIs are deliberately not offered for tab titles:
-  naming would otherwise spawn a CLI process per conversation. No model means no AI generation.
-- **Git Commit & PR Messages**: an ordered fallback list, saved as
-  `ai.routes.commit`, alongside an inline **Custom Prompt** editor (`git.commitAI.prompt`,
-  also reachable from **Settings > Git**). An entry is a model of a local CLI (`kind: agent`)
-  or of an API service (`kind: provider`). **Add Models…** anchors a menu directly to the
-  button (**From API Service…** or **From Local CLI…**). Drag entries (or use their arrow
-  buttons) to change priority. The first entry is the primary model and every entry below
-  it is a fallback.
+- **Automatic Tab Titles** (**Settings > Views & Tabs**): `agents.sessionTitle.mode`
+  (`off`, `native`, or `generate`), `agents.sessionTitle.alwaysUseAI`, and one model from
+  either an enabled API service or a logged-in local CLI (`Codex`, `Claude Code`, `Pi`,
+  `OpenCode`), saved as `ai.routes.title` (`{kind, provider | agent, model}`; legacy
+  `{provider, model}` entries remain compatible). Both **Views & Tabs** and **Git** share
+  the same unified model picker sheet and offer a **New API Service…** action. No model
+  means no AI generation.
+- **Git Commit & PR Messages** (**Settings > Git**): an ordered fallback list, saved as
+  `ai.routes.commit`, alongside a **Custom Prompt** sheet (`git.commitAI.prompt`).
+  An entry is a model of a local CLI (`kind: agent`) or of an API service (`kind: provider`).
+  **Add Models…** opens the unified picker sheet (**API** + **Local CLI**) and adds checked
+  models in selection order. Drag entries (or use their arrow buttons) to change priority.
+  The first entry is the primary model and every entry below it is a fallback.
 
 An API connection route sends the same prompt as the ACP route, with the
 instructions as the system message and the Git context as the user message. It
@@ -258,8 +259,8 @@ Window UI state is intentionally separate: `InspectorPresentationStore` owns las
 | `git.commitAI.prompt`             | string  | `""`                          | User-defined language, format and style                                                                | Settings > Git                     | Next generation              |
 | `git.commitAI.routes`             | array   | `[]`                          | Legacy mirror of the agent entries of `ai.routes.commit`, as `{id, agent, model}`                      | Settings > AI (written by OMG)     | Read only without `ai.routes.commit` |
 | `ai.providers`                    | array   | `[]`                          | `{id, name, kind, baseURL, enabled, models: [{id, contextWindow?, maxOutputTokens?}]}`; `kind` is `openai` or `anthropic` | Settings > AI > Providers          | Next request                 |
-| `ai.routes.commit`                | array   | `[]`                          | Ordered `{id, kind, agent \| provider, model}` entries; `kind` is `agent` or `provider`                | Settings > AI > Models per Task    | Next generation              |
-| `ai.routes.title`                 | object  | absent                        | `{provider, model}` of an enabled API connection                                                       | Settings > AI > Models per Task    | Next conversation title      |
+| `ai.routes.commit`                | array   | `[]`                          | Ordered `{id, kind, agent \| provider, model}` entries; `kind` is `agent` or `provider`                | Settings > Git                     | Next generation              |
+| `ai.routes.title`                 | object  | absent                        | `{kind, agent \| provider, model}` (or legacy `{provider, model}`) of a local CLI or enabled API service | Settings > Views & Tabs            | Next conversation title      |
 | `notifications.taskComplete`      | boolean | `true`                        | `true`, `false`                                                                                        | Settings > AI                      | Runtime policy               |
 | `notifications.attention`         | boolean | `true`                        | `true`, `false`                                                                                        | Settings > AI                      | Runtime policy               |
 | `notifications.sound`             | boolean | `false`                       | `true`, `false`                                                                                        | Settings > AI                      | Runtime policy               |
@@ -338,13 +339,15 @@ model when the CLI reports none). Setting `agents.sessionTitle.alwaysUseAI` to
 `true` while `agents.sessionTitle.mode` is `generate` always asks the configured
 AI model to shorten conversation titles instead of keeping long native Agent
 titles (manual renames still win). `generate` behaves like `native` until
-`ai.routes.title` names a model of an enabled API connection, so the default
-sends nothing anywhere. Generation is HTTP only: OMG sends the first prompt of
-the conversation, with likely secrets removed and capped at 1500 bytes, and never
-project files or terminal output. The request asks for the model's maximum
-output when one is set and for 1024 tokens otherwise. The connection sees at most
-two title requests at a time; after three consecutive failures OMG pauses for five
-minutes, and a 401 or 403 pauses until the title model or its connection changes.
+`ai.routes.title` names a model of an enabled API connection or logged-in local CLI,
+so the default sends nothing anywhere. OMG sends the first prompt of the conversation,
+with likely secrets removed and capped at 1500 bytes, and never project files or
+terminal output. HTTP requests ask for the model's maximum output when one is set and
+for 1024 tokens otherwise; local CLI routes reuse a warm pooled ACP session (`GitACPService`).
+At most two title requests run in flight at once, with a bounded queue (`maxQueueDepth = 64`,
+prioritizing explicit manual/batch renames ahead of automatic background requests); after
+three consecutive failures OMG pauses for five minutes, and a 401 or 403 pauses until
+the title model or its connection changes.
 ATS allows local networking, and an empty key sends no authentication header. For
 OpenAI-style endpoints the request uses `max_tokens` and retries once with
 `max_completion_tokens` when the endpoint asks for it; Anthropic requests use

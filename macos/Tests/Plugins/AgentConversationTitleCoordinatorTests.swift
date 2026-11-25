@@ -1009,4 +1009,95 @@ struct AgentConversationTitleCoordinatorTests {
         await langFixture.coordinator.waitUntilIdle()
         #expect(langFixture.record?.title == "排查 CI 偶现失败")
     }
+
+    @Test func backgroundBurstQueuesThroughBoundedServiceAndQueueRejectionNeverLocksSettledAt() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = AgentConversationTitleStore(fileURL: directory.appendingPathComponent("titles.json"))
+
+        // 1. Five concurrent automatic background tabs (`force: false`) sharing a 2-slot AITitleService
+        //    all queue cleanly and receive generated titles instead of dropping tabs #3..#5.
+        let service = AITitleService(
+            targets: { _ in .acp(agent: .codex, model: "gpt-5-codex") },
+            acpGenerator: { _, _, _, user in
+                try? await Task.sleep(for: .milliseconds(25))
+                if let match = user.range(of: "tab-") {
+                    let suffix = user[match.lowerBound...].prefix(5)
+                    return "精简-\(suffix)"
+                }
+                return "精简标题"
+            },
+            limits: .init(maxInFlight: 2, maxQueueDepth: 16)
+        )
+        let burstCoordinator = AgentConversationTitleCoordinator(
+            store: store,
+            generator: service,
+            loadSeed: { target in
+                .init(native: "Verbose native title for \(target.conversationID.rawValue)",
+                      firstPrompt: "Investigate \(target.conversationID.rawValue)")
+            },
+            mode: { .generate },
+            alwaysUseAI: { true },
+            language: { .simplifiedChinese },
+            sleep: { _ in },
+            retryDelays: [.zero]
+        )
+        let ids = try (1...5).map { idx in
+            try #require(AgentConversationID("tab-\(idx)"))
+        }
+        for id in ids {
+            burstCoordinator.request(
+                .init(agent: .codex, conversationID: id, remoteHost: nil),
+                trigger: .bound,
+                owner: UUID()
+            )
+        }
+        await burstCoordinator.waitUntilIdle()
+        for (index, id) in ids.enumerated() {
+            let record = store.record(agent: .codex, conversationID: id)
+            #expect(record?.source == .generated)
+            #expect(record?.title == "精简-tab-\(index + 1)")
+        }
+
+        // 2. When a request is rejected solely due to queue overflow or cancellation (`.rejectedOrCancelled`),
+        //    `settledAt` is NOT written, so the next `.bound`/`.working` trigger retries immediately.
+        actor RejectOnceGenerator: AITitleGenerating {
+            var attempts = 0
+            func title(forFirstPrompt prompt: String) async -> String? { nil }
+            func generate(
+                forFirstPrompt prompt: String,
+                nativeTitle: String?,
+                projectName: String?,
+                force: Bool
+            ) async -> AITitleGenerationResult {
+                attempts += 1
+                return attempts == 1 ? .rejectedOrCancelled : .generated("重试成功标题")
+            }
+        }
+        let rejectOnce = RejectOnceGenerator()
+        let retryID = try #require(AgentConversationID("retry-after-reject"))
+        let retryCoordinator = AgentConversationTitleCoordinator(
+            store: store,
+            generator: rejectOnce,
+            loadSeed: { _ in .init(native: "Long Native Agent Title", firstPrompt: "Fix retry lock") },
+            mode: { .generate },
+            alwaysUseAI: { true },
+            language: { .simplifiedChinese },
+            sleep: { _ in },
+            now: { Date(timeIntervalSince1970: 1_000) },
+            retryDelays: [.zero],
+            settleInterval: 600
+        )
+        let owner = UUID()
+        retryCoordinator.request(.init(agent: .claude, conversationID: retryID, remoteHost: nil), trigger: .bound, owner: owner)
+        await retryCoordinator.waitUntilIdle()
+        #expect(store.record(agent: .claude, conversationID: retryID)?.source == .native)
+
+        // Same timestamp (`now` unchanged, well within 600s `settleInterval`): retry is NOT blocked!
+        retryCoordinator.request(.init(agent: .claude, conversationID: retryID, remoteHost: nil), trigger: .working, owner: owner)
+        await retryCoordinator.waitUntilIdle()
+        #expect(await rejectOnce.attempts == 2)
+        #expect(store.record(agent: .claude, conversationID: retryID)?.source == .generated)
+        #expect(store.record(agent: .claude, conversationID: retryID)?.title == "重试成功标题")
+    }
 }

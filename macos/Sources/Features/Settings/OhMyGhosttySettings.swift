@@ -1493,9 +1493,9 @@ final class OhMyGhosttySettings: ObservableObject {
 
     func resetAppearance() {
         let keys = chosen.keys.filter {
-            ($0.hasPrefix("appearance.") || $0.hasPrefix("terminal.focusedSplitBorder")) &&
+            (($0.hasPrefix("appearance.") || $0.hasPrefix("terminal.focusedSplitBorder") || $0 == "terminal.resizeRendering") &&
                 $0 != "appearance.tabRowDensity" &&
-                $0 != "appearance.tabIconSize"
+                $0 != "appearance.tabIconSize")
         }
         for key in keys { chosen.removeValue(forKey: key) }
         applyChosenValues()

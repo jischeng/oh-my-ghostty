@@ -237,11 +237,6 @@ final class NativeSettingsController: NSViewController, NSTableViewDataSource, N
         label.font = .systemFont(ofSize: 13)
         cell.updateColors()
         let stack = NSStackView(views: [icon, label])
-        if tab == .plugins {
-            cell.badge.text = "BETA"
-            stack.addArrangedSubview(cell.badge)
-            stack.setCustomSpacing(6, after: label)
-        }
         stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
         cell.addSubview(stack)
@@ -369,7 +364,7 @@ final class NativeSettingsController: NSViewController, NSTableViewDataSource, N
                 self?.activeModalSheet = nil
             }
         }
-        if let parent = view.window {
+        if let parent = view.window, parent.styleMask.contains(.titled) {
             GitCommitAISettingsPanel.present(sheet, title: title, size: size, from: parent)
         }
     }

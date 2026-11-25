@@ -142,13 +142,22 @@ struct AIProviderTests {
     }
 
     @Test func titleRouteRoundTripsAndRejectsBrokenShapes() {
-        let route = AITitleRoute(provider: UUID(), model: "small")
+        let providerID = UUID()
+        let route = AITitleRoute(provider: providerID, model: "small")
         #expect(AITitleRoute.decode(route.encoded) == route)
+        #expect(AITitleRoute.decode(["provider": providerID.uuidString, "model": "small"]) == route)
         #expect(JSONSerialization.isValidJSONObject(route.encoded))
+
+        let agentRoute = AITitleRoute(agent: .codex, model: "gpt-5-codex")
+        #expect(AITitleRoute.decode(agentRoute.encoded) == agentRoute)
+        #expect(JSONSerialization.isValidJSONObject(agentRoute.encoded))
+
         #expect(AITitleRoute.decode(nil) == nil)
         #expect(AITitleRoute.decode(["provider": "nope", "model": "small"]) == nil)
-        #expect(AITitleRoute.decode(["provider": route.provider.uuidString, "model": "  "]) == nil)
-        #expect(AITitleRoute.decode(["provider": route.provider.uuidString]) == nil)
+        #expect(AITitleRoute.decode(["kind": "agent", "agent": "nope", "model": "small"]) == nil)
+        #expect(AITitleRoute.decode(["kind": "other", "provider": providerID.uuidString, "model": "small"]) == nil)
+        #expect(AITitleRoute.decode(["provider": providerID.uuidString, "model": "  "]) == nil)
+        #expect(AITitleRoute.decode(["provider": providerID.uuidString]) == nil)
     }
 
     @Test func anEndpointCarriesTheModelLimitsAndTheProvidersKey() throws {

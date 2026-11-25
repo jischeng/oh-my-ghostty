@@ -62,7 +62,6 @@ struct SettingsStrings: Equatable, Sendable {
         case .mobile: t("Mobile Devices", "移动设备")
         case .ssh: t("Remote Machines", "远程机器")
         case .agents: "AI"
-        case .plugins: t("Plugins", "插件")
         case .advanced: t("Advanced", "高级")
         }
     }
@@ -289,7 +288,7 @@ struct SettingsStrings: Equatable, Sendable {
 
     var organizationSection: String { t("Tabs List", "普通标签列表") }
     var inboxViewSection: String { t("Inbox View", "收件箱视图") }
-    var tabsDisplaySection: String { t("Display & Resize", "显示与性能") }
+    var tabsDisplaySection: String { t("Tab Display", "标签栏显示") }
     var groupingLabel: String { t("Grouping", "分组方式") }
     var inboxGroupingLabel: String { t("Inbox Grouping", "收件箱分组") }
     var inboxOrderingLabel: String { t("Inbox Ordering", "收件箱排序") }
@@ -975,12 +974,12 @@ struct SettingsStrings: Equatable, Sendable {
 
     var aiTitleModelLabel: String { t("Title Model", "命名模型") }
     var aiTitleModelUnset: String {
-        t("Not set: choose a model from an API service configured in AI settings.",
-          "未选择：请从「AI」页面配置的 API 服务中选择一个模型。")
+        t("Not set: choose a model from your API services or logged-in local CLIs.",
+          "未选择：请从 API 服务或本机已登录 CLI 中选择一个模型。")
     }
     var aiTitleModelCaption: String {
-        t("Uses an API service from AI settings. Sends the redacted first prompt plus optional project folder and session title context.",
-          "使用「AI」页面配置的 API 服务；发送脱敏后的首条提示词及可选的项目目录名与会话标题上下文。")
+        t("Uses an API service or logged-in local CLI from AI settings. Sends the redacted first prompt plus optional project folder and session title context.",
+          "使用「AI」页面的 API 服务或本机已登录 CLI；发送脱敏后的首条提示词及可选的项目目录名与会话标题上下文。")
     }
 
     static func aiBaseURLPlaceholder(_ kind: AIEndpointProtocol) -> String {

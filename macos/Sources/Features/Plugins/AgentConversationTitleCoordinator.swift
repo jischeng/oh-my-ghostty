@@ -454,7 +454,7 @@ final class AgentConversationTitleCoordinator: ObservableObject {
         prompt: String,
         nativeTitle: String? = nil,
         force: Bool = false
-    ) async -> String? {
+    ) async -> AITitleGenerationResult {
         let token = flights[target.key]?.token
         if let token, flights[target.key]?.token == token {
             flights[target.key]?.isGenerating = true
@@ -466,17 +466,17 @@ final class AgentConversationTitleCoordinator: ObservableObject {
                 syncPublishedFlightState()
             }
         }
-        let generated = await generator.title(
+        let outcome = await generator.generate(
             forFirstPrompt: prompt,
             nativeTitle: nativeTitle,
             projectName: target.projectName,
             force: force
         )
-        if generated != nil, let token, flights[target.key]?.token == token, !Task.isCancelled {
+        if case .generated = outcome, let token, flights[target.key]?.token == token, !Task.isCancelled {
             flights[target.key]?.pendingForcedRetry = false
             runForcedGeneratedCallbacks(for: target.key)
         }
-        return generated
+        return Task.isCancelled ? .rejectedOrCancelled : outcome
     }
 
     private static func nonEmptyTrimmed(_ text: String?) -> String? {
@@ -526,7 +526,7 @@ final class AgentConversationTitleCoordinator: ObservableObject {
             )
             return
         }
-        settledAt[target.key] = now()
+        guard !Task.isCancelled else { return }
         let allowsGeneration = flights[target.key].map { !$0.generatingOwners.isEmpty } ?? true
         await resolveFromPrompt(target, prompt: prompt, allowsGeneration: allowsGeneration)
     }
@@ -545,7 +545,8 @@ final class AgentConversationTitleCoordinator: ObservableObject {
         let cachedFallback = existingRecord?.source == .generated ? nil : Self.nonEmptyTrimmed(existingRecord?.title)
         let allowsGeneration = flights[target.key].map { !$0.generatingOwners.isEmpty } ?? true
         if allowsGeneration, let input = prompt ?? native ?? cachedFallback {
-            if let title = await generateTitle(for: target, prompt: input, nativeTitle: native, force: true) {
+            switch await generateTitle(for: target, prompt: input, nativeTitle: native, force: true) {
+            case .generated(let title):
                 guard !Task.isCancelled else { return }
                 settledAt[target.key] = now()
                 store.set(
@@ -559,6 +560,10 @@ final class AgentConversationTitleCoordinator: ObservableObject {
                     isUserRequested: true
                 )
                 return
+            case .rejectedOrCancelled:
+                if Task.isCancelled { return }
+            case .unavailableOrFailed:
+                break
             }
         }
         // When AI generation was unavailable or failed, never clobber an existing `.generated` title
@@ -647,12 +652,13 @@ final class AgentConversationTitleCoordinator: ObservableObject {
                 }
             }
             let input = Self.nonEmptyTrimmed(firstPrompt) ?? native
-            if let generated = await generateTitle(
+            switch await generateTitle(
                 for: target,
                 prompt: input,
                 nativeTitle: native,
                 force: forcedFlight
             ) {
+            case .generated(let generated):
                 guard !Task.isCancelled else { return }
                 let stillForced = flights[target.key]?.forced == true
                 settledAt[target.key] = now()
@@ -668,8 +674,14 @@ final class AgentConversationTitleCoordinator: ObservableObject {
                     isUserRequested: stillForced
                 )
                 return
+            case .unavailableOrFailed:
+                guard !Task.isCancelled else { return }
+                settledAt[target.key] = now()
+            case .rejectedOrCancelled:
+                // Rejected by queue capacity, configuration switch, or task cancellation:
+                // never write `settledAt` so the conversation remains eligible for retry.
+                if Task.isCancelled { return }
             }
-            settledAt[target.key] = now()
         }
         store.set(
             native,
@@ -690,27 +702,36 @@ final class AgentConversationTitleCoordinator: ObservableObject {
         }
         let allowsGeneration = flights[target.key].map { !$0.generatingOwners.isEmpty } ?? true
         guard allowsGeneration else { return false }
-        settledAt[target.key] = now()
-        guard let generated = await generateTitle(
+        switch await generateTitle(
             for: target,
             prompt: existing.title,
             nativeTitle: existing.title,
             force: forcedFlight
-        ) else { return false }
-        guard !Task.isCancelled else { return true }
-        let stillForced = flights[target.key]?.forced == true
-        store.set(
-            generated,
-            source: .generated,
-            agent: target.agent,
-            conversationID: target.conversationID,
-            remoteHost: target.remoteHost,
-            force: true,
-            allowGeneratedOverNative: alwaysGenerate || stillForced,
-            supersededNativeTitle: existing.title,
-            isUserRequested: stillForced
-        )
-        return true
+        ) {
+        case .generated(let generated):
+            guard !Task.isCancelled else { return true }
+            settledAt[target.key] = now()
+            let stillForced = flights[target.key]?.forced == true
+            store.set(
+                generated,
+                source: .generated,
+                agent: target.agent,
+                conversationID: target.conversationID,
+                remoteHost: target.remoteHost,
+                force: true,
+                allowGeneratedOverNative: alwaysGenerate || stillForced,
+                supersededNativeTitle: existing.title,
+                isUserRequested: stillForced
+            )
+            return true
+        case .unavailableOrFailed:
+            if !Task.isCancelled {
+                settledAt[target.key] = now()
+            }
+            return false
+        case .rejectedOrCancelled:
+            return false
+        }
     }
 
     private func resolveFromPrompt(
@@ -730,8 +751,12 @@ final class AgentConversationTitleCoordinator: ObservableObject {
                 && isChinese
                 && !AgentConversationTitleStore.containsCJK(record.title)
         } ?? false
-        guard forcedFlight || existing == nil || existing == .prompt || canLocalizeExisting else { return }
+        guard forcedFlight || existing == nil || existing == .prompt || canLocalizeExisting else {
+            settledAt[target.key] = now()
+            return
+        }
         if !forcedFlight, currentMode != .generate {
+            settledAt[target.key] = now()
             AgentConversationTitleLog.info(
                 "not stored \(Self.describe(target)): mode is \(currentMode.rawValue) and the Agent named nothing"
             )
@@ -739,8 +764,10 @@ final class AgentConversationTitleCoordinator: ObservableObject {
         }
         if allowsGeneration {
             // Only the opening prompt leaves the process; the service redacts and bounds it.
-            if let title = await generateTitle(for: target, prompt: prompt, nativeTitle: nil, force: forcedFlight) {
+            switch await generateTitle(for: target, prompt: prompt, nativeTitle: nil, force: forcedFlight) {
+            case .generated(let title):
                 guard !Task.isCancelled else { return }
+                settledAt[target.key] = now()
                 let forceStore = flights[target.key]?.forced == true
                 store.set(
                     title,
@@ -752,11 +779,21 @@ final class AgentConversationTitleCoordinator: ObservableObject {
                     isUserRequested: forceStore
                 )
                 return
+            case .unavailableOrFailed:
+                guard !Task.isCancelled else { return }
+                settledAt[target.key] = now()
+                AgentConversationTitleLog.info(
+                    "not generated \(Self.describe(target)): the endpoint gave no title, sanitised prompt stands in"
+                )
+            case .rejectedOrCancelled:
+                // Never write `settledAt` on queue overflow or cancellation so the next trigger retries.
+                if Task.isCancelled { return }
+                AgentConversationTitleLog.info(
+                    "deferred \(Self.describe(target)): generation slot rejected, sanitised prompt stands in temporarily"
+                )
             }
-            AgentConversationTitleLog.info(
-                "not generated \(Self.describe(target)): the endpoint gave no title, sanitised prompt stands in"
-            )
         } else {
+            settledAt[target.key] = now()
             AgentConversationTitleLog.info(
                 "not generated \(Self.describe(target)): tab has a manual title override, sanitised prompt stands in"
             )

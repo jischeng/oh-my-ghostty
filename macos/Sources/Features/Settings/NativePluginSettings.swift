@@ -91,7 +91,7 @@ extension NativeSettingsController {
                     self?.confirm(self?.text("Uninstall \(manifest.id)?", "卸载 \(manifest.id)？") ?? "") { [weak self] in
                         do {
                             try manager.uninstall(manifest.id)
-                            self?.select(.plugins)
+                            self?.select(.advanced)
                         } catch {
                             self?.showError(error)
                         }

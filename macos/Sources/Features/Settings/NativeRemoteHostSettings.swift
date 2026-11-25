@@ -121,69 +121,9 @@ extension NativeSettingsController {
     }
 
     private func addHost() {
-        guard let window = view.window, window.attachedSheet == nil else { return }
-        let sheet = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 540, height: 440),
-                            styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        sheet.title = text("Add a machine", "添加机器")
-        sheet.isReleasedWhenClosed = false
-        let form = NativeSettingsForm()
-        sheet.contentViewController = form
-        form.section(text("SSH address", "SSH 地址"))
-        let field = SettingsTextField("", placeholder: "user@host") { _ in }
-        let add: (GitSSHConnection, String?, Bool) -> Void = { [weak self, weak window, weak sheet] connection, endpoint, fromConfig in
-            guard let self, let window, let sheet else { return }
-            let targetID = self.registry.targetID(for: connection)
-            let wasRegistered = self.registry.host(targetID) != nil
-            let id = self.registry.addConfigured(connection, endpoint: endpoint, fromConfiguration: fromConfig)
-            if !wasRegistered {
-                var policy = self.agents.policy(for: id)
-                policy.checkAutomatically = false
-                policy.updateHooksAutomatically = false
-                self.agents.setPolicy(policy, for: id)
-            }
-            window.endSheet(sheet)
-            self.showHost(id)
-        }
-        let errorLabel = NSTextField(wrappingLabelWithString: "")
-        errorLabel.textColor = .systemRed
-        errorLabel.font = .systemFont(ofSize: 12)
-        errorLabel.isHidden = true
-        let addButton = SettingsActionButton(text("Add", "添加")) { [weak field, weak errorLabel] in
-            guard let value = field?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return }
-            do { add(try GitSSHConnection(destination: value), nil, false) } catch {
-                errorLabel?.stringValue = error.localizedDescription
-                errorLabel?.isHidden = false
-            }
-        }
-        addButton.keyEquivalent = "\r"
-        let controls = NSStackView(views: [field, addButton])
-        form.row(text("Alias or address", "别名或地址"), control: controls)
-        form.stack.addArrangedSubview(errorLabel)
-        let cancel = SettingsActionButton(text("Cancel", "取消")) { [weak window, weak sheet] in
-            if let window, let sheet { window.endSheet(sheet) }
-        }
-        cancel.keyEquivalent = "\u{1b}"
-        form.row("", control: cancel)
-        form.section(text("From SSH config", "从 SSH config 添加"))
-        let task = Task { @MainActor [weak self, weak form] in
-            guard let load = self?.hostChoices else { return }
-            let choices = await load()
-            guard let self, let form, !Task.isCancelled else { return }
-            for choice in choices {
-                let exists = self.registry.host(self.registry.targetID(for: choice.connection)) != nil
-                let button = SettingsActionButton(exists ? self.text("Added", "已添加") : self.text("Add", "添加")) {
-                    add(choice.connection, choice.endpoint, true)
-                }
-                button.isEnabled = !exists
-                form.row(choice.name, subtitle: choice.endpoint, control: button)
-            }
-            if choices.isEmpty { form.note(self.text("No named hosts in SSH config.", "SSH config 中没有可添加的主机。")) }
-        }
-        // NSScrollView has no intrinsic height; assigning the controller resets
-        // the panel's original contentRect to zero unless sized after layout.
-        sheet.setContentSize(.init(width: 560, height: 440))
-        sheet.contentMinSize = .init(width: 560, height: 440)
-        window.beginSheet(sheet) { _ in task.cancel(); sheet.orderOut(nil) }
+        let heading = text("Add a machine", "添加机器")
+        let sheet = AddSSHHostSheetController(controller: self)
+        presentModalSheet(sheet, title: heading, size: NSSize(width: 560, height: 460))
     }
 
     func showError(_ error: Error) {
@@ -209,7 +149,7 @@ extension NativeSettingsController {
         alert.beginSheetModal(for: window)
     }
 
-    private func observeTarget(_ target: String, form: NativeSettingsForm) {
+    fileprivate func observeTarget(_ target: String, form: NativeSettingsForm) {
         let status = NSTextField(wrappingLabelWithString: "")
         status.font = .systemFont(ofSize: 11)
         status.textColor = .secondaryLabelColor
@@ -237,23 +177,36 @@ extension NativeSettingsController {
         form.retained.append(token)
     }
 
-    /// Cards 2 & 3 of the AI page: Terminal Coding Agents, then Agent History.
+    /// Cards 3 & 4 of the AI page: Terminal Coding Agents, then Agent History.
     func agentOverview(_ form: NativeSettingsForm) {
         form.section(strings.terminalCodingAgentsSection)
         toggle(form, strings.agentStatusHooksLabel, \.agentStatusHooksEnabled, help: strings.agentStatusHooksHelp)
-        let localLink = form.link(
-            text("Coding Agents on This Mac", "本机 Agent 状态扩展与 CLI"),
-            subtitle: localCodingAgentsSummary()
-        ) { [weak self] in
-            self?.showAgents(target: AgentIntegrationManager.localID)
+        let manageButton = SettingsActionButton(text("Manage…", "管理…")) { [weak self] in
+            self?.presentLocalCodingAgentsSheet()
         }
-        localLink?.setAccessibilityIdentifier("settings.ai.coding-agents.local")
+        manageButton.setAccessibilityIdentifier("settings.ai.coding-agents.local")
+        let localRow = form.row(
+            text("Coding Agents on This Mac", "本机 Agent 状态扩展与 CLI"),
+            subtitle: localCodingAgentsSummary(),
+            control: manageButton
+        )
+        let token = agents.objectWillChange.receive(on: RunLoop.main).sink { [weak self] _ in
+            guard let self else { return }
+            localRow?.setSubtitle(self.localCodingAgentsSummary())
+        }
+        form.retained.append(token)
 
         form.section(strings.agentHistorySection)
         number(form, strings.agentHistoryLimitLabel, \.agentHistoryLimit, range: 100...50000, step: 100,
                help: strings.agentHistoryLimitCaption)
         toggle(form, strings.agentHistoryBackgroundIndexingLabel, \.agentHistoryBackgroundIndexing,
                help: strings.agentHistoryBackgroundIndexingHelp)
+    }
+
+    func presentLocalCodingAgentsSheet() {
+        let heading = text("Coding Agents on This Mac", "本机 Agent 状态扩展与 CLI")
+        let sheet = LocalCodingAgentsSheetController(controller: self)
+        presentModalSheet(sheet, title: heading, size: NSSize(width: 620, height: 580))
     }
 
     private func localCodingAgentsSummary() -> String {
@@ -273,12 +226,15 @@ extension NativeSettingsController {
     }
 
     func showAgents(target: String) {
-        let local = target == AgentIntegrationManager.localID
-        if !local { agents.loadCached(target: target) }
-        let name = local ? text("This Mac", "此 Mac") : registry.host(target)?.name ?? target
+        if target == AgentIntegrationManager.localID {
+            presentLocalCodingAgentsSheet()
+            return
+        }
+        agents.loadCached(target: target)
+        let name = registry.host(target)?.name ?? target
         setRoute("agents:" + target)
         push(name + " · Agent", route: "agents:" + target, previous: { [weak self] in
-            if local { self?.select(.agents) } else { self?.showHost(target, push: false) }
+            self?.showHost(target, push: false)
         }, build: { [weak self] form in
             guard let self else { return }
             self.buildAgents(target, in: form)
@@ -428,8 +384,8 @@ extension NativeSettingsController {
         })
     }
 
-    private func exportHooks() {
-        guard let window = view.window else { return }
+    fileprivate func exportHooks(from presenter: NSWindow? = nil) {
+        guard let window = presenter ?? view.window else { return }
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "omg-agent-hooks.py"
         panel.allowedContentTypes = [.plainText]
@@ -441,5 +397,382 @@ extension NativeSettingsController {
                 try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
             } catch { self?.showError(error) }
         }
+    }
+}
+
+/// Modal sheet for adding an SSH machine manually or from `~/.ssh/config`, with a standard
+/// bottom action bar instead of placing a Cancel row inside the form body.
+@MainActor
+final class AddSSHHostSheetController: GitCommitSettingsPanelController {
+    private weak var settingsController: NativeSettingsController?
+    private let strings: SettingsStrings
+    let addressField = SettingsTextField("", placeholder: "user@host") { _ in }
+    let errorLabel = NSTextField(wrappingLabelWithString: "")
+    let cancelButton = NSButton()
+    let addButton = NSButton()
+    private var choicesTask: Task<Void, Never>?
+
+    init(controller: NativeSettingsController) {
+        self.settingsController = controller
+        self.strings = controller.strings
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    deinit { choicesTask?.cancel() }
+
+    private func text(_ en: String, _ zh: String) -> String { strings.t(en, zh) }
+
+    override func loadView() {
+        let root = OMGNativeSurfaceView()
+        let title = NSTextField(labelWithString: text("Add a machine", "添加机器"))
+        title.font = .systemFont(ofSize: 15, weight: .semibold)
+
+        let form = NativeSettingsForm(contentInsets: NSEdgeInsets(top: 6, left: 4, bottom: 8, right: 4))
+        if let palette = settingsController?.currentPalette {
+            form.applyPalette(palette)
+        }
+        addChild(form)
+
+        form.section(text("SSH address", "SSH 地址"))
+        addressField.commit = { [weak self] _ in self?.errorLabel.isHidden = true }
+        addressField.setAccessibilityIdentifier("settings.ssh.add-host.address")
+        form.row(text("Alias or address", "别名或地址"), control: addressField)
+
+        form.section(text("From SSH config", "从 SSH config 添加"))
+        choicesTask = Task { @MainActor [weak self, weak form] in
+            guard let self, let load = self.settingsController?.hostChoices else { return }
+            let choices = await load()
+            guard !Task.isCancelled, let form, let controller = self.settingsController else { return }
+            for choice in choices {
+                let exists = controller.registry.host(controller.registry.targetID(for: choice.connection)) != nil
+                let button = SettingsActionButton(exists ? self.text("Added", "已添加") : self.text("Add", "添加")) { [weak self] in
+                    self?.commitHost(choice.connection, endpoint: choice.endpoint, fromConfiguration: true)
+                }
+                button.isEnabled = !exists
+                form.row(choice.name, subtitle: choice.endpoint, control: button)
+            }
+            if choices.isEmpty {
+                form.note(self.text("No named hosts in SSH config.", "SSH config 中没有可添加的主机。"))
+            }
+        }
+
+        errorLabel.textColor = .systemRed
+        errorLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        errorLabel.maximumNumberOfLines = 2
+        errorLabel.isHidden = true
+        errorLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        cancelButton.title = text("Cancel", "取消")
+        cancelButton.bezelStyle = .rounded
+        cancelButton.target = self
+        cancelButton.action = #selector(cancel)
+        cancelButton.keyEquivalent = "\u{1b}"
+        cancelButton.keyEquivalentModifierMask = []
+        cancelButton.setAccessibilityIdentifier("settings.ssh.add-host.cancel")
+
+        addButton.title = text("Add", "添加")
+        addButton.bezelStyle = .rounded
+        addButton.bezelColor = .controlAccentColor
+        addButton.target = self
+        addButton.action = #selector(addTypedHost)
+        addButton.keyEquivalent = "\r"
+        addButton.setAccessibilityIdentifier("settings.ssh.add-host.confirm")
+
+        let actions = NSStackView(views: [errorLabel, NSView(), cancelButton, addButton])
+        actions.orientation = .horizontal
+        actions.spacing = 8
+
+        let formView = form.view
+        let stack = NSStackView(views: [title, formView, actions])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 10
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 18),
+            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
+            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 18),
+            stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
+            formView.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            formView.heightAnchor.constraint(greaterThanOrEqualToConstant: 340),
+            actions.widthAnchor.constraint(equalTo: stack.widthAnchor),
+        ])
+        view = root
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        view.window?.makeFirstResponder(addressField)
+    }
+
+    override func didEndSheet() {
+        choicesTask?.cancel()
+    }
+
+    @objc func cancel() {
+        choicesTask?.cancel()
+        closePanel()
+    }
+
+    @objc func addTypedHost() {
+        let value = addressField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else {
+            errorLabel.stringValue = text("Enter an SSH host alias or user@host.", "请输入 SSH 主机别名或 user@host。")
+            errorLabel.isHidden = false
+            return
+        }
+        do {
+            let connection = try GitSSHConnection(destination: value)
+            commitHost(connection, endpoint: nil, fromConfiguration: false)
+        } catch {
+            errorLabel.stringValue = error.localizedDescription
+            errorLabel.isHidden = false
+        }
+    }
+
+    private func commitHost(_ connection: GitSSHConnection, endpoint: String?, fromConfiguration: Bool) {
+        guard let controller = settingsController else { return }
+        let targetID = controller.registry.targetID(for: connection)
+        let wasRegistered = controller.registry.host(targetID) != nil
+        let id = controller.registry.addConfigured(connection, endpoint: endpoint, fromConfiguration: fromConfiguration)
+        if !wasRegistered {
+            var policy = controller.agents.policy(for: id)
+            policy.checkAutomatically = false
+            policy.updateHooksAutomatically = false
+            controller.agents.setPolicy(policy, for: id)
+        }
+        choicesTask?.cancel()
+        closePanel { [weak controller] in
+            controller?.showHost(id)
+        }
+    }
+}
+
+/// Modal sheet managing local Coding Agents (`AgentIntegrationManager.localID`) inline on one
+/// surface without 2–3 levels of secondary `push` navigation.
+@MainActor
+final class LocalCodingAgentsSheetController: GitCommitSettingsPanelController {
+    private weak var settingsController: NativeSettingsController?
+    private let manager: AgentIntegrationManager
+    private let strings: SettingsStrings
+    let doneButton = NSButton()
+
+    init(controller: NativeSettingsController) {
+        self.settingsController = controller
+        self.manager = controller.agents
+        self.strings = controller.strings
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    private func text(_ en: String, _ zh: String) -> String { strings.t(en, zh) }
+
+    override func loadView() {
+        let target = AgentIntegrationManager.localID
+        let root = OMGNativeSurfaceView()
+        let title = NSTextField(labelWithString: text("Coding Agents on This Mac", "本机 Agent 状态扩展与 CLI"))
+        title.font = .systemFont(ofSize: 15, weight: .semibold)
+
+        let form = NativeSettingsForm(contentInsets: NSEdgeInsets(top: 6, left: 4, bottom: 8, right: 4))
+        if let palette = settingsController?.currentPalette {
+            form.applyPalette(palette)
+        }
+        addChild(form)
+
+        let policy = manager.policy(for: target)
+        form.section(text("Setup", "状态扩展配置"))
+        let checkButton = SettingsActionButton(text("Check", "检查")) { [weak self] in
+            guard let manager = self?.manager else { return }
+            Task { await manager.refresh(target: target, checkLatest: false) }
+        }
+        checkButton.setAccessibilityIdentifier("settings.ai.coding-agents.check")
+        form.row(text("Agent discovery", "检查已安装的 Agent"), control: checkButton)
+
+        let installAllButton = SettingsActionButton(text("Install", "启用")) { [weak self] in
+            self?.manager.beginSetup(target: target, installAll: true)
+        }
+        installAllButton.setAccessibilityIdentifier("settings.ai.coding-agents.install-all")
+        form.row(text("Enable all detected Agents", "一键启用已发现的 Agent"), control: installAllButton)
+
+        form.toggle(
+            text("Maintain status extensions automatically", "自动维护已安装的状态扩展"),
+            value: policy.updateHooksAutomatically
+        ) { [weak self] value in
+            guard let self else { return }
+            var next = self.manager.policy(for: target)
+            if value { next.checkAutomatically = true }
+            next.updateHooksAutomatically = value
+            self.manager.setPolicy(next, for: target)
+        }
+
+        form.section(
+            text("Supported Agents", "支持的 Agent"),
+            caption: strings.agentIntegrationExplanation
+        )
+        for agent in SupportedAgent.allCases {
+            buildAgentRow(agent, target: target, in: form)
+        }
+
+        form.section(text("Maintenance", "维护与工具"))
+        form.toggle(text("Update Agent CLIs automatically", "自动更新 Agent CLI"), value: policy.updatesCLIs) { [weak self] value in
+            guard let self else { return }
+            var next = self.manager.policy(for: target)
+            next.updateAllCLIsAutomatically = value
+            next.automaticallyUpdatedAgents = []
+            if value { next.checkAutomatically = true }
+            self.manager.setPolicy(next, for: target)
+        }
+        form.toggle(strings.agentMaintenance, value: policy.checkAutomatically) { [weak self] value in
+            guard let self else { return }
+            var next = self.manager.policy(for: target)
+            next.checkAutomatically = value
+            self.manager.setPolicy(next, for: target)
+        }
+        form.toggle(strings.agentCheckOnConnection, value: policy.checkOnConnection == true) { [weak self] value in
+            guard let self else { return }
+            var next = self.manager.policy(for: target)
+            next.checkOnConnection = value
+            self.manager.setPolicy(next, for: target)
+        }
+        form.row(text("Check interval (hours)", "检查间隔（小时）"), control: SettingsNumberField(
+            value: Double(policy.intervalHours), range: 1...168, step: 1
+        ) { [weak self] value in
+            guard let self else { return }
+            var next = self.manager.policy(for: target)
+            next.intervalHours = Int(value)
+            self.manager.setPolicy(next, for: target)
+        })
+        if let checked = policy.lastSuccess {
+            form.note(strings.agentLastChecked + " " + checked.formatted())
+        }
+        form.row(
+            strings.exportSSHInstallerButton,
+            subtitle: text("Export a standalone script for manual setup on restricted SSH hosts.",
+                           "导出独立安装脚本，供在受限 SSH 主机上审阅并手动执行。"),
+            control: SettingsActionButton(text("Export…", "导出…")) { [weak self] in
+                self?.settingsController?.exportHooks(from: self?.view.window)
+            }
+        )
+        settingsController?.observeTarget(target, form: form)
+
+        doneButton.title = text("Done", "完成")
+        doneButton.bezelStyle = .rounded
+        doneButton.keyEquivalent = "\r"
+        doneButton.target = self
+        doneButton.action = #selector(closeSheet)
+        doneButton.setAccessibilityIdentifier("settings.ai.coding-agents.done")
+        let actions = NSStackView(views: [NSView(), doneButton])
+        actions.orientation = .horizontal
+
+        let formView = form.view
+        let stack = NSStackView(views: [title, formView, actions])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 10
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 18),
+            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
+            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 18),
+            stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
+            formView.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            formView.heightAnchor.constraint(greaterThanOrEqualToConstant: 460),
+            actions.widthAnchor.constraint(equalTo: stack.widthAnchor),
+        ])
+        view = root
+    }
+
+    private func buildAgentRow(_ agent: SupportedAgent, target: String, in form: NativeSettingsForm) {
+        let initialSnapshot = manager.snapshot(for: target) ?? .init()
+        let hookToggle = SettingsSwitch(value: initialSnapshot.hooks[agent]?.isInstalled == true) { _ in }
+        hookToggle.setAccessibilityLabel(agent.displayName + " · Hooks")
+        hookToggle.setAccessibilityIdentifier("settings.ai.coding-agents.hook." + agent.rawValue)
+        hookToggle.change = { [weak self, weak hookToggle] enabled in
+            guard let self else { return }
+            hookToggle?.isEnabled = false
+            let manager = self.manager
+            manager.acknowledgeOnboarding(target: target)
+            Task { @MainActor [weak hookToggle] in
+                await manager.update(agent, target: target, remove: !enabled)
+                hookToggle?.state = manager.snapshot(for: target)?.hooks[agent]?.isInstalled == true ? .on : .off
+                hookToggle?.isEnabled = true
+            }
+        }
+
+        let repairButton = SettingsActionButton("") { [weak self] in
+            guard let manager = self?.manager else { return }
+            manager.acknowledgeOnboarding(target: target)
+            Task { await manager.update(agent, target: target) }
+        }
+        repairButton.setAccessibilityIdentifier("settings.ai.coding-agents.repair." + agent.rawValue)
+
+        let cliButton = SettingsActionButton("") { [weak self] in
+            guard let manager = self?.manager else { return }
+            Task { await manager.update(agent, target: target, cli: true) }
+        }
+        cliButton.setAccessibilityIdentifier("settings.ai.coding-agents.cli." + agent.rawValue)
+
+        let controls = NSStackView(views: [cliButton, repairButton, hookToggle])
+        controls.spacing = 8
+        let row = form.row(
+            agent.displayName,
+            subtitle: agentRowSummary(agent, snapshot: initialSnapshot),
+            control: controls
+        )
+
+        let sync = { [weak self, weak hookToggle, weak repairButton, weak cliButton] in
+            guard let self else { return }
+            let current = self.manager.snapshot(for: target) ?? .init()
+            let idle = !self.manager.busy.contains(target)
+            let hookState = current.hooks[agent] ?? .missing
+            let cliInfo = current.cli[agent]
+            row?.setSubtitle(self.agentRowSummary(agent, snapshot: current))
+
+            hookToggle?.state = hookState.isInstalled ? .on : .off
+            hookToggle?.isEnabled = idle && (cliInfo?.path != nil || hookState.isInstalled)
+
+            repairButton?.title = hookState == .updateAvailable
+                ? self.text("Update Hooks", "更新 Hooks")
+                : self.text("Reinstall", "重装")
+            repairButton?.isHidden = !hookState.isInstalled
+            repairButton?.isEnabled = idle
+
+            cliButton?.title = cliInfo?.path == nil
+                ? self.text("Install CLI", "安装 CLI")
+                : self.text("Update CLI", "更新 CLI")
+            cliButton?.isHidden = cliInfo?.canAutomaticallyUpdate != true
+            cliButton?.isEnabled = idle && cliInfo?.canAutomaticallyUpdate == true
+        }
+        sync()
+        let token = manager.objectWillChange.receive(on: RunLoop.main).sink { _ in sync() }
+        form.retained.append(token)
+    }
+
+    private func agentRowSummary(_ agent: SupportedAgent, snapshot: AgentIntegrationSnapshot) -> String {
+        let cli = snapshot.cli[agent]
+        let cliPart = cli?.displayVersion
+            ?? (cli?.path == nil ? text("Not installed", "未安装") : text("Installed", "已安装"))
+        let isDetectorOnly = agent.definition.hook.kind == .none
+        let hookPart: String
+        switch snapshot.hooks[agent] ?? .missing {
+        case .current:
+            hookPart = isDetectorOnly ? strings.agentDetectorCurrent : strings.agentHooksCurrent
+        case .updateAvailable:
+            hookPart = isDetectorOnly ? strings.agentDetectorUpdateRequired : strings.agentHooksUpdateRequired
+        case .missing:
+            hookPart = isDetectorOnly ? strings.agentDetectorMissing : strings.agentHooksMissing
+        }
+        return "\(cliPart) · \(hookPart)"
+    }
+
+    @objc func closeSheet() {
+        closePanel()
     }
 }

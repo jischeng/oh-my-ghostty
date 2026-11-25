@@ -50,7 +50,7 @@ extension OhMyGhosttySettings {
     }
 
     private func dropAIRoutes(where matches: (UUID) -> Bool) {
-        if let route = aiTitleRoute, matches(route.provider) { aiTitleRoute = nil }
+        if let provider = aiTitleRoute?.provider, matches(provider) { aiTitleRoute = nil }
         if gitCommitAIRoutes.contains(where: { $0.provider.map(matches) ?? false }) {
             gitCommitAIRoutes.removeAll { $0.provider.map(matches) ?? false }
         }

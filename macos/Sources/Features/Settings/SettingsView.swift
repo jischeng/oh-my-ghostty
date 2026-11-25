@@ -15,12 +15,11 @@ enum OhMyGhosttySettingsTab: String, CaseIterable, Identifiable {
     case mobile
     case ssh
     case agents
-    case plugins
     case advanced
 
     static let navigationOrder: [Self] = [
         .general, .appearance, .tabs, .terminal, .controls, .editor,
-        .keyboard, .agents, .git, .mobile, .ssh, .plugins, .advanced
+        .keyboard, .agents, .git, .mobile, .ssh, .advanced
     ]
 
     var id: String { rawValue }
@@ -38,7 +37,6 @@ enum OhMyGhosttySettingsTab: String, CaseIterable, Identifiable {
         case .mobile: "iphone"
         case .ssh: "network"
         case .agents: "sparkles"
-        case .plugins: "puzzlepiece.extension"
         case .advanced: "slider.horizontal.3"
         }
     }

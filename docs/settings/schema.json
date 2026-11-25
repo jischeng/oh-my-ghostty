@@ -152,11 +152,21 @@
     },
     "ai.routes.title": {
       "category": "agents",
-      "description": "Model that generates conversation titles for agent tabs. API connections only. Absent means no generation: tabs show agent-reported titles only.",
+      "description": "Model that generates conversation titles for agent tabs: either an installed agent (local ACP) or an API connection (HTTP). Legacy {provider, model} objects without kind remain supported. Absent means no generation.",
       "type": "object",
-      "required": ["provider", "model"],
+      "required": ["model"],
       "properties": {
-        "provider": { "type": "string", "format": "uuid" },
+        "kind": { "type": "string", "enum": ["agent", "provider"] },
+        "agent": {
+          "type": "string",
+          "enum": ["claude", "pi", "codex", "opencode"],
+          "description": "Required when kind is agent."
+        },
+        "provider": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Required when kind is provider (or omitted in legacy entries): the id of an entry in ai.providers."
+        },
         "model": { "type": "string", "minLength": 1, "maxLength": 256 }
       },
       "additionalProperties": false

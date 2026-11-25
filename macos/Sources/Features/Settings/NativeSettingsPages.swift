@@ -24,7 +24,6 @@ extension NativeSettingsController {
         case .ssh: remoteHosts(form)
         case .mobile: mobileAccess(form)
         case .agents: aiOverview(form)
-        case .plugins: plugins(form)
         case .advanced:
             form.section(strings.settingsLocationsSection)
             let files = NSStackView(views: [
@@ -50,6 +49,7 @@ extension NativeSettingsController {
             })
             form.note(strings.precedenceLabel + " · " + strings.precedenceValue)
             if let error = settings.lastError { form.note(error) }
+            plugins(form)
             buildOMGDoctorSection(form, doctor: doctor)
         }
     }
@@ -134,8 +134,6 @@ extension NativeSettingsController {
         picker(form, strings.rowDensityLabel, \.tabRowDensity, OhMyGhosttyTabRowDensity.allCases.map { ($0, strings.densityTitle($0)) })
         number(form, strings.tabIconSizeLabel, \.tabIconSize, range: 12...20)
         toggle(form, strings.showShortcutLabelsLabel, \.showShortcutLabels)
-        picker(form, strings.terminalResizeRenderingLabel, \.terminalResizeRendering,
-               TerminalResizeRenderingMode.allCases.map { ($0, strings.terminalResizeRenderingTitle($0)) })
         form.row(strings.resetTabsButton, control: SettingsActionButton(text("Reset", "重置")) { [weak self] in
             self?.settings.resetTabs(); self?.select(.tabs)
         })
@@ -252,6 +250,24 @@ extension NativeSettingsController {
             "Background opacity also affects sidebars. Unfocused opacity controls native split dimming; 100% disables dimming.",
             "背景不透明度也影响侧栏等界面。非聚焦不透明度控制原生分屏淡化，100% 表示不淡化。"
         ))
+        form.section(strings.resizeRenderingSection)
+        let resizeModes = TerminalResizeRenderingMode.allCases
+        let resizePopup = SettingsPopup(
+            titles: resizeModes.map { strings.terminalResizeRenderingTitle($0) },
+            selected: resizeModes.firstIndex(of: settings.terminalResizeRendering) ?? 0
+        ) { [weak settings] index in
+            guard resizeModes.indices.contains(index) else { return }
+            settings?.terminalResizeRendering = resizeModes[index]
+        }
+        form.row(
+            strings.terminalResizeRenderingLabel,
+            control: resizePopup,
+            help: strings.terminalResizeRenderingCaption
+        )
+        form.refreshers.append { [weak settings, weak resizePopup] in
+            guard let settings else { return }
+            resizePopup?.selectItem(at: resizeModes.firstIndex(of: settings.terminalResizeRendering) ?? 0)
+        }
         form.section(text("Reset", "重置"))
         form.row(strings.resetAppearanceButton,
                  subtitle: text("Uses terminal defaults until you choose a value.", "未自定义的选项沿用终端配置。"),

@@ -48,6 +48,13 @@ extension NativeSettingsController {
                    "添加另一个 OpenAI 兼容或 Anthropic 接口。")
         form.row(strings.aiAddServiceLabel, subtitle: addSubtitle, control: addServiceButton)
 
+        form.section(
+            strings.aiInstalledGroup,
+            caption: text(
+                "Reuse your logged-in local CLIs for tab titles and Git messages without configuring API keys.",
+                "直接复用本机已登录 CLI 的模型与认证用于标签页命名与 Git 信息生成，无需配置 API 密钥。"
+            )
+        )
         let snapshot = agents.snapshot(for: AgentIntegrationManager.localID)
         for agent in GitCommitAgent.allCases {
             let inspectButton = SettingsActionButton(text("Models…", "模型…")) { [weak self] in
@@ -139,7 +146,11 @@ extension NativeSettingsController {
 
         let choose = SettingsActionButton(text("Choose…", "选择…")) { [weak self] in
             guard let self else { return }
-            GitCommitAISettingsPanel.presentTitleModel(settings: self.settings, from: self)
+            GitCommitAISettingsPanel.presentTitleModel(
+                settings: self.settings,
+                catalog: self.aiAgentCatalog,
+                from: self
+            )
         }
         choose.setAccessibilityIdentifier("settings.ai.title.choose-model")
         let clear = SettingsActionButton(text("Clear", "清除")) { [weak settings] in settings?.aiTitleRoute = nil }
@@ -228,14 +239,19 @@ extension NativeSettingsController {
     /// The chosen title model, or why no title will be generated.
     func aiTitleModelSummary() -> String {
         guard let route = settings.aiTitleRoute else { return strings.aiTitleModelUnset }
-        guard let provider = settings.aiProvider(route.provider) else {
-            return text("\(route.model): its API service was removed. Choose another model.",
-                        "\(route.model)：所属的 API 服务已被移除，请重新选择模型。")
+        switch route.target {
+        case .agent(let agent):
+            return "\(agent.title) · \(route.model)"
+        case .provider(let providerID):
+            guard let provider = settings.aiProvider(providerID) else {
+                return text("\(route.model): its API service was removed. Choose another model.",
+                            "\(route.model)：所属的 API 服务已被移除，请重新选择模型。")
+            }
+            let name = provider.name + " · " + route.model
+            return provider.enabled ? name
+                : text("\(name): the service is turned off, so no titles are generated.",
+                       "\(name)：该服务已停用，不会生成标题。")
         }
-        let name = provider.name + " · " + route.model
-        return provider.enabled ? name
-            : text("\(name): the service is turned off, so no titles are generated.",
-                   "\(name)：该服务已停用，不会生成标题。")
     }
 }
 

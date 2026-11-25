@@ -90,8 +90,9 @@ struct NativeAISettingsTests {
             #expect(strings.tabTitle(.agents) == "AI")
             let form = try #require(fixture.controller.children.compactMap { $0 as? NativeSettingsForm }.first)
             let labels = descendants(view).compactMap { ($0 as? NSTextField)?.stringValue }
-            for title in [strings.aiProvidersSection, strings.terminalCodingAgentsSection,
-                          strings.agentHistorySection, strings.aiProviderSummary(fixture.settings.aiProviders[0])] {
+            for title in [strings.aiProvidersSection, strings.aiInstalledGroup,
+                          strings.terminalCodingAgentsSection, strings.agentHistorySection,
+                          strings.aiProviderSummary(fixture.settings.aiProviders[0])] {
                 #expect(labels.contains(title), "missing \(title)")
             }
             // Feature-specific model assignments and notifications belong on their owning pages, not AI.
@@ -117,13 +118,22 @@ struct NativeAISettingsTests {
 
             _ = try find(NSButton.self, "settings.ai.provider." + provider.id.uuidString, in: view)
             _ = try find(NSButton.self, "settings.ai.provider.add", in: view)
-            _ = try find(NSButton.self, "settings.ai.coding-agents.local", in: view)
+            let manageLocalAgents = try find(NSButton.self, "settings.ai.coding-agents.local", in: view)
             for agent in GitCommitAgent.allCases {
                 _ = try find(NSButton.self, "settings.ai.agent." + agent.rawValue, in: view)
             }
             // Showing the page asked no agent and no service for anything.
             #expect(fixture.controller.aiAgentCatalog.entry(.claude) == AIAgentModelCatalog.Entry())
             #expect(fixture.requests.all.isEmpty)
+
+            // Managing local Coding Agents opens an inline modal sheet instead of pushing 2–3 subpages.
+            manageLocalAgents.performClick(nil)
+            #expect(fixture.controller.isShowing("agents"))
+            let localSheet = try #require(fixture.controller.activeModalSheet as? LocalCodingAgentsSheetController)
+            for agent in SupportedAgent.allCases {
+                _ = try find(SettingsSwitch.self, "settings.ai.coding-agents.hook." + agent.rawValue, in: localSheet.view)
+            }
+            localSheet.closeSheet()
         }
     }
 
@@ -355,60 +365,34 @@ struct NativeAISettingsTests {
         let off = AIProvider(name: "Off", baseURL: "https://off.example.com", enabled: false,
                              models: [AIProviderModel(id: "y")])
         let empty = AIProvider(name: "Empty", baseURL: "https://empty.example.com")
-        let eligible = AIProviderModelPickerController.eligible([first, off, empty, second])
+        let eligible = AIUnifiedModelPickerController.eligibleProviders([first, off, empty, second])
         #expect(eligible == [first, second])
 
-        var chosen: (UUID, [String])?
-        let multi = AIProviderModelPickerController(providers: eligible, allowsMultiple: true, strings: strings,
-                                                    heading: "Add API Models") { chosen = ($0, $1) }
-        _ = multi.view
-        #expect(multi.providerPopup.numberOfItems == 2)
-        #expect(multi.modelTable.numberOfRows == 3)
-        #expect(multi.addProviderButton.isHidden)
-        #expect(!multi.confirmButton.isEnabled)
-        multi.toggle("c")
-        multi.toggle("a")
-        #expect(multi.confirmButton.isEnabled)
-        multi.confirm()
-        #expect(chosen?.0 == first.id)
-        // Reported in exact user click order ("c" then "a"), never silently re-sorted.
-        #expect(chosen?.1 == ["c", "a"])
-
-        let single = AIProviderModelPickerController(providers: eligible, allowsMultiple: false, strings: strings,
-                                                     heading: "Choose Title Model") { chosen = ($0, $1) }
-        _ = single.view
-        single.toggle("a")
-        single.toggle("b")
-        #expect(single.selected == ["b"])
-        single.select(providerAt: 1)
-        #expect(single.selected.isEmpty)
-        #expect(single.modelTable.numberOfRows == 1)
-        single.toggle("x")
-        single.confirm()
-        #expect(chosen?.0 == second.id)
-        #expect(chosen?.1 == ["x"])
-
-        // Unified picker combines enabled API services and Local CLIs in consistent order and shares AIAgentModelCatalog.
+        // Unified multi-select picker combines enabled API services and Local CLIs and preserves click order.
         let catalog = AIAgentModelCatalog { agent in ["\(agent.rawValue)-live"] }
         catalog.recordModels(["codex-cached-1", "codex-cached-2"], for: .codex)
         var unifiedPicked: [AIUnifiedModelPickerController.PickedModel] = []
         let unified = AIUnifiedModelPickerController(
-            providers: [first, off],
+            providers: [first, off, empty, second],
             catalog: catalog,
+            allowsMultiple: true,
             strings: strings,
             heading: "Add Generation Models"
         ) { unifiedPicked = $0 }
         _ = unified.view
         #expect(unified.sources == [
             .provider(first),
+            .provider(second),
             .agent(.codex),
             .agent(.claude),
             .agent(.pi),
             .agent(.opencode),
         ])
-        // Select an API model first, then switch to Codex (cached!) and select a CLI model.
+        #expect(unified.sourcePopup.numberOfItems == 6)
+        #expect(!unified.confirmButton.isEnabled)
+        // Select an API model first ("c"), switch to Codex (cached!) and select a CLI model, then back to API ("a").
         unified.toggle("c")
-        unified.selectSource(at: 1) // .agent(.codex)
+        unified.selectSource(at: 2) // .agent(.codex)
         #expect(unified.modelTable.numberOfRows == 2)
         unified.toggle("codex-cached-2")
         unified.selectSource(at: 0) // back to .provider(first)
@@ -420,21 +404,35 @@ struct NativeAISettingsTests {
             .init(target: .provider(first.id), model: "a"),
         ])
 
-        // Empty-state picker with an add-service callback opens the Add API Service modal sheet without creating garbage.
+        // Unified single-select picker (used by `Choose Title Model`) replaces prior choices across API and CLI sources.
+        var singlePicked: [AIUnifiedModelPickerController.PickedModel] = []
+        let single = AIUnifiedModelPickerController(
+            providers: [first, second],
+            catalog: catalog,
+            allowsMultiple: false,
+            initialTarget: .provider(second.id),
+            strings: strings,
+            heading: "Choose Title Model"
+        ) { singlePicked = $0 }
+        _ = single.view
+        #expect(single.currentSource == .provider(second))
+        single.toggle("x")
+        #expect(single.selected == [.init(target: .provider(second.id), model: "x")])
+        single.selectSource(at: 2) // .agent(.codex)
+        single.toggle("codex-cached-1")
+        #expect(single.selected == [.init(target: .agent(.codex), model: "codex-cached-1")])
+        single.confirm()
+        #expect(singlePicked == [.init(target: .agent(.codex), model: "codex-cached-1")])
+
+        // Chaining `New API Service…` from the title model picker opens `AIProviderSheetController` without creating garbage.
         let fixture = Fixture()
         defer { fixture.close() }
         fixture.controller.select(.tabs)
-        let emptyWithAdd = AIProviderModelPickerController(
-            providers: [],
-            allowsMultiple: false,
-            strings: strings,
-            heading: "Choose Title Model",
-            onAddProvider: { [weak controller = fixture.controller] in controller?.presentAIProviderSheet(id: nil) },
-            done: { _, _ in }
-        )
-        _ = emptyWithAdd.view
-        #expect(!emptyWithAdd.addProviderButton.isHidden)
-        emptyWithAdd.addProvider()
+        try find(NSButton.self, "settings.ai.title.choose-model", in: fixture.controller.view).performClick(nil)
+        let titlePicker = try #require(fixture.controller.activeModalSheet as? AIUnifiedModelPickerController)
+        #expect(!titlePicker.allowsMultiple)
+        #expect(!titlePicker.addProviderButton.isHidden)
+        titlePicker.addProvider()
         #expect(fixture.settings.aiProviders.isEmpty)
         #expect(fixture.controller.activeModalSheet is AIProviderSheetController)
     }
@@ -445,6 +443,9 @@ struct NativeAISettingsTests {
         let strings = SettingsStrings(language: .english)
         let controller = fixture.controller
         #expect(controller.aiTitleModelSummary() == strings.aiTitleModelUnset)
+
+        fixture.settings.aiTitleRoute = AITitleRoute(agent: .codex, model: "gpt-5-codex")
+        #expect(controller.aiTitleModelSummary() == "Codex · gpt-5-codex")
 
         let provider = try #require(fixture.settings.addAIProvider(name: "Work proxy"))
         fixture.settings.updateAIProvider(provider.id) { $0.mergeModels(["alpha"]) }

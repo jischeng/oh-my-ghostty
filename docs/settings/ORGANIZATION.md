@@ -6,18 +6,17 @@ Otty is a visual/information-architecture reference, not a feature-parity requir
 | Destination | Owned settings |
 | --- | --- |
 | General | Language, terminal close confirmation, quit behavior, and unified Notifications (terminal desktop notifications + Agent task completion/attention notifications & sound tone) |
-| Appearance | Window/OMG theme, fonts, opacity/blur, cursor, focused split border, and font inheritance |
-| Views & Tabs | Layout & Sidebar (horizontal/vertical tabs, default sidebar view, sidebar visibility/width/remembered width), Tabs List (grouping/order/path), Inbox View (inbox grouping/order/Continue window), Automatic Tab Titles (naming mode, always-shorten switch, title model sheet), Display & Resize (row density/icon size/shortcut badges/resize rendering/reset) |
+| Appearance | Window/OMG theme, fonts, opacity/blur, cursor, focused split border, font inheritance, and terminal resize rendering |
+| Views & Tabs | Layout & Sidebar (horizontal/vertical tabs, default sidebar view, sidebar visibility/width/remembered width), Tabs List (grouping/order/path), Inbox View (inbox grouping/order/Continue window), Automatic Tab Titles (naming mode, always-shorten switch, unified API + Local CLI title model sheet), Tab Display (row density/icon size/shortcut badges/reset) |
 | Shell & Sessions | Session recovery on launch, new tab/split inheritance, persistent terminal sessions (background runtime toggles, keep-on-quit controls, detached lifetime, expiration, Agent completion cleanup), shell integration |
 | Input & Controls | Quick Input (composer height/opacity, auto-open on Agent start/complete, Control-J newline, Agent draft import), Sent History, text selection, clipboard permissions/paste safety, mouse focus, Option-as-Alt |
 | Editor | File/directory destination, editor keymap, wrapping/pairs, typography, inline Editor Theme (background mode, syntax theme, opacity, blur), reset |
 | Shortcuts | Quick Input, sidebar/inbox/inspector/workspace shortcut recorders, number shortcut families, Ghostty keybinding configuration access |
-| AI | Unified Model Services (API services managed via modal sheets without draft leakage, alongside Local CLI model sheets in consistent `Codex`, `Claude Code`, `Pi`, `OpenCode` order), Terminal Coding Agents (live status toggle & local status extension/CLI setup), Agent History (session limit & background indexing) |
+| AI | API Model Services (managed via modal sheets without draft leakage), Local CLI Models (`Codex`, `Claude Code`, `Pi`, `OpenCode` inspected via modal sheets in unified order), Terminal Coding Agents (live status toggle & modal local status extension/CLI manager with inline per-Agent controls), Agent History (session limit & background indexing) |
 | Git | Auto-fetch interval, and AI Commit & PR Messages (ordered fallback models added from one unified API + Local CLI picker sheet, plus custom commit prompt sheet) |
 | Remote Machines | Explicit SSH host registration, connection setup, inline host discovery toggle, and cached Agent inventory |
 | Mobile Devices | LAN / Tailscale mobile gateway pairing and provisioning |
-| Plugins | Official and local plugin installation/management with inline version and update controls |
-| Advanced | OMG/Ghostty config locations, precedence, open/reload/reveal actions, and OMG Doctor diagnostics |
+| Advanced | OMG/Ghostty config locations, precedence, open/reload/reveal actions, official/local plugin management, and OMG Doctor diagnostics |
 
 ## Search and shared layout
 

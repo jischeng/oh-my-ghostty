@@ -215,20 +215,71 @@ struct AIProvider: Equatable, Identifiable, Sendable {
     }
 }
 
-/// The model that names agent conversations (`ai.routes.title`). API connections only.
+/// The model that names agent conversations (`ai.routes.title`): either an API service
+/// model (HTTP) or a logged-in local CLI model (ACP), sharing the same target model as Git.
 struct AITitleRoute: Equatable, Sendable {
-    let provider: UUID
+    let target: GitCommitAIRoute.Target
     let model: String
 
+    init(target: GitCommitAIRoute.Target, model: String) {
+        self.target = target
+        self.model = model
+    }
+
+    init(provider: UUID, model: String) {
+        self.init(target: .provider(provider), model: model)
+    }
+
+    init(agent: GitCommitAgent, model: String) {
+        self.init(target: .agent(agent), model: model)
+    }
+
+    var provider: UUID? {
+        if case .provider(let provider) = target { return provider }
+        return nil
+    }
+
+    var agent: GitCommitAgent? {
+        if case .agent(let agent) = target { return agent }
+        return nil
+    }
+
+    /// Reads both the unified `{kind, provider | agent, model}` object and the legacy
+    /// `{provider, model}` shape from `ai.routes.title`.
     static func decode(_ value: Any?) -> AITitleRoute? {
         guard let object = value as? [String: Any],
-              let provider = (object["provider"] as? String).flatMap(UUID.init(uuidString:)),
               let model = (object["model"] as? String).flatMap(AIModelID.normalized) else { return nil }
-        return AITitleRoute(provider: provider, model: model)
+        switch object["kind"] as? String {
+        case "agent":
+            guard let agent = (object["agent"] as? String).flatMap(GitCommitAgent.init(rawValue:)) else {
+                return nil
+            }
+            return AITitleRoute(agent: agent, model: model)
+        case "provider":
+            guard let provider = (object["provider"] as? String).flatMap(UUID.init(uuidString:)) else {
+                return nil
+            }
+            return AITitleRoute(provider: provider, model: model)
+        case nil:
+            if let provider = (object["provider"] as? String).flatMap(UUID.init(uuidString:)) {
+                return AITitleRoute(provider: provider, model: model)
+            }
+            if let agent = (object["agent"] as? String).flatMap(GitCommitAgent.init(rawValue:)) {
+                return AITitleRoute(agent: agent, model: model)
+            }
+            return nil
+        default:
+            return nil
+        }
     }
 
     var encoded: [String: Any] {
-        ["provider": provider.uuidString, "model": model]
+        switch target {
+        case .provider(let provider):
+            ["kind": "provider", "provider": provider.uuidString, "model": model]
+        case .agent(let agent):
+            ["kind": "agent", "agent": agent.rawValue, "model": model]
+        }
     }
 }
 
@@ -271,9 +322,9 @@ struct AIProviderDirectory: Sendable {
         return endpoint
     }
 
-    /// The endpoint behind the tab-title route, or nil when none is usable.
+    /// The HTTP endpoint behind an API-service tab-title route, or nil for none / CLI routes.
     func titleEndpoint(_ route: AITitleRoute?) -> AIEndpoint? {
-        guard let route else { return nil }
-        return try? endpoint(provider: route.provider, model: route.model)
+        guard let provider = route?.provider, let model = route?.model else { return nil }
+        return try? endpoint(provider: provider, model: model)
     }
 }

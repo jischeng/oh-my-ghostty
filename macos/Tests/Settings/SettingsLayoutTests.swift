@@ -107,7 +107,7 @@ struct SettingsLayoutTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let settings = OhMyGhosttySettings(fileURL: root.appendingPathComponent("settings.json"))
         settings.language = .simplifiedChinese
-        let tabs: [OhMyGhosttySettingsTab] = [.general, .terminal, .controls, .editor, .tabs, .appearance, .keyboard, .git, .plugins, .advanced]
+        let tabs: [OhMyGhosttySettingsTab] = [.general, .terminal, .controls, .editor, .tabs, .appearance, .keyboard, .git, .advanced]
         for language in [OhMyGhosttyLanguage.simplifiedChinese, .english] {
             settings.language = language
             for tab in tabs {

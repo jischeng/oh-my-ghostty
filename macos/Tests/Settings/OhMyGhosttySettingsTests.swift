@@ -702,7 +702,8 @@ struct OhMyGhosttySettingsTests {
         #expect(zh.windowTitle == "设置")
         #expect(en.windowTitle == "Settings")
         #expect(zh.tabTitle(.general) == "通用")
-        #expect(zh.tabTitle(.plugins) == "插件")
+        #expect(zh.tabTitle(.advanced) == "高级")
+        #expect(en.tabTitle(.advanced) == "Advanced")
         #expect(zh.tabTitle(.editor) == "编辑器")
         #expect(en.tabTitle(.editor) == "Editor")
         #expect(en.tabTitle(.ssh) == "Remote Machines")
@@ -1047,6 +1048,19 @@ struct OhMyGhosttySettingsTests {
         let restored = OhMyGhosttySettings(fileURL: url)
         #expect(restored.aiProviders == [provider])
         #expect(restored.aiTitleRoute == settings.aiTitleRoute)
+
+        // Legacy `{provider, model}` JSON without `kind` decodes cleanly; local CLI agent routes round-trip too.
+        let legacyJSON = #"{"ai.routes.title":{"provider":"\#(provider.id.uuidString)","model":"claude-test"}}"#
+        try legacyJSON.write(to: url, atomically: true, encoding: .utf8)
+        #expect(OhMyGhosttySettings(fileURL: url).aiTitleRoute == AITitleRoute(provider: provider.id, model: "claude-test"))
+
+        restored.aiTitleRoute = AITitleRoute(agent: .codex, model: "gpt-5-codex")
+        let cliSaved = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let cliTitle = try #require(cliSaved["ai.routes.title"] as? [String: Any])
+        #expect(cliTitle["kind"] as? String == "agent")
+        #expect(cliTitle["agent"] as? String == "codex")
+        #expect(cliTitle["model"] as? String == "gpt-5-codex")
+        #expect(OhMyGhosttySettings(fileURL: url).aiTitleRoute == AITitleRoute(agent: .codex, model: "gpt-5-codex"))
 
         // Clearing the title model removes its key instead of writing an empty value.
         restored.aiTitleRoute = nil

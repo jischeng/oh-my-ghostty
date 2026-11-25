@@ -162,21 +162,36 @@ struct AITitleServiceTests {
             let title = try await blocking.complete(user: "x")
             return (AITestData.openAI(title), AITestData.response(200))
         }
-        let service = AITitleService(client: client, endpoints: { AITestData.endpoint })
+        let service = AITitleService(
+            client: client,
+            endpoints: { AITestData.endpoint },
+            limits: .init(maxInFlight: 2, maxQueueDepth: 1)
+        )
 
         let first = Task { await service.title(forFirstPrompt: "a") }
         let second = Task { await service.title(forFirstPrompt: "b") }
         #expect(await waitUntil { await blocking.startedCount == 2 })
-        // Both slots are busy, so the third request returns without reaching the endpoint.
-        #expect(await service.title(forFirstPrompt: "c") == nil)
+
+        // Background request `c` waits in the bounded queue without starting until a slot opens.
+        let third = Task { await service.title(forFirstPrompt: "c") }
+        try? await Task.sleep(for: .milliseconds(25))
+        #expect(await blocking.startedCount == 2)
+
+        // Beyond `maxQueueDepth` (1), overflow background request `overflow` sheds cleanly as `.rejectedOrCancelled`.
+        #expect(await service.generate(forFirstPrompt: "overflow") == .rejectedOrCancelled)
         #expect(await blocking.startedCount == 2)
 
         await blocking.release()
-        let values = await [first.value, second.value].compactMap { $0 }
-        #expect(values.count == 2)
-        // Once a slot is free, the next request runs.
-        #expect(await service.title(forFirstPrompt: "d") != nil)
-        #expect(await blocking.startedCount == 3)
+        #expect(await waitUntil { await blocking.startedCount == 3 })
+        await blocking.release()
+        let values = await [first.value, second.value, third.value].compactMap { $0 }
+        #expect(values.count == 3)
+
+        // Once slots are free again, the next request runs immediately.
+        let fourth = Task { await service.title(forFirstPrompt: "d") }
+        #expect(await waitUntil { await blocking.startedCount == 4 })
+        await blocking.release()
+        #expect(await fourth.value != nil)
     }
 
     @Test func threeConsecutiveFailuresPauseTheService() async {
@@ -423,6 +438,81 @@ struct AITitleServiceTests {
         #expect(await waitUntil { await blocking.startedCount == 3 })
         await blocking.release()
         #expect(await switched.value == "Renamed")
+    }
+
+    @Test func forcedRequestsTakePriorityAheadOfQueuedBackgroundRequestsAndACPTargetGeneratesTitles() async {
+        let blocking = AIBlockingClient()
+        let recorder = AIRequestRecorder()
+        let client = AIHTTPClient { request in
+            recorder.record(request)
+            let title = try await blocking.complete(user: "Title")
+            return (AITestData.openAI(title), AITestData.response(200))
+        }
+        let service = AITitleService(
+            client: client,
+            endpoints: { AITestData.endpoint },
+            limits: .init(maxInFlight: 1, maxQueueDepth: 4)
+        )
+
+        let inFlight = Task { await service.title(forFirstPrompt: "in-flight") }
+        #expect(await waitUntil { await blocking.startedCount == 1 })
+
+        let bg1 = Task { await service.title(forFirstPrompt: "bg-1", nativeTitle: nil, projectName: nil, force: false) }
+        try? await Task.sleep(for: .milliseconds(15))
+        let bg2 = Task { await service.title(forFirstPrompt: "bg-2", nativeTitle: nil, projectName: nil, force: false) }
+        try? await Task.sleep(for: .milliseconds(15))
+        let forced = Task { await service.title(forFirstPrompt: "forced-1", nativeTitle: nil, projectName: nil, force: true) }
+        try? await Task.sleep(for: .milliseconds(15))
+
+        await blocking.release()
+        #expect(await waitUntil { await blocking.startedCount == 4 })
+        _ = await [inFlight.value, bg1.value, bg2.value, forced.value]
+
+        let order = recorder.bodies.compactMap { body -> String? in
+            let messages = (body["messages"] as? [[String: Any]]) ?? []
+            return messages.last?["content"] as? String
+        }
+        #expect(order.count == 4)
+        #expect(order[0].contains("in-flight"))
+        #expect(order[1].contains("forced-1"))
+        #expect(order[2].contains("bg-1"))
+        #expect(order[3].contains("bg-2"))
+
+        // Local CLI ACP route shares the same system prompt, prompt redaction, and sanitization pipeline.
+        struct ACPCall: Sendable {
+            let agent: GitCommitAgent
+            let model: String
+            let system: String
+            let user: String
+        }
+        actor ACPRecorder {
+            var calls: [ACPCall] = []
+            func record(_ call: ACPCall) {
+                calls.append(call)
+            }
+        }
+        let acpRecorder = ACPRecorder()
+        let acpService = AITitleService(
+            targets: { _ in .acp(agent: .codex, model: "gpt-5-codex") },
+            acpGenerator: { agent, model, system, user in
+                await acpRecorder.record(ACPCall(agent: agent, model: model, system: system, user: user))
+                return AITitleSanitizer.sanitize("\"精简 CLI 标题…\"")
+            },
+            language: { .simplifiedChinese }
+        )
+        let generated = await acpService.title(
+            forFirstPrompt: "token=sk-1234567890abcdefghijklmnop 帮我排查构建缓慢",
+            nativeTitle: "Slow build investigation",
+            projectName: "omg"
+        )
+        #expect(generated == "精简 CLI 标题")
+        let acpCalls = await acpRecorder.calls
+        #expect(acpCalls.count == 1)
+        #expect(acpCalls.first?.agent == .codex)
+        #expect(acpCalls.first?.model == "gpt-5-codex")
+        #expect(acpCalls.first?.system.contains("Simplified Chinese") == true)
+        #expect(acpCalls.first?.user.contains("sk-1234567890") == false)
+        #expect(acpCalls.first?.user.contains("<project>omg</project>") == true)
     }
 }
 

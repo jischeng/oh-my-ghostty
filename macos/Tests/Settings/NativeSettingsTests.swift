@@ -124,6 +124,9 @@ struct NativeSettingsTests {
         #expect(sheet.frame.width >= 500 && sheet.frame.height >= 400, "Visible Add Host sheet: \(sheet.frame)")
         let content = try #require(sheet.contentView)
         content.layoutSubtreeIfNeeded()
+        let sheetForm = try #require((controller.activeModalSheet as? AddSSHHostSheetController)?
+            .children.compactMap { $0 as? NativeSettingsForm }.first)
+        #expect(!sheetForm.rowTitles.contains(""), "Cancel must sit in the bottom action bar, not an empty form row")
         let cancel = try #require(descendants(content).compactMap { $0 as? NSButton }.first { $0.title == "Cancel" })
         #expect(cancel.bounds.width > 0 && cancel.bounds.height > 0)
         cancel.performClick(nil)
@@ -131,6 +134,12 @@ struct NativeSettingsTests {
         #expect(window.attachedSheet == nil)
         controller.select(.appearance)
         #expect(controller.selection == .appearance)
+        let appearanceForm = try #require(controller.children.compactMap { $0 as? NativeSettingsForm }.first)
+        #expect(appearanceForm.rowTitles.contains(SettingsStrings(language: .english).terminalResizeRenderingLabel))
+
+        controller.select(.advanced)
+        let advancedLabels = descendants(controller.view).compactMap { ($0 as? NSTextField)?.stringValue }
+        #expect(advancedLabels.contains(SettingsStrings(language: .english).officialPluginsSection))
     }
 
     @Test func themePickerPreservesDistinctOptionsWithTheSameDisplayName() {

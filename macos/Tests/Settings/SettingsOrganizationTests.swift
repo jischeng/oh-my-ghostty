@@ -10,6 +10,7 @@ struct SettingsOrganizationTests {
         let navigation = OhMyGhosttySettingsTab.navigationOrder
         #expect(Set(navigation) == Set(OhMyGhosttySettingsTab.allCases))
         #expect(navigation.count == Set(navigation).count)
+        #expect(!OhMyGhosttySettingsTab.allCases.map(\.rawValue).contains("plugins"))
         for language in [OhMyGhosttyLanguage.english, .simplifiedChinese] {
             let entries = SettingsSearchCatalog.entries(strings: .init(language: language))
             #expect(entries.count == Set(entries.map(\.id)).count)
@@ -31,6 +32,7 @@ struct SettingsOrganizationTests {
             #expect(entries.first { $0.settingIDs.contains("keyboard.toggleInbox") }?.tab == .keyboard)
             #expect(entries.first { $0.settingIDs.contains("appearance.tabIconSize") }?.tab == .tabs)
             #expect(entries.first { $0.settingIDs.contains("appearance.tabRowDensity") }?.tab == .tabs)
+            #expect(entries.first { $0.settingIDs.contains("terminal.resizeRendering") }?.tab == .appearance)
             #expect(OhMyGhosttySettings.descriptors.first { $0.id == "appearance.tabRowDensity" }?.defaultValue == "comfortable")
             #expect(entries.first { $0.settingIDs.contains("tabs.sidebarView") }?.tab == .tabs)
             #expect(entries.first { $0.settingIDs.contains("tabs.inboxGrouping") }?.tab == .tabs)
@@ -38,6 +40,7 @@ struct SettingsOrganizationTests {
             #expect(entries.first { $0.settingIDs.contains("tabs.inboxContinueMinutes") }?.tab == .tabs)
             #expect(entries.first { $0.settingIDs.contains("editor.backgroundMode") }?.tab == .editor)
             let copy = SettingsStrings(language: language)
+            #expect(entries.first { $0.title == copy.officialPluginsSection }?.tab == .advanced)
             #expect(entries.first { $0.settingIDs.contains("tabs.inboxGrouping") }?.title == copy.inboxViewSection)
             #expect(entries.first { $0.settingIDs.contains("tabs.grouping") }?.title == copy.organizationSection)
             #expect(entries.first { $0.settingIDs.contains("sessions.newTabInheritance") }?.tab == .terminal)

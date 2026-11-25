@@ -1221,6 +1221,8 @@ struct VerticalTabsIntegrationTests {
         }
         eighth.selectVerticalTab(controllers[2])
         controllers[2].markTabActivated()
+        #expect(tabGroup.windows.first !== controllers[2].window)
+        controllers[2].noteTerminalInput()
         for _ in 0..<50 where tabGroup.windows.first !== controllers[2].window {
             try await Task.sleep(for: .milliseconds(2))
         }

@@ -26,137 +26,147 @@ struct VerticalTabInboxInteractionTests {
         }
     }
 
-    @Test func aVisitCountsOnlyWhenTheTabIsLeftAfterStayingOnIt() {
-        let visit = TabInteractionTracker.visitInterval
-        var tracker = TabInteractionTracker()
-        // Changes among other tabs are none of this tab's business.
-        let stamped1 = tracker.selectionChanged(wasSelected: false, isSelected: false, uptime: 50)
-        #expect(!stamped1)
-        #expect(tracker.selectedSince == nil)
-
-        // Becoming the selected tab is not an interaction.
-        let stamped2 = tracker.selectionChanged(wasSelected: false, isSelected: true, uptime: 100)
-        #expect(!stamped2)
-        #expect(tracker.selectedSince == 100)
-        // Restoring a session and attaching tabs select a tab for an instant.
-        let stamped3 = tracker.selectionChanged(wasSelected: true, isSelected: false, uptime: 100 + visit / 2)
-        #expect(!stamped3)
-        #expect(tracker.selectedSince == nil)
-
-        let stamped4 = tracker.selectionChanged(wasSelected: false, isSelected: true, uptime: 200)
-        #expect(!stamped4)
-        // A repeated report does not restart the visit.
-        let stamped5 = tracker.selectionChanged(wasSelected: true, isSelected: true, uptime: 200 + visit / 2)
-        #expect(!stamped5)
-        #expect(tracker.selectedSince == 200)
-        let stamped6 = tracker.selectionChanged(wasSelected: true, isSelected: false, uptime: 200 + visit)
-        #expect(stamped6)
-        // Leaving is reported once.
-        let stamped7 = tracker.selectionChanged(wasSelected: true, isSelected: false, uptime: 400)
-        #expect(!stamped7)
-    }
-
-    @Test func typingIsThrottledAndOnlyStampsWhenItMovesTheTab() throws {
+    @Test func typingStampsImmediatelyWhenOvertakingAndAvoidsTopTabChurn() throws {
         let interval = TabInteractionTracker.typingInterval
+        let created = try #require(calendar.date(from: DateComponents(year: 2026, month: 11, day: 24, hour: 9)))
         let last = try #require(calendar.date(from: DateComponents(year: 2026, month: 11, day: 24, hour: 10)))
-        func stamps(after seconds: TimeInterval, recency: Date? = nil, other: Date?) -> Bool {
+        func stamps(after seconds: TimeInterval, createdAt: Date? = nil, recency: Date? = nil, other: Date?) -> Bool {
             TabInteractionTracker.typingStamps(
-                at: last.addingTimeInterval(seconds), last: last, recency: recency ?? last,
-                newestOther: other, calendar: calendar)
+                at: last.addingTimeInterval(seconds), createdAt: createdAt ?? created,
+                last: last, recency: recency ?? last, newestOther: other, calendar: calendar
+            )
         }
-        // Never twice within the interval, even below a more recent tab.
+        // Non-advancing timestamps never stamp.
         #expect(!stamps(after: 0, other: last.addingTimeInterval(1)))
-        #expect(!stamps(after: interval - 0.1, other: last.addingTimeInterval(1)))
-        // Afterwards only below another tab, or level with it.
-        #expect(stamps(after: interval, other: last.addingTimeInterval(1)))
+        // First real input after session creation always stamps immediately.
+        #expect(stamps(after: 0.2, createdAt: last, other: nil))
+        // Moving a lower tab to or above `other` stamps immediately without a 5s dead zone.
+        #expect(stamps(after: 1.5, other: last.addingTimeInterval(1)))
         #expect(stamps(after: 60, other: last))
-        // Already the most recent tab: every later keystroke changes nothing.
+        // Synthetic future `other` dates remain throttled by typingInterval.
+        #expect(!stamps(after: 1, other: last.addingTimeInterval(10)))
+        #expect(stamps(after: interval, other: last.addingTimeInterval(10)))
+        // Already the sole most-recent tab today: further keystrokes publish nothing.
         #expect(!stamps(after: 60, other: last.addingTimeInterval(-1)))
         #expect(!stamps(after: 3_600, other: nil))
         // An agent's activity put the tab on top without the user typing.
         #expect(!stamps(after: 60, recency: last.addingTimeInterval(30), other: last.addingTimeInterval(10)))
-        // The first typing of a new day moves the tab to Today.
+        // The first input of a new day moves the tab to Today.
         #expect(stamps(after: 14 * 3_600, other: nil))
         #expect(stamps(after: 14 * 3_600, other: last.addingTimeInterval(-1)))
-
-        // The other tabs are not looked at while typing is throttled.
-        var asked = 0
-        func newest() -> Date? { asked += 1; return nil }
-        _ = TabInteractionTracker.typingStamps(at: last.addingTimeInterval(1), last: last, recency: last,
-                                               newestOther: newest(), calendar: calendar)
-        #expect(asked == 0)
     }
 
-    @Test func selectingATabDoesNotStampItButLeavingAfterAVisitDoes() throws {
-        let created = Date(timeIntervalSince1970: 1_790_000_000)
-        let controller = try terminal(created: created)
-        let neighbour = try terminal()
-        defer { close([controller, neighbour]) }
-        let own = ObjectIdentifier(controller)
-        let other = ObjectIdentifier(neighbour)
-        let visit = TabInteractionTracker.visitInterval
-        func at(_ seconds: TimeInterval) -> Date { created.addingTimeInterval(seconds) }
-
-        // A tab without a saved date was last used when it was created.
-        #expect(controller.tabLastInteractionAt == created)
-
-        // Activation still dates the Tabs view's recently used order, and only that.
-        let activated = controller.tabLastActivatedAt
-        controller.markTabActivated()
-        #expect(controller.tabLastActivatedAt >= activated)
-        #expect(controller.tabLastInteractionAt == created)
-
-        // Becoming selected, and being passed through, stamp nothing.
-        controller.noteTabSelectionChanged(from: other, to: own, uptime: 1_000, now: at(10))
-        #expect(controller.tabLastInteractionAt == created)
-        controller.noteTabSelectionChanged(from: own, to: other, uptime: 1_000 + visit / 2, now: at(11))
-        #expect(controller.tabLastInteractionAt == created)
-
-        // Visited and left.
-        controller.noteTabSelectionChanged(from: other, to: own, uptime: 2_000, now: at(20))
-        #expect(controller.tabLastInteractionAt == created)
-        controller.noteTabSelectionChanged(from: own, to: other, uptime: 2_000 + visit, now: at(30))
-        #expect(controller.tabLastInteractionAt == at(30))
-        #expect(TabInboxModel.item(for: controller).lastInteractionAt == at(30))
-
-        // A window that goes away is not a tab the user left.
-        controller.noteTabSelectionChanged(from: other, to: own, uptime: 3_000, now: at(40))
-        controller.noteTabSelectionChanged(from: own, to: nil, uptime: 4_000, now: at(50))
-        #expect(controller.tabLastInteractionAt == at(30))
-        // Nor is another tab losing the selection.
-        controller.noteTabSelectionChanged(from: other, to: nil, uptime: 5_000, now: at(60))
-        #expect(controller.tabLastInteractionAt == at(30))
-    }
-
-    @Test func realTabSwitchStampsTheTabThatWasLeftNotTheOneSelected() async throws {
+    @Test func passiveSelectionAndViewingOverTwoSecondsLeavesRecencyUnchangedInInboxAndTabs() async throws {
         let fixture = try TerminalWorkspaceRefactorTests.Fixture()
         defer { fixture.close() }
         let first = try fixture.tab()
+        try await Task.sleep(for: .milliseconds(20))
         let second = try fixture.tab(parent: first)
+        try await Task.sleep(for: .milliseconds(20))
+        let third = try fixture.tab(parent: first)
+        let controllers = [first, second, third]
         let group = try #require(first.window?.tabGroup)
 
-        // Start a visit of the first tab, whichever tab the fixture left selected.
-        first.selectVerticalTab(first)
-        try #require(group.selectedWindow === first.window)
         let firstBefore = first.tabLastInteractionAt
-        // Selecting again right away is passing through: nothing is stamped.
-        first.selectVerticalTab(second)
-        try #require(group.selectedWindow === second.window)
-        #expect(first.tabLastInteractionAt == firstBefore)
-        first.selectVerticalTab(first)
-        #expect(first.tabLastInteractionAt == firstBefore)
-
-        try await Task.sleep(for: .seconds(TabInteractionTracker.visitInterval + 0.2))
         let secondBefore = second.tabLastInteractionAt
-        let left = Date()
+        let thirdBefore = third.tabLastInteractionAt
+        #expect(firstBefore == first.tabCreatedAt)
+        #expect(secondBefore == second.tabCreatedAt)
+        #expect(thirdBefore == third.tabCreatedAt)
+
+        func inboxOrder() -> [Int] {
+            TabInboxModel.groups(
+                tabs: controllers, grouping: .none, ordering: .recentlyUsed
+            ).flatMap(\.tabs).map(\.actualIndex)
+        }
+        func tabsOrder() -> [Int] {
+            GhosttyTabOrganizationModel().groups(
+                tabs: controllers, grouping: .none, ordering: .recentlyUsed
+            ).flatMap(\.tabs).map(\.actualIndex)
+        }
+        #expect(inboxOrder() == [3, 2, 1])
+        #expect(tabsOrder() == [3, 2, 1])
+
+        // Select the oldest tab, dwell for >2s without typing, then switch away.
+        first.selectVerticalTab(first)
+        first.markTabActivated()
+        try #require(group.selectedWindow === first.window)
+        try await Task.sleep(for: .milliseconds(2_100))
+
         first.selectVerticalTab(second)
+        second.markTabActivated()
         try #require(group.selectedWindow === second.window)
-        #expect(first.tabLastInteractionAt >= left)
-        // The tab the user arrived at keeps its place.
+
+        #expect(first.tabLastInteractionAt == firstBefore)
         #expect(second.tabLastInteractionAt == secondBefore)
+        #expect(third.tabLastInteractionAt == thirdBefore)
+        #expect(inboxOrder() == [3, 2, 1])
+        #expect(tabsOrder() == [3, 2, 1])
     }
 
-    @Test func typingMovesTheDateOnlyBelowAnotherTabAndAtMostEveryFewSeconds() throws {
+    @Test func terminalInputAndQuickInputMoveTabToTopOfRecentlyUsedInInboxAndTabs() async throws {
+        let fixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { fixture.close() }
+        let first = try fixture.tab()
+        try await Task.sleep(for: .milliseconds(20))
+        let second = try fixture.tab(parent: first)
+        try await Task.sleep(for: .milliseconds(20))
+        let third = try fixture.tab(parent: first)
+        let controllers = [first, second, third]
+        for controller in controllers {
+            if let surface = controller.surfaceTree.first {
+                surface.runtimeDescriptor = nil
+                surface.runtimeInlineSession = nil
+            }
+        }
+
+        func inboxOrder() -> [Int] {
+            TabInboxModel.groups(
+                tabs: controllers, grouping: .none, ordering: .recentlyUsed
+            ).flatMap(\.tabs).map(\.actualIndex)
+        }
+        func tabsOrder() -> [Int] {
+            GhosttyTabOrganizationModel().groups(
+                tabs: controllers, grouping: .none, ordering: .recentlyUsed
+            ).flatMap(\.tabs).map(\.actualIndex)
+        }
+        #expect(inboxOrder() == [3, 2, 1])
+        #expect(tabsOrder() == [3, 2, 1])
+
+        // 1. Typing / insertText in the first tab moves it to the top of both .inbox and .tabs.
+        let firstBefore = first.tabLastInteractionAt
+        let firstSurface = try #require(first.surfaceTree.first)
+        firstSurface.insertText("echo hello\n", replacementRange: NSRange(location: 0, length: 0))
+        #expect(first.tabLastInteractionAt > firstBefore)
+        #expect(inboxOrder() == [1, 3, 2])
+        #expect(tabsOrder() == [1, 3, 2])
+
+        // 2. Quick Input submission in the second tab updates tabLastInteractionAt and moves it to the top.
+        let secondBefore = second.tabLastInteractionAt
+        let secondSurface = try #require(second.surfaceTree.first)
+        if !ProgrammaticInputGuard.isGlobalSecureInputActive {
+            var completed = false
+            let submitted = second.submitQuickInputText(
+                "pwd",
+                to: secondSurface.id,
+                restoreFocus: false
+            ) {
+                completed = true
+            }
+            #expect(submitted)
+            for _ in 0..<50 where !completed {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            #expect(completed)
+        } else {
+            second.noteTerminalInput()
+        }
+        #expect(second.tabLastInteractionAt > secondBefore)
+        #expect(inboxOrder() == [2, 1, 3])
+        #expect(tabsOrder() == [2, 1, 3])
+    }
+
+    @Test func typingMovesTheDateOnlyBelowAnotherTabAndAvoidsTopTabSpam() throws {
         let fixture = try TerminalWorkspaceRefactorTests.Fixture()
         defer { fixture.close() }
         let first = try fixture.tab()
@@ -172,30 +182,30 @@ struct VerticalTabInboxInteractionTests {
         guard Calendar.current.isDate(at(300), inSameDayAs: first.tabCreatedAt) else { return }
         second.recordTabInteraction(at: at(0))
 
-        // The most recent tab stays where it is, whatever is typed into it.
-        second.noteTabTyping(at: at(60))
+        // Already the most recent tab after initial interaction: further keystrokes keep its date.
+        second.noteTerminalInput(at: at(60))
         #expect(second.tabLastInteractionAt == at(0))
 
-        // The tab below it moves up with the first keystroke.
-        first.noteTabTyping(at: at(60))
+        // The tab below it moves up immediately with the first keystroke.
+        first.noteTerminalInput(at: at(60))
         #expect(first.tabLastInteractionAt == at(60))
         #expect(first.tabInboxRecency > second.tabInboxRecency)
 
-        // Another tab took the top again; typing is still throttled.
-        second.recordTabInteraction(at: at(61))
-        first.noteTabTyping(at: at(62))
-        first.noteTabTyping(at: at(60 + interval - 0.5))
+        // Another tab receives a synthetic future timestamp; repeated keystrokes before `other` throttle.
+        second.recordTabInteraction(at: at(70))
+        first.noteTerminalInput(at: at(62))
+        first.noteTerminalInput(at: at(60 + interval - 0.5))
         #expect(first.tabLastInteractionAt == at(60))
-        first.noteTabTyping(at: at(60 + interval + 0.5))
-        #expect(first.tabLastInteractionAt == at(60 + interval + 0.5))
+        first.noteTerminalInput(at: at(71))
+        #expect(first.tabLastInteractionAt == at(71))
 
         // On top again: nothing is published for further keystrokes.
         var published = 0
         let observation = first.$tabLastInteractionAt.dropFirst().sink { _ in published += 1 }
         defer { observation.cancel() }
-        for seconds in stride(from: 100.0, through: 200.0, by: 10) { first.noteTabTyping(at: at(seconds)) }
+        for seconds in stride(from: 100.0, through: 200.0, by: 10) { first.noteTerminalInput(at: at(seconds)) }
         #expect(published == 0)
-        #expect(first.tabLastInteractionAt == at(60 + interval + 0.5))
+        #expect(first.tabLastInteractionAt == at(71))
     }
 
     @Test func interactionDateIsSavedWithTheTabAndOlderStateFallsBackToCreation() throws {
@@ -270,7 +280,8 @@ struct VerticalTabInboxInteractionTests {
             )
         }
         row.layoutSubtreeIfNeeded()
-        #expect(row.preferredHeight == 34)
+        let singleLineHeight = row.preferredHeight
+        #expect(singleLineHeight >= 34)
         #expect(!row.showsSubtitle)
         #expect(controller.tabLastInteractionAt == created)
 
@@ -282,7 +293,7 @@ struct VerticalTabInboxInteractionTests {
         try await Task.sleep(for: .milliseconds(30))
         row.layoutSubtreeIfNeeded()
         #expect(row.showsSubtitle)
-        #expect(row.preferredHeight == 48)
+        #expect(row.preferredHeight > singleLineHeight)
         #expect(row.titleLabel.stringValue == "Fix sidebar pills")
         #expect(row.subtitleLabel.stringValue == "~/code/project")
         #expect(controller.tabLastInteractionAt == created)

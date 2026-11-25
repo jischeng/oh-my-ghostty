@@ -337,18 +337,24 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     lazy var workspacePopover = WorkspacePopoverPresentation(controller: self)
     let tabCreatedAt: Date
     @Published private(set) var tabLastActivatedAt: Date
-    /// When an Agent in this tab last changed state. Not persisted.
+    /// When an Agent in this tab last entered active work or a completion/attention state. Not persisted.
     @Published private(set) var tabLastAgentActivityAt: Date?
-    /// When the user last typed into this tab or left it after visiting it.
-    /// Selecting the tab does not change it. Persisted with the session.
+    /// When the user last sent terminal input or Quick Input to this tab.
+    /// Selecting or viewing the tab never changes it. Persisted with the session.
     @Published private(set) var tabLastInteractionAt: Date
-    var tabInteraction = TabInteractionTracker()
 
     /// The only writer of `tabLastInteractionAt`. The rules for calling it
     /// are in TerminalController+TabInbox.swift.
     func recordTabInteraction(at date: Date) {
         guard tabLastInteractionAt != date else { return }
         tabLastInteractionAt = date
+        scheduleRecentlyUsedTabReconciliation()
+    }
+
+    func recordTabAgentActivity(at date: Date) {
+        guard tabLastAgentActivityAt != date else { return }
+        tabLastAgentActivityAt = date
+        scheduleRecentlyUsedTabReconciliation()
     }
 
     /// The real AppKit tabs in this controller's tab group, in display order.
@@ -392,7 +398,6 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             if wasSelected != isSelected {
                 syncSurfaceTreeOcclusionState()
             }
-            noteTabSelectionChanged(from: oldValue, to: selectedTabID)
         }
     }
 
@@ -2245,7 +2250,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // Hydration changes presentation only. It must never dispatch queued
         // input or repeat completion notifications and composer actions.
         guard !restoring else { return }
-        if previousState != nextState { tabLastAgentActivityAt = Date() }
+        noteTabAgentActivityTransition(from: previousState, to: nextState)
         if let surface = surfaceTree.first(where: { $0.id == surfaceID }) {
             AgentActivityNotification.deliver(previous: previousActivity, next: next[surfaceID], surface: surface)
         }
@@ -3036,14 +3041,20 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     func markTabActivated() {
         tabLastActivatedAt = Date()
+    }
+
+    private func scheduleRecentlyUsedTabReconciliation() {
         guard tabLayoutState.orderingMode == .recentlyUsed,
-              window?.tabGroup?.selectedWindow === window else { return }
+              !workspacePresentationIsParked,
+              window?.tabGroup != nil,
+              tabLayout != .vertical || OhMyGhosttySettings.shared.tabSidebarViewMode == .tabs else { return }
         pendingTabOrganizationWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
             defer { pendingTabOrganizationWorkItem = nil }
             guard tabLayoutState.orderingMode == .recentlyUsed,
-                  window?.tabGroup?.selectedWindow === window else { return }
+                  !workspacePresentationIsParked,
+                  tabLayout != .vertical || OhMyGhosttySettings.shared.tabSidebarViewMode == .tabs else { return }
             reconcileTabOrganization()
         }
         pendingTabOrganizationWorkItem = workItem

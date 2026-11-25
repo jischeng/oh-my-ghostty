@@ -1,46 +1,32 @@
 import AppKit
 
-/// When a tab counts as used by the user. The inbox lists recently used tabs
-/// first, and a tab must not jump to the top just because it was selected.
+/// When a tab counts as used by the user. Recently used ordering lists tabs by
+/// real terminal input, Quick Input submission, or meaningful agent activity —
+/// never by passive tab selection, viewing, or leaving.
 struct TabInteractionTracker {
-    /// Typing moves a tab's interaction date at most this often.
+    /// Throttles repeated stamps against synthetic future dates.
     static let typingInterval: TimeInterval = 5
-    /// A tab selected for less than this was passed through, not visited:
-    /// restoring a session or attaching a new tab selects tabs for an instant.
-    static let visitInterval: TimeInterval = 1
 
-    /// System uptime at which the tab became the selected one.
-    private(set) var selectedSince: TimeInterval?
-
-    /// Records a change of the selected tab. True when the user leaves this
-    /// tab after a visit.
-    mutating func selectionChanged(wasSelected: Bool, isSelected: Bool, uptime: TimeInterval) -> Bool {
-        if isSelected {
-            if !wasSelected || selectedSince == nil { selectedSince = uptime }
-            return false
-        }
-        let since = selectedSince
-        selectedSince = nil
-        guard wasSelected, let since else { return false }
-        return uptime - since >= Self.visitInterval
-    }
-
-    /// Whether typing at `now` moves the interaction date. `last` is that
-    /// date, `recency` the date the inbox orders the tab by and `newestOther`
-    /// the same for the most recent other tab.
+    /// Whether terminal input at `now` moves the interaction date. `last` is
+    /// `tabLastInteractionAt`, `createdAt` is `tabCreatedAt`, `recency` is the
+    /// date Recently Used orders the tab by, and `newestOther` is the highest
+    /// recency date among the other tabs in the group.
     static func typingStamps(
         at now: Date,
+        createdAt: Date = .distantPast,
         last: Date,
         recency: Date,
         newestOther: @autoclosure () -> Date?,
         calendar: Calendar = .current
     ) -> Bool {
-        guard now.timeIntervalSince(last) >= typingInterval else { return false }
-        // Date sections are calendar days: the first typing of a day counts.
+        guard now > last else { return false }
+        // First real input after session creation always records interaction.
+        if last <= createdAt { return true }
+        // Date sections are calendar days: the first input of a day counts.
         guard calendar.isDate(recency, inSameDayAs: now) else { return true }
-        // Already the most recent tab: a newer date would move nothing.
-        guard let other = newestOther() else { return false }
-        return other >= recency
+        // Already the sole most-recent tab: a newer date would move nothing.
+        guard let other = newestOther(), other >= recency else { return false }
+        return now >= other || now.timeIntervalSince(last) >= typingInterval
     }
 }
 
@@ -84,37 +70,37 @@ extension TerminalController {
                               lastAgentActivityAt: tabLastAgentActivityAt)
     }
 
-    /// Key and mouse presses on this tab's terminals arrive here. Only typing
-    /// makes the tab recently used; a click may just have focused a pane.
+    /// Key and mouse presses on this tab's terminals arrive here. Only key
+    /// input makes the tab recently used; a click may just have focused a pane.
     func noteTabInteractionFromUserInput() {
         guard NSApp.currentEvent?.type == .keyDown else { return }
-        noteTabTyping()
+        noteTerminalInput()
     }
 
-    /// The user typed into one of this tab's terminals. Most keystrokes
-    /// change nothing: the date moves at most every few seconds, and only
-    /// when that changes the tab's place or date section.
-    func noteTabTyping(at now: Date = Date()) {
+    /// Real user terminal input (`keyDown`, `insertText`, paste, or Quick Input
+    /// submission) into one of this tab's terminals.
+    func noteTerminalInput(at now: Date = Date()) {
         guard TabInteractionTracker.typingStamps(
-            at: now, last: tabLastInteractionAt, recency: tabInboxRecency,
+            at: now, createdAt: tabCreatedAt, last: tabLastInteractionAt, recency: tabInboxRecency,
             newestOther: tabControllers.lazy.filter { $0 !== self }.map { $0.tabInboxRecency }.max()
         ) else { return }
         stampTabInteraction(at: now)
     }
 
-    /// The selected tab of this tab's group changed. Leaving a tab after a
-    /// visit makes it recently used; becoming selected does not.
-    func noteTabSelectionChanged(
-        from old: ObjectIdentifier?,
-        to new: ObjectIdentifier?,
-        uptime: TimeInterval = ProcessInfo.processInfo.systemUptime,
-        now: Date = Date()
+    func noteTabTyping(at now: Date = Date()) {
+        noteTerminalInput(at: now)
+    }
+
+    /// Records meaningful agent activity state transitions (`working` start or
+    /// `done`/`needsAttention`/`error` arrival). Clearing or acknowledging back
+    /// to `.idle` or `nil` never stamps recency.
+    func noteTabAgentActivityTransition(
+        from previous: TabActivityState?,
+        to next: TabActivityState?,
+        at now: Date = Date()
     ) {
-        let own = ObjectIdentifier(self)
-        // Without a selection the window is going away; that is not leaving.
-        let left = tabInteraction.selectionChanged(
-            wasSelected: old == own && new != nil, isSelected: new == own, uptime: uptime)
-        if left { stampTabInteraction(at: now) }
+        guard TabInboxModel.shouldRecordAgentActivityTransition(from: previous, to: next) else { return }
+        recordTabAgentActivity(at: now)
     }
 
     private func stampTabInteraction(at date: Date) {

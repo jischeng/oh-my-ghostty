@@ -566,10 +566,14 @@ struct TerminalLiveTabLayoutTests {
         let surface = try #require(controller.surfaceTree.first)
         #expect(controller.tabLastAgentActivityAt == nil)
 
+        // Starting idle is not active agent work and does not stamp recency.
         let start = Date()
         surface.contextSignal = .init(action: .start, id: "omg-program-status",
             metadata: "state=idle:app=antigravity")
         #expect(controller.agentActivities[surface.id]?.state == .idle)
+        #expect(controller.tabLastAgentActivityAt == nil)
+
+        // .idle -> .working stamps recency.
         surface.contextSignal = .init(action: .start, id: "omg-program-status",
             metadata: "state=working:app=antigravity")
         #expect(controller.agentActivities[surface.id]?.state == .working)
@@ -581,11 +585,41 @@ struct TerminalLiveTabLayoutTests {
             metadata: "state=working:app=antigravity")
         #expect(controller.tabLastAgentActivityAt == working)
 
+        // .working -> .needsAttention, .error, and .done each stamp recency.
+        surface.contextSignal = .init(action: .start, id: "omg-program-status",
+            metadata: "state=blocked:app=antigravity")
+        #expect(controller.agentActivities[surface.id]?.state == .needsAttention)
+        let attention = try #require(controller.tabLastAgentActivityAt)
+        #expect(attention >= working)
+
+        surface.contextSignal = .init(action: .start, id: "omg-program-status",
+            metadata: "state=working:app=antigravity")
+        let resumedWorking = try #require(controller.tabLastAgentActivityAt)
+        #expect(resumedWorking >= attention)
+
+        surface.contextSignal = .init(action: .start, id: "omg-program-status",
+            metadata: "state=error:app=antigravity")
+        #expect(controller.agentActivities[surface.id]?.state == .error)
+        let failed = try #require(controller.tabLastAgentActivityAt)
+        #expect(failed >= resumedWorking)
+
+        surface.contextSignal = .init(action: .start, id: "omg-program-status",
+            metadata: "state=working:app=antigravity")
         surface.contextSignal = .init(action: .start, id: "omg-program-status",
             metadata: "state=done:app=antigravity")
         #expect(controller.agentActivities[surface.id]?.state == .done)
         let done = try #require(controller.tabLastAgentActivityAt)
-        #expect(done >= working)
+        #expect(done >= failed)
+
+        // Acknowledging .done -> .idle (e.g. passively viewing a finished tab) never stamps recency.
+        controller.acknowledgeTerminalAgentState(for: surface)
+        #expect(controller.agentActivities[surface.id]?.state == .idle)
+        #expect(controller.tabLastAgentActivityAt == done)
+
+        surface.contextSignal = .init(action: .start, id: "omg-program-status",
+            metadata: "state=clear:app=antigravity")
+        #expect(controller.agentActivities[surface.id] == nil)
+        #expect(controller.tabLastAgentActivityAt == done)
     }
 
     @Test func horizontalTabsUseNativeAgentStatusAndSharedPresentation() async throws {

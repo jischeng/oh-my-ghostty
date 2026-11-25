@@ -177,8 +177,10 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
     private var isInbox: Bool { OhMyGhosttySettings.shared.tabSidebarViewMode == .inbox }
 
     /// Only the recency order depends on interaction and agent timestamps.
-    private var inboxFollowsRecency: Bool {
-        isInbox && OhMyGhosttySettings.shared.tabInboxOrderingMode == .recentlyUsed
+    private var followsRecency: Bool {
+        isInbox
+            ? OhMyGhosttySettings.shared.tabInboxOrderingMode == .recentlyUsed
+            : configuration.layoutState.orderingMode == .recentlyUsed
     }
 
     /// Project groups follow each tab's directory. The inbox has its own grouping.
@@ -190,7 +192,11 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
     private func toggleInbox() {
         // Every sidebar observes the settings, so all windows switch together.
         let settings = OhMyGhosttySettings.shared
-        settings.tabSidebarViewMode = settings.tabSidebarViewMode == .inbox ? .tabs : .inbox
+        let nextMode: GhosttyTabSidebarViewMode = settings.tabSidebarViewMode == .inbox ? .tabs : .inbox
+        settings.tabSidebarViewMode = nextMode
+        if nextMode == .tabs, configuration.layoutState.orderingMode == .recentlyUsed {
+            configuration.controller.reconcileTabOrganization()
+        }
     }
 
     private func configureInboxButton(_ strings: ChromeStrings) {
@@ -275,15 +281,11 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
             tab.objectWillChange.sink { [weak self] _ in
                 if self?.groupsByProject == true { self?.scheduleRefresh() }
             }.store(in: &metadataSubscriptions)
-            // Activation orders the Tabs view; the inbox follows interaction.
-            tab.$tabLastActivatedAt.dropFirst().sink { [weak self] _ in
-                if self?.configuration.layoutState.orderingMode == .recentlyUsed { self?.scheduleRefresh() }
-            }.store(in: &metadataSubscriptions)
             tab.$tabLastInteractionAt.dropFirst().sink { [weak self] _ in
-                if self?.inboxFollowsRecency == true { self?.scheduleRefresh() }
+                if self?.followsRecency == true { self?.scheduleRefresh() }
             }.store(in: &metadataSubscriptions)
             tab.$tabLastAgentActivityAt.dropFirst().sink { [weak self] _ in
-                if self?.inboxFollowsRecency == true { self?.scheduleRefresh() }
+                if self?.followsRecency == true { self?.scheduleRefresh() }
             }.store(in: &metadataSubscriptions)
             // Only a change of state moves a tab into or out of Continue, or
             // changes the inbox button's dot; progress and message updates of

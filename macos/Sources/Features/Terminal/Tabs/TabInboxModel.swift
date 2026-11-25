@@ -30,7 +30,7 @@ struct TabInboxItem: Equatable {
     /// State of the tab's preferred agent activity; nil without an agent.
     var state: TabActivityState?
     var createdAt: Date
-    /// When the user last typed into the tab or left it after visiting it.
+    /// When the user last sent terminal input or Quick Input to the tab.
     var lastInteractionAt: Date
     var lastAgentActivityAt: Date?
 }
@@ -102,6 +102,22 @@ enum TabInboxModel {
     /// How many tabs wait for the user, given the agent states of each tab.
     static func attentionCount(_ tabs: [[TabActivityState]]) -> Int {
         tabs.filter { $0.contains(where: waitsForUser) }.count
+    }
+
+    /// Whether an agent state change counts as new tab activity for recency.
+    /// Enters active work or a completion/attention state; passive acknowledgment
+    /// back to `.idle` or `nil` never bumps recency.
+    static func shouldRecordAgentActivityTransition(
+        from previous: TabActivityState?,
+        to next: TabActivityState?
+    ) -> Bool {
+        guard previous != next else { return false }
+        switch next {
+        case .working, .done, .needsAttention, .error:
+            return true
+        case .idle, nil:
+            return false
+        }
     }
 
     /// When the tab was last used: by the user, or by an agent changing state.

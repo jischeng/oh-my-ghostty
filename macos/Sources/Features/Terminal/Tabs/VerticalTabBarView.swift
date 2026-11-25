@@ -724,10 +724,20 @@ final class GhosttyTabOrganizationModel: ObservableObject {
             }
         case .recentlyUsed:
             organized.sort {
-                if $0.controller.tabLastActivatedAt == $1.controller.tabLastActivatedAt {
+                let lhs = TabInboxModel.recency(
+                    createdAt: $0.controller.tabCreatedAt,
+                    lastInteractionAt: $0.controller.tabLastInteractionAt,
+                    lastAgentActivityAt: $0.controller.tabLastAgentActivityAt
+                )
+                let rhs = TabInboxModel.recency(
+                    createdAt: $1.controller.tabCreatedAt,
+                    lastInteractionAt: $1.controller.tabLastInteractionAt,
+                    lastAgentActivityAt: $1.controller.tabLastAgentActivityAt
+                )
+                if lhs == rhs {
                     return $0.actualIndex < $1.actualIndex
                 }
-                return $0.controller.tabLastActivatedAt > $1.controller.tabLastActivatedAt
+                return lhs > rhs
             }
         }
 

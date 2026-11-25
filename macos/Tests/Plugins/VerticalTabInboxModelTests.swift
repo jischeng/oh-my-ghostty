@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import Foundation
 import Testing
@@ -137,6 +138,23 @@ struct VerticalTabInboxModelTests {
         }
     }
 
+    @Test func onlyMeaningfulAgentStateTransitionsRecordActivity() {
+        let allStates: [TabActivityState?] = [nil, .idle, .working, .done, .needsAttention, .error]
+        for previous in allStates {
+            // Clearing or acknowledging back to .idle or nil never stamps recency.
+            #expect(!TabInboxModel.shouldRecordAgentActivityTransition(from: previous, to: .idle))
+            #expect(!TabInboxModel.shouldRecordAgentActivityTransition(from: previous, to: nil))
+
+            // Repeating the same state never stamps recency.
+            #expect(!TabInboxModel.shouldRecordAgentActivityTransition(from: previous, to: previous))
+
+            // Entering .working or arriving at .done/.needsAttention/.error from a different state stamps recency.
+            for activeTarget in [TabActivityState.working, .done, .needsAttention, .error] where previous != activeTarget {
+                #expect(TabInboxModel.shouldRecordAgentActivityTransition(from: previous, to: activeTarget))
+            }
+        }
+    }
+
     @Test func equalDatesKeepTheNativeTabOrder() throws {
         let same = try date(24, 9)
         let now = try date(24, 12)
@@ -147,6 +165,34 @@ struct VerticalTabInboxModelTests {
             #expect(TabInboxModel.order(items: idle, ordering: ordering) == [0, 1, 2, 3])
             #expect(arrangement(idle, ordering, now: now) == [.today: [0, 1, 2, 3]])
             #expect(arrangement(waiting, ordering, now: now) == [.continue: [1, 3, 0, 2]])
+        }
+    }
+
+    @Test @MainActor func equalTimestampsTieBreakByNativeActualIndexInInboxAndTabs() throws {
+        let delegate = try #require(NSApp.delegate as? AppDelegate)
+        let same = try date(24, 9)
+        let now = try date(24, 12)
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 30"
+        let controllers = (0..<4).map { _ in
+            TerminalController(delegate.ghostty, withBaseConfig: config, tabLayout: .vertical, tabCreatedAt: same)
+        }
+        defer {
+            for controller in controllers {
+                controller.window?.delegate = nil
+                controller.window?.close()
+            }
+        }
+        for ordering in GhosttyTabOrderingMode.allCases {
+            let inboxGroups = TabInboxModel.groups(
+                tabs: controllers, grouping: .none, ordering: ordering, now: now, calendar: calendar
+            )
+            #expect(inboxGroups.flatMap(\.tabs).map(\.actualIndex) == [1, 2, 3, 4])
+
+            let tabGroups = GhosttyTabOrganizationModel().groups(
+                tabs: controllers, grouping: .none, ordering: ordering, now: now
+            )
+            #expect(tabGroups.flatMap(\.tabs).map(\.actualIndex) == [1, 2, 3, 4])
         }
     }
 

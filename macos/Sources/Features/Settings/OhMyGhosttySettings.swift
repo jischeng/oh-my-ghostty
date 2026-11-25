@@ -1582,9 +1582,10 @@ final class OhMyGhosttySettings: ObservableObject {
             tabSidebarViewMode = enumValue("tabs.sidebarView", fallback: .tabs)
             tabInboxGroupingMode = enumValue("tabs.inboxGrouping", fallback: .date)
             tabInboxOrderingMode = enumValue("tabs.inboxOrdering", fallback: .recentlyUsed)
-            let rawContinueMinutes = Int(numberValue("tabs.inboxContinueMinutes", fallback: 15, range: 1...60).rounded())
-            tabInboxContinueMinutes = Self.inboxContinueMinuteOptions.contains(rawContinueMinutes)
-                ? rawContinueMinutes : 15
+            let rawContinueMinutes = (chosen["tabs.inboxContinueMinutes"] as? NSNumber)
+                .flatMap { CFGetTypeID($0) == CFBooleanGetTypeID() ? nil : Int($0.doubleValue.rounded()) }
+            tabInboxContinueMinutes = rawContinueMinutes
+                .flatMap { Self.inboxContinueMinuteOptions.contains($0) ? $0 : nil } ?? 15
             tabPathDisplay = enumValue("tabs.pathDisplay", fallback: .folderName)
             showShortcutLabels = boolValue("tabs.showShortcutLabels", fallback: true)
             rememberSidebarWidth = boolValue("tabs.rememberSidebarWidth", fallback: true)

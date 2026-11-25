@@ -402,6 +402,7 @@ struct VerticalTabInboxSidebarTests {
         // Both views offer the same entries in the same words.
         let entries = [strings.groupHeader] + GhosttyTabGroupingMode.allCases.map(strings.groupingTitle)
             + [strings.orderHeader] + GhosttyTabOrderingMode.allCases.map(strings.orderingTitle)
+            + [strings.autoRenameWorkspaceTabs]
         #expect(toggle.accessibilityIdentifier() == "tabs.inbox")
         #expect(toggle.controlStyle == .plain)
         #expect(!toggle.isBordered)
@@ -413,7 +414,7 @@ struct VerticalTabInboxSidebarTests {
         #expect(toggle.toolTip == strings.toggleInbox(shown: false))
         #expect(titles() == entries)
         // The Tabs view: no grouping, manual order.
-        #expect(checked() == [false, true, false, false, false, true, false, false])
+        #expect(checked() == [false, true, false, false, false, true, false, false, false])
 
         toggle.performClick(nil)
         #expect(settings.tabSidebarViewMode == .inbox)
@@ -424,14 +425,14 @@ struct VerticalTabInboxSidebarTests {
         #expect(toggle.toolTip == strings.toggleInbox(shown: true))
         #expect(titles() == entries)
         // The inbox: by date, recently used first.
-        #expect(checked() == [false, false, false, true, false, false, false, true])
+        #expect(checked() == [false, false, false, true, false, false, false, true, false])
 
         try choose(strings.groupingTitle(.project))
         try choose(strings.orderingTitle(.created))
         #expect(settings.tabInboxGroupingMode == .project)
         #expect(settings.tabInboxOrderingMode == .created)
         sidebar.refresh()
-        #expect(checked() == [false, false, true, false, false, false, true, false])
+        #expect(checked() == [false, false, true, false, false, false, true, false, false])
         #expect(sidebar.inbox.configuration.groups.allSatisfy { $0.id.hasPrefix("inbox:") && $0.title != nil })
         // The inbox's choices never reach the Tabs view or the native tabs.
         #expect(sidebar.state.groupingMode == .none)
@@ -450,7 +451,7 @@ struct VerticalTabInboxSidebarTests {
         sidebar.refresh()
         #expect(!toggle.isShown)
         #expect(toggle.controlStyle == .plain)
-        #expect(checked() == [false, true, false, false, false, true, false, false])
+        #expect(checked() == [false, true, false, false, false, true, false, false, false])
         #expect(sidebar.rows == sidebar.controllers.map { sidebar.key($0) })
     }
 

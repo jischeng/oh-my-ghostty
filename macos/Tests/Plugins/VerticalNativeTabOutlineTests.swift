@@ -263,7 +263,7 @@ struct VerticalNativeTabOutlineTests {
         }
     }
 
-    @Test func singleTrailingSlotPriorityAndCommandHoldRevealInNormalTabs() throws {
+    @Test func singleTrailingSlotPriorityAndCommandHoldRevealInNormalTabs() async throws {
         final class KeyOutlineWindow: NSWindow {
             var keyState = true
             override var isKeyWindow: Bool { keyState }
@@ -399,11 +399,12 @@ struct VerticalNativeTabOutlineTests {
         #expect(cells[1].trailingAccessory == .status)
         #expect(cells[2].trailingAccessory == .status)
 
-        // 5. Window resignKey and app resignActive immediately clear ⌘-hold so Command-Tab never sticks ON.
+        // 5. Window resignKey (deferred across runloop for native tab switches) and app resignActive clear ⌘-hold.
         controller.commandMonitor.handleFlagsChanged(try flagsEvent([.command]))
         #expect(controller.isCommandHeld)
         window.keyState = false
         NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window)
+        try await Task.sleep(for: .milliseconds(20))
         #expect(!controller.isCommandHeld)
         #expect(cells[1].trailingAccessory == .status)
 

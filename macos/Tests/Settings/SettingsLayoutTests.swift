@@ -30,34 +30,33 @@ struct SettingsLayoutTests {
         await registry.register(connection, endpoint: "chengjisheng@10.0.0.123:2222")
         let registeredManager = AgentIntegrationManager(defaults: defaults,
             connectionTargets: { [RegisteredSSHHost.id(for: connection)] }, registry: registry)
-        let registeredRoot = Form {
-            Section("SSH") {
-                SSHRegistrationSettingsView(strings: .init(language: .simplifiedChinese), registry: registry, agents: registeredManager,
-                    initialChoices: [.init(id: RegisteredSSHHost.id(for: connection), name: "cloud", endpoint: "chengjisheng@10.0.0.123:2222",
-                                           connection: connection, fromConfiguration: true)])
-            }
-            AgentIntegrationSettingsView(strings: .init(language: .simplifiedChinese), settings: settings,
-                manager: registeredManager, registry: registry, refreshOnAppear: false, target: RegisteredSSHHost.id(for: connection))
-        }.formStyle(.grouped).environment(\.colorScheme, .dark)
-        let registeredHost = NSHostingView(rootView: registeredRoot)
-        let registeredWindow = makeWindow(registeredHost, width: 800)
+        let sshController = NativeSettingsController(
+            settings: settings,
+            initialSelection: .ssh,
+            registry: registry,
+            agents: registeredManager
+        )
+        let registeredWindow = makeWindow(sshController.view, width: 820)
         defer { registeredWindow.close() }
-        try await Task.sleep(for: .milliseconds(150))
-        registeredHost.layoutSubtreeIfNeeded()
-        try capture(registeredHost, name: "registered-ssh")
-        for width in [CGFloat(450), 1_000] {
-            let root = Form {
-                AgentIntegrationSettingsView(strings: .init(language: .simplifiedChinese), settings: settings,
-                                             manager: manager, refreshOnAppear: false)
-            }
-            .formStyle(.grouped).environment(\.colorScheme, .dark)
-            let host = NSHostingView(rootView: root)
-            let window = makeWindow(host, width: width)
-            defer { window.close() }
-            try await Task.sleep(for: .milliseconds(150))
-            host.layoutSubtreeIfNeeded()
-            try capture(host, name: "agents-\(Int(width))")
-            #expect(host.bounds.width == width)
+        try await Task.sleep(for: .milliseconds(50))
+        sshController.view.layoutSubtreeIfNeeded()
+        try capture(sshController.view, name: "registered-ssh")
+        #expect(sshController.view.bounds.width == 820)
+
+        for width in [CGFloat(760), 1_000] {
+            let agentsController = NativeSettingsController(
+                settings: settings,
+                initialSelection: .agents,
+                registry: registry,
+                agents: manager
+            )
+            let agentsWindow = makeWindow(agentsController.view, width: width)
+            defer { agentsWindow.close() }
+            agentsController.showAgents(target: AgentIntegrationManager.localID)
+            try await Task.sleep(for: .milliseconds(50))
+            agentsController.view.layoutSubtreeIfNeeded()
+            try capture(agentsController.view, name: "agents-\(Int(width))")
+            #expect(agentsController.view.bounds.width == width)
         }
         let host = NSHostingView(rootView: SettingsView(settings: settings, initialSelection: .appearance)
             .environment(\.colorScheme, .dark))
@@ -83,18 +82,22 @@ struct SettingsLayoutTests {
         let manager = AgentIntegrationManager(defaults: defaults, snapshots: ["local": snapshot], connectionTargets: { [] })
         let settings = OhMyGhosttySettings(fileURL: home.appendingPathComponent("settings.json"))
         for language in [OhMyGhosttyLanguage.english, .simplifiedChinese] {
-            for scheme in [ColorScheme.light, .dark] {
-                let host = NSHostingView(rootView: Form {
-                    AgentIntegrationSettingsView(strings: .init(language: language), settings: settings,
-                        manager: manager, refreshOnAppear: false, expanded: [.codex])
-                }.formStyle(.grouped).environment(\.colorScheme, scheme))
-                let window = makeWindow(host, width: 450)
+            settings.language = language
+            for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+                let controller = NativeSettingsController(
+                    settings: settings,
+                    initialSelection: .agents,
+                    agents: manager
+                )
+                let window = makeWindow(controller.view, width: 820)
+                window.appearance = NSAppearance(named: appearance)
                 defer { window.close() }
-                try await Task.sleep(for: .milliseconds(150))
-                host.layoutSubtreeIfNeeded()
-                #expect(host.bounds.width == 450)
+                controller.showAgents(target: AgentIntegrationManager.localID)
+                try await Task.sleep(for: .milliseconds(50))
+                controller.view.layoutSubtreeIfNeeded()
+                #expect(controller.view.bounds.width == 820)
                 #expect(manager.busy.isEmpty)
-                try capture(host, name: "agent-detail-\(language.rawValue)-\(scheme)")
+                try capture(controller.view, name: "agent-detail-\(language.rawValue)-\(appearance.rawValue)")
             }
         }
     }

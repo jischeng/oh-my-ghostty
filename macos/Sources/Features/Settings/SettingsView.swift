@@ -53,13 +53,18 @@ final class OhMyGhosttySettingsWindowController: NSWindowController {
         initialSelection: OhMyGhosttySettingsTab = .general
     ) {
         let root = NativeSettingsController(settings: settings, initialSelection: initialSelection)
-        let window = SettingsWindow(contentViewController: root)
+        let window = SettingsWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 680),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
         window.title = SettingsStrings(language: settings.language).windowTitle
-        window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.isMovableByWindowBackground = true
         window.isOpaque = true
+        window.contentViewController = root
         window.minSize = NSSize(width: 820, height: 540)
         window.contentMinSize = NSSize(width: 760, height: 560)
         window.setFrameAutosaveName("OhMyGhosttySettingsWindow")
@@ -68,6 +73,7 @@ final class OhMyGhosttySettingsWindowController: NSWindowController {
         if window.frame.width < 820 || window.frame.height < 540 {
             window.setContentSize(NSSize(width: 900, height: 680))
         }
+        root.updateChromeInsets()
         super.init(window: window)
 
         applyAppearance(settings)
@@ -196,7 +202,7 @@ final class SettingsWindow: NSWindow {
 /// Compatibility entry point for previews; the live window owns this controller directly.
 struct SettingsView: NSViewControllerRepresentable {
     let settings: OhMyGhosttySettings
-    var initialSelection: OhMyGhosttySettingsTab = .tabs
+    var initialSelection: OhMyGhosttySettingsTab = .general
     var palette: OMGThemePalette?
     var initialSearch = ""
 

@@ -180,9 +180,9 @@ enum TerminalTabPresentationResolver {
             }
 
             var name: String? = explicitUserTitle
-            if name == nil, settings.agentSessionTitleMode != .off {
+            if name == nil {
                 let conversation = controller.agentConversationTitle(for: surface)
-                let terminal = conversation == nil
+                let terminal = (conversation == nil && settings.agentSessionTitleMode != .off)
                     ? agent.flatMap {
                         sessionName(
                             fromTerminalTitle: surface.title,

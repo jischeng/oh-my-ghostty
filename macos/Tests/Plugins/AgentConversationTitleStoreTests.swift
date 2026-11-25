@@ -205,30 +205,49 @@ struct AgentConversationTitleStoreTests {
 
         let store = AgentConversationTitleStore()
         #expect(store.set("Ray Gateway V2 Migration", source: .native, agent: .codex, conversationID: conversation))
-        // English generated title cannot replace an English native title without force.
+        // Neither English nor Chinese background `.generated` titles replace `.native` unless
+        // `allowGeneratedOverNative` or `force` is explicitly enabled.
         #expect(!store.set("Ray gateway migration", source: .generated, agent: .codex, conversationID: conversation))
-        // Chinese generated title upgrades an English-only native title.
-        #expect(store.set("Ray 网关 V2 迁移", source: .generated, agent: .codex, conversationID: conversation))
+        #expect(!store.set("Ray 网关 V2 迁移", source: .generated, agent: .codex, conversationID: conversation))
+        #expect(store.set(
+            "Ray 网关 V2 迁移",
+            source: .generated,
+            agent: .codex,
+            conversationID: conversation,
+            allowGeneratedOverNative: true
+        ))
         #expect(store.record(agent: .codex, conversationID: conversation)?.source == .generated)
         #expect(store.title(agent: .codex, conversationID: conversation) == "Ray 网关 V2 迁移")
 
-        // A Chinese native title is not replaced by a generated title without force.
+        let bound = AgentResumeDescriptor(
+            agent: .codex,
+            conversationID: conversation,
+            scope: .local,
+            workingDirectory: "/repo"
+        )
+        // `.native` mode ("Agent Title Only") hides background `.generated` records.
+        #expect(store.title(for: bound, mode: .native) == nil)
+        #expect(store.title(for: bound, mode: .generate) == "Ray 网关 V2 迁移")
+
+        // A Chinese native title is not replaced by a generated title without `allowGeneratedOverNative` or `force`.
         #expect(store.set("网关迁移收尾", source: .native, agent: .codex, conversationID: conversation))
         #expect(!store.set("另一份中文标题", source: .generated, agent: .codex, conversationID: conversation))
-        #expect(store.title(agent: .codex, conversationID: conversation) == "网关迁移收尾")
+        #expect(store.title(for: bound, mode: .native) == "网关迁移收尾")
 
-        // Force replaces any existing record regardless of rank or language, and records
-        // supersededNativeTitle so an unchanged native title cannot overwrite it on `.done`.
+        // Explicit manual rename (`force: true, isUserRequested: true`) shows even in `.native` / `.off` modes,
+        // and records `supersededNativeTitle` so an unchanged native title cannot overwrite it on `.done`.
         #expect(store.set(
             "强制生成标题",
             source: .generated,
             agent: .codex,
             conversationID: conversation,
             force: true,
-            supersededNativeTitle: "网关迁移收尾"
+            supersededNativeTitle: "网关迁移收尾",
+            isUserRequested: true
         ))
         #expect(store.record(agent: .codex, conversationID: conversation)?.source == .generated)
-        #expect(store.title(agent: .codex, conversationID: conversation) == "强制生成标题")
+        #expect(store.title(for: bound, mode: .native) == "强制生成标题")
+        #expect(store.title(for: bound, mode: .off) == "强制生成标题")
         #expect(!store.set("网关迁移收尾", source: .native, agent: .codex, conversationID: conversation))
         #expect(store.title(agent: .codex, conversationID: conversation) == "强制生成标题")
         #expect(store.set("用户手动重命名", source: .native, agent: .codex, conversationID: conversation))

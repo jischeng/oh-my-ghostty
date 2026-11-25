@@ -30,9 +30,18 @@ private final class NativeSettingsNavigationCell: NSTableCellView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard showsGroupDivider, backgroundStyle != .emphasized else { return }
-        NSColor.separatorColor.withAlphaComponent(0.55).setFill()
+        if let rowView = superview as? NSTableRowView {
+            if rowView.isSelected { return }
+            if let table = rowView.superview as? NSTableView {
+                let row = table.row(for: self)
+                if row > 0, table.selectedRowIndexes.contains(row - 1) {
+                    return
+                }
+            }
+        }
+        NSColor.labelColor.withAlphaComponent(0.12).setFill()
         let y = isFlipped ? 0.0 : bounds.maxY - 1.0
-        NSRect(x: 10, y: y, width: max(0, bounds.width - 20), height: 1).fill()
+        NSRect(x: 12, y: y, width: max(0, bounds.width - 24), height: 1).fill()
     }
 }
 
@@ -59,6 +68,7 @@ final class NativeSettingsController: NSViewController, NSTableViewDataSource, N
     private var searchTopConstraint: NSLayoutConstraint?
     private var headerTopConstraint: NSLayoutConstraint?
     private var palette: OMGThemePalette?
+    var currentPalette: OMGThemePalette? { palette }
     private let search = NSSearchField()
     var searchField: NSSearchField { search }
     private let titleLabel = NSTextField(labelWithString: "")
@@ -244,6 +254,7 @@ final class NativeSettingsController: NSViewController, NSTableViewDataSource, N
         return cell
     }
     func tableViewSelectionDidChange(_ notification: Notification) {
+        sidebar.setNeedsDisplay(sidebar.bounds)
         guard !selecting, rows.indices.contains(sidebar.selectedRow) else { return }
         select(rows[sidebar.selectedRow])
     }
@@ -307,10 +318,22 @@ final class NativeSettingsController: NSViewController, NSTableViewDataSource, N
         back.isHidden = history.isEmpty
     }
 
+    override func viewWillLayout() {
+        super.viewWillLayout()
+        updateChromeInsets()
+    }
+
     func updateChromeInsets() {
-        let usesFullSizeTitlebar = view.window?.styleMask.contains(.fullSizeContentView) == true
-        searchTopConstraint?.constant = usesFullSizeTitlebar ? 40 : 16
-        headerTopConstraint?.constant = usesFullSizeTitlebar ? 18 : 14
+        guard let window = view.window, window.styleMask.contains(.fullSizeContentView) else {
+            searchTopConstraint?.constant = 16
+            headerTopConstraint?.constant = 14
+            return
+        }
+        let layoutRect = view.convert(window.contentLayoutRect, from: nil)
+        let rawTitlebar = view.bounds.height > 0 ? view.bounds.maxY - layoutRect.maxY : 28
+        let titlebarHeight = min(max(28, rawTitlebar), 52)
+        searchTopConstraint?.constant = max(42, ceil(titlebarHeight) + 12)
+        headerTopConstraint?.constant = max(18, ceil(titlebarHeight) - 10)
     }
 
     func applyPalette(_ palette: OMGThemePalette) {
@@ -323,8 +346,22 @@ final class NativeSettingsController: NSViewController, NSTableViewDataSource, N
 
     func presentModalSheet(_ sheet: GitCommitSettingsPanelController, title: String, size: NSSize) {
         if let existing = activeModalSheet, !existing.finished {
-            existing.closePanel()
+            existing.closePanel { [weak self] in
+                self?.presentModalSheetNow(sheet, title: title, size: size)
+            }
+            return
         }
+        if let parent = view.window, let attached = parent.attachedSheet {
+            parent.endSheet(attached)
+            DispatchQueue.main.async { [weak self] in
+                self?.presentModalSheetNow(sheet, title: title, size: size)
+            }
+            return
+        }
+        presentModalSheetNow(sheet, title: title, size: size)
+    }
+
+    private func presentModalSheetNow(_ sheet: GitCommitSettingsPanelController, title: String, size: NSSize) {
         activeModalSheet = sheet
         _ = sheet.view
         sheet.onSheetDidEnd = { [weak self, weak sheet] in

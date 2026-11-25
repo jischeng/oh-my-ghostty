@@ -292,6 +292,7 @@ struct NativeSettingsRow {
 @MainActor
 final class NativeSettingsForm: NSViewController {
     let stack = NSStackView()
+    let contentInsets: NSEdgeInsets
     private var group: NSStackView?
     private var rowCount = 0
     private(set) var rowTitles: [String] = []
@@ -303,6 +304,14 @@ final class NativeSettingsForm: NSViewController {
     private var palette: OMGThemePalette?
     /// Divider above the most recent `embed`, for callers that hide an empty embed.
     private(set) var embedSeparator: NSView?
+
+    init(contentInsets: NSEdgeInsets = NSEdgeInsets(top: 24, left: 28, bottom: 28, right: 32)) {
+        self.contentInsets = contentInsets
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func applyPalette(_ palette: OMGThemePalette) {
         self.palette = palette
@@ -329,16 +338,16 @@ final class NativeSettingsForm: NSViewController {
         scroll.documentView = document
         view = scroll
         // Fill the window up to a readable width instead of stretching rows on wide windows.
-        let fill = stack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -32)
+        let fill = stack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -contentInsets.right)
         fill.priority = .defaultHigh
         NSLayoutConstraint.activate([
             document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
-            stack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 28),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: document.trailingAnchor, constant: -32),
+            stack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: contentInsets.left),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: document.trailingAnchor, constant: -contentInsets.right),
             fill,
             stack.widthAnchor.constraint(lessThanOrEqualToConstant: 880),
-            stack.topAnchor.constraint(equalTo: document.topAnchor, constant: 24),
-            stack.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -28)
+            stack.topAnchor.constraint(equalTo: document.topAnchor, constant: contentInsets.top),
+            stack.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -contentInsets.bottom)
         ])
     }
 

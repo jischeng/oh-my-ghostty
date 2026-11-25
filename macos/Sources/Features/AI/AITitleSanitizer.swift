@@ -126,13 +126,25 @@ enum AITitleSanitizer {
     }
 
     private static func truncate(_ text: String, maxWidth: Int) -> String? {
+        guard let bounded = truncateColumns(text, maxWidth: maxWidth) else { return nil }
+        let cleaned = trimEdgePunctuation(bounded)
+        return cleaned.isEmpty ? nil : cleaned
+    }
+
+    /// Truncates a single-line string to `maxWidth` display columns (wide CJK/emoji = 2,
+    /// halfwidth = 1) without baking in an ellipsis, backing up to the start of a trailing
+    /// halfwidth word (whitespace or CJK boundary) when cut mid-word.
+    nonisolated static func truncateColumns(_ text: String, maxWidth: Int) -> String? {
         guard maxWidth > 0 else { return nil }
-        guard width(text) > maxWidth else { return text }
+        guard width(text) > maxWidth else {
+            let trimmed = text.trimmingCharacters(in: .whitespaces)
+            return trimmed.isEmpty ? nil : trimmed
+        }
         var kept = ""
         var used = 0
         var firstDropped: Character?
         for character in text {
-            let next = used + width(character)
+            let next = used + displayWidth(of: character)
             if next > maxWidth {
                 firstDropped = character
                 break
@@ -142,35 +154,34 @@ enum AITitleSanitizer {
         }
         if let lastKept = kept.last,
            let firstDropped,
-           !lastKept.isWhitespace,
-           !firstDropped.isWhitespace,
-           width(lastKept) == 1,
-           width(firstDropped) == 1,
-           let spaceIndex = kept.lastIndex(where: \.isWhitespace) {
-            let wordBounded = String(kept[..<spaceIndex]).trimmingCharacters(in: .whitespaces)
+           isHalfwidthWordCharacter(lastKept),
+           isHalfwidthWordCharacter(firstDropped),
+           let boundaryIndex = kept.lastIndex(where: { !isHalfwidthWordCharacter($0) }) {
+            let splitIndex = kept[boundaryIndex].isWhitespace ? boundaryIndex : kept.index(after: boundaryIndex)
+            let wordBounded = String(kept[..<splitIndex]).trimmingCharacters(in: .whitespaces)
             if !wordBounded.isEmpty {
                 kept = wordBounded
             }
         }
-        kept = trimEdgePunctuation(kept)
-        return kept.isEmpty ? nil : kept
+        let trimmed = kept.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
-    static func width(_ text: String) -> Int {
+    nonisolated private static func isHalfwidthWordCharacter(_ character: Character) -> Bool {
+        !character.isWhitespace && displayWidth(of: character) == 1
+    }
+
+    nonisolated static func width(_ text: String) -> Int {
         text.reduce(0) { $0 + displayWidth(of: $1) }
     }
 
-    static func displayWidth(of character: Character) -> Int {
+    nonisolated static func displayWidth(of character: Character) -> Int {
         let scalars = character.unicodeScalars
         guard !scalars.allSatisfy({ isZeroWidth($0.value) }) else { return 0 }
         return scalars.contains { isWide($0.value) } ? 2 : 1
     }
 
-    private static func width(_ character: Character) -> Int {
-        displayWidth(of: character)
-    }
-
-    private static func isZeroWidth(_ value: UInt32) -> Bool {
+    nonisolated private static func isZeroWidth(_ value: UInt32) -> Bool {
         switch value {
         case 0x0300...0x036F, 0x200B...0x200F, 0x20D0...0x20FF, 0xFE00...0xFE0F, 0xFE20...0xFE2F:
             true
@@ -180,7 +191,7 @@ enum AITitleSanitizer {
     }
 
     /// East Asian wide, fullwidth and emoji ranges; the same approximation the Quick Input uses.
-    private static func isWide(_ value: UInt32) -> Bool {
+    nonisolated private static func isWide(_ value: UInt32) -> Bool {
         switch value {
         case 0x1100...0x115F, 0x2E80...0x303E, 0x3040...0xA4CF, 0xAC00...0xD7A3,
              0xF900...0xFAFF, 0xFE10...0xFE6F, 0xFF00...0xFF60, 0xFFE0...0xFFE6,

@@ -279,7 +279,10 @@ final class AICLIProviderSheetController: GitCommitSettingsPanelController {
         let title = NSTextField(labelWithString: agent.title)
         title.font = .systemFont(ofSize: 15, weight: .semibold)
 
-        let form = NativeSettingsForm()
+        let form = NativeSettingsForm(contentInsets: NSEdgeInsets(top: 6, left: 4, bottom: 8, right: 4))
+        if let palette = settingsController?.currentPalette {
+            form.applyPalette(palette)
+        }
         addChild(form)
         form.section(text("Local CLI", "本机 CLI"))
         let cli = SupportedAgent(rawValue: agent.rawValue).flatMap {
@@ -332,11 +335,12 @@ final class AICLIProviderSheetController: GitCommitSettingsPanelController {
         stack.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
-            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
-            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 16),
-            stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14),
+            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 18),
+            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
+            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 18),
+            stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
             formView.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            formView.heightAnchor.constraint(greaterThanOrEqualToConstant: 420),
             actions.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
         view = root
@@ -532,7 +536,10 @@ final class AIProviderSheetController: GitCommitSettingsPanelController {
         let title = NSTextField(labelWithString: heading)
         title.font = .systemFont(ofSize: 15, weight: .semibold)
 
-        let form = NativeSettingsForm()
+        let form = NativeSettingsForm(contentInsets: NSEdgeInsets(top: 6, left: 4, bottom: 8, right: 4))
+        if let palette = settingsController?.currentPalette {
+            form.applyPalette(palette)
+        }
         addChild(form)
         buildConnectionSection(in: form)
         buildModelsSection(in: form)
@@ -570,11 +577,12 @@ final class AIProviderSheetController: GitCommitSettingsPanelController {
         stack.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
-            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
-            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 16),
-            stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14),
+            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 18),
+            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
+            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 18),
+            stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -16),
             formView.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            formView.heightAnchor.constraint(greaterThanOrEqualToConstant: 420),
             actions.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
         view = root
@@ -844,12 +852,23 @@ final class AIProviderSheetController: GitCommitSettingsPanelController {
             stageKey(keyField.stringValue)
         }
         guard validateAndStageURL(urlField.stringValue) else { return }
+        if existingID == nil, settings.aiProviders.count >= AIProvider.maxProviders { return }
         let typedName = AIProvider.normalizedName(nameField.stringValue)
         draft.name = typedName.isEmpty ? AIProvider.suggestedName(baseURL: draft.baseURL) : typedName
 
-        let targetID: UUID
+        let targetID = existingID ?? draft.id
+        do {
+            if let pendingKey, !pendingKey.isEmpty {
+                try credentials.setAPIKey(pendingKey, for: targetID)
+            } else if clearedExistingKey {
+                try credentials.removeAPIKey(for: targetID)
+            }
+        } catch {
+            refreshKeyStatus(problem: text("The API key could not be saved.", "无法保存 API 密钥。"))
+            return
+        }
+
         if let existingID {
-            targetID = existingID
             let previousIDs = Set(settings.aiProvider(existingID)?.models.map(\.id) ?? [])
             let remainingIDs = Set(draft.models.map(\.id))
             for removedModel in previousIDs.subtracting(remainingIDs) {
@@ -871,20 +890,7 @@ final class AIProviderSheetController: GitCommitSettingsPanelController {
                 provider.models = draft.models
             }
         } else {
-            guard settings.aiProviders.count < AIProvider.maxProviders else { return }
-            targetID = draft.id
             settings.aiProviders.append(draft)
-        }
-
-        do {
-            if let pendingKey, !pendingKey.isEmpty {
-                try credentials.setAPIKey(pendingKey, for: targetID)
-            } else if clearedExistingKey {
-                try credentials.removeAPIKey(for: targetID)
-            }
-        } catch {
-            refreshKeyStatus(problem: text("The API key could not be saved.", "无法保存 API 密钥。"))
-            return
         }
 
         fetchTask?.cancel()

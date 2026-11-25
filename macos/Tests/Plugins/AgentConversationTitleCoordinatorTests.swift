@@ -242,18 +242,18 @@ struct AgentConversationTitleCoordinatorTests {
         #expect(await fixture.generator.prompts.isEmpty)
     }
 
-    @Test func nativeModeSanitisesThePromptFallbackAndUpgradesWhenGenerateEnabled() async {
+    @Test func nativeModeWritesNoPromptHidesBackgroundGeneratedAndRestoresNativeTitle() async {
         let decoratedPrompt = "Title: **Fix the flaky login test across CI runners**\nSecond line."
         let fixture = Fixture(seeds: Seeds(rest: Seed(native: nil, firstPrompt: decoratedPrompt)),
                               generated: "Login flake", mode: .native)
         fixture.request(.working)
         await fixture.coordinator.waitUntilIdle()
-        #expect(fixture.record?.source == .prompt)
-        #expect(fixture.record?.title == AITitleSanitizer.sanitize(decoratedPrompt))
+        // `.native` ("Agent Title Only") never writes a `.prompt` stand-in when the Agent gave no title.
+        #expect(fixture.record == nil)
         #expect(await fixture.generator.prompts.isEmpty)
         #expect(await fixture.seeds.targets.count == 3)
 
-        // A transcript with a prompt and no name is not read again every turn.
+        // A transcript with a prompt and no name is still throttled by `settleInterval`.
         fixture.request(.working)
         #expect(fixture.coordinator.inFlightCount == 0)
         fixture.now = fixture.now.addingTimeInterval(11 * 60)
@@ -261,13 +261,54 @@ struct AgentConversationTitleCoordinatorTests {
         await fixture.coordinator.waitUntilIdle()
         #expect(await fixture.seeds.targets.count == 4)
 
-        // Once the user enables generation, even a `.bound` check upgrades `.prompt` -> `.generated`.
+        // Once the user switches to `.generate`, `.bound` generates the title.
         fixture.mode = .generate
+        fixture.coordinator.invalidateSettledState()
         fixture.request(.bound)
         await fixture.coordinator.waitUntilIdle()
         #expect(await fixture.generator.prompts == [decoratedPrompt])
         #expect(fixture.record?.source == .generated)
         #expect(fixture.record?.title == "Login flake")
+
+        // Switching back to `.native` hides background `.generated` titles immediately,
+        // and restores `.native` even if `supersededNativeTitle` matched a prior `alwaysUseAI` run.
+        let descriptor = AgentResumeDescriptor(
+            agent: fixture.target.agent,
+            conversationID: fixture.target.conversationID,
+            scope: .local,
+            workingDirectory: "/repo"
+        )
+        #expect(fixture.store.title(for: descriptor, mode: .native) == nil)
+
+        let restoreFixture = Fixture(
+            seeds: Seeds(rest: Seed(native: "Stabilise login", firstPrompt: prompt)),
+            generated: "Login fix",
+            mode: .generate,
+            alwaysUseAI: true
+        )
+        restoreFixture.request(.bound)
+        await restoreFixture.coordinator.waitUntilIdle()
+        #expect(restoreFixture.record?.source == .generated)
+        #expect(restoreFixture.record?.title == "Login fix")
+
+        restoreFixture.mode = .native
+        restoreFixture.coordinator.invalidateSettledState()
+        restoreFixture.request(.bound)
+        await restoreFixture.coordinator.waitUntilIdle()
+        #expect(restoreFixture.record?.source == .native)
+        #expect(restoreFixture.record?.title == "Stabilise login")
+
+        // Explicit manual `force: true` rename still works even when automatic mode is `.off`.
+        let manualInOffMode = Fixture(
+            seeds: Seeds(rest: Seed(native: nil, firstPrompt: decoratedPrompt)),
+            generated: "Manual AI Title",
+            mode: .off
+        )
+        manualInOffMode.request(.done, force: true, manualTabID: UUID())
+        await manualInOffMode.coordinator.waitUntilIdle()
+        #expect(manualInOffMode.record?.title == "Manual AI Title")
+        #expect(manualInOffMode.record?.isUserRequested == true)
+        #expect(manualInOffMode.store.title(for: descriptor, mode: .off) == "Manual AI Title")
     }
 
     @Test func manualOverrideSkipsLLMGenerationUntilCleared() async {
@@ -424,12 +465,28 @@ struct AgentConversationTitleCoordinatorTests {
         #expect(AgentConversationTitleTracker.trigger(for: .done, newlyBound: true) == .done)
     }
 
-    @Test func chineseGenerateModeUpgradesEnglishOnlyNativeTitleAndKeepsChineseNative() async {
-        // English-only native title with firstPrompt -> invokes generator using firstPrompt.
+    @Test func chineseGenerateModeRespectsAlwaysUseAIFlagOnEnglishNativeTitles() async {
+        // Default `alwaysUseAI == false` ("Generate When Missing") preserves an English native title
+        // even in Chinese UI without firing an unwanted LLM rewrite.
+        let keepEnglishNative = Fixture(
+            seeds: Seeds(rest: Seed(native: "Ray Gateway V2 Migration", firstPrompt: "Migrate Ray gateway to V2")),
+            generated: "不应被调用",
+            mode: .generate,
+            alwaysUseAI: false,
+            language: .simplifiedChinese
+        )
+        keepEnglishNative.request(.working)
+        await keepEnglishNative.coordinator.waitUntilIdle()
+        #expect(await keepEnglishNative.generator.prompts.isEmpty)
+        #expect(keepEnglishNative.record?.source == .native)
+        #expect(keepEnglishNative.record?.title == "Ray Gateway V2 Migration")
+
+        // Enabling `alwaysUseAI == true` shortens & localizes English native titles into Chinese.
         let withPrompt = Fixture(
             seeds: Seeds(rest: Seed(native: "Ray Gateway V2 Migration", firstPrompt: "Migrate Ray gateway to V2")),
             generated: "Ray 网关 V2 迁移",
             mode: .generate,
+            alwaysUseAI: true,
             language: .simplifiedChinese
         )
         withPrompt.request(.working)
@@ -445,11 +502,12 @@ struct AgentConversationTitleCoordinatorTests {
         #expect(withPrompt.record?.source == .generated)
         #expect(withPrompt.record?.title == "Ray 网关 V2 迁移")
 
-        // English-only native title without firstPrompt -> invokes generator using native title itself.
+        // Without firstPrompt, `alwaysUseAI == true` invokes generator using the native title itself.
         let nativeOnly = Fixture(
             seeds: Seeds(rest: Seed(native: "Ray Gateway V2 Migration", firstPrompt: nil)),
             generated: "Ray 网关迁移",
             mode: .generate,
+            alwaysUseAI: true,
             language: .simplifiedChinese
         )
         nativeOnly.request(.bound)
@@ -458,24 +516,12 @@ struct AgentConversationTitleCoordinatorTests {
         #expect(nativeOnly.record?.source == .generated)
         #expect(nativeOnly.record?.title == "Ray 网关迁移")
 
-        // Already-Chinese native title is preserved untouched without calling the generator.
-        let chineseNative = Fixture(
-            seeds: Seeds(rest: Seed(native: "修复网关健康检查", firstPrompt: "Fix health check")),
-            generated: "不应被调用",
-            mode: .generate,
-            language: .simplifiedChinese
-        )
-        chineseNative.request(.working)
-        await chineseNative.coordinator.waitUntilIdle()
-        #expect(await chineseNative.generator.prompts.isEmpty)
-        #expect(chineseNative.record?.source == .native)
-        #expect(chineseNative.record?.title == "修复网关健康检查")
-
-        // An existing cached English-only native record upgrades on `.bound` when Chinese + generate is active.
+        // Existing cached `.native` upgrades on `.bound` once `alwaysUseAI == true`.
         let cachedUpgrade = Fixture(
             seeds: Seeds(rest: Seed(native: "Checking Group Chat Message", firstPrompt: nil)),
             generated: "排查群聊消息",
             mode: .generate,
+            alwaysUseAI: true,
             language: .simplifiedChinese
         )
         cachedUpgrade.store.set(
@@ -783,7 +829,7 @@ struct AgentConversationTitleCoordinatorTests {
             seeds: Seeds(rest: Seed(native: "Implement OAuth2 PKCE flow", firstPrompt: "Implement OAuth2 PKCE")),
             generated: "OAuth2 PKCE",
             mode: .generate,
-            alwaysUseAI: false,
+            alwaysUseAI: true,
             language: .simplifiedChinese
         )
         asciiChinese.request(.working)
@@ -797,35 +843,61 @@ struct AgentConversationTitleCoordinatorTests {
         #expect(await asciiChinese.generator.prompts.count == 1)
     }
 
-    @Test func plainNonAgentTabPreservesManualTitleOverrideAndDisablesAutoRenameMenuItem() throws {
+    @Test func plainNonAgentTabPreservesManualTitleOverrideAndChromeOmitsAutoRenameMenuItem() async throws {
         let savedMode = OhMyGhosttySettings.shared.agentSessionTitleMode
-        OhMyGhosttySettings.shared.agentSessionTitleMode = .generate
+        OhMyGhosttySettings.shared.agentSessionTitleMode = .off
         defer { OhMyGhosttySettings.shared.agentSessionTitleMode = savedMode }
 
         let workspaceFixture = try TerminalWorkspaceRefactorTests.Fixture()
         defer { workspaceFixture.close() }
         let plainTab = try workspaceFixture.tab()
         let agentTab = try workspaceFixture.tab()
+        let disconnectedRemoteTab = try workspaceFixture.tab()
         let agentSurface = try #require(agentTab.surfaceTree.first)
+        let remoteSurface = try #require(disconnectedRemoteTab.surfaceTree.first)
         let conversation = try #require(AgentConversationID("abababab-cdcd-4efe-8123-456789abcdef"))
         agentTab.adoptAgentResumeDescriptor(
             .init(agent: .claude, conversationID: conversation, scope: .local, workingDirectory: "/repo"),
             for: agentSurface
         )
+        disconnectedRemoteTab.adoptAgentResumeDescriptor(
+            .init(agent: .claude, conversationID: conversation, scope: .remote, workingDirectory: "/srv"),
+            for: remoteSurface
+        )
 
         #expect(!plainTab.canAutoRenameTab)
         #expect(agentTab.canAutoRenameTab)
+        #expect(!disconnectedRemoteTab.canAutoRenameTab)
 
         plainTab.titleOverride = "My Dev Shell"
         plainTab.autoRenameTab(force: true)
         #expect(plainTab.titleOverride == "My Dev Shell")
 
+        // When AI generation fails/is unconfigured, `autoRenameTab(force: true)` preserves `titleOverride`.
+        let failingCoordinator = Coordinator(
+            store: AgentConversationTitleStore(),
+            generator: Generator(nil),
+            loadSeed: { _ in Seed(native: nil, firstPrompt: "Fix deploy") },
+            mode: { .generate },
+            sleep: { _ in }
+        )
+        agentTab.titleOverride = "Pinned Agent Name"
+        agentTab.startAgentConversationTitleTracking(coordinator: failingCoordinator)
+        agentTab.autoRenameTab(force: true)
+        await failingCoordinator.waitUntilIdle()
+        #expect(agentTab.titleOverride == "Pinned Agent Name")
+
         let strings = ChromeStrings.current
-        let plainMenu = NativeTabContextMenu.make(for: plainTab, host: plainTab)
+        // `.chrome` Tabs view never displays conversation titles and omits `Auto-Rename Tab`.
+        let chromeMenu = NativeTabContextMenu.make(for: agentTab, host: agentTab, style: .chrome)
+        #expect(!chromeMenu.items.contains { $0.title == strings.autoRenameTab })
+
+        let plainMenu = NativeTabContextMenu.make(for: plainTab, host: plainTab, style: .inbox)
         let plainItem = try #require(plainMenu.items.first { $0.title == strings.autoRenameTab })
         #expect(!plainItem.isEnabled)
 
-        let agentMenu = NativeTabContextMenu.make(for: agentTab, host: agentTab)
+        // `.inbox` enables manual `Auto-Rename Tab` even when background `agentSessionTitleMode == .off`.
+        let agentMenu = NativeTabContextMenu.make(for: agentTab, host: agentTab, style: .inbox)
         let agentItem = try #require(agentMenu.items.first { $0.title == strings.autoRenameTab })
         #expect(agentItem.isEnabled)
     }
@@ -918,7 +990,7 @@ struct AgentConversationTitleCoordinatorTests {
 
         // Language switch invalidates `settledAt` so an English generated title can localize to Chinese.
         let langFixture = Fixture(
-            seeds: Seeds(rest: Seed(native: "Investigate flaky CI", firstPrompt: "Investigate flaky CI")),
+            seeds: Seeds(rest: Seed(native: nil, firstPrompt: "Investigate flaky CI")),
             generated: "排查 CI 偶现失败",
             mode: .generate,
             alwaysUseAI: false,

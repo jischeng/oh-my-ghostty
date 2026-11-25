@@ -29,23 +29,29 @@ final class NativeTabNode: NSObject {
 /// Shared native tab context menu used by both the Tabs outline and the Inbox view.
 enum NativeTabContextMenu {
     @MainActor
-    static func make(for tab: TerminalController, host: TerminalController) -> NSMenu {
+    static func make(
+        for tab: TerminalController,
+        host: TerminalController,
+        style: TerminalTabPresentationResolver.Style = .inbox
+    ) -> NSMenu {
         let strings = ChromeStrings.current
         let workspaces = tab.workspaceCoordinator.store.workspaces
-        let isRenaming = tab.isGeneratingTabTitle
-        let canAutoRename = !isRenaming
-            && tab.canAutoRenameTab
-            && OhMyGhosttySettings.shared.agentSessionTitleMode != .off
         var entries: [NativeMenuEntry] = [
             .action(strings.newTab, symbol: "plus") { [weak tab] in tab?.newVerticalTab() },
             .action(strings.renameTab, symbol: "pencil") { [weak tab] in tab?.promptTabTitle() },
-            .action(
-                isRenaming ? strings.renamingTab : strings.autoRenameTab,
-                symbol: "sparkles",
-                enabled: canAutoRename
-            ) { [weak tab] in tab?.autoRenameTab(force: true) },
-            .separator,
         ]
+        if style == .inbox {
+            let isRenaming = tab.isGeneratingTabTitle
+            let canAutoRename = !isRenaming && tab.canAutoRenameTab
+            entries.append(
+                .action(
+                    isRenaming ? strings.renamingTab : strings.autoRenameTab,
+                    symbol: "sparkles",
+                    enabled: canAutoRename
+                ) { [weak tab] in tab?.autoRenameTab(force: true) }
+            )
+        }
+        entries.append(.separator)
         if workspaces.count > 1 {
             let currentWorkspaceID = tab.workspaceID
             let moveEntries = workspaces.map { workspace in
@@ -485,7 +491,7 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
 
     private func menu(for row: Int) -> NSMenu? {
         guard let tab = (outline.item(atRow: row) as? NativeTabNode)?.tab?.controller else { return nil }
-        return NativeTabContextMenu.make(for: tab, host: configuration.controller)
+        return NativeTabContextMenu.make(for: tab, host: configuration.controller, style: .chrome)
     }
 
     func outlineViewSelectionDidChange(_ notification: Notification) {
@@ -991,7 +997,9 @@ final class NativeTabCell: NSTableCellView {
             trailingSlot.isHidden = true
             return
         }
-        isRenamingTitle = configuredTab?.controller.isGeneratingTabTitle == true
+        // `.chrome` Tabs list never displays `agentConversationTitle`, so never spin a phantom
+        // AI-renaming indicator over the row's live status badge.
+        isRenamingTitle = false
         renamingSpinner.toolTip = ChromeStrings.current.renamingTab
         let hovered = (superview as? NativeHoverRowView)?.isHovered == true
         let next = NativeTabTrailingAccessory.resolve(

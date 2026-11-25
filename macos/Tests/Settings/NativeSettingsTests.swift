@@ -510,6 +510,11 @@ struct NativeSettingsTests {
         #expect(window.titleVisibility == .hidden)
         let rootController = try #require(window.contentViewController as? NativeSettingsController)
         #expect(rootController.selection == .general)
+        rootController.view.layoutSubtreeIfNeeded()
+        // Search field must clear traffic lights (>= 40pt from window top) right on initial window creation.
+        let searchFrame = rootController.searchField.convert(rootController.searchField.bounds, to: rootController.view)
+        let topClearance = rootController.view.bounds.maxY - searchFrame.maxY
+        #expect(topClearance >= 40, "Expected >= 40pt traffic-light clearance, got \(topClearance)")
 
         let darkTerminal = OMGThemePalette(
             background: NSColor(srgbRed: 0.16, green: 0.17, blue: 0.20, alpha: 1),

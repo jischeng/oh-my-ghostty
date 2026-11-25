@@ -400,6 +400,7 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
             strings,
             grouping: config.layoutState.groupingMode,
             ordering: config.layoutState.orderingMode,
+            includesAutoRename: false,
             setGrouping: { [weak controller = config.controller] in controller?.setTabGroupingMode($0) },
             setOrdering: { [weak controller = config.controller] in controller?.setTabOrderingMode($0) }
         )
@@ -413,6 +414,7 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
             strings,
             grouping: settings.tabInboxGroupingMode,
             ordering: settings.tabInboxOrderingMode,
+            includesAutoRename: true,
             setGrouping: { OhMyGhosttySettings.shared.tabInboxGroupingMode = $0 },
             setOrdering: { OhMyGhosttySettings.shared.tabInboxOrderingMode = $0 }
         )
@@ -422,6 +424,7 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
         _ strings: ChromeStrings,
         grouping: GhosttyTabGroupingMode,
         ordering: GhosttyTabOrderingMode,
+        includesAutoRename: Bool,
         setGrouping: @escaping (GhosttyTabGroupingMode) -> Void,
         setOrdering: @escaping (GhosttyTabOrderingMode) -> Void
     ) -> [NativeMenuEntry] {
@@ -434,16 +437,18 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
         for mode in GhosttyTabOrderingMode.allCases {
             entries.append(.action(strings.orderingTitle(mode), checked: ordering == mode) { setOrdering(mode) })
         }
-        entries.append(.separator)
-        let isRenamingWorkspace = tabs.contains { $0.isManualRenamingTab }
-        entries.append(.action(
-            isRenamingWorkspace ? strings.renamingWorkspaceTabs : strings.autoRenameWorkspaceTabs,
-            symbol: "sparkles",
-            enabled: !isRenamingWorkspace
-        ) { [weak self] in
-            guard let self else { return }
-            TerminalController.autoRenameWorkspaceTabs(self.tabs)
-        })
+        if includesAutoRename {
+            entries.append(.separator)
+            let isRenamingWorkspace = tabs.contains { $0.isManualRenamingTab }
+            entries.append(.action(
+                isRenamingWorkspace ? strings.renamingWorkspaceTabs : strings.autoRenameWorkspaceTabs,
+                symbol: "sparkles",
+                enabled: !isRenamingWorkspace
+            ) { [weak self] in
+                guard let self else { return }
+                TerminalController.autoRenameWorkspaceTabs(self.tabs)
+            })
+        }
         return entries
     }
 

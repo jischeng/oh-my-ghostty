@@ -132,11 +132,15 @@ extension NativeSettingsController {
         let field = SettingsTextField("", placeholder: "user@host") { _ in }
         let add: (GitSSHConnection, String?, Bool) -> Void = { [weak self, weak window, weak sheet] connection, endpoint, fromConfig in
             guard let self, let window, let sheet else { return }
+            let targetID = self.registry.targetID(for: connection)
+            let wasRegistered = self.registry.host(targetID) != nil
             let id = self.registry.addConfigured(connection, endpoint: endpoint, fromConfiguration: fromConfig)
-            var policy = self.agents.policy(for: id)
-            policy.checkAutomatically = false
-            policy.updateHooksAutomatically = false
-            self.agents.setPolicy(policy, for: id)
+            if !wasRegistered {
+                var policy = self.agents.policy(for: id)
+                policy.checkAutomatically = false
+                policy.updateHooksAutomatically = false
+                self.agents.setPolicy(policy, for: id)
+            }
             window.endSheet(sheet)
             self.showHost(id)
         }

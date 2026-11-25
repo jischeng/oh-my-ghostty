@@ -399,10 +399,9 @@ struct VerticalTabInboxSidebarTests {
             let run = try #require(handler)
             run()
         }
-        // Both views offer the same entries in the same words.
-        let entries = [strings.groupHeader] + GhosttyTabGroupingMode.allCases.map(strings.groupingTitle)
+        let tabEntries = [strings.groupHeader] + GhosttyTabGroupingMode.allCases.map(strings.groupingTitle)
             + [strings.orderHeader] + GhosttyTabOrderingMode.allCases.map(strings.orderingTitle)
-            + [strings.autoRenameWorkspaceTabs]
+        let inboxEntries = tabEntries + [strings.autoRenameWorkspaceTabs]
         #expect(toggle.accessibilityIdentifier() == "tabs.inbox")
         #expect(toggle.controlStyle == .plain)
         #expect(!toggle.isBordered)
@@ -414,9 +413,9 @@ struct VerticalTabInboxSidebarTests {
         #expect(toggle.glyphRect.height <= TabInboxHeaderButton.maxGlyphSlot + 0.01)
         #expect(toggle.glyphRect.height >= 12)
         #expect(toggle.toolTip == strings.toggleInbox(shown: false))
-        #expect(titles() == entries)
-        // The Tabs view: no grouping, manual order.
-        #expect(checked() == [false, true, false, false, false, true, false, false, false])
+        #expect(titles() == tabEntries)
+        // The Tabs view: no grouping, manual order (no Inbox auto-rename action).
+        #expect(checked() == [false, true, false, false, false, true, false, false])
 
         toggle.performClick(nil)
         #expect(settings.tabSidebarViewMode == .inbox)
@@ -425,7 +424,7 @@ struct VerticalTabInboxSidebarTests {
         #expect(!toggle.isBordered)
         #expect(toggle.isShown)
         #expect(toggle.toolTip == strings.toggleInbox(shown: true))
-        #expect(titles() == entries)
+        #expect(titles() == inboxEntries)
         // The inbox: by date, recently used first.
         #expect(checked() == [false, false, false, true, false, false, false, true, false])
 
@@ -453,7 +452,7 @@ struct VerticalTabInboxSidebarTests {
         sidebar.refresh()
         #expect(!toggle.isShown)
         #expect(toggle.controlStyle == .plain)
-        #expect(checked() == [false, true, false, false, false, true, false, false, false])
+        #expect(checked() == [false, true, false, false, false, true, false, false])
         #expect(sidebar.rows == sidebar.controllers.map { sidebar.key($0) })
     }
 
@@ -1264,7 +1263,7 @@ struct VerticalTabInboxSidebarTests {
                 if case .action(let title, _, _, _, _) = entry { return title }
                 return nil
             }
-            #expect(entryTitles.contains(strings.autoRenameWorkspaceTabs))
+            #expect(entryTitles.contains(strings.autoRenameWorkspaceTabs) == (mode == .inbox))
         }
         settings.tabInboxGroupingMode = .project
         sidebar.refresh()

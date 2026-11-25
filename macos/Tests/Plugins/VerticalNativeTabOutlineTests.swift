@@ -1009,7 +1009,8 @@ struct VerticalNativeTabOutlineTests {
         #expect(cell.trailingAccessory == .status)
         #expect(cell.renamingSpinner.isHidden)
 
-        // Trigger automatic AI generation: `.renaming` overrides `.status` with a 12×12pt spinner.
+        // Trigger automatic AI generation: `.chrome` Tabs view does not display `agentConversationTitle`,
+        // so it preserves `.status` instead of spinning a phantom `renamingSpinner`.
         titleCoordinator.request(
             .init(agent: .codex, conversationID: conversation, remoteHost: nil),
             trigger: .working,
@@ -1021,18 +1022,15 @@ struct VerticalNativeTabOutlineTests {
         try await Task.sleep(for: .milliseconds(20))
         cell.layoutSubtreeIfNeeded()
 
-        #expect(cell.trailingAccessory == .renaming)
+        #expect(cell.trailingAccessory == .status)
         #expect(!cell.trailingSlot.isHidden)
-        #expect(!cell.renamingSpinner.isHidden)
-        #expect(cell.renamingSpinner.animationRequested)
-        #expect(cell.renamingSpinner.style == .spinning)
-        #expect(cell.renamingSpinner.controlSize == .small)
-        #expect(cell.renamingSpinner.frame.size == NSSize(width: 12, height: 12))
-        #expect(cell.status.isHidden)
+        #expect(cell.renamingSpinner.isHidden)
+        #expect(!cell.renamingSpinner.animationRequested)
+        #expect(!cell.status.isHidden)
         #expect(cell.shortcut.isHidden)
         #expect(cell.closeButton.isHidden)
 
-        // `⌘`-held shortcut overrides `.renaming`.
+        // `⌘`-held shortcut overrides `.status`.
         outlineController.isCommandModifierHeldOverride = true
         defer { outlineController.isCommandModifierHeldOverride = nil }
         cell.layoutSubtreeIfNeeded()
@@ -1040,7 +1038,7 @@ struct VerticalNativeTabOutlineTests {
         #expect(!cell.shortcut.isHidden)
         #expect(cell.renamingSpinner.isHidden)
 
-        // Hover `✕` overrides both `⌘`-held shortcut and `.renaming`.
+        // Hover `✕` overrides `⌘`-held shortcut.
         row.isHovered = true
         cell.layoutSubtreeIfNeeded()
         #expect(cell.trailingAccessory == .close)
@@ -1048,11 +1046,11 @@ struct VerticalNativeTabOutlineTests {
         #expect(cell.shortcut.isHidden)
         #expect(cell.renamingSpinner.isHidden)
 
-        // Exiting hover and releasing `⌘` restores `.renaming`, then finishes cleanly to `.status`.
+        // Exiting hover and releasing `⌘` restores `.status`.
         row.isHovered = false
         outlineController.isCommandModifierHeldOverride = nil
         cell.layoutSubtreeIfNeeded()
-        #expect(cell.trailingAccessory == .renaming)
+        #expect(cell.trailingAccessory == .status)
 
         await generator.release()
         await titleCoordinator.waitUntilIdle()

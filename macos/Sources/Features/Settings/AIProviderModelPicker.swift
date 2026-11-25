@@ -244,8 +244,7 @@ final class AIProviderModelPickerController: GitCommitSettingsPanelController,
 
     @objc func addProvider() {
         guard let onAddProvider else { return }
-        closePanel()
-        onAddProvider()
+        closePanel { onAddProvider() }
     }
 
     @objc private func cancel() { closePanel() }
@@ -625,8 +624,7 @@ final class AIUnifiedModelPickerController: GitCommitSettingsPanelController,
 
     @objc func addProvider() {
         guard let onAddProvider else { return }
-        closePanel()
-        onAddProvider()
+        closePanel { onAddProvider() }
     }
 
     @objc private func cancel() { closePanel() }

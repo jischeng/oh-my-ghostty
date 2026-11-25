@@ -106,15 +106,13 @@ actor AITitleService: AITitleGenerating {
         await configuredEndpoint(force: false)
     }
 
-    /// Explicit manual renames (`force: true`) may use `ai.routes.title` even when
-    /// automatic background naming is set to `.native`.
+    /// Explicit manual renames (`force: true`) may use `ai.routes.title` regardless of
+    /// the background automatic naming mode (`agentSessionTitleMode`).
     @Sendable
     nonisolated static func configuredEndpoint(force: Bool) async -> AIEndpoint? {
         await MainActor.run {
             let settings = OhMyGhosttySettings.shared
-            if force {
-                guard settings.agentSessionTitleMode != .off else { return nil }
-            } else {
+            if !force {
                 guard settings.agentSessionTitleMode == .generate else { return nil }
             }
             return AIProviderDirectory(providers: settings.aiProviders, credentials: .shared)
@@ -273,6 +271,7 @@ actor AITitleService: AITitleGenerating {
         consecutiveFailures = 0
         pausedUntil = nil
         authBlocked = false
+        rejectAllSlotWaiters()
     }
 
     private func sameConfiguration(_ lhs: AIEndpoint?, _ rhs: AIEndpoint) -> Bool {
@@ -297,13 +296,23 @@ actor AITitleService: AITitleGenerating {
         case .failure(.httpStatus(401, _)), .failure(.httpStatus(403, _)):
             authBlocked = true
             consecutiveFailures += 1
+            rejectAllSlotWaiters()
         case .failure:
             consecutiveFailures += 1
             if consecutiveFailures >= limits.consecutiveFailuresBeforePause {
                 pausedUntil = clock.now + limits.pauseDuration
                 tailWaitWindow = min(limits.pauseDuration / 2, .seconds(5))
                 consecutiveFailures = 0
+                rejectAllSlotWaiters()
             }
+        }
+    }
+
+    private func rejectAllSlotWaiters() {
+        let pending = slotWaiters
+        slotWaiters.removeAll()
+        for waiter in pending {
+            waiter.continuation.resume(returning: false)
         }
     }
 

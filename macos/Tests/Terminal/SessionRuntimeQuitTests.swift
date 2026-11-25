@@ -34,17 +34,19 @@ struct SessionRuntimeQuitTests {
         let chinese = SettingsSearchCatalog.entries(strings: SettingsStrings(language: .simplifiedChinese))
         #expect(english.contains { $0.prefixes.contains("sessions.keep") && $0.keywords.contains("quit") })
         #expect(chinese.contains { $0.prefixes.contains("sessions.keep") && $0.keywords.contains("退出") })
-        let host = NSHostingView(rootView: SessionRuntimeSettingsView(
-            settings: settings, strings: SettingsStrings(language: .simplifiedChinese))
-            .padding(20).frame(width: 620).background(Color(nsColor: .windowBackgroundColor)))
-        host.frame = .init(origin: .zero, size: host.fittingSize)
-        let window = NSWindow(contentRect: host.frame, styleMask: .borderless, backing: .buffered, defer: false)
+        let controller = NativeSettingsController(settings: settings, initialSelection: .terminal)
+        let window = NSWindow(
+            contentRect: .init(x: 0, y: 0, width: 860, height: 640),
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
+        )
         window.isReleasedWhenClosed = false
-        window.contentView = host
+        window.contentViewController = controller
         defer { window.close() }
-        host.layoutSubtreeIfNeeded()
-        let bitmap = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
-        host.cacheDisplay(in: host.bounds, to: bitmap)
+        controller.view.layoutSubtreeIfNeeded()
+        let bitmap = try #require(controller.view.bitmapImageRepForCachingDisplay(in: controller.view.bounds))
+        controller.view.cacheDisplay(in: controller.view.bounds, to: bitmap)
         let png = try #require(bitmap.representation(using: .png, properties: [:]))
         try png.write(to: URL(fileURLWithPath: "/tmp/omg-quit-policy-settings.png"))
     }

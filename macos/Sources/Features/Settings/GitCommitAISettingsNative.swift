@@ -310,8 +310,14 @@ enum GitCommitAISettingsPanel {
         panel.titlebarAppearsTransparent = true
         panel.isOpaque = true
         panel.contentViewController = controller
-        // The content view otherwise shrinks the sheet to its narrowest fitting width.
+        // The content view otherwise shrinks the sheet to its narrowest fitting width
+        // or collapses NSScrollView-backed sheets to zero content height.
         controller.view.widthAnchor.constraint(equalToConstant: size.width).isActive = true
+        let minHeight = controller.view.heightAnchor.constraint(greaterThanOrEqualToConstant: size.height)
+        minHeight.priority = .defaultHigh
+        minHeight.isActive = true
+        panel.setContentSize(size)
+        panel.contentMinSize = size
         (controller.view as? OMGNativeSurfaceView)?.bindTheme(to: parent)
         parent.beginSheet(panel) { _ in controller.sheetEnded() }
     }
@@ -321,6 +327,7 @@ enum GitCommitAISettingsPanel {
 class GitCommitSettingsPanelController: NSViewController, NSWindowDelegate {
     private(set) var finished = false
     private weak var panelWindow: NSWindow?
+    private var closeCompletions: [() -> Void] = []
     var onSheetDidEnd: (() -> Void)?
 
     override func viewDidAppear() {
@@ -329,20 +336,34 @@ class GitCommitSettingsPanelController: NSViewController, NSWindowDelegate {
         panelWindow?.delegate = self
     }
 
-    func closePanel() {
-        guard !finished else { return }
+    func closePanel(completion: (() -> Void)? = nil) {
+        if finished {
+            if let completion {
+                if (panelWindow ?? view.window)?.sheetParent != nil {
+                    closeCompletions.append(completion)
+                } else {
+                    completion()
+                }
+            }
+            return
+        }
         finished = true
         guard let window = panelWindow ?? view.window else {
             didEndSheet()
             onSheetDidEnd?()
+            completion?()
             return
         }
         if let parent = window.sheetParent {
+            if let completion {
+                closeCompletions.append(completion)
+            }
             parent.endSheet(window)
         } else {
             window.orderOut(nil)
             didEndSheet()
             onSheetDidEnd?()
+            completion?()
         }
     }
 
@@ -354,6 +375,11 @@ class GitCommitSettingsPanelController: NSViewController, NSWindowDelegate {
         panelWindow = nil
         didEndSheet()
         onSheetDidEnd?()
+        let completions = closeCompletions
+        closeCompletions.removeAll()
+        for completion in completions {
+            completion()
+        }
     }
 
     func didEndSheet() {}

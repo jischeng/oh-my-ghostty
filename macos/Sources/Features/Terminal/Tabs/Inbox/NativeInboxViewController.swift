@@ -292,7 +292,7 @@ final class NativeInboxViewController: NSViewController {
                 }
                 row.contextMenuProvider = { [weak self] in
                     guard let self else { return nil }
-                    return NativeTabContextMenu.make(for: tab.controller, host: self.configuration.controller)
+                    return NativeTabContextMenu.make(for: tab.controller, host: self.configuration.controller, style: .inbox)
                 }
                 row.onHeightPreferenceChange = { [weak self] in
                     self?.relayoutItems()

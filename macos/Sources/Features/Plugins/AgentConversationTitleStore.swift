@@ -30,6 +30,8 @@ struct AgentConversationTitleRecord: Codable, Equatable, Sendable {
     /// Native title that was active when an AI `.generated` title replaced it,
     /// so later `.done` checks only upgrade when the Agent's native title changes.
     var supersededNativeTitle: String?
+    /// True when this record came from an explicit user `Auto-Rename` action (`force: true`).
+    var isUserRequested: Bool?
     var updatedAt: Date
 }
 
@@ -195,10 +197,9 @@ final class AgentConversationTitleStore: ObservableObject {
     /// Records a title unless a better one is already known. A source is never
     /// downgraded, and among equals only the Agent renames its own
     /// conversation: the opening prompt does not change and a generated title
-    /// is never generated again, except when `force` is true, when
+    /// is never generated again, except when `force` is true or when
     /// `allowGeneratedOverNative` is true for a `.generated` title replacing a
-    /// `.native` title, or when a Chinese generated title localizes an
-    /// English-only native title.
+    /// `.native` title.
     ///
     /// - Returns: Whether the conversation's title changed.
     @discardableResult
@@ -210,7 +211,8 @@ final class AgentConversationTitleStore: ObservableObject {
         remoteHost: String? = nil,
         force: Bool = false,
         allowGeneratedOverNative: Bool = false,
-        supersededNativeTitle: String? = nil
+        supersededNativeTitle: String? = nil,
+        isUserRequested: Bool = false
     ) -> Bool {
         let columns = source == .prompt ? Self.promptTitleColumns : Self.maximumTitleColumns
         let prepared = (source == .generated || source == .prompt) ? Self.trimTrailingEllipsis(title) : title
@@ -221,10 +223,6 @@ final class AgentConversationTitleStore: ObservableObject {
         let key = Key(agent: agent, conversationID: conversationID)
         if let existing = records[key], !force {
             let renamed = source == .native && existing.source == .native && existing.title != title
-            let localizedUpgrade = source == .generated
-                && existing.source == .native
-                && !Self.containsCJK(existing.title)
-                && Self.containsCJK(title)
             let generatedOverride = allowGeneratedOverNative
                 && source == .generated
                 && existing.source == .native
@@ -234,7 +232,7 @@ final class AgentConversationTitleStore: ObservableObject {
             if unchangedSuperseded {
                 return false
             }
-            guard source.rank > existing.source.rank || renamed || localizedUpgrade || generatedOverride else {
+            guard source.rank > existing.source.rank || renamed || generatedOverride else {
                 return false
             }
         }
@@ -246,6 +244,7 @@ final class AgentConversationTitleStore: ObservableObject {
             source: source,
             remoteHost: remoteHost,
             supersededNativeTitle: normalizedSuperseded,
+            isUserRequested: isUserRequested ? true : nil,
             updatedAt: now()
         )
         records = bounded(next)
@@ -331,32 +330,7 @@ final class AgentConversationTitleStore: ObservableObject {
             }
             .first { !$0.isEmpty }
         guard let line = firstLine else { return nil }
-        var used = 0
-        var result = ""
-        var firstDropped: Character?
-        for character in line {
-            let width = AITitleSanitizer.displayWidth(of: character)
-            guard used + width <= columns else {
-                firstDropped = character
-                break
-            }
-            result.append(character)
-            used += width
-        }
-        guard let firstDropped else { return result }
-        if let lastKept = result.last,
-           !lastKept.isWhitespace,
-           !firstDropped.isWhitespace,
-           AITitleSanitizer.displayWidth(of: lastKept) == 1,
-           AITitleSanitizer.displayWidth(of: firstDropped) == 1,
-           let spaceIndex = result.lastIndex(where: \.isWhitespace) {
-            let wordBounded = String(result[..<spaceIndex]).trimmingCharacters(in: .whitespaces)
-            if !wordBounded.isEmpty {
-                result = wordBounded
-            }
-        }
-        let trimmed = result.trimmingCharacters(in: .whitespaces)
-        return trimmed.isEmpty ? nil : trimmed
+        return AITitleSanitizer.truncateColumns(line, maxWidth: columns)
     }
 
     nonisolated private static func trimTrailingEllipsis(_ text: String) -> String {

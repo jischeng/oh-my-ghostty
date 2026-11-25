@@ -500,4 +500,46 @@ struct NativeAISettingsTests {
         try find(NSButton.self, "settings.ai.commit.edit-prompt", in: fixture.controller.view).performClick(nil)
         #expect(fixture.controller.activeModalSheet is GitCommitAIPromptController)
     }
+
+    @Test func modalSheetsMaintainFullHeightChainCleanlyOnLiveWindowAndSaveCredentialsAtomically() async throws {
+        let fixture = Fixture()
+        defer { fixture.close() }
+        fixture.window.orderFront(nil)
+        fixture.controller.select(.git)
+
+        // Open unified model picker on a real NSWindow -> verify full sheet height -> chain New API Service…
+        try find(NSButton.self, "settings.ai.commit.add-models", in: fixture.controller.view).performClick(nil)
+        try await Task.sleep(for: .milliseconds(100))
+        let pickerSheet = try #require(fixture.window.attachedSheet)
+        #expect(pickerSheet.frame.height >= 480, "Unified picker sheet frame: \(pickerSheet.frame)")
+
+        let picker = try #require(fixture.controller.activeModalSheet as? AIUnifiedModelPickerController)
+        picker.addProvider()
+        #expect(await settle { fixture.controller.activeModalSheet is AIProviderSheetController })
+        try await Task.sleep(for: .milliseconds(100))
+
+        let providerWindow = try #require(fixture.window.attachedSheet)
+        #expect(providerWindow.frame.height >= 500, "AIProviderSheetController frame must not collapse: \(providerWindow.frame)")
+        let providerSheet = try #require(fixture.controller.activeModalSheet as? AIProviderSheetController)
+        #expect(providerSheet.view.fittingSize.height >= 500)
+
+        // Block credentials path with a directory so `setAPIKey` throws: `settings.aiProviders` must stay empty!
+        let badCredDir = fixture.directory.appendingPathComponent("blocked-creds.json")
+        try FileManager.default.createDirectory(at: badCredDir, withIntermediateDirectories: true)
+        fixture.controller.aiCredentials = AICredentialStore(fileURL: badCredDir)
+        fixture.controller.presentAIProviderSheet(id: nil)
+        #expect(await settle { (fixture.controller.activeModalSheet as? AIProviderSheetController) !== providerSheet })
+        let failingSheet = try #require(fixture.controller.activeModalSheet as? AIProviderSheetController)
+        failingSheet.nameField.stringValue = "Should Not Persist"
+        failingSheet.urlField.stringValue = "https://api.example.com"
+        failingSheet.keyField.stringValue = "sk-fail-key"
+        failingSheet.save()
+        #expect(fixture.settings.aiProviders.isEmpty)
+
+        // CLI provider sheet also maintains full readable height.
+        fixture.controller.presentAICLIProviderSheet(.codex)
+        #expect(await settle { fixture.controller.activeModalSheet is AICLIProviderSheetController })
+        let cliSheet = try #require(fixture.controller.activeModalSheet as? AICLIProviderSheetController)
+        #expect(cliSheet.view.fittingSize.height >= 480)
+    }
 }

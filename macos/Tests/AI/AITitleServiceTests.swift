@@ -384,6 +384,46 @@ struct AITitleServiceTests {
             content.contains("prompt-\(offset + 3)")
         })
     }
+
+    @Test func changingEndpointConfigurationRejectsQueuedWaitersWithoutLeakingSlots() async {
+        let blocking = AIBlockingClient()
+        let client = AIHTTPClient { _ in
+            let title = try await blocking.complete(user: "Renamed")
+            return (AITestData.openAI(title), AITestData.response(200))
+        }
+        let endpointA = AIEndpoint(
+            kind: .openAI,
+            baseURL: URL(string: "https://api.example.com")!,
+            model: "model-a",
+            apiKey: "key-a"
+        )
+        let endpointB = AIEndpoint(
+            kind: .openAI,
+            baseURL: URL(string: "https://api.example.com")!,
+            model: "model-b",
+            apiKey: "key-b"
+        )
+        let provider = SwitchingEndpointProvider(endpointA)
+        let service = AITitleService(client: client, endpoints: { await provider.current() })
+
+        let first = Task { await service.title(forFirstPrompt: "p1", nativeTitle: nil, projectName: nil, force: true) }
+        let second = Task { await service.title(forFirstPrompt: "p2", nativeTitle: nil, projectName: nil, force: true) }
+        #expect(await waitUntil { await blocking.startedCount == 2 })
+
+        let queued = Task { await service.title(forFirstPrompt: "p3", nativeTitle: nil, projectName: nil, force: true) }
+        try? await Task.sleep(for: .milliseconds(20))
+
+        // Switch configuration and send a new request: queued `p3` from old config aborts cleanly.
+        await provider.set(endpointB)
+        let switched = Task { await service.title(forFirstPrompt: "p4", nativeTitle: nil, projectName: nil, force: true) }
+        #expect(await queued.value == nil)
+
+        await blocking.release()
+        _ = await (first.value, second.value)
+        #expect(await waitUntil { await blocking.startedCount == 3 })
+        await blocking.release()
+        #expect(await switched.value == "Renamed")
+    }
 }
 
 actor SwitchingEndpointProvider {

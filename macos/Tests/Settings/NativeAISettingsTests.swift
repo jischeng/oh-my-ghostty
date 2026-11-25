@@ -88,29 +88,35 @@ struct NativeAISettingsTests {
             #expect(strings.tabTitle(.agents) == "AI")
             let form = try #require(fixture.controller.children.compactMap { $0 as? NativeSettingsForm }.first)
             let labels = descendants(view).compactMap { ($0 as? NSTextField)?.stringValue }
-            for title in [strings.aiProvidersSection, strings.aiInstalledGroup, strings.aiConnectionsGroup,
-                          strings.aiTaskModelsSection, strings.aiCommitModelsGroup, strings.aiTitleModelGroup,
+            for title in [strings.aiProvidersSection, strings.aiTitleModelGroup, strings.aiTaskModelsSection,
+                          strings.terminalCodingAgentsSection, strings.agentNotificationsAndHistorySection,
                           strings.aiProviderSummary(fixture.settings.aiProviders[0])] {
                 #expect(labels.contains(title), "missing \(title)")
             }
-            // Providers come first, then the task models, then everything the Agent page held.
+            // Local CLI models live behind one consolidated link instead of duplicating Agent rows on the main page.
             let rows = form.rowTitles
-            let firstAgent = try #require(rows.firstIndex(of: GitCommitAgent.claude.title))
-            let connection = try #require(rows.firstIndex(of: "Work proxy"))
-            let titles = try #require(rows.firstIndex(of: strings.agentSessionTitleLabel))
-            let behavior = try #require(rows.firstIndex(of: strings.agentStatusHooksLabel))
-            #expect(firstAgent < connection && connection < titles && titles < behavior)
-            #expect(rows.contains(strings.aiTitleModelLabel))
-            #expect(rows.contains(strings.notifyTaskCompleteLabel))
-            #expect(rows.contains(strings.agentHistorySection))
+            #expect(!rows.contains(GitCommitAgent.claude.title))
+            #expect(!descendants(view).contains { $0.accessibilityIdentifier() == "settings.ai.agent.claude" })
 
-            for agent in GitCommitAgent.allCases {
-                _ = try find(NSButton.self, "settings.ai.agent." + agent.rawValue, in: view)
-            }
+            let connection = try #require(rows.firstIndex(of: "Work proxy"))
+            let addService = try #require(rows.firstIndex(of: strings.aiAddServiceLabel))
+            let localCLIs = try #require(rows.firstIndex(of: strings.aiLocalCLIModelsLabel))
+            let titles = try #require(rows.firstIndex(of: strings.agentSessionTitleLabel))
+            let commitPrompt = try #require(rows.firstIndex(of: strings.gitCustomPromptLabel))
+            let behavior = try #require(rows.firstIndex(of: strings.agentStatusHooksLabel))
+            let notifications = try #require(rows.firstIndex(of: strings.notifyTaskCompleteLabel))
+            let historyLimit = try #require(rows.firstIndex(of: strings.agentHistoryLimitLabel))
+            #expect(connection < addService && addService < localCLIs)
+            #expect(localCLIs < titles && titles < commitPrompt)
+            #expect(commitPrompt < behavior && behavior < notifications && notifications < historyLimit)
+            #expect(rows.contains(strings.aiTitleModelLabel))
+            #expect(rows.contains(strings.agentHistoryBackgroundIndexingLabel))
+
             _ = try find(NSButton.self, "settings.ai.provider." + provider.id.uuidString, in: view)
-            for identifier in ["settings.ai.provider.add", "settings.ai.commit.add-models",
-                               "settings.ai.title.choose-model",
-                               "settings.ai.title.clear-model"] {
+            for identifier in ["settings.ai.provider.add", "settings.ai.local-cli-models",
+                               "settings.ai.commit.add-models", "settings.ai.commit.edit-prompt",
+                               "settings.ai.title.choose-model", "settings.ai.title.clear-model",
+                               "settings.ai.coding-agents.local"] {
                 _ = try find(NSButton.self, identifier, in: view)
             }
             _ = try find(SettingsPopup.self, "settings.ai.title.mode", in: view)
@@ -300,6 +306,11 @@ struct NativeAISettingsTests {
         defer { fixture.close() }
         let controller = fixture.controller
         controller.select(.agents)
+        try find(NSButton.self, "settings.ai.local-cli-models", in: controller.view).performClick(nil)
+        #expect(controller.isShowing("ai-local-cli-models"))
+        for agent in GitCommitAgent.allCases {
+            _ = try find(NSButton.self, "settings.ai.agent." + agent.rawValue, in: controller.view)
+        }
         try find(NSButton.self, "settings.ai.agent.opencode", in: controller.view).performClick(nil)
         #expect(controller.isShowing("ai-agent:opencode"))
 
@@ -316,6 +327,11 @@ struct NativeAISettingsTests {
         #expect(!descendants(controller.view).contains {
             $0.accessibilityIdentifier() == "settings.ai.agent.codex.adapter-update"
         })
+
+        try find(NSButton.self, "settings.back", in: controller.view).performClick(nil)
+        #expect(controller.isShowing("ai-local-cli-models"))
+        let subpageLabels = descendants(controller.view).compactMap { ($0 as? NSTextField)?.stringValue }
+        #expect(subpageLabels.contains { $0.contains(SettingsStrings(language: .english).aiModelCount(2)) })
 
         try find(NSButton.self, "settings.back", in: controller.view).performClick(nil)
         #expect(controller.isShowing("agents"))
@@ -342,6 +358,7 @@ struct NativeAISettingsTests {
         // Two connections may share a name; both stay in the menu.
         #expect(multi.providerPopup.numberOfItems == 2)
         #expect(multi.modelTable.numberOfRows == 3)
+        #expect(multi.addProviderButton.isHidden)
         #expect(!multi.confirmButton.isEnabled)
         multi.toggle("c")
         multi.toggle("a")
@@ -352,7 +369,7 @@ struct NativeAISettingsTests {
         #expect(chosen?.1 == ["a", "c"])
 
         let single = AIProviderModelPickerController(providers: eligible, allowsMultiple: false, strings: strings,
-                                                     heading: "Choose the Title Model") { chosen = ($0, $1) }
+                                                     heading: "Choose Title Model") { chosen = ($0, $1) }
         _ = single.view
         single.toggle("a")
         single.toggle("b")
@@ -370,8 +387,27 @@ struct NativeAISettingsTests {
                                                    heading: "Add API Models") { _, _ in }
         _ = none.view
         #expect(none.modelTable.numberOfRows == 0)
+        #expect(none.addProviderButton.isHidden)
         #expect(!none.confirmButton.isEnabled)
         #expect(!none.searchField.isEnabled)
+
+        // Empty-state picker with an add-service callback offers a direct jump into connection setup.
+        let fixture = Fixture()
+        defer { fixture.close() }
+        fixture.controller.select(.agents)
+        let emptyWithAdd = AIProviderModelPickerController(
+            providers: [],
+            allowsMultiple: false,
+            strings: strings,
+            heading: "Choose Title Model",
+            onAddProvider: { [weak controller = fixture.controller] in controller?.addConnection() },
+            done: { _, _ in }
+        )
+        _ = emptyWithAdd.view
+        #expect(!emptyWithAdd.addProviderButton.isHidden)
+        emptyWithAdd.addProvider()
+        let created = try #require(fixture.settings.aiProviders.first)
+        #expect(fixture.controller.isShowing("ai-provider:" + created.id.uuidString))
     }
 
     @Test func theTitleModelRowExplainsWhatWillHappen() throws {

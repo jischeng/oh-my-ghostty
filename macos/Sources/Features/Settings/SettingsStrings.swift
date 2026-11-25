@@ -264,7 +264,7 @@ struct SettingsStrings: Equatable, Sendable {
 
     // MARK: Tabs
 
-    var layoutSection: String { t("Layout", "布局") }
+    var layoutSection: String { t("Layout & Sidebar", "布局与侧边栏") }
     var tabLayoutLabel: String { t("Tab Layout", "标签页布局") }
     var horizontalOption: String { t("Horizontal", "水平") }
     var verticalOption: String { t("Vertical", "垂直") }
@@ -280,8 +280,12 @@ struct SettingsStrings: Equatable, Sendable {
         t("Remember Resized Width", "记住调整后的宽度")
     }
 
-    var organizationSection: String { t("Organization", "组织方式") }
-    var groupingLabel: String { t("Grouping", "分组") }
+    var organizationSection: String { t("Tabs List", "普通标签列表") }
+    var inboxViewSection: String { t("Inbox View", "收件箱视图") }
+    var tabsDisplaySection: String { t("Display & Resize", "显示与性能") }
+    var groupingLabel: String { t("Grouping", "分组方式") }
+    var inboxGroupingLabel: String { t("Inbox Grouping", "收件箱分组") }
+    var inboxOrderingLabel: String { t("Inbox Ordering", "收件箱排序") }
 
     func groupingTitle(_ mode: GhosttyTabGroupingMode) -> String {
         switch mode {
@@ -623,8 +627,8 @@ struct SettingsStrings: Equatable, Sendable {
     var officialPluginsSection: String { t("Official Plugins", "官方插件") }
     var officialPluginsCaption: String {
         t(
-            "Plugins are installed independently from OMG. SSH uses your existing OpenSSH configuration. Configure status Hooks in Integrations → Agent.",
-            "插件独立于 OMG 安装，SSH 沿用现有 OpenSSH 配置。状态 Hook 请前往“集成 → Agent”配置。"
+            "Plugins are installed independently from OMG. SSH uses your existing OpenSSH configuration. Configure Agent status extensions in AI settings.",
+            "插件独立于 OMG 安装，SSH 沿用现有 OpenSSH 配置。Agent 状态扩展请前往“AI”页面配置。"
         )
     }
     var installButton: String { t("Install", "安装") }
@@ -833,7 +837,17 @@ struct SettingsStrings: Equatable, Sendable {
           "仅在 OMG 连接此主机时由本机发起自动检查和更新；Agent 集成检查不会在远端安装独立定时更新服务（启用持久化 SSH 终端会话时会按需运行 ~/.omg/omgd）。仍可手动检查。需要免交互 OpenSSH 登录和 Python 3。")
     }
     var agentStatusHooksLabel: String {
-        t("Enable Normalized Status Events (OMG-wide)", "启用规范化状态事件（OMG 全局）")
+        t("Show Live Agent Status in Tabs & Inbox", "在标签页与收件箱显示实时状态")
+    }
+    var agentStatusHooksHelp: String {
+        t("Display Working, Needs Input, and Done badges from installed Agent status extensions.",
+          "根据已安装的状态扩展，在标签页与收件箱显示运行中、等待确认和已完成状态。")
+    }
+    var terminalCodingAgentsSection: String {
+        t("Terminal Coding Agents", "终端 Coding Agent 集成")
+    }
+    var agentNotificationsAndHistorySection: String {
+        t("Agent Notifications & History", "Agent 通知与历史")
     }
     var agentDetectorMissing: String { t("Detector Not Installed", "未安装检测器") }
     var agentDetectorUpdateRequired: String {
@@ -855,9 +869,9 @@ struct SettingsStrings: Equatable, Sendable {
     }
 
     var notificationsSection: String { t("Notifications", "通知") }
-    var notifyTaskCompleteLabel: String { t("Task Complete", "任务完成") }
-    var notifyAttentionLabel: String { t("Attention Required", "需要注意") }
-    var notificationSoundLabel: String { t("Play Sound", "播放声音") }
+    var notifyTaskCompleteLabel: String { t("Notify When Task Completes", "任务完成时发送通知") }
+    var notifyAttentionLabel: String { t("Notify When Input Is Needed", "等待确认或输入时发送通知") }
+    var notificationSoundLabel: String { t("Play Sound", "播放提示音") }
     var notificationSoundToneLabel: String { t("Sound Tone", "提示音音色") }
     func notificationSoundToneTitle(_ tone: AgentNotificationSoundTone) -> String {
         tone == .systemDefault ? t("System Default", "系统默认") : tone.rawValue
@@ -865,26 +879,29 @@ struct SettingsStrings: Equatable, Sendable {
 
     // MARK: AI providers, task models and conversation titles
 
-    var aiProvidersSection: String { t("Providers", "提供商") }
-    /// One line under the providers: what the two groups are.
+    var aiProvidersSection: String { t("Model Services", "模型服务") }
+    /// One line under the model services: what API services and local CLIs do.
     var aiProvidersCaption: String {
-        t("Agents run models through their own CLI and login; API connections call a service directly.",
-          "Agent 通过本机 CLI 和自身登录运行模型；API 连接直接调用服务。")
+        t("Connect OpenAI-compatible or Anthropic APIs, or reuse logged-in local CLIs for Git messages.",
+          "连接 OpenAI 兼容或 Anthropic 接口，或复用本机已登录的 CLI 生成 Git 信息。")
     }
     /// Where API keys live, said once for the whole section.
     var aiProvidersFootnote: String {
         t("API keys are kept in a private file on this Mac, never in settings.json.",
-          "API 密钥保存在本机的私有文件中，不会写入 settings.json。")
+          "API 密钥保存在本机独立的私有文件中，不会写入 settings.json。")
     }
-    var aiInstalledGroup: String { t("Installed", "已安装") }
+    var aiInstalledGroup: String { t("Local CLI Models", "本机 CLI 模型") }
+    var aiLocalCLIModelsLabel: String { t("Local CLI Models", "本机 CLI 模型") }
+    var aiAddServiceLabel: String { t("Add API Service", "添加 API 服务") }
     var aiAddConnection: String { t("Add…", "添加…") }
-    var aiAddConnectionHelp: String { t("Add an API connection", "添加 API 连接") }
+    var aiAddConnectionHelp: String { t("Add an API service", "添加 API 服务") }
     var aiAddModels: String { t("Add Models…", "添加模型…") }
-    var aiConnectionsGroup: String { t("API connections", "API 连接") }
-    var aiTaskModelsSection: String { t("Models per Task", "任务模型") }
+    var aiConnectionsGroup: String { t("API Services", "API 服务") }
+    var aiTaskModelsSection: String { t("Git Commit & PR Messages", "Git 提交与 PR 信息生成") }
     var aiCommitModelsGroup: String { t("Commit, tag and PR messages", "提交、标签与 PR 信息") }
-    var aiTitleModelGroup: String { t("Tab titles", "标签标题") }
-    var aiNewConnectionName: String { t("New connection", "新连接") }
+    var aiTitleModelGroup: String { t("Automatic Tab Titles", "标签页自动命名") }
+    var aiNewConnectionName: String { t("New API service", "新 API 服务") }
+    var gitCustomPromptLabel: String { t("Custom Prompt", "自定义提示词") }
 
     func aiProviderKindTitle(_ kind: AIEndpointProtocol) -> String {
         switch kind {
@@ -927,36 +944,36 @@ struct SettingsStrings: Equatable, Sendable {
         }
     }
 
-    var agentSessionTitleLabel: String { t("Conversation Titles", "会话标题") }
+    var agentSessionTitleLabel: String { t("Naming Mode", "自动命名策略") }
     var agentSessionTitleCaption: String {
-        t("Generate asks the model below only when the agent reports no title.",
-          "“生成”仅在 Agent 未上报标题时向下方的模型请求标题。")
+        t("\"Generate When Missing\" asks the title model below only when the agent provides no title. Manual renames always win.",
+          "“缺省时用 AI 生成”仅在 Agent 未提供标题时使用下方模型生成；手动重命名始终优先。")
     }
 
     func agentSessionTitleModeTitle(_ mode: AgentSessionTitleMode) -> String {
         switch mode {
         case .off: t("Off", "关闭")
-        case .native: t("Agent Reported", "Agent 上报")
-        case .generate: t("Generate", "生成")
+        case .native: t("Agent Title Only", "仅使用 Agent 原生标题")
+        case .generate: t("Generate When Missing", "缺省时用 AI 生成")
         }
     }
 
     var agentSessionTitleAlwaysUseAILabel: String {
-        t("Always use AI to shorten tab titles", "强制使用 AI 精简标签标题")
+        t("Always Shorten Titles with AI", "始终用 AI 精简标题")
     }
     var agentSessionTitleAlwaysUseAICaption: String {
-        t("Always generate short titles with the configured AI model instead of keeping long native Agent titles. Manual renames still win.",
-          "始终使用已配置的 AI 模型精简 Agent 会话标题，不再保留过长的原生标题（手动重命名仍优先）。")
+        t("Always generate concise titles with the title model instead of keeping long native Agent titles. Manual renames still win.",
+          "始终使用命名模型将冗长的原生 Agent 标题精简为短标题（手动重命名仍优先）。")
     }
 
-    var aiTitleModelLabel: String { t("Title Model", "标题模型") }
+    var aiTitleModelLabel: String { t("Title Model", "命名模型") }
     var aiTitleModelUnset: String {
-        t("Not set: only titles the agent reports are shown.",
-          "未选择：仅显示 Agent 上报的标题。")
+        t("Not set: select a model from an API service above to generate titles.",
+          "未选择：请从上方 API 服务中选择一个模型用于生成标题。")
     }
     var aiTitleModelCaption: String {
-        t("API connections only. OMG sends the first prompt with likely secrets removed.",
-          "仅支持 API 连接。发送前会尽量移除首条提示词中的敏感信息。")
+        t("Uses an API service above. OMG sends only the first prompt with likely secrets removed.",
+          "使用上方配置的 API 服务。仅发送脱敏后的首条提示词。")
     }
 
     static func aiBaseURLPlaceholder(_ kind: AIEndpointProtocol) -> String {

@@ -5,14 +5,18 @@ import GhosttyKit
 private final class NativeSettingsNavigationCell: NSTableCellView {
     let label = NSTextField(labelWithString: "")
     let icon = NSImageView()
+    var showsGroupDivider = false {
+        didSet { needsDisplay = true }
+    }
 
     override var backgroundStyle: NSView.BackgroundStyle {
-        didSet { updateColors() }
+        didSet { updateColors(); needsDisplay = true }
     }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         updateColors()
+        needsDisplay = true
     }
 
     let badge = SettingsBadge()
@@ -21,6 +25,14 @@ private final class NativeSettingsNavigationCell: NSTableCellView {
         badge.emphasized = backgroundStyle == .emphasized
         label.textColor = backgroundStyle == .emphasized ? .alternateSelectedControlTextColor : .labelColor
         icon.contentTintColor = backgroundStyle == .emphasized ? .alternateSelectedControlTextColor : .secondaryLabelColor
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard showsGroupDivider, backgroundStyle != .emphasized else { return }
+        NSColor.separatorColor.withAlphaComponent(0.55).setFill()
+        let y = isFlipped ? 0.0 : bounds.maxY - 1.0
+        NSRect(x: 10, y: y, width: max(0, bounds.width - 20), height: 1).fill()
     }
 }
 
@@ -187,6 +199,8 @@ final class NativeSettingsController: NSViewController, NSTableViewDataSource, N
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let tab = rows[row]
         let cell = NativeSettingsNavigationCell()
+        cell.showsGroupDivider = rows == OhMyGhosttySettingsTab.navigationOrder &&
+            [.terminal, .agents, .advanced].contains(tab)
         let icon = cell.icon
         icon.image = NSImage(systemSymbolName: tab.systemImage, accessibilityDescription: nil)
         let label = cell.label
@@ -401,12 +415,10 @@ final class NativeSettingsController: NSViewController, NSTableViewDataSource, N
         if entry.tab == .terminal && entry.id == "terminal:runtime" &&
             !query.localizedCaseInsensitiveContains("keep") && !query.contains("退出") {
             secondary = text("Session options", "会话选项")
-        } else if entry.tab == .tabs && (entry.title == strings.appearanceTabsSection || entry.title == strings.resizeRenderingSection) {
-            secondary = text("More tab options", "更多标签选项")
         } else if entry.tab == .controls && (query.localizedCaseInsensitiveContains("history") || query.contains("历史")) {
             secondary = strings.quickInputHistoryTitle
         }
         if let open = secondaryPages[secondary] { open(); return }
-        (page as? NativeSettingsForm)?.scrollTo(entry.title)
+        (page as? NativeSettingsForm)?.scrollTo(entry.anchor)
     }
 }

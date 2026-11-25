@@ -15,26 +15,27 @@ extension NativeSettingsController {
             picker(form, strings.tabLayoutLabel, \.tabLayout, [(.vertical, strings.verticalOption), (.horizontal, strings.horizontalOption)])
             toggle(form, strings.showSidebarLabel, \.sidebarVisible)
             number(form, strings.sidebarWidthLabel, \.defaultSidebarWidth, range: 176...480)
+            toggle(form, strings.rememberSidebarWidthLabel, \.rememberSidebarWidth)
             form.section(strings.organizationSection)
             picker(form, strings.groupingLabel, \.groupingMode, GhosttyTabGroupingMode.allCases.map { ($0, strings.groupingTitle($0)) })
             picker(form, strings.orderingLabel, \.orderingMode, GhosttyTabOrderingMode.allCases.map { ($0, strings.orderingTitle($0)) })
             picker(form, strings.pathDisplayLabel, \.tabPathDisplay, OhMyGhosttyTabPathDisplay.allCases.map { ($0, strings.pathDisplayTitle($0)) })
+            form.section(strings.inboxViewSection)
+            picker(form, strings.inboxGroupingLabel, \.tabInboxGroupingMode,
+                   GhosttyTabGroupingMode.allCases.map { ($0, strings.groupingTitle($0)) })
+            picker(form, strings.inboxOrderingLabel, \.tabInboxOrderingMode,
+                   GhosttyTabOrderingMode.allCases.map { ($0, strings.orderingTitle($0)) })
             picker(form, strings.inboxContinueMinutesLabel, \.tabInboxContinueMinutes,
                    OhMyGhosttySettings.inboxContinueMinuteOptions.map { ($0, strings.inboxContinueMinutesTitle($0)) })
-            form.section(text("Display", "显示"))
+            form.section(strings.tabsDisplaySection)
             picker(form, strings.rowDensityLabel, \.tabRowDensity, OhMyGhosttyTabRowDensity.allCases.map { ($0, strings.densityTitle($0)) })
+            number(form, strings.tabIconSizeLabel, \.tabIconSize, range: 12...20)
             toggle(form, strings.showShortcutLabelsLabel, \.showShortcutLabels)
-            more(form, text("More tab options", "更多标签选项")) { [weak self] page in
-                guard let self else { return }
-                page.section(self.strings.appearanceTabsSection)
-                self.number(page, self.strings.tabIconSizeLabel, \.tabIconSize, range: 12...20)
-                self.toggle(page, self.strings.rememberSidebarWidthLabel, \.rememberSidebarWidth)
-                self.picker(page, self.strings.terminalResizeRenderingLabel, \.terminalResizeRendering,
-                            TerminalResizeRenderingMode.allCases.map { ($0, self.strings.terminalResizeRenderingTitle($0)) })
-                page.row(self.strings.resetTabsButton, control: SettingsActionButton(self.text("Reset", "重置")) { [weak self] in
-                    self?.settings.resetTabs(); self?.select(.tabs)
-                })
-            }
+            picker(form, strings.terminalResizeRenderingLabel, \.terminalResizeRendering,
+                   TerminalResizeRenderingMode.allCases.map { ($0, strings.terminalResizeRenderingTitle($0)) })
+            form.row(strings.resetTabsButton, control: SettingsActionButton(text("Reset", "重置")) { [weak self] in
+                self?.settings.resetTabs(); self?.select(.tabs)
+            })
         case .terminal: terminal(form)
         case .controls: controls(form)
         case .editor: editor(form)
@@ -43,24 +44,30 @@ extension NativeSettingsController {
             form.section(strings.gitSection)
             picker(form, strings.gitAutoFetchLabel, \.gitAutoFetchInterval,
                    Array(Set([0, 1, 2, 5, 10, 15, 30, 60, settings.gitAutoFetchInterval])).sorted().map { ($0, strings.gitAutoFetchIntervalTitle($0)) })
-            form.section(text("Commit messages", "提交信息"))
+            form.section(strings.gitAISettingsTitle)
             let routes = settings.gitCommitAIRoutes
             let first = routes.first?.title(providers: settings.aiProviders) ?? ""
             let summary = routes.isEmpty
-                ? text("No models yet. Choose them in AI settings to generate commit, tag and PR messages.",
-                       "尚未选择模型。在 AI 设置中选择后，即可生成提交、标签与 PR 信息。")
+                ? text("No models yet. Choose them in AI settings to generate commit, tag, and PR messages.",
+                       "尚未选择模型。前往 AI 页面添加后，即可生成提交、标签与 PR 信息。")
                 : text("\(strings.aiModelCount(routes.count)), tried in order, starting with \(first). Managed in AI settings.",
-                       "\(strings.aiModelCount(routes.count))，按顺序尝试，首选 \(first)。在 AI 设置中管理。")
+                       "\(strings.aiModelCount(routes.count))，按顺序尝试，首选 \(first)。在 AI 页面管理。")
             let models = form.link(text("AI models", "AI 模型"), subtitle: summary) { [weak self] in
                 self?.select(.agents)
             }
             models?.setAccessibilityIdentifier("settings.git.ai-models")
-            form.section(text("Commit style", "提交风格"))
-            form.row(text("Custom prompt", "自定义提示词"),
-                     subtitle: text("Custom instructions for generated messages.", "自定义生成提交信息时使用的提示词。"),
-                     control: SettingsActionButton(text("Edit…", "编辑…")) { [weak self] in
-                guard let self else { return }; GitCommitAISettingsPanel.presentPrompt(settings: self.settings, from: self.view.window)
-            })
+            let promptRow = form.row(
+                strings.gitCustomPromptLabel,
+                subtitle: commitPromptSummary(),
+                control: SettingsActionButton(text("Edit…", "编辑…")) { [weak self] in
+                    guard let self else { return }
+                    GitCommitAISettingsPanel.presentPrompt(settings: self.settings, from: self.view.window)
+                }
+            )
+            form.refreshers.append { [weak self] in
+                guard let self else { return }
+                promptRow?.setSubtitle(self.commitPromptSummary())
+            }
         case .ssh: remoteHosts(form)
         case .mobile: mobileAccess(form)
         case .agents: aiOverview(form)
@@ -394,7 +401,7 @@ extension NativeSettingsController {
             if QuickInputHistoryStore.shared.storageError != nil { page.note(self.strings.quickInputHistoryStorageError) }
         }
         core(.selection, in: form)
-        more(form, text("Clipboard and mouse", "剪贴板与鼠标")) { [weak self] page in
+        more(form, text("Clipboard, mouse, and Option key", "剪贴板、鼠标与 Option 键")) { [weak self] page in
             self?.core(.clipboard, in: page); self?.core(.mouse, in: page); self?.core(.keyboard, in: page)
         }
     }

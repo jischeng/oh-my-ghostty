@@ -290,7 +290,7 @@ enum GitCommitAISettingsPanel {
                     agent: agent, models: models, to: settings.gitCommitAIRoutes
                 )
             },
-            title: GitL10n.text("Add AI Models"),
+            title: GitL10n.text("Add Local CLI Models"),
             size: NSSize(width: 540, height: 620),
             from: parent
         )
@@ -507,10 +507,10 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
 
     override func loadView() {
         let root = OMGNativeSurfaceView()
-        let title = NSTextField(labelWithString: GitL10n.text("Add AI Models"))
+        let title = NSTextField(labelWithString: GitL10n.text("Add Local CLI Models"))
         title.font = .systemFont(ofSize: 15, weight: .semibold)
         helpField.stringValue = GitL10n.text(
-            "Models run through local ACP, including for SSH repositories. Selected services receive the changes. Sessions expire after 30 days."
+            "Reuses your logged-in local CLI to generate messages (including for SSH repositories). Staged diffs are sent to the selected model service."
         )
         helpField.textColor = .secondaryLabelColor
         helpField.font = .systemFont(ofSize: NSFont.smallSystemFontSize)

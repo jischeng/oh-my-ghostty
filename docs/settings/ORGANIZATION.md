@@ -9,13 +9,14 @@ Otty is a visual/information-architecture reference, not a feature-parity requir
 | Shell & Sessions | Shell integration, working-directory inheritance, startup/session restoration, terminal notifications |
 | Input & Controls | Quick Input size/history/privacy, terminal selection, clipboard permissions/paste safety, mouse focus, Option-as-Alt |
 | Editor | File/directory destination, editor keymap, wrapping/pairs, editor theme/font/tab width |
-| AI | Providers (installed agents over ACP, API connections with keys and model lists), the model per task (commit/tag/PR messages, tab titles), per-host Hook/CLI setup and maintenance, Agent history limit, automatic Quick Input opening, Agent notifications |
-| Views & Tabs | Horizontal/vertical tabs, sidebar geometry, grouping/order/path, tab density/icons, resize rendering |
+| AI | Model Services (API services with keys & model lists, plus a consolidated Local CLI Models subpage), Automatic Tab Titles (naming mode, always-shorten switch, title model), Git Commit & PR Messages (ordered fallback models & custom prompt), Terminal Coding Agents (local status extensions/CLI setup, live status badge toggle, automatic Quick Input opening), Agent Notifications & History (notifications, sound tone, history limit & background indexing) |
+| Views & Tabs | Layout & Sidebar (horizontal/vertical tabs, sidebar visibility/width/remembered width), Tabs List (grouping/order/path), Inbox View (inbox grouping/order/Continue window), Display & Resize (row density/icon size/shortcut badges/resize rendering/reset) |
 | Appearance | Terminal theme, fonts, opacity/blur, cursor and font inheritance |
 | Shortcuts | Quick Input and Inspector shortcut recorders; original Ghostty keybinding configuration access |
-| Integrations → Git | Auto-fetch, commit style instructions, and a link to the AI models for Git messages |
-| Integrations → SSH | Explicit host registration and cached inventory |
-| Integrations → Plugins | Official and GitHub plugin installation/management |
+| Git | Auto-fetch interval, and AI Commit Messages (summary link to AI settings + custom commit prompt) |
+| Remote Machines | Explicit SSH host registration, connection setup, and cached Agent inventory |
+| Mobile Devices | LAN / Tailscale mobile gateway pairing and provisioning |
+| Plugins | Official and local plugin installation/management |
 | Advanced | OMG/Ghostty config locations, precedence, open/reload/reveal actions |
 
 ## Search and shared layout

@@ -289,6 +289,8 @@ struct SettingsControlsTests {
             let strings = SettingsStrings(language: language)
             #expect(strings.tabTitle(.agents) == "AI")
             #expect(strings.agentIntegrationSection == "Agent")
+            #expect(!strings.officialPluginsCaption.contains("Integrations → Agent"))
+            #expect(!strings.officialPluginsCaption.contains("集成 → Agent"))
         }
     }
 

@@ -277,6 +277,7 @@ struct NativeSettingsRow {
             let detail = NSTextField(wrappingLabelWithString: text)
             detail.font = .systemFont(ofSize: 11)
             detail.textColor = .secondaryLabelColor
+            detail.setContentHuggingPriority(.init(1), for: .horizontal)
             detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             detail.setContentCompressionResistancePriority(.required, for: .vertical)
             labels.addArrangedSubview(detail)
@@ -418,6 +419,7 @@ final class NativeSettingsForm: NSViewController {
         labels.setHuggingPriority(.required, for: .vertical)
         let label = NSTextField(wrappingLabelWithString: title)
         label.font = .systemFont(ofSize: 13)
+        label.setContentHuggingPriority(.init(1), for: .horizontal)
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         label.setContentCompressionResistancePriority(.required, for: .vertical)
         labels.addArrangedSubview(label)
@@ -426,17 +428,22 @@ final class NativeSettingsForm: NSViewController {
             let detail = NSTextField(wrappingLabelWithString: subtitle)
             detail.font = .systemFont(ofSize: 11)
             detail.textColor = .secondaryLabelColor
+            detail.setContentHuggingPriority(.init(1), for: .horizontal)
             detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             detail.setContentCompressionResistancePriority(.required, for: .vertical)
             labels.addArrangedSubview(detail)
             detail.widthAnchor.constraint(equalTo: labels.widthAnchor).isActive = true
         }
-        labels.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        labels.setContentHuggingPriority(.init(1), for: .horizontal)
         control.setContentHuggingPriority(.required, for: .horizontal)
         control.setContentCompressionResistancePriority(.required, for: .horizontal)
         if let stack = control as? NSStackView {
+            stack.distribution = .fill
             stack.setHuggingPriority(.required, for: .horizontal)
-            stack.widthAnchor.constraint(equalToConstant: stack.fittingSize.width).isActive = true
+            for arranged in stack.arrangedSubviews {
+                arranged.setContentHuggingPriority(.required, for: .horizontal)
+                arranged.setContentCompressionResistancePriority(.required, for: .horizontal)
+            }
         }
         control.setAccessibilityLabel(title)
         control.toolTip = help

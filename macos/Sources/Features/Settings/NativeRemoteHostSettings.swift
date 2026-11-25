@@ -230,16 +230,23 @@ extension NativeSettingsController {
         form.retained.append(token)
     }
 
-    /// The Agent half of the AI page: CLI and Hook integration, behavior and notifications.
-    /// Providers and the model choices come first, from `aiOverview`.
+    /// Cards 4 & 5 of the AI page: terminal Coding Agent integration, then notifications & history.
     func agentOverview(_ form: NativeSettingsForm) {
-        form.section(text("This Mac", "此 Mac"))
-        form.link(text("Installed Agents", "已安装的 Agent")) { [weak self] in self?.showAgents(target: AgentIntegrationManager.localID) }
-        form.section(strings.agentBehaviorSection)
-        toggle(form, strings.agentStatusHooksLabel, \.agentStatusHooksEnabled)
-        toggle(form, strings.openQuickInputOnAgentStartLabel, \.openQuickInputOnAgentStart)
-        toggle(form, strings.openQuickInputOnAgentCompleteLabel, \.openQuickInputOnAgentComplete)
-        form.section(strings.notificationsSection)
+        form.section(strings.terminalCodingAgentsSection)
+        let localLink = form.link(
+            text("Coding Agents on This Mac", "本机 Agent 状态扩展与 CLI"),
+            subtitle: localCodingAgentsSummary()
+        ) { [weak self] in
+            self?.showAgents(target: AgentIntegrationManager.localID)
+        }
+        localLink?.setAccessibilityIdentifier("settings.ai.coding-agents.local")
+        toggle(form, strings.agentStatusHooksLabel, \.agentStatusHooksEnabled, help: strings.agentStatusHooksHelp)
+        toggle(form, strings.openQuickInputOnAgentStartLabel, \.openQuickInputOnAgentStart,
+               help: strings.openQuickInputOnAgentStartCaption)
+        toggle(form, strings.openQuickInputOnAgentCompleteLabel, \.openQuickInputOnAgentComplete,
+               help: strings.openQuickInputOnAgentCompleteCaption)
+
+        form.section(strings.agentNotificationsAndHistorySection)
         toggle(form, strings.notifyTaskCompleteLabel, \.notifyTaskComplete)
         toggle(form, strings.notifyAttentionLabel, \.notifyAttention)
         toggle(form, strings.notificationSoundLabel, \.notificationSound)
@@ -266,18 +273,26 @@ extension NativeSettingsController {
                 .receive(on: RunLoop.main)
                 .sink { _ in syncToneControl() }
         )
-        more(form, strings.agentHistorySection) { [weak self] page in
-            guard let self else { return }; page.section(self.strings.agentHistorySection)
-            self.number(page, self.strings.agentHistoryLimitLabel, \.agentHistoryLimit, range: 100...50000, step: 100)
-            self.toggle(page, self.strings.agentHistoryBackgroundIndexingLabel, \.agentHistoryBackgroundIndexing,
-                        help: self.strings.agentHistoryBackgroundIndexingHelp)
+        number(form, strings.agentHistoryLimitLabel, \.agentHistoryLimit, range: 100...50000, step: 100,
+               help: strings.agentHistoryLimitCaption)
+        toggle(form, strings.agentHistoryBackgroundIndexingLabel, \.agentHistoryBackgroundIndexing,
+               help: strings.agentHistoryBackgroundIndexingHelp)
+    }
+
+    private func localCodingAgentsSummary() -> String {
+        let snapshot = agents.snapshot(for: AgentIntegrationManager.localID)
+        let detected = SupportedAgent.allCases.filter { snapshot?.cli[$0]?.path != nil }.count
+        let enabledHooks = SupportedAgent.allCases.filter { snapshot?.hooks[$0]?.isInstalled == true }.count
+        if detected == 0 && enabledHooks == 0 {
+            return text(
+                "Set up status extensions and CLI updates for Claude Code, Codex, Cursor, Pi, and more.",
+                "管理 Claude Code、Codex、Cursor、Pi 等终端 Agent 的状态扩展与 CLI 更新。"
+            )
         }
-        more(form, text("Agent tools", "Agent 工具")) { [weak self] page in
-            guard let self else { return }
-            page.section(self.text("Remote setup", "远程配置"))
-            page.row(self.strings.exportSSHInstallerButton, control: SettingsActionButton(self.text("Export…", "导出…")) { [weak self] in self?.exportHooks()
-            })
-        }
+        return text(
+            "\(detected) detected · \(enabledHooks) status extensions active",
+            "已发现 \(detected) 个 Agent · \(enabledHooks) 个已启用状态扩展"
+        )
     }
 
     func showAgents(target: String) {
@@ -296,14 +311,14 @@ extension NativeSettingsController {
     private func buildAgents(_ target: String, in form: NativeSettingsForm) {
         let local = target == AgentIntegrationManager.localID
         let policy = agents.policy(for: target)
-        form.section(text("Setup", "配置"))
-        form.row(text("Agent discovery", "检查 Agent"), control: SettingsActionButton(text("Check", "检查")) { [weak self] in
+        form.section(text("Setup", "状态扩展配置"))
+        form.row(text("Agent discovery", "检查已安装的 Agent"), control: SettingsActionButton(text("Check", "检查")) { [weak self] in
             guard let self else { return }
             let manager = self.agents
             Task { await manager.refresh(target: target, checkLatest: false) }
         })
         if local {
-            form.toggle(text("Maintain Hooks automatically", "自动维护 Hooks"),
+            form.toggle(text("Maintain status extensions automatically", "自动维护已安装的状态扩展"),
                         value: policy.updateHooksAutomatically) { [weak self] value in
                 guard let self else { return }
                 var policy = self.agents.policy(for: target)
@@ -312,21 +327,19 @@ extension NativeSettingsController {
                 self.agents.setPolicy(policy, for: target)
             }
         }
-        form.row(text("Install detected Hooks", "安装已发现的 Hooks"), control: SettingsActionButton(text("Install", "安装")) { [weak self] in
+        form.row(text("Enable all detected Agents", "一键启用已发现的 Agent"),
+                 control: SettingsActionButton(text("Install", "启用")) { [weak self] in
             self?.agents.beginSetup(target: target, installAll: true)
         })
-        form.section(text("Agents", "Agent"))
-        let list = NativeAgentSettingsList(target: target, manager: agents, strings: strings)
+        form.section(text("Supported Agents", "支持的 Agent"))
+        let list = NativeAgentSettingsList(target: target, manager: agents, strings: strings, includeUnavailable: true)
         list.onSelect = { [weak self] in self?.showAgent($0, target: target) }
         form.addChild(list)
         _ = list.view
-        // Show every Agent; the page scrolls, not a nested list.
+        // Show every supported Agent inline on one scrollable page instead of a 4th-level subpage.
         let height = form.embed(list.view, height: CGFloat(max(1, list.displayedCount)) * 48)
         list.onCountChange = { [weak height] count in height?.constant = CGFloat(max(1, count)) * 48 }
-        form.link(text("Other Agents", "其他 Agent")) { [weak self] in
-            self?.showOtherAgents(target, push: true)
-        }
-        form.section(text("Maintenance", "维护"))
+        form.section(text("Maintenance", "维护与工具"))
         form.toggle(text("Update Agent CLIs automatically", "自动更新 Agent CLI"), value: policy.updatesCLIs) { [weak self] in
             guard let self else { return }; var policy = self.agents.policy(for: target)
             policy.updateAllCLIsAutomatically = $0
@@ -341,29 +354,17 @@ extension NativeSettingsController {
                 self.maintenanceSchedule(target, form: page)
             })
         }
+        if local {
+            form.row(
+                strings.exportSSHInstallerButton,
+                subtitle: text("Export a standalone script for manual setup on restricted SSH hosts.",
+                               "导出独立安装脚本，供在受限 SSH 主机上审阅并手动执行。"),
+                control: SettingsActionButton(text("Export…", "导出…")) { [weak self] in
+                    self?.exportHooks()
+                }
+            )
+        }
         observeTarget(target, form: form)
-    }
-
-    private func showOtherAgents(_ target: String, push: Bool) {
-        let title = text("Other Agents", "其他 Agent")
-        let route = "agents:" + target + ":all"
-        let build: (NativeSettingsForm) -> Void = { [weak self] page in
-            guard let self else { return }
-            page.section("Agent")
-            let list = NativeAgentSettingsList(target: target, manager: self.agents, strings: self.strings, includeUnavailable: true)
-            list.onSelect = { [weak self] in self?.showAgent($0, target: target) }
-            page.addChild(list)
-            _ = list.view
-            page.embed(list.view, height: CGFloat(max(1, list.displayedCount)) * 48)
-        }
-        if push {
-            self.push(title, route: route, previous: { [weak self] in self?.refreshAgents(target) }, build: build)
-        } else {
-            setRoute(route)
-            let form = NativeSettingsForm()
-            build(form)
-            present(form, title: title)
-        }
     }
 
     private func maintenanceSchedule(_ target: String, form: NativeSettingsForm) {
@@ -397,12 +398,11 @@ extension NativeSettingsController {
     }
 
     private func showAgent(_ agent: SupportedAgent, target: String) {
-        let fromOtherAgents = isShowing("agents:" + target + ":all")
         setRoute("agent:" + target + ":" + agent.rawValue)
         let snapshot = agents.snapshot(for: target) ?? .init()
         push(agent.displayName, route: "agent:" + target + ":" + agent.rawValue,
              previous: { [weak self] in
-                 if fromOtherAgents { self?.showOtherAgents(target, push: false) } else { self?.refreshAgents(target) }
+                 self?.refreshAgents(target)
              }, build: { [weak self] form in
             guard let self else { return }
             form.section(agent.displayName)

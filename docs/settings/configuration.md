@@ -60,26 +60,27 @@ model chosen for each task, and Agent integration (CLI/status integration
 installation, behavior and notifications). SSH manages registered hosts; Plugins
 continues to manage plugin packages.
 
-### AI providers
+### Model Services
 
-**AI > Providers** lists two kinds of provider in one place:
+**AI > Model Services** organizes model sources cleanly without duplicating terminal coding agents on the main page:
 
-- **Installed agents (ACP)**: Claude Code, Pi, Codex and OpenCode, reached through
-  their local ACP adapter with the CLI's own login. Each row shows the CLI state
-  from the last Agent check and the number of models last discovered. The detail
-  page lists the discovered models, has **Refresh**, and for Codex the control
-  that checks and installs the OMG-managed Codex ACP adapter. Discovery starts an
-  agent process, so it runs when the detail page is first opened or on Refresh,
-  never when the AI page is merely shown.
-- **API connections**: any number of named OpenAI-compatible or Anthropic
-  endpoints. Each has a name, kind, base URL, API key and an enabled switch.
+- **API services**: any number of named OpenAI-compatible or Anthropic
+  endpoints, listed directly on the AI page with an **Add API Service** action.
+  Each has a name, protocol, base URL, API key and an enabled switch.
   **Fetch Models** calls the service's model list (`GET {base}/models` for
   OpenAI-compatible endpoints, with `/v1` added when the base URL has no path;
   `GET {base}/v1/models` for Anthropic) with the same authentication as a chat
-  request and merges the result into the connection's list. **Add a model ID**
+  request and merges the result into the service's list. **Add a model ID**
   covers services that do not implement the list call. Each model can carry an
   optional context window and maximum output, in tokens; blank means the default.
   A response larger than 4 MB is refused and at most 500 models are kept.
+- **Local CLI Models**: a consolidated subpage for Claude Code, Pi, Codex and OpenCode,
+  reached through each CLI's local helper command with its own login. Each row shows
+  the CLI state from the last Agent check and the number of models last discovered.
+  The detail page lists discovered models, has **Refresh**, and for Codex includes the
+  control that checks and installs the OMG-managed Codex ACP helper package. Discovery
+  starts a local process only when a CLI detail page is opened or refreshed, never when
+  the AI page is merely shown.
 
 Connections are saved as `ai.providers`. API keys are never written to
 `settings.json`: they live in `<Application Support>/AI/credentials.json`
@@ -88,21 +89,22 @@ page only ever shows whether a key is stored. Removing a connection deletes its
 key and every model choice that used it. Plain `http://` is accepted only for
 loopback, private-range and link-local hosts; redirects are never followed.
 
-### Models per task
+### Automatic Tab Titles and Git Commit & PR Messages
 
-**AI > Models per Task** chooses the model for each job:
+**AI** separates each AI-powered feature into its own task card:
 
-- **Commit, tag and PR messages**: an ordered fallback list, saved as
-  `ai.routes.commit`. An entry is a model of an installed agent (`kind: agent`)
-  or of an API connection (`kind: provider`). **Add Agent Models…** opens the
-  searchable ACP multi-select; **Add API Models…** picks from the models listed
-  on enabled connections. Drag entries (or use their arrow buttons) to change
-  priority. The first entry is the main model and every entry below it is a
-  fallback. Git settings keeps the commit style prompt and links here.
-- **Tab titles**: `agents.sessionTitle.mode` and one model of an enabled API
-  connection, saved as `ai.routes.title`. Installed agents are deliberately not
-  offered: a title would cost a process start per conversation and keep the
-  prompt in a session directory. No model means no generation.
+- **Automatic Tab Titles**: `agents.sessionTitle.mode` (`off`, `native`, or `generate`),
+  `agents.sessionTitle.alwaysUseAI`, and one model of an enabled API service saved as
+  `ai.routes.title`. When no API service has models yet, the model picker offers a direct
+  **Add API Service…** action. Local CLIs are deliberately not offered for tab titles:
+  naming would otherwise spawn a CLI process per conversation. No model means no AI generation.
+- **Git Commit & PR Messages**: an ordered fallback list, saved as
+  `ai.routes.commit`, alongside an inline **Custom Prompt** editor (`git.commitAI.prompt`,
+  also reachable from **Settings > Git**). An entry is a model of a local CLI (`kind: agent`)
+  or of an API service (`kind: provider`). **Add Models…** anchors a menu directly to the
+  button (**From API Service…** or **From Local CLI…**). Drag entries (or use their arrow
+  buttons) to change priority. The first entry is the primary model and every entry below
+  it is a fallback.
 
 An API connection route sends the same prompt as the ACP route, with the
 instructions as the system message and the Git context as the user message. It
@@ -225,8 +227,8 @@ Window UI state is intentionally separate: `InspectorPresentationStore` owns las
 | `tabs.grouping`                   | enum    | `none`                        | `none`, `project`, `date`                                                                              | Settings > Tabs                    | Runtime                      |
 | `tabs.ordering`                   | enum    | `manual`                      | `manual`, `created`, `recentlyUsed`                                                                    | Settings > Tabs                    | Runtime                      |
 | `tabs.sidebarView`                | enum    | `tabs`                        | `tabs`, `inbox`                                                                                        | Vertical Tabs sidebar header       | Runtime                      |
-| `tabs.inboxGrouping`              | enum    | `date`                        | `none`, `project`, `date`                                                                              | Vertical Tabs sidebar "…" menu     | Runtime                      |
-| `tabs.inboxOrdering`              | enum    | `recentlyUsed`                | `manual`, `created`, `recentlyUsed`                                                                    | Vertical Tabs sidebar "…" menu     | Runtime                      |
+| `tabs.inboxGrouping`              | enum    | `date`                        | `none`, `project`, `date`                                                                              | Settings > Tabs & sidebar "…" menu | Runtime                      |
+| `tabs.inboxOrdering`              | enum    | `recentlyUsed`                | `manual`, `created`, `recentlyUsed`                                                                    | Settings > Tabs & sidebar "…" menu | Runtime                      |
 | `tabs.inboxContinueMinutes`       | number  | `15`                          | `1`, `3`, `5`, `10`, `15`, `30`, `60`                                                                  | Settings > Tabs                    | Runtime                      |
 | `tabs.pathDisplay`                | enum    | `folderName`                  | `fullPath`, `folderName`                                                                               | Settings > Tabs                    | Runtime                      |
 | `tabs.showShortcutLabels`         | boolean | `true`                        | `true`, `false`                                                                                        | Settings > Tabs                    | Runtime                      |
@@ -325,8 +327,8 @@ The inbox has its own `tabs.inboxGrouping` (`none`, `project`, `date`; default
 which keep their meaning in the Tabs view. Continue is shown above the date
 sections only with date grouping, and `manual` means the native tab order: the
 inbox is display-only. An unknown stored value, such as `recent` from the first
-inbox build, falls back to the default. The sidebar header is their only UI;
-there is no Settings picker.
+inbox build, falls back to the default. Both **Settings > Views & Tabs > Inbox View**
+and the Vertical Tabs sidebar `"…"` menu expose these options.
 
 Agent tabs can show a conversation title instead of the working directory. The
 title belongs to the conversation, not to the tab, and a manual rename always

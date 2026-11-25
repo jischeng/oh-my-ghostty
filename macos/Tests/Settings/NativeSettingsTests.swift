@@ -412,17 +412,14 @@ struct NativeSettingsTests {
         controller.showAgents(target: id)
         #expect(controller.isShowing("agents:" + id))
         let back = try #require(descendants(controller.view).compactMap { $0 as? NSButton }.first { $0.accessibilityIdentifier() == "settings.back" })
-        let others = try #require(descendants(controller.view).compactMap { $0 as? NSButton }
-            .first { $0.accessibilityLabel() == controller.text("Other Agents", "其他 Agent") })
-        others.performClick(nil)
-        #expect(controller.isShowing("agents:" + id + ":all"))
+        #expect(!descendants(controller.view).compactMap { $0 as? NSButton }
+            .contains { $0.accessibilityLabel() == controller.text("Other Agents", "其他 Agent") })
         let table = try #require(descendants(controller.view).compactMap { $0 as? NSTableView }
             .first { $0.accessibilityIdentifier() == "settings.agents." + id })
+        #expect(table.numberOfRows == SupportedAgent.allCases.count)
         table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         table.sendAction(table.action, to: table.target)
         #expect(controller.routeID.hasPrefix("agent:" + id + ":"))
-        back.performClick(nil)
-        #expect(controller.isShowing("agents:" + id + ":all"))
         back.performClick(nil)
         #expect(controller.isShowing("agents:" + id))
         back.performClick(nil)
@@ -431,6 +428,40 @@ struct NativeSettingsTests {
         #expect(controller.isShowing("ssh"))
         controller.select(.general)
         #expect(!controller.isShowing("agents:" + id))
+    }
+
+    @Test func tabsPageSeparatesTabsListFromInboxViewAndFlattensAllTabOptions() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let settings = OhMyGhosttySettings(fileURL: directory.appendingPathComponent("settings.json"))
+        settings.language = .simplifiedChinese
+        let strings = SettingsStrings(language: .simplifiedChinese)
+        let controller = NativeSettingsController(settings: settings, initialSelection: .tabs)
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 900, height: 680),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = controller
+        defer { window.close() }
+        controller.view.layoutSubtreeIfNeeded()
+
+        let labels = descendants(controller.view).compactMap { ($0 as? NSTextField)?.stringValue }
+        for heading in [strings.layoutSection, strings.organizationSection, strings.inboxViewSection, strings.tabsDisplaySection] {
+            #expect(labels.contains(heading), "missing \(heading)")
+        }
+        #expect(!descendants(controller.view).compactMap { $0 as? NSButton }.contains { $0.accessibilityLabel() == "更多标签选项" })
+
+        let popups = descendants(controller.view).compactMap { $0 as? SettingsPopup }
+        let inboxGrouping = try #require(popups.first { $0.accessibilityLabel() == strings.inboxGroupingLabel })
+        let inboxOrdering = try #require(popups.first { $0.accessibilityLabel() == strings.inboxOrderingLabel })
+        inboxGrouping.selectItem(at: 1) // .project
+        inboxGrouping.sendAction(inboxGrouping.action, to: inboxGrouping.target)
+        inboxOrdering.selectItem(at: 0) // .manual
+        inboxOrdering.sendAction(inboxOrdering.action, to: inboxOrdering.target)
+        #expect(settings.tabInboxGroupingMode == .project)
+        #expect(settings.tabInboxOrderingMode == .manual)
+        // Normal Tabs list settings stay independent of Inbox View settings.
+        #expect(settings.groupingMode == .none)
+        #expect(settings.orderingMode == .manual)
     }
 
     @Test func quickInputOpacityControlUpdatesPersistsAndResetsToDefault() throws {

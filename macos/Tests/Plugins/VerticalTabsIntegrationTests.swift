@@ -16,7 +16,12 @@ struct VerticalTabsIntegrationTests {
         let window = try #require(controller.window)
         defer { window.delegate = nil; window.close() }
         let surface = try #require(controller.focusedSurface ?? controller.surfaceTree.first)
-        try await Task.sleep(for: .milliseconds(200))
+        // Seed an initial title before subscribing so the 500ms "👻" fallback timer cannot race under VM load.
+        surface.setTitle("Initial")
+        for _ in 0..<40 where surface.title != "Initial" {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try await Task.sleep(for: .milliseconds(100))
         var publications = 0
         var surfacePublications = 0
         var titles: [String] = []

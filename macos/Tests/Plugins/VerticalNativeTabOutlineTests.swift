@@ -237,7 +237,7 @@ struct VerticalNativeTabOutlineTests {
                 #expect(hoverLayer.path?.boundingBoxOfPath == row.selectionRect)
                 #expect(abs(cell.rowStack.frame.midY - cell.bounds.midY) <= 0.5)
                 #expect(cell.icon.frame.size == NSSize(width: 18, height: 18))
-                let iconInRow = cell.convert(cell.icon.frame, to: row)
+                let iconInRow = row.convert(cell.icon.bounds, from: cell.icon)
                 #expect(abs((iconInRow.minX - row.selectionRect.minX) - 10) <= 0.5)
                 let expectedWeight: NSFont.Weight = index == 1 ? .medium : .regular
                 #expect(cell.label.font == .systemFont(ofSize: 13, weight: expectedWeight))
@@ -247,13 +247,16 @@ struct VerticalNativeTabOutlineTests {
                     #expect(!cell.status.isHidden)
                     #expect(cell.shortcut.isHidden)
                     #expect(cell.closeButton.isHidden)
-                    let slotInRow = cell.convert(cell.trailingSlot.frame, to: row)
+                    let slotInRow = row.convert(cell.trailingSlot.bounds, from: cell.trailingSlot)
                     #expect(abs((row.selectionRect.maxX - slotInRow.maxX) - 10) <= 0.5)
                 } else {
                     // Unhovered rows without a status badge collapse the trailing slot so titles extend to 10pt inside the pill.
                     #expect(cell.trailingAccessory == .none)
                     #expect(cell.trailingSlot.isHidden)
-                    let labelInRow = cell.convert(cell.label.frame, to: row)
+                    let labelInRow = cell.rowStack.convert(
+                        cell.label.alignmentRect(forFrame: cell.label.frame),
+                        to: row
+                    )
                     #expect(abs((row.selectionRect.maxX - labelInRow.maxX) - 10) <= 0.5)
                 }
             }

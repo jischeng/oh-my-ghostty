@@ -356,7 +356,7 @@ final class OhMyGhosttySettings: ObservableObject {
             requiresNewWindow: false, category: "tabs"),
         .init(
             id: "tabs.inboxContinueMinutes", type: .number, defaultValue: "15",
-            allowedValues: Self.inboxContinueMinuteOptions.map(String.init), minimum: 1, maximum: 60,
+            allowedValues: OhMyGhosttySettings.inboxContinueMinuteOptions.map(String.init), minimum: 1, maximum: 60,
             description: "Minutes a recently active or handled tab stays in the Inbox Continue section.",
             requiresNewWindow: false, category: "tabs"),
         .init(

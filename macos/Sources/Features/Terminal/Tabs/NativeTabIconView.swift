@@ -102,15 +102,41 @@ final class NativeTabIconView: NSView {
         let singleLogo = customSizing?.singleLogo ?? TabIconMetrics.singleLogo(OhMyGhosttySettings.shared.tabIconSize)
         let symbolBonus = customSizing?.symbolBonus ?? 3
         let paneSize = customSizing?.paneSize ?? TabIconMetrics.pane
+        let isSplit = presentation.parts.count > 1
         for (mark, part) in zip(marks, presentation.parts) {
             let slot = part.rect
             let area = CGRect(x: composition.minX + slot.minX * edge, y: composition.minY + slot.minY * edge,
                               width: slot.width * edge, height: slot.height * edge)
             let symbol: Bool
             if case .systemSymbol = part.icon { symbol = true } else { symbol = false }
-            let size = presentation.parts.count > 1 ? paneSize
+            let size = isSplit
+                ? min(paneSize, min(area.width, area.height))
                 : min(edge, symbol ? singleLogo + symbolBonus : singleLogo)
-            mark.frame = CGRect(x: area.midX - size / 2, y: area.midY - size / 2, width: size, height: size)
+            let markX: CGFloat
+            if isSplit && slot.width < 1 {
+                if slot.minX <= 0.001 {
+                    markX = area.minX
+                } else if slot.maxX >= 0.999 {
+                    markX = area.maxX - size
+                } else {
+                    markX = area.midX - size / 2
+                }
+            } else {
+                markX = area.midX - size / 2
+            }
+            let markY: CGFloat
+            if isSplit && slot.height < 1 {
+                if slot.minY <= 0.001 {
+                    markY = area.minY
+                } else if slot.maxY >= 0.999 {
+                    markY = area.maxY - size
+                } else {
+                    markY = area.midY - size / 2
+                }
+            } else {
+                markY = area.midY - size / 2
+            }
+            mark.frame = CGRect(x: markX, y: markY, width: size, height: size)
         }
     }
 

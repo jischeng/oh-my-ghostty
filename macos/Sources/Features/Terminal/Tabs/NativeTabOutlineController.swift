@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import QuartzCore
 import SwiftUI
 
 private let tabPresentationDidChangeNotification = Notification.Name("GhosttyTabPresentationDidChange")
@@ -77,6 +78,13 @@ enum NativeTabContextMenu {
 @MainActor
 final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate {
     static let tabType = NSPasteboard.PasteboardType("com.jischeng.omg.native-sidebar-tab")
+    static let rowMoveAnimationDuration: TimeInterval = 0.16
+
+    private struct ParentMoveBatch {
+        let parent: NativeTabNode?
+        let moves: [(Int, Int)]
+    }
+
     let outline: NativeTabOutline
     let scrollView = NSScrollView()
     var configuration: NativeTabOutlineConfiguration
@@ -85,9 +93,11 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
     var structure: [String] = []
     var updating = false
     var lastSelectedID: ObjectIdentifier?
+    var animationsEnabled = true
     private var selectionChangeGeneration = 0
     private(set) var reloadCount = 0
     private(set) var moveCount = 0
+    private(set) var animatedMoveCount = 0
     private(set) var membershipUpdateCount = 0
 
     /// Insert/delete without reloading existing cells when survivor order is
@@ -123,6 +133,76 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
             if candidate == new { return (source, destination) }
         }
         return nil
+    }
+
+    /// Sequence of incremental `moveItem` steps transforming `old` into `new`
+    /// when both arrays contain the exact same unique item keys.
+    static func moveSequence(from old: [String], to new: [String]) -> [(Int, Int)]? {
+        guard old.count == new.count, Set(old) == Set(new), old != new else { return nil }
+        if let single = singleMove(from: old, to: new) {
+            return [single]
+        }
+        var current = old
+        var moves: [(Int, Int)] = []
+        for targetIndex in new.indices {
+            let wanted = new[targetIndex]
+            guard let sourceIndex = current.firstIndex(of: wanted) else { return nil }
+            if sourceIndex != targetIndex {
+                let item = current.remove(at: sourceIndex)
+                current.insert(item, at: targetIndex)
+                moves.append((sourceIndex, targetIndex))
+            }
+        }
+        return current == new ? moves : nil
+    }
+
+    private static func groupMoveBatches(
+        changedGroups: [NativeTabNode],
+        oldChildren: [String: [String]]
+    ) -> [ParentMoveBatch]? {
+        var batches: [ParentMoveBatch] = []
+        for group in changedGroups {
+            guard let old = oldChildren[group.key],
+                  let moves = moveSequence(from: old, to: group.children.map(\.key)) else {
+                return nil
+            }
+            batches.append(ParentMoveBatch(parent: group, moves: moves))
+        }
+        return batches.isEmpty ? nil : batches
+    }
+
+    private var shouldAnimateMoves: Bool {
+        animationsEnabled &&
+            outline.window?.isVisible == true &&
+            !outline.isHiddenOrHasHiddenAncestor &&
+            !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    private func applyMoveBatches(_ batches: [ParentMoveBatch]) {
+        let totalMoves = batches.reduce(0) { $0 + $1.moves.count }
+        guard totalMoves > 0 else { return }
+        let animate = shouldAnimateMoves
+        let timing = CAMediaTimingFunction(controlPoints: 0.1, 0.9, 0.2, 1.0)
+        NSAnimationContext.runAnimationGroup { context in
+            if animate {
+                context.duration = Self.rowMoveAnimationDuration
+                context.timingFunction = timing
+                context.allowsImplicitAnimation = true
+            } else {
+                context.duration = 0
+            }
+            outline.beginUpdates()
+            for batch in batches {
+                for (source, destination) in batch.moves {
+                    outline.moveItem(at: source, inParent: batch.parent, to: destination, inParent: batch.parent)
+                }
+            }
+            outline.endUpdates()
+        }
+        moveCount += totalMoves
+        if animate {
+            animatedMoveCount += 1
+        }
     }
 
     init(_ parent: NativeTabOutlineConfiguration) {
@@ -253,14 +333,12 @@ final class NativeTabOutlineController: NSViewController, NSOutlineViewDataSourc
                 $0.tab == nil && oldChildren[$0.key] != $0.children.map(\.key)
             }
             if oldChildren.isEmpty, roots.allSatisfy({ $0.tab != nil }),
-               let (source, destination) = Self.singleMove(from: oldRoots, to: newRoots) {
-                outline.moveItem(at: source, inParent: nil, to: destination, inParent: nil)
-                moveCount += 1
-            } else if oldRoots == newRoots, changedGroups.count == 1,
-                      let group = changedGroups.first, let old = oldChildren[group.key],
-                      let (source, destination) = Self.singleMove(from: old, to: group.children.map(\.key)) {
-                outline.moveItem(at: source, inParent: group, to: destination, inParent: group)
-                moveCount += 1
+               let moves = Self.moveSequence(from: oldRoots, to: newRoots) {
+                applyMoveBatches([ParentMoveBatch(parent: nil, moves: moves)])
+            } else if !oldRoots.isEmpty, oldRoots == newRoots, !changedGroups.isEmpty,
+                      roots.allSatisfy({ $0.tab == nil }),
+                      let batches = Self.groupMoveBatches(changedGroups: changedGroups, oldChildren: oldChildren) {
+                applyMoveBatches(batches)
             } else if oldChildren.isEmpty, roots.allSatisfy({ $0.tab != nil }),
                       updateMembership(from: oldRoots, to: newRoots, parent: nil) {
                 // Native insertion/removal preserves existing row views.
@@ -731,14 +809,30 @@ final class NativeTabListPointer: NSObject {
         return ProcessInfo.processInfo.systemUptime - lastMovement < Self.restInterval
     }
 
-    private func moved() {
+    private func moved(with event: NSEvent) {
+        guard let view, NativePointerLocation.contains(view, event: event) else {
+            if inside {
+                inside = false
+                onExit?()
+            }
+            return
+        }
         inside = true
         lastMovement = ProcessInfo.processInfo.systemUptime
     }
 
+    func noteActivityIfInside() {
+        guard inside else { return }
+        lastMovement = ProcessInfo.processInfo.systemUptime
+    }
+
+    func cancel() {
+        inside = false
+    }
+
     // NSObject does not inherit NSResponder's Objective-C selector mapping.
-    @objc(mouseEntered:) func mouseEntered(with event: NSEvent) { moved() }
-    @objc(mouseMoved:) func mouseMoved(with event: NSEvent) { moved() }
+    @objc(mouseEntered:) func mouseEntered(with event: NSEvent) { moved(with: event) }
+    @objc(mouseMoved:) func mouseMoved(with event: NSEvent) { moved(with: event) }
     @objc(mouseExited:) func mouseExited(with event: NSEvent) {
         guard inside else { return }
         inside = false

@@ -62,8 +62,9 @@ final class NativeInboxCloseButton: NSView {
     }
 }
 
-/// Harmonious Otty-style session row for the AppKit Inbox (`34pt` single-line, `48pt` two-line).
-/// Hover and selection share the exact `bounds` pill (`cornerRadius = 6pt`).
+/// Authentic Otty-style session row for the AppKit Inbox (`36pt` single-line, `52pt` two-line).
+/// All Line-1 elements sit on `midY = 18pt`, Line-2 paths start flush-left beneath `iconView` at `x = 10pt`,
+/// and hover and selection share the exact `bounds` pill (`cornerRadius = 8pt`).
 @MainActor
 final class NativeInboxRowView: NSView {
     static let cornerRadius = NativeInboxMetrics.rowCornerRadius
@@ -142,7 +143,7 @@ final class NativeInboxRowView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        iconView.customSizing = NativeInboxMetrics.singleLineIconSizing
+        iconView.customSizing = NativeInboxMetrics.iconSizing
 
         titleLabel.font = .systemFont(ofSize: 13, weight: .regular)
         titleLabel.lineBreakMode = .byTruncatingMiddle
@@ -275,9 +276,7 @@ final class NativeInboxRowView: NSView {
         remoteCloudView.isHidden = !hasRemoteBreadcrumb
 
         shortcutLabel.stringValue = value.shortcut ?? ""
-        iconView.customSizing = showsSubtitle
-            ? NativeInboxMetrics.twoLineIconSizing
-            : NativeInboxMetrics.singleLineIconSizing
+        iconView.customSizing = NativeInboxMetrics.iconSizing
         iconView.configure(
             controller: tab.controller,
             icon: value.icon,
@@ -325,22 +324,13 @@ final class NativeInboxRowView: NSView {
         super.layout()
         let pad = NativeInboxMetrics.rowHorizontalPadding
         let topMidY = showsSubtitle ? NativeInboxMetrics.twoLineTopMidY : NativeInboxMetrics.singleLineMidY
-        let targetSizing = showsSubtitle
-            ? NativeInboxMetrics.twoLineIconSizing
-            : NativeInboxMetrics.singleLineIconSizing
-        if iconView.customSizing != targetSizing {
-            iconView.customSizing = targetSizing
+        if iconView.customSizing != NativeInboxMetrics.iconSizing {
+            iconView.customSizing = NativeInboxMetrics.iconSizing
         }
-        let iconEdge = showsSubtitle
-            ? NativeInboxMetrics.twoLineIconSize
-            : NativeInboxMetrics.singleLineIconSize
-        let iconMidY = showsSubtitle
-            ? NativeInboxMetrics.twoLineIconMidY
-            : NativeInboxMetrics.singleLineMidY
-        let iconX = pad + (NativeInboxMetrics.iconColumnWidth - iconEdge) / 2
+        let iconEdge = NativeInboxMetrics.iconSize
         iconView.frame = NSRect(
-            x: iconX,
-            y: iconMidY - iconEdge / 2,
+            x: pad,
+            y: topMidY - iconEdge / 2,
             width: iconEdge,
             height: iconEdge
         )
@@ -416,7 +406,7 @@ final class NativeInboxRowView: NSView {
         }
 
         let bottomMidY = NativeInboxMetrics.twoLineBottomMidY
-        var subX = NativeInboxMetrics.textLeadingX
+        var subX = NativeInboxMetrics.subtitleLeadingX
         if subtitleIsRemote {
             subtitleCloudView.frame = NSRect(
                 x: subX,

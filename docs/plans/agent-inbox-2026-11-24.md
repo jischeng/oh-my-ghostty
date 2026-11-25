@@ -346,21 +346,28 @@ Where this section contradicts earlier iterations, this section wins.
   `NativeTabSidebarController` mounts `NativeInboxViewController` alongside
   `NativeTabOutlineController` and toggles visibility by `tabSidebarViewMode`.
   `NativeInboxViewController` lays out reusable `NativeInboxSectionHeaderView`
-  (`26pt` height, `chevron.down` with `-90°` collapsed rotation, flush-right
-  count) and `NativeInboxRowView` (`26pt` leading icon column at `x = 8..34pt` +
-  `7pt` gap -> shared `textLeadingX = 41pt`; `34pt` single-line row at
-  `midY = 17pt` with `22×22pt` `iconView` at `x = 10pt` rendering `18pt` single
-  Agent logos / `20pt` SF Symbols / `10pt` split-pane marks; `48pt` two-line
-  session row with `midY = 16pt` top band, `midY = 34.5pt` bottom path band, and
-  `26×26pt` `iconView` at `x = 8pt` centered across `Title + Path` at
-  `midY = 24.5pt` rendering `22pt` single Agent logos / `24pt` SF Symbols /
-  `12pt` non-overlapping split-pane marks while trailing controls stay anchored
-  on `topMidY = 16pt`; `.regular` unselected / `.medium` selected `13pt` titles,
-  button-only `✕` hover backing, inline `cloud` symbol before remote paths)
-  inside a flipped document view (`x = 8, width = panelWidth - 16`, `2pt` gap,
-  unified borderless `cornerRadius = 6` `theme.selectedFill` / `theme.hoverFill`
-  pill matching `NativeTabRowView`). `NativeTabIconView.customSizing` defaults to
-  `nil` so Normal Tabs (`.tabs`) icon sizing remains untouched.
+  (`26pt` height, non-flipped `chevron.down` layer rotating `+90°` over `0.18s`
+  `.easeInEaseOut` to right-pointing `>` when collapsed, flush-right count kept
+  visible in both states) and authentic Otty `NativeInboxRowView` cards (`x = 8,
+  width = panelWidth - 16`, `2pt` gap, smooth `cornerRadius = 8pt` borderless
+  `theme.selectedFill` / `theme.hoverFill` pill; `36pt` single-line and `52pt`
+  two-line rows with all Line-1 elements anchored on `midY = 18pt`: `18×18pt`
+  `iconView` at `x = 10, y = 9` rendering `16pt` single Agent logos, `17pt` SF
+  Symbols, and `8.5pt` split-pane marks separated by a `1pt` gap, `13pt`
+  `.regular`/`.medium` `titleLabel` at `x = 34pt`, and trailing `14×14pt` status
+  badge + `⌘1..9` / `18×18pt` button-only `✕` close control at
+  `rightEdge = width - 10pt`; Line-2 `11pt` path/host subtitle starting
+  flush-left beneath `iconView` at `x = 10pt` on `midY = 38pt`, with an inline
+  `cloud` SF Symbol before remote paths). `NativeTabIconView.customSizing`
+  defaults to `nil` so Normal Tabs (`.tabs`) icon sizing remains untouched.
+- **Smooth reorder & collapse/expand animations**: after initial layout, when
+  sidebar width is unchanged (`< 0.5pt`), `NativeInboxViewController` animates
+  surviving row/header vertical shifts over `0.16s` with control points
+  `(0.1, 0.9, 0.2, 1.0)` and fades newly inserted/expanded rows from `0` to `1`
+  over `0.10s`, while applying width-resize drags immediately. In `.tabs`,
+  `NativeTabOutlineController` animates within-parent tab permutations via
+  `beginUpdates()` + `moveItem` + `endUpdates()` over `0.16s`
+  `(0.1, 0.9, 0.2, 1.0)` instead of snapping via `reloadData()`.
 - **Visible-row `⌘1..9` order & borderless header toggle**: collapsing an Inbox
   section persists its `inbox:` group ID in `collapsedGroupIDs` and excludes
   hidden rows from `publishInboxDisplayOrder`, so `⌘1..9` and row `⌘N` labels

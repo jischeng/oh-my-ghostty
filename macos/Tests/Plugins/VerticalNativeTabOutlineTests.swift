@@ -549,4 +549,112 @@ struct VerticalNativeTabOutlineTests {
         #expect(coordinator.reloadCount == 1)
         #expect(coordinator.membershipUpdateCount == 24)
     }
+
+    @Test func withinParentTabReordersAnimateViaMoveItemWithoutReloadingData() throws {
+        final class VisibleOutlineWindow: NSWindow {
+            override var isVisible: Bool { true }
+        }
+
+        let delegate = try #require(NSApp.delegate as? AppDelegate)
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 30"
+        let controllers = (0..<4).map { _ in
+            TerminalController(delegate.ghostty, withBaseConfig: config, tabLayout: .vertical)
+        }
+        defer {
+            for controller in controllers {
+                controller.window?.delegate = nil
+                controller.window?.close()
+            }
+        }
+        let state = VerticalTabWindowLayoutState(isSidebarVisible: true)
+        let tabs = controllers.enumerated().map {
+            GhosttyOrganizedTab(controller: $0.element, actualIndex: $0.offset + 1)
+        }
+        var groups = [GhosttyTabGroupPresentation(id: "flat", title: nil, icon: nil, tabs: tabs)]
+        func makeConfig() -> NativeTabOutlineConfiguration {
+            NativeTabOutlineConfiguration(
+                groups: groups,
+                selectedID: ObjectIdentifier(controllers[0]),
+                layoutState: state,
+                controller: controllers[0],
+                rowHeight: 32,
+                presentation: { tab in
+                    .init(
+                        title: "Tab \(tab.actualIndex)",
+                        remoteBreadcrumb: nil,
+                        shortcut: "⌘\(tab.actualIndex)",
+                        icon: .systemSymbol("terminal"),
+                        activity: nil,
+                        selected: tab.actualIndex == 1,
+                        hovered: false
+                    )
+                }
+            )
+        }
+
+        let coordinator = NativeTabOutlineController(makeConfig())
+        let window = VisibleOutlineWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 260, height: 220),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = coordinator.view
+        defer { window.contentView = nil; window.close() }
+
+        coordinator.update(makeConfig())
+        coordinator.view.layoutSubtreeIfNeeded()
+        let outline = coordinator.outline
+        #expect(coordinator.reloadCount == 1)
+        let initialNodes = try (0..<4).map { try #require(outline.item(atRow: $0) as? NativeTabNode) }
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+
+        // Multi-item permutation in flat list uses moveSequence + beginUpdates/endUpdates without reloadData().
+        groups = [GhosttyTabGroupPresentation(id: "flat", title: nil, icon: nil, tabs: [tabs[3], tabs[2], tabs[0], tabs[1]])]
+        coordinator.update(makeConfig())
+        #expect(coordinator.reloadCount == 1)
+        #expect(coordinator.moveCount >= 2)
+        if !reduceMotion {
+            #expect(coordinator.animatedMoveCount == 1)
+        }
+        let reorderedNodes = try (0..<4).map { try #require(outline.item(atRow: $0) as? NativeTabNode) }
+        #expect(reorderedNodes[0] === initialNodes[3])
+        #expect(reorderedNodes[1] === initialNodes[2])
+        #expect(reorderedNodes[2] === initialNodes[0])
+        #expect(reorderedNodes[3] === initialNodes[1])
+
+        // Grouped mode: simultaneous child reorders across two groups animate without reloadData().
+        groups = [
+            GhosttyTabGroupPresentation(id: "g1", title: "Alpha", icon: nil, tabs: [tabs[0], tabs[1]]),
+            GhosttyTabGroupPresentation(id: "g2", title: "Beta", icon: nil, tabs: [tabs[2], tabs[3]]),
+        ]
+        coordinator.update(makeConfig())
+        let reloadsAfterGrouping = coordinator.reloadCount
+        let movesBeforeGroupReorder = coordinator.moveCount
+        let animatedBeforeGroupReorder = coordinator.animatedMoveCount
+
+        groups = [
+            GhosttyTabGroupPresentation(id: "g1", title: "Alpha", icon: nil, tabs: [tabs[1], tabs[0]]),
+            GhosttyTabGroupPresentation(id: "g2", title: "Beta", icon: nil, tabs: [tabs[3], tabs[2]]),
+        ]
+        coordinator.update(makeConfig())
+        #expect(coordinator.reloadCount == reloadsAfterGrouping)
+        #expect(coordinator.moveCount == movesBeforeGroupReorder + 2)
+        if !reduceMotion {
+            #expect(coordinator.animatedMoveCount == animatedBeforeGroupReorder + 1)
+        }
+
+        // animationsEnabled = false still uses moveItem without reloading, with duration 0.
+        coordinator.animationsEnabled = false
+        let animatedDisabledBaseline = coordinator.animatedMoveCount
+        groups = [
+            GhosttyTabGroupPresentation(id: "g1", title: "Alpha", icon: nil, tabs: [tabs[0], tabs[1]]),
+            GhosttyTabGroupPresentation(id: "g2", title: "Beta", icon: nil, tabs: [tabs[3], tabs[2]]),
+        ]
+        coordinator.update(makeConfig())
+        #expect(coordinator.reloadCount == reloadsAfterGrouping)
+        #expect(coordinator.animatedMoveCount == animatedDisabledBaseline)
+    }
 }

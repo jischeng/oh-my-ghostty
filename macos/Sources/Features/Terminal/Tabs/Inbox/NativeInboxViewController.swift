@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 
 /// Configuration for the flipped-document AppKit Inbox view.
 struct NativeInboxConfiguration {
@@ -7,6 +8,17 @@ struct NativeInboxConfiguration {
     let layoutState: VerticalTabWindowLayoutState
     let controller: TerminalController
     let presentation: (GhosttyOrganizedTab) -> GhosttyTabPresentation?
+}
+
+/// Scroll view notifying its controller when hidden so hover and pointer-hold reset cleanly.
+@MainActor
+final class NativeInboxScrollView: NSScrollView {
+    var onHide: (() -> Void)?
+
+    override func viewDidHide() {
+        super.viewDidHide()
+        onHide?()
+    }
 }
 
 /// Flipped document view hosting reusable Inbox section headers and session rows.
@@ -27,7 +39,16 @@ final class NativeInboxDocumentView: NSView {
 /// without `NSOutlineView` disclosure gutters or synchronous row-height re-entrancy.
 @MainActor
 final class NativeInboxViewController: NSViewController {
-    let scrollView = NSScrollView()
+    static let rowMoveAnimationDuration: TimeInterval = 0.16
+    static let rowFadeInAnimationDuration: TimeInterval = 0.10
+
+    private struct PlannedItemFrame {
+        let view: NSView
+        let frame: NSRect
+        let isNewlyInserted: Bool
+    }
+
+    let scrollView = NativeInboxScrollView()
     let documentView = NativeInboxDocumentView()
     private(set) var configuration: NativeInboxConfiguration
 
@@ -44,7 +65,15 @@ final class NativeInboxViewController: NSViewController {
     private var windowObservers: [NSObjectProtocol] = []
     private weak var observedWindow: NSWindow?
     private var lastSelectedID: ObjectIdentifier?
-    private var pointer: NativeTabListPointer?
+    private(set) var pointer: NativeTabListPointer?
+
+    /// Controls smooth reorder and section collapse/expand animations when visible.
+    var animationsEnabled = true
+    private(set) var hasCompletedInitialLayout = false
+    private(set) var lastLayoutWidth: CGFloat = 0
+    private(set) var animatedLayoutCount = 0
+    private(set) var animatedFadeInCount = 0
+    private var layoutGeneration: UInt64 = 0
 
     /// Invoked when an active pointer leaves the Inbox scroll view so held display order can apply.
     var pointerDidLeave: (() -> Void)?
@@ -115,6 +144,10 @@ final class NativeInboxViewController: NSViewController {
             self?.pointerDidLeave?()
         }
         self.pointer = pointer
+        scrollView.onHide = { [weak self] in
+            self?.pointer?.cancel()
+            self?.clearHover()
+        }
 
         view = scrollView
     }
@@ -168,21 +201,42 @@ final class NativeInboxViewController: NSViewController {
         }
     }
 
+    private func shouldAnimateLayout(panelWidth: CGFloat) -> Bool {
+        guard animationsEnabled,
+              hasCompletedInitialLayout,
+              panelWidth > 0,
+              abs(panelWidth - lastLayoutWidth) < 0.5,
+              let window = view.window,
+              window.isVisible,
+              !view.isHiddenOrHasHiddenAncestor,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            return false
+        }
+        return true
+    }
+
     private func rebuildAndLayoutItems() {
+        let clipSize = scrollView.contentView.bounds.size
+        let panelWidth = max(clipSize.width, view.bounds.width)
+        let canAnimate = shouldAnimateLayout(panelWidth: panelWidth)
         let totalTabs = configuration.groups.reduce(0) { $0 + $1.tabs.count }
         let canClose = totalTabs > 1
         let collapsed = configuration.layoutState.collapsedGroupIDs
         var activeHeaderIDs = Set<String>()
         var activeTabIDs = Set<UUID>()
+        var newlyInsertedHeaderIDs = Set<String>()
+        var newlyInsertedTabIDs = Set<UUID>()
 
         for group in configuration.groups {
             let groupCollapsed = group.title != nil && collapsed.contains(group.id)
             if let title = group.title {
                 activeHeaderIDs.insert(group.id)
-                let header = headerViews[group.id] ?? {
+                let existingHeader = headerViews[group.id]
+                let header = existingHeader ?? {
                     let created = NativeInboxSectionHeaderView()
                     headerViews[group.id] = created
                     documentView.addSubview(created)
+                    newlyInsertedHeaderIDs.insert(group.id)
                     return created
                 }()
                 let groupID = group.id
@@ -194,7 +248,7 @@ final class NativeInboxViewController: NSViewController {
                     title: title,
                     count: group.count,
                     collapsed: groupCollapsed,
-                    animated: header.superview != nil && header.groupID == group.id
+                    animated: canAnimate && existingHeader != nil && header.groupID == group.id
                 )
                 header.isHidden = false
             }
@@ -207,6 +261,7 @@ final class NativeInboxViewController: NSViewController {
                     let created = NativeInboxRowView()
                     rowViews[id] = created
                     documentView.addSubview(created)
+                    newlyInsertedTabIDs.insert(id)
                     return created
                 }()
                 let selected = tab.id == configuration.selectedID
@@ -247,24 +302,32 @@ final class NativeInboxViewController: NSViewController {
             rowViews.removeValue(forKey: id)
         }
 
-        relayoutItems()
+        relayoutItems(
+            newlyInsertedHeaderIDs: newlyInsertedHeaderIDs,
+            newlyInsertedTabIDs: newlyInsertedTabIDs
+        )
         scrollSelectedRowToVisibleIfNeeded()
         lastSelectedID = configuration.selectedID
         refreshPointerHover()
     }
 
-    func relayoutItems() {
+    func relayoutItems(
+        newlyInsertedHeaderIDs: Set<String> = [],
+        newlyInsertedTabIDs: Set<UUID> = []
+    ) {
         guard isViewLoaded else { return }
         let clipSize = scrollView.contentView.bounds.size
         let panelWidth = max(clipSize.width, view.bounds.width)
         let rowWidth = max(0, panelWidth - NativeInboxMetrics.sidebarHorizontalMargin * 2)
         let x = NativeInboxMetrics.sidebarHorizontalMargin
         let collapsed = configuration.layoutState.collapsedGroupIDs
+        let shouldAnimate = shouldAnimateLayout(panelWidth: panelWidth)
 
         var y = NativeInboxMetrics.topContentPadding
         var renderedAnySection = false
         var nextKeys: [String] = []
         var nextVisibleTabs: [GhosttyOrganizedTab] = []
+        var planned: [PlannedItemFrame] = []
 
         for group in configuration.groups {
             let groupCollapsed = group.title != nil && collapsed.contains(group.id)
@@ -273,13 +336,17 @@ final class NativeInboxViewController: NSViewController {
                     y += NativeInboxMetrics.sectionTopMargin
                 }
                 renderedAnySection = true
-                header.frame = NSRect(
+                let targetFrame = NSRect(
                     x: x,
                     y: y,
                     width: rowWidth,
                     height: NativeInboxMetrics.sectionHeaderHeight
                 )
-                header.layoutSubtreeIfNeeded()
+                planned.append(PlannedItemFrame(
+                    view: header,
+                    frame: targetFrame,
+                    isNewlyInserted: newlyInsertedHeaderIDs.contains(group.id)
+                ))
                 y += NativeInboxMetrics.sectionHeaderHeight
                 nextKeys.append("group:\(group.id)")
                 if !groupCollapsed && !group.tabs.isEmpty {
@@ -289,27 +356,111 @@ final class NativeInboxViewController: NSViewController {
 
             guard !groupCollapsed else { continue }
             for (index, tab) in group.tabs.enumerated() {
-                guard let row = rowViews[tab.controller.tabSessionID] else { continue }
+                let id = tab.controller.tabSessionID
+                guard let row = rowViews[id] else { continue }
                 if index > 0 {
                     y += NativeInboxMetrics.rowVerticalGap
                 }
                 let height = row.preferredHeight
-                row.frame = NSRect(x: x, y: y, width: rowWidth, height: height)
-                row.layoutSubtreeIfNeeded()
+                let targetFrame = NSRect(x: x, y: y, width: rowWidth, height: height)
+                planned.append(PlannedItemFrame(
+                    view: row,
+                    frame: targetFrame,
+                    isNewlyInserted: newlyInsertedTabIDs.contains(id)
+                ))
                 y += height
-                nextKeys.append("tab:\(tab.controller.tabSessionID)")
+                nextKeys.append("tab:\(id)")
                 nextVisibleTabs.append(tab)
             }
         }
 
         orderedItemKeys = nextKeys
         visibleTabs = nextVisibleTabs
-        documentView.frame = NSRect(
-            x: 0,
-            y: 0,
-            width: panelWidth,
-            height: max(clipSize.height, y + NativeInboxMetrics.bottomContentPadding)
-        )
+        let targetDocHeight = max(clipSize.height, y + NativeInboxMetrics.bottomContentPadding)
+
+        guard shouldAnimate else {
+            layoutGeneration &+= 1
+            for item in planned {
+                item.view.alphaValue = 1
+                if item.view.frame != item.frame {
+                    item.view.frame = item.frame
+                }
+                item.view.layoutSubtreeIfNeeded()
+            }
+            documentView.frame = NSRect(x: 0, y: 0, width: panelWidth, height: targetDocHeight)
+            if panelWidth > 0 {
+                hasCompletedInitialLayout = true
+                lastLayoutWidth = panelWidth
+            }
+            return
+        }
+
+        lastLayoutWidth = panelWidth
+        var shifting: [PlannedItemFrame] = []
+        var fadingIn: [NSView] = []
+
+        for item in planned {
+            if item.isNewlyInserted {
+                item.view.frame = item.frame
+                item.view.layoutSubtreeIfNeeded()
+                item.view.alphaValue = 0
+                fadingIn.append(item.view)
+            } else if abs(item.view.frame.minY - item.frame.minY) > 0.5 ||
+                      abs(item.view.frame.height - item.frame.height) > 0.5 {
+                shifting.append(item)
+            } else {
+                if abs(item.view.frame.width - item.frame.width) >= 0.5 {
+                    item.view.frame = item.frame
+                }
+                item.view.layoutSubtreeIfNeeded()
+            }
+        }
+
+        if !shifting.isEmpty && targetDocHeight < documentView.frame.height {
+            documentView.frame = NSRect(x: 0, y: 0, width: panelWidth, height: documentView.frame.height)
+        } else {
+            documentView.frame = NSRect(x: 0, y: 0, width: panelWidth, height: targetDocHeight)
+        }
+
+        if !shifting.isEmpty {
+            layoutGeneration &+= 1
+            let generation = layoutGeneration
+            animatedLayoutCount += 1
+            let timing = CAMediaTimingFunction(controlPoints: 0.1, 0.9, 0.2, 1.0)
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = Self.rowMoveAnimationDuration
+                context.timingFunction = timing
+                context.allowsImplicitAnimation = true
+                for item in shifting {
+                    item.view.animator().frame = item.frame
+                    item.view.layoutSubtreeIfNeeded()
+                }
+            }, completionHandler: { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, self.layoutGeneration == generation else { return }
+                    let clipH = self.scrollView.contentView.bounds.height
+                    let width = max(self.scrollView.contentView.bounds.width, self.view.bounds.width)
+                    self.documentView.frame = NSRect(
+                        x: 0,
+                        y: 0,
+                        width: width,
+                        height: max(clipH, targetDocHeight)
+                    )
+                    self.refreshPointerHover()
+                }
+            })
+        }
+
+        if !fadingIn.isEmpty {
+            animatedFadeInCount += 1
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = Self.rowFadeInAnimationDuration
+                context.timingFunction = CAMediaTimingFunction(name: .linear)
+                for view in fadingIn {
+                    view.animator().alphaValue = 1
+                }
+            }
+        }
     }
 
     private func toggleSection(_ groupID: String) {
@@ -439,14 +590,21 @@ final class NativeInboxViewController: NSViewController {
             clearHover()
             return
         }
+        pointer?.noteActivityIfInside()
         updateHover(at: documentView.convert(windowPoint, from: nil))
     }
 
     override func mouseEntered(with event: NSEvent) {
-        mouseMoved(with: event)
+        pointer?.mouseEntered(with: event)
+        guard NativePointerLocation.contains(scrollView, event: event) else {
+            clearHover()
+            return
+        }
+        updateHover(at: documentView.convert(event.locationInWindow, from: nil))
     }
 
     override func mouseMoved(with event: NSEvent) {
+        pointer?.mouseMoved(with: event)
         guard NativePointerLocation.contains(scrollView, event: event) else {
             clearHover()
             return
@@ -456,5 +614,6 @@ final class NativeInboxViewController: NSViewController {
 
     override func mouseExited(with event: NSEvent) {
         clearHover()
+        pointer?.mouseExited(with: event)
     }
 }

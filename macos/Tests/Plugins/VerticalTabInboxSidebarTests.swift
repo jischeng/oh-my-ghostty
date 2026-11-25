@@ -1,5 +1,6 @@
 import AppKit
 import GhosttyKit
+import QuartzCore
 import Testing
 @testable import Ghostty
 
@@ -326,7 +327,7 @@ struct VerticalTabInboxSidebarTests {
         #expect(todayHeader.frame.height == NativeInboxMetrics.sectionHeaderHeight)
 
         let continueRow = try #require(inbox.rowView(for: controllers[2]))
-        #expect(continueRow.frame.height == (continueRow.showsSubtitle ? 48 : 34))
+        #expect(continueRow.frame.height == (continueRow.showsSubtitle ? 52 : 36))
 
         // The native order and the user's grouping and ordering are untouched.
         #expect(sidebar.group.windows == sidebar.nativeWindows)
@@ -578,13 +579,15 @@ struct VerticalTabInboxSidebarTests {
         #expect(!continueHeader.isCollapsed)
         #expect(continueHeader.chevronRotationAngle == 0)
 
-        // Collapsing Continue hides its rows, rotates its chevron -90°, persists the
-        // inbox: group ID, and renumbers visible rows top-to-bottom so ⌘1 matches screen!
+        // Collapsing Continue hides its rows, rotates its chevron +90° (`>`), persists the
+        // inbox: group ID, keeps count visible, and renumbers visible rows top-to-bottom so ⌘1 matches screen!
+        #expect(!continueHeader.countLabel.isHidden)
         #expect(continueHeader.accessibilityPerformPress())
         #expect(sidebar.state.collapsedGroupIDs.contains("inbox:continue"))
         sidebar.refresh()
         #expect(continueHeader.isCollapsed)
-        #expect(abs(continueHeader.chevronRotationAngle - (-.pi / 2)) < 0.001)
+        #expect(!continueHeader.countLabel.isHidden)
+        #expect(abs(continueHeader.chevronRotationAngle - (.pi / 2)) < 0.001)
         #expect(sidebar.rows == ["group:inbox:continue", "group:inbox:today", sidebar.key(selected)])
         #expect(ids(sidebar.state.inboxDisplayOrder.controllers) == [ObjectIdentifier(selected)])
         #expect(sidebar.state.inboxDisplayOrder.position(of: ObjectIdentifier(selected)) == 1)
@@ -773,29 +776,29 @@ struct VerticalTabInboxSidebarTests {
         #expect(header.frame.height == 26)
         #expect(header.chevronContainer.frame.minX == 4)
         #expect(header.titleLabel.frame.minX == 20)
-        #expect(abs(header.countLabel.frame.maxX - (expectedWidth - 8)) <= 0.5)
+        #expect(abs(header.countLabel.frame.maxX - (expectedWidth - 10)) <= 0.5)
 
-        // Row 1: 1-line 34pt row centered at midY = 17pt, 22×22pt icon centered in 26pt column at x = 10pt
+        // Row 1: 1-line 36pt row centered at midY = 18pt, 18×18pt iconView at x = 10pt, y = 9pt
         let row1 = try #require(inbox.rowView(for: controllers[0]))
         #expect(row1.frame.minX == 8)
         #expect(row1.frame.width == expectedWidth)
-        #expect(row1.frame.height == 34)
+        #expect(row1.frame.height == 36)
         #expect(row1.hoverRect == row1.selectionRect)
         #expect(row1.highlightRect == row1.bounds)
-        #expect(NativeInboxRowView.cornerRadius == 6)
-        #expect(row1.iconView.customSizing == NativeInboxMetrics.singleLineIconSizing)
-        #expect(row1.iconView.frame == NSRect(x: 10, y: 6, width: 22, height: 22))
+        #expect(NativeInboxRowView.cornerRadius == 8)
+        #expect(row1.iconView.customSizing == NativeInboxMetrics.iconSizing)
+        #expect(row1.iconView.frame == NSRect(x: 10, y: 9, width: 18, height: 18))
         let row1Marks = row1.iconView.subviews.compactMap { $0 as? NSImageView }
         #expect(row1Marks.count == 1)
-        #expect(row1Marks[0].frame.size == NSSize(width: 20, height: 20))
-        #expect(row1.titleLabel.frame.minX == 41)
-        #expect(abs(row1.titleLabel.frame.midY - 17) <= 0.5)
-        #expect(abs(row1.shortcutLabel.frame.maxX - (expectedWidth - 8)) <= 0.5)
-        #expect(abs(row1.shortcutLabel.frame.midY - 17) <= 0.5)
+        #expect(row1Marks[0].frame.size == NSSize(width: 17, height: 17))
+        #expect(row1.titleLabel.frame.minX == 34)
+        #expect(abs(row1.titleLabel.frame.midY - 18) <= 0.5)
+        #expect(abs(row1.shortcutLabel.frame.maxX - (expectedWidth - 10)) <= 0.5)
+        #expect(abs(row1.shortcutLabel.frame.midY - 18) <= 0.5)
         #expect(row1.subtitleLabel.isHidden)
         #expect(row1.remoteCloudView.isHidden)
 
-        // Hover swaps ⌘N to 18×18 close button on the exact same centerline,
+        // Hover swaps ⌘N to 18×18 close button on the exact same centerline (midY = 18pt, rightEdge = width - 10pt),
         // keeping its hover disc hidden until the pointer enters the ✕ button itself.
         inbox.updateHover(at: NSPoint(x: row1.frame.midX, y: row1.frame.midY))
         row1.layoutSubtreeIfNeeded()
@@ -803,7 +806,7 @@ struct VerticalTabInboxSidebarTests {
         #expect(row1.shortcutLabel.isHidden)
         #expect(!row1.closeButton.isHidden)
         #expect(!row1.closeButton.showsHoverDisc)
-        #expect(row1.closeButton.frame == NSRect(x: expectedWidth - 26, y: 8, width: 18, height: 18))
+        #expect(row1.closeButton.frame == NSRect(x: expectedWidth - 28, y: 9, width: 18, height: 18))
         inbox.updateHover(at: NSPoint(
             x: row1.frame.minX + row1.closeButton.frame.midX,
             y: row1.frame.minY + row1.closeButton.frame.midY
@@ -811,49 +814,54 @@ struct VerticalTabInboxSidebarTests {
         #expect(row1.isCloseHovered)
         #expect(row1.closeButton.showsHoverDisc)
 
-        // Row 2: 2-line 48pt local named session row (26×26pt icon centered across Title+Path at midY = 24.5pt, text at x = 41pt)
+        // Row 2: 2-line 52pt local named session row (Line-1 anchored on midY = 18pt, Line-2 flush-left at x = 10pt on midY = 38pt)
         let row2 = try #require(inbox.rowView(for: controllers[1]))
         #expect(row2.frame.minX == 8)
         #expect(row2.frame.width == expectedWidth)
-        #expect(row2.frame.height == 48)
+        #expect(row2.frame.height == 52)
         #expect(row2.frame.minY - row1.frame.maxY == 2, "2pt vertical gap between rows")
         #expect(row2.isSelected)
         #expect(row2.titleLabel.font == .systemFont(ofSize: 13, weight: .medium))
-        #expect(row2.iconView.customSizing == NativeInboxMetrics.twoLineIconSizing)
-        #expect(row2.iconView.frame == NSRect(x: 8, y: 11.5, width: 26, height: 26))
-        #expect(abs(row2.iconView.frame.midY - 24.5) <= 1)
+        #expect(row2.iconView.customSizing == NativeInboxMetrics.iconSizing)
+        #expect(row2.iconView.frame == NSRect(x: 10, y: 9, width: 18, height: 18))
+        #expect(row2.iconView.frame.midY == 18)
         let row2Marks = row2.iconView.subviews.compactMap { $0 as? NSImageView }
         #expect(row2Marks.count == 1)
-        #expect(row2Marks[0].frame.size == NSSize(width: 22, height: 22))
-        #expect(row2.titleLabel.frame.minX == 41)
+        #expect(row2Marks[0].frame.size == NSSize(width: 16, height: 16))
+        #expect(row2.titleLabel.frame.minX == 34)
         #expect(row1.titleLabel.frame.minX == row2.titleLabel.frame.minX)
-        #expect(abs(row2.titleLabel.frame.midY - 16) <= 0.5)
-        #expect(abs(row2.shortcutLabel.frame.midY - 16) <= 0.5)
-        #expect(row2.closeButton.frame.midY == 16)
+        #expect(abs(row2.titleLabel.frame.midY - 18) <= 0.5)
+        #expect(row2.statusView.frame.size == NSSize(width: 14, height: 14))
+        #expect(abs(row2.statusView.frame.midY - 18) <= 0.5)
+        #expect(abs(row2.shortcutLabel.frame.midY - 18) <= 0.5)
+        #expect(row2.closeButton.frame.midY == 18)
         #expect(!row2.subtitleLabel.isHidden)
         #expect(row2.subtitleCloudView.isHidden)
-        #expect(row2.subtitleLabel.frame.minX == row2.titleLabel.frame.minX)
-        #expect(abs(row2.subtitleLabel.frame.midY - 34.5) <= 0.5)
-        #expect(row2.subtitleLabel.frame.width == expectedWidth - 8 - 41)
+        #expect(row2.subtitleLabel.frame.minX == row2.iconView.frame.minX)
+        #expect(row2.subtitleLabel.frame.minX == 10)
+        #expect(abs(row2.subtitleLabel.frame.midY - 38) <= 0.5)
+        #expect(row2.subtitleLabel.frame.width == expectedWidth - 20)
 
-        // Row 3: 2-line 48pt remote SSH named session row (unselected uses .regular, inline cloud before subtitle)
+        // Row 3: 2-line 52pt remote SSH named session row (unselected uses .regular, flush-left cloud at x = 10pt before subtitle)
         let row3 = try #require(inbox.rowView(for: controllers[2]))
-        #expect(row3.frame.height == 48)
+        #expect(row3.frame.height == 52)
         #expect(!row3.isSelected)
         #expect(row3.titleLabel.font == .systemFont(ofSize: 13, weight: .regular))
         #expect(!row3.subtitleCloudView.isHidden)
-        #expect(row3.subtitleCloudView.frame.minX == 41)
-        #expect(abs(row3.subtitleCloudView.frame.midY - 34.5) <= 0.5)
-        #expect(row3.subtitleLabel.frame.minX == 41 + NativeInboxMetrics.cloudIconWidth + NativeInboxMetrics.cloudIconGap)
-        #expect(abs(row3.subtitleLabel.frame.midY - 34.5) <= 0.5)
+        #expect(row3.subtitleCloudView.frame.minX == row3.iconView.frame.minX)
+        #expect(row3.subtitleCloudView.frame.minX == 10)
+        #expect(abs(row3.subtitleCloudView.frame.midY - 38) <= 0.5)
+        #expect(row3.subtitleLabel.frame.minX == 10 + NativeInboxMetrics.cloudIconWidth + NativeInboxMetrics.cloudIconGap)
+        #expect(abs(row3.subtitleLabel.frame.midY - 38) <= 0.5)
+        #expect(abs(row3.subtitleLabel.frame.maxX - (expectedWidth - 10)) <= 0.5)
 
-        // Row 4: 1-line 34pt remote SSH row (inline cloud before remoteBreadcrumb)
+        // Row 4: 1-line 36pt remote SSH row (inline cloud at textLeadingX = 34pt before remoteBreadcrumb)
         let row4 = try #require(inbox.rowView(for: controllers[3]))
-        #expect(row4.frame.height == 34)
+        #expect(row4.frame.height == 36)
         #expect(!row4.remoteCloudView.isHidden)
-        #expect(row4.remoteCloudView.frame.minX == 41)
-        #expect(abs(row4.remoteCloudView.frame.midY - 17) <= 0.5)
-        #expect(row4.titleLabel.frame.minX == 41 + NativeInboxMetrics.cloudIconWidth + NativeInboxMetrics.cloudIconGap)
+        #expect(row4.remoteCloudView.frame.minX == 34)
+        #expect(abs(row4.remoteCloudView.frame.midY - 18) <= 0.5)
+        #expect(row4.titleLabel.frame.minX == 34 + NativeInboxMetrics.cloudIconWidth + NativeInboxMetrics.cloudIconGap)
 
         // Native context menu includes Rename Tab…, New Tab, Move Tab to New Window, Close Tab, etc.
         let strings = ChromeStrings.current
@@ -886,8 +894,8 @@ struct VerticalTabInboxSidebarTests {
 
         let organized = GhosttyOrganizedTab(controller: controller, actualIndex: 1)
 
-        // 2-line Inbox split row: 26×26pt iconView centered at midY = 24.5pt with non-overlapping 12×12pt marks.
-        let twoLineRow = NativeInboxRowView(frame: NSRect(x: 0, y: 0, width: 234, height: 48))
+        // 2-line Inbox split row: 18×18pt iconView on Line 1 (x = 10, y = 9, midY = 18) with 8.5×8.5pt marks and 1pt gap.
+        let twoLineRow = NativeInboxRowView(frame: NSRect(x: 0, y: 0, width: 234, height: 52))
         twoLineRow.configure(tab: organized, selected: false, canClose: true) { _ in
             .init(
                 title: "Split pane session",
@@ -901,17 +909,17 @@ struct VerticalTabInboxSidebarTests {
             )
         }
         twoLineRow.layoutSubtreeIfNeeded()
-        #expect(twoLineRow.iconView.frame == NSRect(x: 8, y: 11.5, width: 26, height: 26))
-        #expect(abs(twoLineRow.iconView.frame.midY - 24.5) <= 1)
+        #expect(twoLineRow.iconView.frame == NSRect(x: 10, y: 9, width: 18, height: 18))
+        #expect(twoLineRow.iconView.frame.midY == 18)
         let twoLineMarks = twoLineRow.iconView.subviews.compactMap { $0 as? NSImageView }
         #expect(twoLineMarks.count == 2)
-        #expect(twoLineMarks[0].frame.size == NSSize(width: 12, height: 12))
-        #expect(twoLineMarks[1].frame.size == NSSize(width: 12, height: 12))
+        #expect(twoLineMarks[0].frame.size == NSSize(width: 8.5, height: 8.5))
+        #expect(twoLineMarks[1].frame.size == NSSize(width: 8.5, height: 8.5))
         #expect(twoLineMarks[0].frame.intersects(twoLineMarks[1].frame) == false)
-        #expect(twoLineMarks[1].frame.minX - twoLineMarks[0].frame.maxX >= 1)
+        #expect(abs((twoLineMarks[1].frame.minX - twoLineMarks[0].frame.maxX) - 1) <= 0.01)
 
-        // 1-line Inbox split row: 22×22pt iconView centered at x = 10pt, midY = 17pt with non-overlapping 10×10pt marks.
-        let oneLineRow = NativeInboxRowView(frame: NSRect(x: 0, y: 0, width: 234, height: 34))
+        // 1-line Inbox split row: identical 18×18pt Line-1 iconView at x = 10, y = 9 (midY = 18) and 8.5×8.5pt marks.
+        let oneLineRow = NativeInboxRowView(frame: NSRect(x: 0, y: 0, width: 234, height: 36))
         oneLineRow.configure(tab: organized, selected: false, canClose: true) { _ in
             .init(
                 title: "~/work/otty",
@@ -925,14 +933,221 @@ struct VerticalTabInboxSidebarTests {
             )
         }
         oneLineRow.layoutSubtreeIfNeeded()
-        #expect(oneLineRow.iconView.frame == NSRect(x: 10, y: 6, width: 22, height: 22))
+        #expect(oneLineRow.iconView.frame == NSRect(x: 10, y: 9, width: 18, height: 18))
         #expect(oneLineRow.titleLabel.frame.minX == twoLineRow.titleLabel.frame.minX)
-        #expect(oneLineRow.titleLabel.frame.minX == 41)
+        #expect(oneLineRow.titleLabel.frame.minX == 34)
         let oneLineMarks = oneLineRow.iconView.subviews.compactMap { $0 as? NSImageView }
         #expect(oneLineMarks.count == 2)
-        #expect(oneLineMarks[0].frame.size == NSSize(width: 10, height: 10))
-        #expect(oneLineMarks[1].frame.size == NSSize(width: 10, height: 10))
+        #expect(oneLineMarks[0].frame.size == NSSize(width: 8.5, height: 8.5))
+        #expect(oneLineMarks[1].frame.size == NSSize(width: 8.5, height: 8.5))
         #expect(oneLineMarks[0].frame.intersects(oneLineMarks[1].frame) == false)
-        #expect(oneLineMarks[1].frame.minX - oneLineMarks[0].frame.maxX >= 1)
+        #expect(abs((oneLineMarks[1].frame.minX - oneLineMarks[0].frame.maxX) - 1) <= 0.01)
+    }
+
+    @Test func sectionHeaderChevronRendersDownWhenExpandedAndRightWhenCollapsedInBitmapPixels() throws {
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 234, height: 40))
+        host.wantsLayer = true
+        host.layer?.backgroundColor = NSColor.black.cgColor
+        host.appearance = NSAppearance(named: .darkAqua)
+        let header = NativeInboxSectionHeaderView(frame: NSRect(x: 0, y: 7, width: 234, height: 26))
+        host.addSubview(header)
+        let window = NSWindow(
+            contentRect: host.bounds,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.contentView = host
+        defer { window.contentView = nil; window.close() }
+
+        func chevronInkPixels() throws -> [(x: Int, y: Int)] {
+            host.layoutSubtreeIfNeeded()
+            CATransaction.flush()
+            let bitmap = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            let scaleX = CGFloat(bitmap.pixelsWide) / host.bounds.width
+            let scaleY = CGFloat(bitmap.pixelsHigh) / host.bounds.height
+            let chevronRectInHost = header.convert(header.chevronContainer.frame, to: host)
+            // `NSBitmapImageRep.colorAt(x:y:)` indexes y from top (0) to bottom (pixelsHigh - 1).
+            // `host` is non-flipped (`y = 0` at bottom), so convert `chevronRectInHost` to top-down pixel bounds.
+            let minPxX = max(0, Int(floor(chevronRectInHost.minX * scaleX)))
+            let maxPxX = min(bitmap.pixelsWide - 1, Int(ceil(chevronRectInHost.maxX * scaleX)) - 1)
+            let topYFromBottom = chevronRectInHost.maxY
+            let bottomYFromBottom = chevronRectInHost.minY
+            let minPxY = max(0, Int(floor((host.bounds.height - topYFromBottom) * scaleY)))
+            let maxPxY = min(bitmap.pixelsHigh - 1, Int(ceil((host.bounds.height - bottomYFromBottom) * scaleY)) - 1)
+            var ink: [(x: Int, y: Int)] = []
+            for py in minPxY...maxPxY {
+                for px in minPxX...maxPxX {
+                    guard let rgb = bitmap.colorAt(x: px, y: py)?.usingColorSpace(.deviceRGB) else { continue }
+                    let luminance = max(rgb.redComponent, max(rgb.greenComponent, rgb.blueComponent))
+                    if luminance > 0.18 {
+                        ink.append((x: px, y: py))
+                    }
+                }
+            }
+            return ink
+        }
+
+        // 1. Expanded state: chevron points DOWN (`v`) — wide open legs near top, narrow converged tip at bottom.
+        header.configure(id: "inbox:today", title: "Today", count: 4, collapsed: false, animated: false)
+        #expect(!header.isCollapsed)
+        #expect(header.chevronRotationAngle == 0)
+        #expect(!header.countLabel.isHidden)
+        let expandedInk = try chevronInkPixels()
+        let expMinY = try #require(expandedInk.map(\.y).min())
+        let expMaxY = try #require(expandedInk.map(\.y).max())
+        let expHeight = max(1, expMaxY - expMinY)
+        let topBandXs = expandedInk.filter { $0.y <= expMinY + max(1, expHeight / 4) }.map(\.x)
+        let bottomBandXs = expandedInk.filter { $0.y >= expMaxY - max(1, expHeight / 5) }.map(\.x)
+        let topSpan = (try #require(topBandXs.max())) - (try #require(topBandXs.min()))
+        let bottomSpan = (try #require(bottomBandXs.max())) - (try #require(bottomBandXs.min()))
+        #expect(topSpan > bottomSpan + 2, "Expanded chevron (`v`) opens wide at the top and converges to a point at the bottom")
+
+        // 2. Animated collapse transition attaches smooth 0.18s rotation and keeps count visible.
+        header.configure(id: "inbox:today", title: "Today", count: 4, collapsed: true, animated: true)
+        #expect(header.isCollapsed)
+        #expect(!header.countLabel.isHidden)
+        #expect(abs(header.chevronRotationAngle - (.pi / 2)) < 0.001)
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            #expect(header.isChevronAnimating)
+        }
+
+        // 3. Collapsed steady state: chevron points RIGHT (`>`) — open legs on LEFT (`minX`), tip on RIGHT (`maxX`), NEVER `<`!
+        header.configure(id: "inbox:today", title: "Today", count: 4, collapsed: true, animated: false)
+        let collapsedInk = try chevronInkPixels()
+        let colMinX = try #require(collapsedInk.map(\.x).min())
+        let colMaxX = try #require(collapsedInk.map(\.x).max())
+        let colMinY = try #require(collapsedInk.map(\.y).min())
+        let colMaxY = try #require(collapsedInk.map(\.y).max())
+        let colWidth = max(1, colMaxX - colMinX)
+        let leftBandYs = collapsedInk.filter { $0.x <= colMinX + max(1, colWidth / 4) }.map(\.y)
+        let rightBandYs = collapsedInk.filter { $0.x >= colMaxX - max(1, colWidth / 5) }.map(\.y)
+        let leftVerticalSpan = (try #require(leftBandYs.max())) - (try #require(leftBandYs.min()))
+        let rightVerticalSpan = (try #require(rightBandYs.max())) - (try #require(rightBandYs.min()))
+        #expect(
+            leftVerticalSpan > rightVerticalSpan + 2,
+            "Collapsed chevron (`>`) must have open legs on the LEFT half and a converged tip on the RIGHT half"
+        )
+        let midY = (colMinY + colMaxY) / 2
+        let midRowXs = collapsedInk.filter { abs($0.y - midY) <= 1 }.map(\.x)
+        let midRowMinX = try #require(midRowXs.min())
+        let midRowMaxX = try #require(midRowXs.max())
+        let midX = (colMinX + colMaxX) / 2
+        #expect(midRowMaxX >= colMaxX - 1, "Tip ink at midY sits at the right edge (`maxX`)")
+        #expect(midRowMinX >= midX - 1, "Left mouth at midY is open (no `<` tip on the left half)")
+    }
+
+    @Test func livePointerTrackingHoldsInboxOrderAndAnimatesReorderAndCollapse() async throws {
+        final class VisibleSidebarWindow: NSWindow {
+            var simulatedMousePoint = NSPoint(x: -50, y: -50)
+            override var isKeyWindow: Bool { true }
+            override var isVisible: Bool { true }
+            override var mouseLocationOutsideOfEventStream: NSPoint { simulatedMousePoint }
+        }
+
+        let restore = inboxSettings(view: .inbox, grouping: .date, ordering: .recentlyUsed)
+        defer { restore() }
+        let sidebar = try Sidebar()
+        defer { sidebar.close() }
+
+        let visibleWindow = VisibleSidebarWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 250, height: 320),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        visibleWindow.isReleasedWhenClosed = false
+        visibleWindow.contentView = sidebar.host
+        defer { visibleWindow.contentView = nil; visibleWindow.close() }
+
+        sidebar.refresh()
+        let inbox = sidebar.inbox
+        #expect(inbox.hasCompletedInitialLayout)
+        #expect(inbox.lastLayoutWidth == 250)
+        #expect(inbox.animatedLayoutCount == 0, "Initial layout applies frames immediately without animation")
+
+        // Real pointer movement inside scrollView holds Inbox display order without holdsOrderOverride.
+        let insidePoint = inbox.scrollView.convert(NSPoint(x: 80, y: 80), to: nil)
+        visibleWindow.simulatedMousePoint = insidePoint
+        let moveEvent = try #require(NSEvent.mouseEvent(
+            with: .mouseMoved,
+            location: insidePoint,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: visibleWindow.windowNumber,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 0,
+            pressure: 0
+        ))
+        inbox.mouseMoved(with: moveEvent)
+        #expect(inbox.isPointerHoldingOrder)
+
+        let initialOrder = sidebar.rows
+        let bottomTab = try #require(sidebar.displayed.last?.controller)
+        bottomTab.recordTabInteraction(at: Date().addingTimeInterval(3_600))
+        sidebar.refresh()
+        #expect(sidebar.host.sidebar.inboxOrderIsPending)
+        #expect(sidebar.rows == initialOrder)
+
+        // Pointer exit unfreezes order and animates row shift (0.16s).
+        visibleWindow.simulatedMousePoint = NSPoint(x: -50, y: -50)
+        let exitEvent = try #require(NSEvent.mouseEvent(
+            with: .mouseExited,
+            location: visibleWindow.simulatedMousePoint,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: visibleWindow.windowNumber,
+            context: nil,
+            eventNumber: 2,
+            clickCount: 0,
+            pressure: 0
+        ))
+        inbox.mouseExited(with: exitEvent)
+        #expect(!inbox.isPointerHoldingOrder)
+        for _ in 0..<20 where sidebar.host.sidebar.inboxOrderIsPending {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(!sidebar.host.sidebar.inboxOrderIsPending)
+        #expect(sidebar.displayed.first?.controller === bottomTab)
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if !reduceMotion {
+            #expect(inbox.animatedLayoutCount == 1)
+        }
+
+        // Sidebar width resize drag updates frames immediately without animating.
+        let countBeforeResize = inbox.animatedLayoutCount
+        visibleWindow.setContentSize(NSSize(width: 292, height: 320))
+        sidebar.host.layoutSubtreeIfNeeded()
+        #expect(inbox.lastLayoutWidth == 292)
+        #expect(inbox.animatedLayoutCount == countBeforeResize)
+
+        // Section collapse shifts subsequent sections smoothly; expand fades rows back in.
+        try setAgentState(.working, on: bottomTab)
+        sidebar.refresh()
+        let countAfterContinueAppear = inbox.animatedLayoutCount
+        let continueHeader = try #require(inbox.headerView(for: "inbox:continue"))
+        #expect(continueHeader.accessibilityPerformPress())
+        sidebar.refresh()
+        if !reduceMotion {
+            #expect(inbox.animatedLayoutCount > countAfterContinueAppear)
+        }
+        let fadeBeforeExpand = inbox.animatedFadeInCount
+        #expect(continueHeader.accessibilityPerformPress())
+        sidebar.refresh()
+        if !reduceMotion {
+            #expect(inbox.animatedFadeInCount > fadeBeforeExpand)
+        }
+
+        // Disabling animations applies reorders immediately without incrementing animatedLayoutCount.
+        inbox.animationsEnabled = false
+        let countWithAnimationsDisabled = inbox.animatedLayoutCount
+        let nextBottom = try #require(sidebar.displayed.last?.controller)
+        nextBottom.recordTabInteraction(at: Date().addingTimeInterval(7_200))
+        sidebar.refresh()
+        #expect(inbox.animatedLayoutCount == countWithAnimationsDisabled)
     }
 }

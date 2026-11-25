@@ -1,6 +1,7 @@
 import AppKit
+import QuartzCore
 
-/// Shared Otty-inspired geometry for the flipped-document AppKit Inbox sidebar.
+/// Shared Otty-authentic geometry for the flipped-document AppKit Inbox sidebar.
 enum NativeInboxMetrics {
     static let sidebarHorizontalMargin: CGFloat = 8
     static let topContentPadding: CGFloat = 2
@@ -12,33 +13,25 @@ enum NativeInboxMetrics {
     static let headerChevronLeading: CGFloat = 4
     static let headerChevronSize: CGFloat = 11
     static let headerChevronGap: CGFloat = 5
-    static let headerCountTrailing: CGFloat = 8
+    static let headerCountTrailing: CGFloat = 10
 
-    static let singleLineRowHeight: CGFloat = 34
-    static let singleLineMidY: CGFloat = 17
-    static let twoLineRowHeight: CGFloat = 48
-    static let twoLineTopMidY: CGFloat = 16
-    static let twoLineBottomMidY: CGFloat = 34.5
-    static let twoLineIconMidY: CGFloat = 24.5
+    static let singleLineRowHeight: CGFloat = 36
+    static let singleLineMidY: CGFloat = 18
+    static let twoLineRowHeight: CGFloat = 52
+    static let twoLineTopMidY: CGFloat = 18
+    static let twoLineBottomMidY: CGFloat = 38
     static let rowVerticalGap: CGFloat = 2
-    static let rowCornerRadius: CGFloat = 6
-    static let rowHorizontalPadding: CGFloat = 8
-    static let iconColumnWidth: CGFloat = 26
-    static let singleLineIconSize: CGFloat = 22
-    static let twoLineIconSize: CGFloat = 26
-    static let iconToTitleGap: CGFloat = 7
-    static let textLeadingX: CGFloat = rowHorizontalPadding + iconColumnWidth + iconToTitleGap // 41pt
-    static let singleLineIconSizing = NativeTabIconView.CustomSizing(
-        composition: 22,
-        singleLogo: 18,
-        symbolBonus: 2,
-        paneSize: 10
-    )
-    static let twoLineIconSizing = NativeTabIconView.CustomSizing(
-        composition: 26,
-        singleLogo: 22,
-        symbolBonus: 2,
-        paneSize: 12
+    static let rowCornerRadius: CGFloat = 8
+    static let rowHorizontalPadding: CGFloat = 10
+    static let iconSize: CGFloat = 18
+    static let iconToTitleGap: CGFloat = 6
+    static let textLeadingX: CGFloat = rowHorizontalPadding + iconSize + iconToTitleGap // 34pt
+    static let subtitleLeadingX: CGFloat = rowHorizontalPadding // 10pt (flush-left beneath icon)
+    static let iconSizing = NativeTabIconView.CustomSizing(
+        composition: 18,
+        singleLogo: 16,
+        symbolBonus: 1,
+        paneSize: 8.5
     )
     static let statusBadgeSize: CGFloat = 14
     static let closeButtonSize: CGFloat = 18
@@ -51,6 +44,12 @@ enum NativeInboxMetrics {
 /// aligned flush with Inbox row margins and trailing shortcut numbers.
 @MainActor
 final class NativeInboxSectionHeaderView: NSView {
+    static let chevronAnimationKey = "arrowRotate"
+    static let chevronAnimationDuration: CFTimeInterval = 0.18
+    /// `chevronLayer` uses non-flipped coordinates (`+x` right, `+y` up).
+    /// `chevron.down` points toward `(0, -1)`, so `+π/2` rotates `(0, -1)` counter-clockwise to `(+1, 0)` (`>`).
+    static let collapsedChevronAngle: CGFloat = .pi / 2
+
     let chevronContainer = NSView()
     private let chevronLayer = CALayer()
     let titleLabel = NSTextField(labelWithString: "")
@@ -60,6 +59,9 @@ final class NativeInboxSectionHeaderView: NSView {
     private(set) var groupID = ""
     private(set) var isCollapsed = false
     private(set) var chevronRotationAngle: CGFloat = 0
+    var isChevronAnimating: Bool {
+        chevronLayer.animation(forKey: Self.chevronAnimationKey) != nil
+    }
     var isHovered = false {
         didSet {
             guard oldValue != isHovered else { return }
@@ -74,6 +76,7 @@ final class NativeInboxSectionHeaderView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         chevronContainer.wantsLayer = true
+        chevronLayer.isGeometryFlipped = false
         chevronLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
         chevronLayer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
         chevronLayer.bounds = CGRect(
@@ -124,11 +127,12 @@ final class NativeInboxSectionHeaderView: NSView {
             countLabel.isHidden = true
             setAccessibilityLabel(title)
         }
+        let targetAngle: CGFloat = collapsed ? Self.collapsedChevronAngle : 0
         let stateChanged = isCollapsed != collapsed
         isCollapsed = collapsed
         setAccessibilityRole(.disclosureTriangle)
         setAccessibilityValue(collapsed ? 0 : 1)
-        if stateChanged || chevronRotationAngle != (collapsed ? -.pi / 2 : 0) {
+        if stateChanged || chevronRotationAngle != targetAngle {
             updateChevronRotation(collapsed: collapsed, animated: animated && stateChanged)
         }
         applyTheme()
@@ -136,12 +140,23 @@ final class NativeInboxSectionHeaderView: NSView {
     }
 
     private func updateChevronRotation(collapsed: Bool, animated: Bool) {
-        let angle: CGFloat = collapsed ? -.pi / 2 : 0
+        let angle: CGFloat = collapsed ? Self.collapsedChevronAngle : 0
+        let previousTransform = chevronLayer.presentation()?.transform ?? chevronLayer.transform
+        let nextTransform = CATransform3DMakeRotation(angle, 0, 0, 1)
         chevronRotationAngle = angle
         CATransaction.begin()
-        CATransaction.setDisableActions(!animated)
-        CATransaction.setAnimationDuration(0.14)
-        chevronLayer.setAffineTransform(CGAffineTransform(rotationAngle: angle))
+        CATransaction.setDisableActions(true)
+        chevronLayer.transform = nextTransform
+        if animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            let animation = CABasicAnimation(keyPath: "transform")
+            animation.fromValue = previousTransform
+            animation.toValue = nextTransform
+            animation.duration = Self.chevronAnimationDuration
+            animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            chevronLayer.add(animation, forKey: Self.chevronAnimationKey)
+        } else {
+            chevronLayer.removeAnimation(forKey: Self.chevronAnimationKey)
+        }
         CATransaction.commit()
     }
 

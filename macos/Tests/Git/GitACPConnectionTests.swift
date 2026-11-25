@@ -140,4 +140,98 @@ struct GitACPConnectionTests {
         }
         await service.shutdown()
     }
+
+    @Test func concurrentGitAndTitleCallsExceedingPoolSizeQueueCleanlyAndCancelledKeyWaitersNeverDeadlock() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-acp-pool-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let script = root.appendingPathComponent("mock_pool_acp.py")
+        try #"""
+        import json, sys, time
+        def send(x):
+            print(json.dumps(dict(jsonrpc="2.0", **x)), flush=True)
+        for line in sys.stdin:
+            r = json.loads(line)
+            method = r.get("method")
+            if method == "initialize":
+                send(dict(id=r["id"], result={"protocolVersion": 1}))
+            elif method == "session/new":
+                send(dict(id=r["id"], result={
+                    "sessionId": "pooled-session",
+                    "models": {"availableModels": [
+                        {"modelId": "m-1"}, {"modelId": "m-2"}, {"modelId": "m-3"}, {"modelId": "m-4"}
+                    ]}
+                }))
+            elif method == "session/set_model":
+                send(dict(id=r["id"], result={}))
+            elif method == "session/prompt":
+                text = json.dumps(r.get("params", {}))
+                time.sleep(0.12 if "SLOW_TURN" in text else 0.04)
+                send(dict(method="session/update", params={
+                    "sessionId": "pooled-session",
+                    "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "OK Title"}}
+                }))
+                send(dict(id=r["id"], result={"stopReason": "end_turn"}))
+        """#.write(to: script, atomically: true, encoding: .utf8)
+
+        let service = GitACPService(
+            store: GitACPSessionStore(root: root.appendingPathComponent("Sessions")),
+            maxSessions: 2,
+            launcher: { _, cwd, connection in
+                try await connection.start(
+                    executable: "/usr/bin/python3",
+                    arguments: [script.path],
+                    cwd: cwd,
+                    environment: ProcessInfo.processInfo.environment
+                )
+            }
+        )
+        defer { Task { await service.shutdown() } }
+
+        // 1. Four simultaneous distinct session keys (2 Git repos + 2 distinct title models) against
+        //    `maxSessions == 2` must queue cleanly instead of throwing "This ACP session is busy".
+        let repoA = GitRepositoryIdentity(worktreePath: "/repoA", gitDirPath: "/repoA/.git", commonGitDirPath: "/repoA/.git")
+        let repoB = GitRepositoryIdentity(worktreePath: "/repoB", gitDirPath: "/repoB/.git", commonGitDirPath: "/repoB/.git")
+        async let commitA = service.generate(
+            repository: repoA, route: GitCommitAIRoute(agent: .codex, model: "m-1"), style: "", prompt: "diff A"
+        )
+        async let commitB = service.generate(
+            repository: repoB, route: GitCommitAIRoute(agent: .claude, model: "m-2"), style: "", prompt: "diff B"
+        )
+        async let titleC = service.generateTitle(
+            agent: .pi, model: "m-3", system: "System", user: "<first_prompt>three</first_prompt>"
+        )
+        async let titleD = service.generateTitle(
+            agent: .opencode, model: "m-4", system: "System", user: "<first_prompt>four</first_prompt>"
+        )
+        let results = try await [commitA, commitB, titleC ?? "", titleD ?? ""]
+        #expect(results == ["OK Title", "OK Title", "OK Title", "OK Title"])
+
+        // 2. Cancelling a second `generateTitle` while parked in `keyWaiters` must not wedge a 3rd waiter.
+        let holder = Task {
+            try await service.generateTitle(
+                agent: .codex, model: "m-1", system: "System", user: "SLOW_TURN"
+            )
+        }
+        try await Task.sleep(for: .milliseconds(30))
+        let cancelledWaiter = Task {
+            try await service.generateTitle(
+                agent: .codex, model: "m-1", system: "System", user: "cancelled"
+            )
+        }
+        let survivingWaiter = Task {
+            try await service.generateTitle(
+                agent: .codex, model: "m-1", system: "System", user: "survivor"
+            )
+        }
+        try await Task.sleep(for: .milliseconds(15))
+        cancelledWaiter.cancel()
+        await #expect(throws: CancellationError.self) {
+            _ = try await cancelledWaiter.value
+        }
+        #expect(try await holder.value == "OK Title")
+        #expect(try await survivingWaiter.value == "OK Title")
+        await service.shutdown()
+    }
 }

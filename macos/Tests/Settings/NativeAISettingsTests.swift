@@ -424,13 +424,18 @@ struct NativeAISettingsTests {
         single.confirm()
         #expect(singlePicked == [.init(target: .agent(.codex), model: "codex-cached-1")])
 
-        // Chaining `New API Service…` from the title model picker opens `AIProviderSheetController` without creating garbage.
+        // Chaining `New API Service…` from the title model picker opens `AIProviderSheetController` without creating garbage,
+        // and reopening `Choose Title Model` pre-highlights the active `aiTitleRoute`.
         let fixture = Fixture()
         defer { fixture.close() }
+        fixture.settings.aiTitleRoute = AITitleRoute(agent: .claude, model: "claude-two")
         fixture.controller.select(.tabs)
         try find(NSButton.self, "settings.ai.title.choose-model", in: fixture.controller.view).performClick(nil)
         let titlePicker = try #require(fixture.controller.activeModalSheet as? AIUnifiedModelPickerController)
         #expect(!titlePicker.allowsMultiple)
+        #expect(titlePicker.currentSource == .agent(.claude))
+        #expect(titlePicker.selected == [.init(target: .agent(.claude), model: "claude-two")])
+        #expect(titlePicker.confirmButton.isEnabled)
         #expect(!titlePicker.addProviderButton.isHidden)
         titlePicker.addProvider()
         #expect(fixture.settings.aiProviders.isEmpty)
@@ -542,5 +547,38 @@ struct NativeAISettingsTests {
         #expect(await settle { fixture.controller.activeModalSheet is AICLIProviderSheetController })
         let cliSheet = try #require(fixture.controller.activeModalSheet as? AICLIProviderSheetController)
         #expect(cliSheet.view.fittingSize.height >= 480)
+
+        // Local Coding Agents sheet attaches cleanly, routes child alerts onto the attached sheet window,
+        // synchronizes coupled policy switches live, and exposes `lastMaintenanceError` when present.
+        var initialPolicy = fixture.controller.agents.policy(for: AgentIntegrationManager.localID)
+        initialPolicy.checkAutomatically = false
+        initialPolicy.updateHooksAutomatically = false
+        fixture.controller.agents.setPolicy(initialPolicy, for: AgentIntegrationManager.localID)
+
+        fixture.controller.presentLocalCodingAgentsSheet()
+        #expect(await settle { fixture.controller.activeModalSheet is LocalCodingAgentsSheetController })
+        try await Task.sleep(for: .milliseconds(100))
+        let localPanel = try #require(fixture.window.attachedSheet)
+        #expect(localPanel.frame.height >= 520, "LocalCodingAgentsSheetController frame: \(localPanel.frame)")
+        #expect(fixture.controller.presentingWindow() === localPanel)
+
+        let localSheet = try #require(fixture.controller.activeModalSheet as? LocalCodingAgentsSheetController)
+        localSheet.view.layoutSubtreeIfNeeded()
+        #expect(localSheet.doneButton.bounds.width > 0 && localSheet.doneButton.bounds.height > 0)
+
+        let autoCheck = try find(SettingsSwitch.self, "settings.ai.coding-agents.auto-check", in: localSheet.view)
+        let autoHooks = try find(SettingsSwitch.self, "settings.ai.coding-agents.auto-hooks", in: localSheet.view)
+        let lastErrorButton = try find(NSButton.self, "settings.ai.coding-agents.last-error-details", in: localSheet.view)
+        #expect(autoCheck.state == .off)
+        #expect(lastErrorButton.isHiddenOrHasHiddenAncestor)
+
+        autoHooks.state = .on
+        autoHooks.change?(true)
+        #expect(await settle { autoCheck.state == .on })
+
+        var failingPolicy = fixture.controller.agents.policy(for: AgentIntegrationManager.localID)
+        failingPolicy.lastMaintenanceError = "Mock hook failure"
+        fixture.controller.agents.setPolicy(failingPolicy, for: AgentIntegrationManager.localID)
+        #expect(await settle { !lastErrorButton.isHiddenOrHasHiddenAncestor })
     }
 }

@@ -126,13 +126,21 @@ extension NativeSettingsController {
         presentModalSheet(sheet, title: heading, size: NSSize(width: 560, height: 460))
     }
 
-    func showError(_ error: Error) {
-        guard let window = view.window, window.isVisible else { return }
+    func presentingWindow(from preferred: NSWindow? = nil) -> NSWindow? {
+        var current = preferred ?? activeModalSheet?.view.window ?? view.window
+        while let attached = current?.attachedSheet {
+            current = attached
+        }
+        return current
+    }
+
+    func showError(_ error: Error, from presenter: NSWindow? = nil) {
+        guard let window = presentingWindow(from: presenter), window.isVisible else { return }
         NSAlert(error: error).beginSheetModal(for: window)
     }
 
-    private func showDetails(_ message: String) {
-        guard let window = view.window else { return }
+    fileprivate func showDetails(_ message: String, from presenter: NSWindow? = nil) {
+        guard let window = presentingWindow(from: presenter) else { return }
         let alert = NSAlert()
         alert.messageText = text("Operation details", "操作详情")
         let scroll = NSScrollView(frame: .init(x: 0, y: 0, width: 520, height: 240))
@@ -153,10 +161,11 @@ extension NativeSettingsController {
         let status = NSTextField(wrappingLabelWithString: "")
         status.font = .systemFont(ofSize: 11)
         status.textColor = .secondaryLabelColor
-        let details = SettingsActionButton(text("Details…", "详情…")) { [weak self] in
+        let details = SettingsActionButton(text("Details…", "详情…")) { [weak self, weak form] in
             guard let self, let message = self.agents.snapshot(for: target)?.maintenanceError ?? self.registry.errors[target] else { return }
-            self.showDetails(message)
+            self.showDetails(message, from: form?.view.window)
         }
+        details.setAccessibilityIdentifier("settings.agents.error-details." + target)
         let progress = NSProgressIndicator()
         progress.style = .spinning
         progress.controlSize = .small
@@ -385,17 +394,17 @@ extension NativeSettingsController {
     }
 
     fileprivate func exportHooks(from presenter: NSWindow? = nil) {
-        guard let window = presenter ?? view.window else { return }
+        guard let window = presentingWindow(from: presenter) else { return }
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "omg-agent-hooks.py"
         panel.allowedContentTypes = [.plainText]
-        panel.beginSheetModal(for: window) { [weak self] result in
+        panel.beginSheetModal(for: window) { [weak self, weak window] result in
             guard result == .OK, let url = panel.url else { return }
             do {
                 let script = try AgentHookInstaller.remoteInstallerScript()
                 try script.write(to: url, atomically: true, encoding: .utf8)
                 try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
-            } catch { self?.showError(error) }
+            } catch { self?.showError(error, from: window) }
         }
     }
 }
@@ -484,6 +493,8 @@ final class AddSSHHostSheetController: GitCommitSettingsPanelController {
         let actions = NSStackView(views: [errorLabel, NSView(), cancelButton, addButton])
         actions.orientation = .horizontal
         actions.spacing = 8
+        title.setContentHuggingPriority(.required, for: .vertical)
+        actions.setContentHuggingPriority(.required, for: .vertical)
 
         let formView = form.view
         let stack = NSStackView(views: [title, formView, actions])
@@ -600,16 +611,18 @@ final class LocalCodingAgentsSheetController: GitCommitSettingsPanelController {
         installAllButton.setAccessibilityIdentifier("settings.ai.coding-agents.install-all")
         form.row(text("Enable all detected Agents", "一键启用已发现的 Agent"), control: installAllButton)
 
-        form.toggle(
-            text("Maintain status extensions automatically", "自动维护已安装的状态扩展"),
-            value: policy.updateHooksAutomatically
-        ) { [weak self] value in
+        let autoHooksSwitch = SettingsSwitch(value: policy.updateHooksAutomatically) { [weak self] value in
             guard let self else { return }
             var next = self.manager.policy(for: target)
             if value { next.checkAutomatically = true }
             next.updateHooksAutomatically = value
             self.manager.setPolicy(next, for: target)
         }
+        autoHooksSwitch.setAccessibilityIdentifier("settings.ai.coding-agents.auto-hooks")
+        form.row(
+            text("Maintain status extensions automatically", "自动维护已安装的状态扩展"),
+            control: autoHooksSwitch
+        )
 
         form.section(
             text("Supported Agents", "支持的 Agent"),
@@ -620,7 +633,7 @@ final class LocalCodingAgentsSheetController: GitCommitSettingsPanelController {
         }
 
         form.section(text("Maintenance", "维护与工具"))
-        form.toggle(text("Update Agent CLIs automatically", "自动更新 Agent CLI"), value: policy.updatesCLIs) { [weak self] value in
+        let autoCLIsSwitch = SettingsSwitch(value: policy.updatesCLIs) { [weak self] value in
             guard let self else { return }
             var next = self.manager.policy(for: target)
             next.updateAllCLIsAutomatically = value
@@ -628,18 +641,25 @@ final class LocalCodingAgentsSheetController: GitCommitSettingsPanelController {
             if value { next.checkAutomatically = true }
             self.manager.setPolicy(next, for: target)
         }
-        form.toggle(strings.agentMaintenance, value: policy.checkAutomatically) { [weak self] value in
+        autoCLIsSwitch.setAccessibilityIdentifier("settings.ai.coding-agents.auto-clis")
+        form.row(text("Update Agent CLIs automatically", "自动更新 Agent CLI"), control: autoCLIsSwitch)
+
+        let autoCheckSwitch = SettingsSwitch(value: policy.checkAutomatically) { [weak self] value in
             guard let self else { return }
             var next = self.manager.policy(for: target)
             next.checkAutomatically = value
             self.manager.setPolicy(next, for: target)
         }
-        form.toggle(strings.agentCheckOnConnection, value: policy.checkOnConnection == true) { [weak self] value in
+        autoCheckSwitch.setAccessibilityIdentifier("settings.ai.coding-agents.auto-check")
+        form.row(strings.agentMaintenance, control: autoCheckSwitch)
+
+        let checkOnConnectSwitch = SettingsSwitch(value: policy.checkOnConnection == true) { [weak self] value in
             guard let self else { return }
             var next = self.manager.policy(for: target)
             next.checkOnConnection = value
             self.manager.setPolicy(next, for: target)
         }
+        form.row(strings.agentCheckOnConnection, control: checkOnConnectSwitch)
         form.row(text("Check interval (hours)", "检查间隔（小时）"), control: SettingsNumberField(
             value: Double(policy.intervalHours), range: 1...168, step: 1
         ) { [weak self] value in
@@ -651,6 +671,27 @@ final class LocalCodingAgentsSheetController: GitCommitSettingsPanelController {
         if let checked = policy.lastSuccess {
             form.note(strings.agentLastChecked + " " + checked.formatted())
         }
+        let lastErrorButton = SettingsActionButton(text("Details…", "详情…")) { [weak self] in
+            guard let self, let message = self.manager.policy(for: target).lastMaintenanceError else { return }
+            self.settingsController?.showDetails(message, from: self.view.window)
+        }
+        lastErrorButton.setAccessibilityIdentifier("settings.ai.coding-agents.last-error-details")
+        let lastErrorRow = form.row(
+            text("Last check did not finish", "上次检查未完成"),
+            control: lastErrorButton
+        )
+        lastErrorRow?.setVisible(policy.lastMaintenanceError != nil)
+
+        let syncPolicy = { [weak self, weak autoHooksSwitch, weak autoCLIsSwitch, weak autoCheckSwitch, weak checkOnConnectSwitch] in
+            guard let self else { return }
+            let latest = self.manager.policy(for: target)
+            autoHooksSwitch?.state = latest.updateHooksAutomatically ? .on : .off
+            autoCLIsSwitch?.state = latest.updatesCLIs ? .on : .off
+            autoCheckSwitch?.state = latest.checkAutomatically ? .on : .off
+            checkOnConnectSwitch?.state = latest.checkOnConnection == true ? .on : .off
+            lastErrorRow?.setVisible(latest.lastMaintenanceError != nil)
+        }
+        form.retained.append(manager.objectWillChange.receive(on: RunLoop.main).sink { _ in syncPolicy() })
         form.row(
             strings.exportSSHInstallerButton,
             subtitle: text("Export a standalone script for manual setup on restricted SSH hosts.",
@@ -669,6 +710,8 @@ final class LocalCodingAgentsSheetController: GitCommitSettingsPanelController {
         doneButton.setAccessibilityIdentifier("settings.ai.coding-agents.done")
         let actions = NSStackView(views: [NSView(), doneButton])
         actions.orientation = .horizontal
+        title.setContentHuggingPriority(.required, for: .vertical)
+        actions.setContentHuggingPriority(.required, for: .vertical)
 
         let formView = form.view
         let stack = NSStackView(views: [title, formView, actions])

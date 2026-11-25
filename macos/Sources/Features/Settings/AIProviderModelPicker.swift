@@ -58,6 +58,7 @@ final class AIUnifiedModelPickerController: GitCommitSettingsPanelController,
         catalog: AIAgentModelCatalog? = nil,
         allowsMultiple: Bool = true,
         initialTarget: GitCommitAIRoute.Target? = nil,
+        initialSelection: [PickedModel] = [],
         strings: SettingsStrings,
         heading: String,
         onAddProvider: (() -> Void)? = nil,
@@ -72,6 +73,7 @@ final class AIUnifiedModelPickerController: GitCommitSettingsPanelController,
         self.heading = heading
         self.onAddProvider = onAddProvider
         self.done = done
+        self.selected = allowsMultiple ? initialSelection : Array(initialSelection.prefix(1))
         if let initialTarget, let matched = resolvedSources.firstIndex(where: { $0.target == initialTarget }) {
             self.sourceIndex = matched
         }
@@ -469,11 +471,15 @@ extension GitCommitAISettingsPanel {
         let resolvedCatalog = catalog ?? controller.aiAgentCatalog
         let strings = SettingsStrings(language: settings.language)
         let heading = strings.t("Choose Title Model", "选择命名模型")
+        let existingSelection: [AIUnifiedModelPickerController.PickedModel] = settings.aiTitleRoute.map {
+            [.init(target: $0.target, model: $0.model)]
+        } ?? []
         let picker = AIUnifiedModelPickerController(
             providers: settings.aiProviders,
             catalog: resolvedCatalog,
             allowsMultiple: false,
             initialTarget: settings.aiTitleRoute?.target,
+            initialSelection: existingSelection,
             strings: strings,
             heading: heading,
             onAddProvider: { [weak controller] in

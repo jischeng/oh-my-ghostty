@@ -138,6 +138,8 @@ actor AITitleService: AITitleGenerating {
 
     private var inFlight = 0
     private var slotWaiters: [SlotWaiter] = []
+    private var preparing = false
+    private var prepareWaiters: [CheckedContinuation<Void, Never>] = []
     private var consecutiveFailures = 0
     private var pausedUntil: ContinuousClock.Instant?
     /// Maximum remaining pause window a caller sits through before giving up.
@@ -375,9 +377,38 @@ actor AITitleService: AITitleGenerating {
         }
         defer { releaseSlot() }
 
-        let system = AIHTTPClient.systemPrompt(language: await language())
-        let outcome = await send(message, system: system, target: target)
-        note(outcome, for: target)
+        enum PreparedSend {
+            case ready(ResolvedTarget, String)
+            case abort(AITitleGenerationResult)
+        }
+        await acquirePrepareTurn()
+        let prepared: PreparedSend
+        if Task.isCancelled {
+            prepared = .abort(.rejectedOrCancelled)
+        } else if let latestTarget = await targets(force) {
+            if sameConfiguration(target, latestTarget) {
+                let system = AIHTTPClient.systemPrompt(language: await language())
+                prepared = Task.isCancelled ? .abort(.rejectedOrCancelled) : .ready(latestTarget, system)
+            } else {
+                noteTarget(latestTarget)
+                currentTarget = latestTarget
+                prepared = .abort(.rejectedOrCancelled)
+            }
+        } else {
+            prepared = .abort(Task.isCancelled ? .rejectedOrCancelled : .unavailableOrFailed)
+        }
+        releasePrepareTurn()
+
+        let (latestTarget, system): (ResolvedTarget, String)
+        switch prepared {
+        case .ready(let resolvedTarget, let resolvedSystem):
+            (latestTarget, system) = (resolvedTarget, resolvedSystem)
+        case .abort(let earlyResult):
+            return earlyResult
+        }
+
+        let outcome = await send(message, system: system, target: latestTarget)
+        note(outcome, for: latestTarget)
         switch outcome {
         case .success(let title):
             if Task.isCancelled { return .rejectedOrCancelled }
@@ -585,5 +616,24 @@ actor AITitleService: AITitleGenerating {
             return
         }
         inFlight = max(0, inFlight - 1)
+    }
+
+    private func acquirePrepareTurn() async {
+        if !preparing {
+            preparing = true
+            return
+        }
+        await withCheckedContinuation { continuation in
+            prepareWaiters.append(continuation)
+        }
+    }
+
+    private func releasePrepareTurn() {
+        if !prepareWaiters.isEmpty {
+            let next = prepareWaiters.removeFirst()
+            next.resume()
+            return
+        }
+        preparing = false
     }
 }

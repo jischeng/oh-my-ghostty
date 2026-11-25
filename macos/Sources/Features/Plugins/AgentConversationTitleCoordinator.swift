@@ -98,6 +98,7 @@ final class AgentConversationTitleCoordinator: ObservableObject {
 
     private struct Flight {
         let token: UUID
+        let epoch: UInt64
         let task: Task<Void, Never>
         var owners: Set<UUID>
         var generatingOwners: Set<UUID>
@@ -110,6 +111,8 @@ final class AgentConversationTitleCoordinator: ObservableObject {
         var isGenerating = false
         /// A turn finished while the conversation was being read.
         var sawCompletedTurn = false
+        /// Settings (`aiTitleRoute`, `language`, `alwaysUseAI`, or `mode`) changed while in flight.
+        var needsReevaluation = false
 
         var manualTabIDs: Set<UUID> {
             manualTabsByOwner.values.reduce(into: Set<UUID>()) { $0.formUnion($1) }
@@ -118,6 +121,7 @@ final class AgentConversationTitleCoordinator: ObservableObject {
 
     private var flights: [Key: Flight] = [:]
     private var settledAt: [Key: Date] = [:]
+    private var configurationEpoch: UInt64 = 0
     /// The newest queued read per host. Reads of one host run in turn, so a
     /// restored window full of Agent tabs does not scan the stores in parallel
     /// or open a connection per tab.
@@ -267,6 +271,9 @@ final class AgentConversationTitleCoordinator: ObservableObject {
                     }
                 }
                 if trigger == .done { flights[key]?.sawCompletedTurn = true }
+                if existingFlight.epoch != configurationEpoch {
+                    flights[key]?.needsReevaluation = true
+                }
                 syncPublishedFlightState()
                 skip(target, trigger, "already being read")
                 return
@@ -399,12 +406,14 @@ final class AgentConversationTitleCoordinator: ObservableObject {
         startsGenerating: Bool
     ) {
         let token = UUID()
+        let epoch = configurationEpoch
         let task = Task { [weak self] in
             await self?.read(target, delays: delays, force: forced)
             self?.finish(target, token: token)
         }
         flights[target.key] = Flight(
             token: token,
+            epoch: epoch,
             task: task,
             owners: owners,
             generatingOwners: generatingOwners,
@@ -416,9 +425,21 @@ final class AgentConversationTitleCoordinator: ObservableObject {
         syncPublishedFlightState()
     }
 
-    /// Clears recent-read throttling when language, naming mode, or title route changes.
+    /// Clears recent-read throttling when language, naming mode, or title route changes,
+    /// and schedules one fresh pass for any lookup currently in flight on the superseded config.
     func invalidateSettledState() {
+        configurationEpoch &+= 1
         settledAt.removeAll()
+        for key in Array(flights.keys) {
+            flights[key]?.needsReevaluation = true
+        }
+    }
+
+    private func markSettled(_ key: Key) {
+        if let flight = flights[key], flight.epoch != configurationEpoch {
+            return
+        }
+        settledAt[key] = now()
     }
 
     private func finish(_ target: Target, token: UUID) {
@@ -426,7 +447,8 @@ final class AgentConversationTitleCoordinator: ObservableObject {
         flights[target.key] = nil
         syncPublishedFlightState()
         let retryForced = flight.pendingForcedRetry
-        guard (flight.sawCompletedTurn && mode() != .off) || retryForced,
+        let retryBackground = (flight.sawCompletedTurn || flight.needsReevaluation) && mode() != .off
+        guard retryBackground || retryForced,
               !flight.task.isCancelled,
               isEnabled, !flight.owners.isEmpty else { return }
         start(
@@ -548,7 +570,7 @@ final class AgentConversationTitleCoordinator: ObservableObject {
             switch await generateTitle(for: target, prompt: input, nativeTitle: native, force: true) {
             case .generated(let title):
                 guard !Task.isCancelled else { return }
-                settledAt[target.key] = now()
+                markSettled(target.key)
                 store.set(
                     title,
                     source: .generated,
@@ -633,23 +655,22 @@ final class AgentConversationTitleCoordinator: ObservableObject {
             )
             return
         }
-        if let existing, existing.source == .generated,
-           let displayNative, existing.supersededNativeTitle == displayNative,
-           !forcedFlight {
-            return
-        }
         let allowsGeneration = flights[target.key].map { !$0.generatingOwners.isEmpty } ?? true
         let alwaysGenerate = prefersGeneratedTitles
         let isChinese = SettingsStrings(language: language()).isChinese
         let shouldGenerateFromNative = allowsGeneration && (alwaysGenerate || forcedFlight)
+        let needsLocalization = shouldGenerateFromNative
+            && isChinese
+            && existing.map({ !AgentConversationTitleStore.containsCJK($0.title) }) == true
+            && settledAt[target.key] == nil
+        if let existing, existing.source == .generated,
+           let displayNative, existing.supersededNativeTitle == displayNative,
+           !forcedFlight, !needsLocalization {
+            return
+        }
         if shouldGenerateFromNative {
-            if let existing, existing.source == .generated, !forcedFlight {
-                let satisfiesLanguage = !isChinese
-                    || AgentConversationTitleStore.containsCJK(existing.title)
-                    || settledAt[target.key] != nil
-                if satisfiesLanguage {
-                    return
-                }
+            if let existing, existing.source == .generated, !forcedFlight, !needsLocalization {
+                return
             }
             let input = Self.nonEmptyTrimmed(firstPrompt) ?? native
             switch await generateTitle(
@@ -661,7 +682,10 @@ final class AgentConversationTitleCoordinator: ObservableObject {
             case .generated(let generated):
                 guard !Task.isCancelled else { return }
                 let stillForced = flights[target.key]?.forced == true
-                settledAt[target.key] = now()
+                if !stillForced, let flight = flights[target.key], flight.epoch != configurationEpoch {
+                    return
+                }
+                markSettled(target.key)
                 store.set(
                     generated,
                     source: .generated,
@@ -676,7 +700,7 @@ final class AgentConversationTitleCoordinator: ObservableObject {
                 return
             case .unavailableOrFailed:
                 guard !Task.isCancelled else { return }
-                settledAt[target.key] = now()
+                markSettled(target.key)
             case .rejectedOrCancelled:
                 // Rejected by queue capacity, configuration switch, or task cancellation:
                 // never write `settledAt` so the conversation remains eligible for retry.
@@ -710,8 +734,11 @@ final class AgentConversationTitleCoordinator: ObservableObject {
         ) {
         case .generated(let generated):
             guard !Task.isCancelled else { return true }
-            settledAt[target.key] = now()
             let stillForced = flights[target.key]?.forced == true
+            if !stillForced, let flight = flights[target.key], flight.epoch != configurationEpoch {
+                return true
+            }
+            markSettled(target.key)
             store.set(
                 generated,
                 source: .generated,
@@ -726,7 +753,7 @@ final class AgentConversationTitleCoordinator: ObservableObject {
             return true
         case .unavailableOrFailed:
             if !Task.isCancelled {
-                settledAt[target.key] = now()
+                markSettled(target.key)
             }
             return false
         case .rejectedOrCancelled:
@@ -752,11 +779,11 @@ final class AgentConversationTitleCoordinator: ObservableObject {
                 && !AgentConversationTitleStore.containsCJK(record.title)
         } ?? false
         guard forcedFlight || existing == nil || existing == .prompt || canLocalizeExisting else {
-            settledAt[target.key] = now()
+            markSettled(target.key)
             return
         }
         if !forcedFlight, currentMode != .generate {
-            settledAt[target.key] = now()
+            markSettled(target.key)
             AgentConversationTitleLog.info(
                 "not stored \(Self.describe(target)): mode is \(currentMode.rawValue) and the Agent named nothing"
             )
@@ -767,8 +794,11 @@ final class AgentConversationTitleCoordinator: ObservableObject {
             switch await generateTitle(for: target, prompt: prompt, nativeTitle: nil, force: forcedFlight) {
             case .generated(let title):
                 guard !Task.isCancelled else { return }
-                settledAt[target.key] = now()
                 let forceStore = flights[target.key]?.forced == true
+                if !forceStore, let flight = flights[target.key], flight.epoch != configurationEpoch {
+                    return
+                }
+                markSettled(target.key)
                 store.set(
                     title,
                     source: .generated,
@@ -781,7 +811,7 @@ final class AgentConversationTitleCoordinator: ObservableObject {
                 return
             case .unavailableOrFailed:
                 guard !Task.isCancelled else { return }
-                settledAt[target.key] = now()
+                markSettled(target.key)
                 AgentConversationTitleLog.info(
                     "not generated \(Self.describe(target)): the endpoint gave no title, sanitised prompt stands in"
                 )
@@ -793,7 +823,7 @@ final class AgentConversationTitleCoordinator: ObservableObject {
                 )
             }
         } else {
-            settledAt[target.key] = now()
+            markSettled(target.key)
             AgentConversationTitleLog.info(
                 "not generated \(Self.describe(target)): tab has a manual title override, sanitised prompt stands in"
             )

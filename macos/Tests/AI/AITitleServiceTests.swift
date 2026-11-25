@@ -438,6 +438,54 @@ struct AITitleServiceTests {
         #expect(await waitUntil { await blocking.startedCount == 3 })
         await blocking.release()
         #expect(await switched.value == "Renamed")
+
+        // Even when NO subsequent caller arrives, clearing or switching the target while a waiter sits
+        // in `slotWaiters` must not fire a request against the disabled/superseded endpoint upon slot grant.
+        let oneSlotBlocking = AIBlockingClient()
+        let oneSlotRecorder = AIRequestRecorder()
+        let oneSlotClient = AIHTTPClient { request in
+            oneSlotRecorder.record(request)
+            let title = try await oneSlotBlocking.complete(user: "Title")
+            return (AITestData.openAI(title), AITestData.response(200))
+        }
+        let targetSwitch = SwitchingEndpointProvider(endpointA)
+        let oneSlotService = AITitleService(
+            client: oneSlotClient,
+            endpoints: { await targetSwitch.current() },
+            limits: .init(maxInFlight: 1, maxQueueDepth: 4)
+        )
+        let active = Task { await oneSlotService.generate(forFirstPrompt: "active", nativeTitle: nil, projectName: nil, force: false) }
+        #expect(await waitUntil { await oneSlotBlocking.startedCount == 1 })
+        let waitingCleared = Task { await oneSlotService.generate(forFirstPrompt: "cleared", nativeTitle: nil, projectName: nil, force: false) }
+        try? await Task.sleep(for: .milliseconds(20))
+        await targetSwitch.set(nil)
+        await oneSlotBlocking.release()
+        _ = await active.value
+        #expect(await waitingCleared.value == .unavailableOrFailed)
+        #expect(oneSlotRecorder.bodies.count == 1)
+
+        let switchedBlocking = AIBlockingClient()
+        let switchedRecorder = AIRequestRecorder()
+        let switchedClient = AIHTTPClient { request in
+            switchedRecorder.record(request)
+            let title = try await switchedBlocking.complete(user: "Title")
+            return (AITestData.openAI(title), AITestData.response(200))
+        }
+        let switchedTarget = SwitchingEndpointProvider(endpointA)
+        let switchedService = AITitleService(
+            client: switchedClient,
+            endpoints: { await switchedTarget.current() },
+            limits: .init(maxInFlight: 1, maxQueueDepth: 4)
+        )
+        let active2 = Task { await switchedService.generate(forFirstPrompt: "active-2", nativeTitle: nil, projectName: nil, force: false) }
+        #expect(await waitUntil { await switchedBlocking.startedCount == 1 })
+        let waitingSwitched = Task { await switchedService.generate(forFirstPrompt: "switched", nativeTitle: nil, projectName: nil, force: false) }
+        try? await Task.sleep(for: .milliseconds(20))
+        await switchedTarget.set(endpointB)
+        await switchedBlocking.release()
+        _ = await active2.value
+        #expect(await waitingSwitched.value == .rejectedOrCancelled)
+        #expect(switchedRecorder.bodies.count == 1)
     }
 
     @Test func forcedRequestsTakePriorityAheadOfQueuedBackgroundRequestsAndACPTargetGeneratesTitles() async {

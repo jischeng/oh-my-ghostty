@@ -86,21 +86,46 @@ actor GitACPService {
         let id: UUID
         let continuation: CheckedContinuation<Bool, Never>
     }
+    private struct PoolWaiter {
+        let id: UUID
+        let key: String
+        let continuation: CheckedContinuation<Bool, Never>
+    }
     private var sessions: [String: Session] = [:]
     private var busy: Set<String> = []
     private var keyWaiters: [String: [KeyWaiter]] = [:]
+    private var activePromptKeys: Set<String> = []
+    private var poolWaiters: [PoolWaiter] = []
     private var cleanup: Task<Void, Never>?
     private let store: GitACPSessionStore
+    private let maxSessions: Int
     private let launcher: SessionLauncher?
 
-    init(store: GitACPSessionStore = GitACPSessionStore(), launcher: SessionLauncher? = nil) {
+    init(
+        store: GitACPSessionStore = GitACPSessionStore(),
+        maxSessions: Int = 6,
+        launcher: SessionLauncher? = nil
+    ) {
         self.store = store
+        self.maxSessions = max(1, maxSessions)
         self.launcher = launcher
     }
 
     func shutdown() async {
         cleanup?.cancel()
         cleanup = nil
+        let pendingPool = poolWaiters
+        poolWaiters.removeAll()
+        for waiter in pendingPool {
+            waiter.continuation.resume(returning: false)
+        }
+        let pendingKeys = keyWaiters.values.flatMap { $0 }
+        keyWaiters.removeAll()
+        busy.removeAll()
+        activePromptKeys.removeAll()
+        for waiter in pendingKeys {
+            waiter.continuation.resume(returning: false)
+        }
         let active = Array(sessions.values)
         sessions.removeAll()
         for session in active {
@@ -194,7 +219,59 @@ actor GitACPService {
         busy.remove(key)
     }
 
+    private func acquirePoolSlot(for key: String) async -> Bool {
+        guard !Task.isCancelled else { return false }
+        if activePromptKeys.count < maxSessions {
+            activePromptKeys.insert(key)
+            return true
+        }
+        let waiterID = UUID()
+        let granted = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(returning: false)
+                } else {
+                    poolWaiters.append(PoolWaiter(id: waiterID, key: key, continuation: continuation))
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelPoolWaiter(id: waiterID) }
+        }
+        guard granted else { return false }
+        if Task.isCancelled {
+            releasePoolSlot(for: key)
+            return false
+        }
+        return true
+    }
+
+    private func cancelPoolWaiter(id: UUID) {
+        guard let index = poolWaiters.firstIndex(where: { $0.id == id }) else { return }
+        let waiter = poolWaiters.remove(at: index)
+        waiter.continuation.resume(returning: false)
+    }
+
+    private func releasePoolSlot(for key: String) {
+        activePromptKeys.remove(key)
+        guard !poolWaiters.isEmpty else { return }
+        let next = poolWaiters.removeFirst()
+        activePromptKeys.insert(next.key)
+        next.continuation.resume(returning: true)
+    }
+
+    private func evictIdleIfNeeded() async {
+        while sessions.count >= maxSessions,
+              let oldest = sessions
+                .filter({ !activePromptKeys.contains($0.key) })
+                .min(by: { $0.value.lastUsed < $1.value.lastUsed }) {
+            sessions.removeValue(forKey: oldest.key)
+            await oldest.value.connection.stop()
+        }
+    }
+
     private func runPrompt(key: String, agent: GitCommitAgent, model: String, text: String) async throws -> String {
+        guard await acquirePoolSlot(for: key) else { throw CancellationError() }
+        defer { releasePoolSlot(for: key) }
         await expireIdle()
         if let old = sessions[key], old.turns >= 8 || old.bytes > 400_000 || Date().timeIntervalSince(old.lastUsed) > 300 {
             sessions.removeValue(forKey: key)
@@ -210,13 +287,7 @@ actor GitACPService {
         }
         do {
             if sessions[key] == nil {
-                if sessions.count >= 4 {
-                    guard let oldest = sessions.filter({ !busy.contains($0.key) }).min(by: { $0.value.lastUsed < $1.value.lastUsed }) else {
-                        throw GitCommitAIError("This ACP session is busy. Try again shortly.")
-                    }
-                    sessions.removeValue(forKey: oldest.key)
-                    await oldest.value.connection.stop()
-                }
+                await evictIdleIfNeeded()
                 let new = try await connect(agent: agent)
                 do {
                     guard new.models.ids.contains(model) else {
@@ -233,6 +304,7 @@ actor GitACPService {
                     await new.connection.stop()
                     throw error
                 }
+                await evictIdleIfNeeded()
                 sessions[key] = Session(connection: new.connection, id: new.id, directory: new.directory, lastUsed: Date())
             }
             guard var session = sessions[key] else { throw GitCommitAIError("Invalid ACP response.") }
@@ -258,7 +330,8 @@ actor GitACPService {
 
     private func expireIdle() async {
         let expired = sessions.filter { key, session in
-            !busy.contains(key) && (Date().timeIntervalSince(session.lastUsed) > 300 || session.turns >= 8 || session.bytes > 400_000)
+            !busy.contains(key) && !activePromptKeys.contains(key)
+                && (Date().timeIntervalSince(session.lastUsed) > 300 || session.turns >= 8 || session.bytes > 400_000)
         }
         for (key, session) in expired {
             sessions.removeValue(forKey: key)

@@ -615,8 +615,14 @@ extension NativeSettingsController {
         }
     }
 
-    func confirm(_ title: String, message: String = "", actionTitle: String? = nil, action: @escaping () -> Void) {
-        guard let window = view.window else { return }
+    func confirm(
+        _ title: String,
+        message: String = "",
+        actionTitle: String? = nil,
+        from presenter: NSWindow? = nil,
+        action: @escaping () -> Void
+    ) {
+        guard let window = presentingWindow(from: presenter) else { return }
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message

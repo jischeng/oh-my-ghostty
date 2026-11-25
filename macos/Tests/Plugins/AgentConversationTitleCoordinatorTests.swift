@@ -1008,6 +1008,29 @@ struct AgentConversationTitleCoordinatorTests {
         langFixture.request(.done)
         await langFixture.coordinator.waitUntilIdle()
         #expect(langFixture.record?.title == "排查 CI 偶现失败")
+
+        // Conversations with a `native` title (`supersededNativeTitle` matched) ALSO localize on language switch.
+        let nativeLangFixture = Fixture(
+            seeds: Seeds(rest: Seed(native: "Investigate flaky CI pipeline", firstPrompt: "Investigate flaky CI")),
+            generated: "排查 CI 流水线",
+            mode: .generate,
+            alwaysUseAI: true,
+            language: .english
+        )
+        nativeLangFixture.store.set(
+            "Flaky CI pipeline",
+            source: .generated,
+            agent: nativeLangFixture.target.agent,
+            conversationID: nativeLangFixture.target.conversationID,
+            force: true,
+            allowGeneratedOverNative: true,
+            supersededNativeTitle: "Investigate flaky CI pipeline"
+        )
+        nativeLangFixture.language = .simplifiedChinese
+        nativeLangFixture.coordinator.invalidateSettledState()
+        nativeLangFixture.request(.bound)
+        await nativeLangFixture.coordinator.waitUntilIdle()
+        #expect(nativeLangFixture.record?.title == "排查 CI 流水线")
     }
 
     @Test func backgroundBurstQueuesThroughBoundedServiceAndQueueRejectionNeverLocksSettledAt() async throws {
@@ -1099,5 +1122,78 @@ struct AgentConversationTitleCoordinatorTests {
         #expect(await rejectOnce.attempts == 2)
         #expect(store.record(agent: .claude, conversationID: retryID)?.source == .generated)
         #expect(store.record(agent: .claude, conversationID: retryID)?.title == "重试成功标题")
+
+        // 3. Switching model or language while multiple tabs are ALREADY in flight (`invalidateSettledState` +
+        //    re-request while `flights[key]` is active) must re-run both evicted waiters and stale in-flight
+        //    generations instead of dropping them with "already being read".
+        actor TargetState {
+            var model = "model-a"
+            var language: OhMyGhosttyLanguage = .english
+            var modelACount = 0
+            var gateOpen = false
+            func enterModelA() async {
+                modelACount += 1
+                while !gateOpen {
+                    try? await Task.sleep(for: .milliseconds(5))
+                }
+            }
+            func switchConfig() {
+                model = "model-b"
+                language = .simplifiedChinese
+                gateOpen = true
+            }
+            func currentModel() -> String { model }
+            func currentLanguage() -> OhMyGhosttyLanguage { language }
+            func currentModelACount() -> Int { modelACount }
+        }
+        let state = TargetState()
+        let switchService = AITitleService(
+            targets: { _ in .acp(agent: .codex, model: await state.currentModel()) },
+            acpGenerator: { _, model, system, _ in
+                if model == "model-a" {
+                    await state.enterModelA()
+                    return "English Title"
+                }
+                return system.contains("Simplified Chinese") ? "新模型中文标题" : "Model B English"
+            },
+            language: { await state.currentLanguage() },
+            limits: .init(maxInFlight: 1, maxQueueDepth: 8)
+        )
+        var currentLanguage: OhMyGhosttyLanguage = .english
+        let switchCoordinator = AgentConversationTitleCoordinator(
+            store: store,
+            generator: switchService,
+            loadSeed: { _ in .init(native: "Verbose native summary", firstPrompt: "Migrate settings") },
+            mode: { .generate },
+            alwaysUseAI: { true },
+            language: { currentLanguage },
+            sleep: { _ in },
+            now: { Date(timeIntervalSince1970: 2_000) },
+            retryDelays: [.zero],
+            settleInterval: 600
+        )
+        let firstID = try #require(AgentConversationID("switch-tab-1"))
+        let secondID = try #require(AgentConversationID("switch-tab-2"))
+        let owner1 = UUID()
+        let owner2 = UUID()
+        switchCoordinator.request(.init(agent: .codex, conversationID: firstID, remoteHost: nil), trigger: .bound, owner: owner1)
+        switchCoordinator.request(.init(agent: .codex, conversationID: secondID, remoteHost: nil), trigger: .bound, owner: owner2)
+        for _ in 0..<200 {
+            if await state.currentModelACount() == 1 { break }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await state.currentModelACount() == 1)
+
+        // Simulate `AgentConversationTitleTracker.modeChanged()` while `firstID` is running on model-a
+        // and `secondID` is parked in `AITitleService.slotWaiters`.
+        currentLanguage = .simplifiedChinese
+        switchCoordinator.invalidateSettledState()
+        switchCoordinator.request(.init(agent: .codex, conversationID: firstID, remoteHost: nil), trigger: .bound, owner: owner1)
+        switchCoordinator.request(.init(agent: .codex, conversationID: secondID, remoteHost: nil), trigger: .bound, owner: owner2)
+        await state.switchConfig()
+
+        await switchCoordinator.waitUntilIdle()
+        #expect(store.record(agent: .codex, conversationID: firstID)?.title == "新模型中文标题")
+        #expect(store.record(agent: .codex, conversationID: secondID)?.title == "新模型中文标题")
     }
 }

@@ -342,6 +342,8 @@ final class AICLIProviderSheetController: GitCommitSettingsPanelController {
         doneButton.setAccessibilityIdentifier("settings.ai.agent.done")
         let actions = NSStackView(views: [NSView(), doneButton])
         actions.orientation = .horizontal
+        title.setContentHuggingPriority(.required, for: .vertical)
+        actions.setContentHuggingPriority(.required, for: .vertical)
 
         let formView = form.view
         let stack = NSStackView(views: [title, formView, actions])
@@ -584,6 +586,8 @@ final class AIProviderSheetController: GitCommitSettingsPanelController {
         let actions = NSStackView(views: [removeButton, NSView(), cancelButton, saveButton])
         actions.orientation = .horizontal
         actions.spacing = 8
+        title.setContentHuggingPriority(.required, for: .vertical)
+        actions.setContentHuggingPriority(.required, for: .vertical)
 
         let formView = form.view
         let stack = NSStackView(views: [title, formView, actions])
@@ -945,8 +949,9 @@ final class AIProviderSheetController: GitCommitSettingsPanelController {
         } catch {
             failure = error
         }
-        closePanel()
         onSavedOrRemoved()
-        if let failure { settingsController?.showError(failure) }
+        closePanel { [weak settingsController] in
+            if let failure { settingsController?.showError(failure) }
+        }
     }
 }

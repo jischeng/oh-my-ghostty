@@ -656,7 +656,7 @@ Folders, Local Network) and Sparkle 2's atomic swap cannot match future signed
 updates by designated requirement alone until the host trusts that leaf
 certificate for Code Signing in the **System** keychain (`-d`, Admin domain):
 
-- Users can install trust in one click from **OMG -> Settings -> Plugins -> OMG
+- Users can install trust in one click from **OMG -> Settings -> Advanced -> OMG
   Doctor -> Trust Release Signer for Updates**, inspect status from `omg +doctor`,
   or run the helper directly on an installed app:
 

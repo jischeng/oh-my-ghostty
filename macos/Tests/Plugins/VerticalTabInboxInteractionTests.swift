@@ -201,7 +201,7 @@ struct VerticalTabInboxInteractionTests {
 
         // On top again: nothing is published for further keystrokes.
         var published = 0
-        let observation = first.$tabLastInteractionAt.dropFirst().sink { _ in published += 1 }
+        let observation = first.tabLastInteractionAtPublisher.dropFirst().sink { _ in published += 1 }
         defer { observation.cancel() }
         for seconds in stride(from: 100.0, through: 200.0, by: 10) { first.noteTerminalInput(at: at(seconds)) }
         #expect(published == 0)

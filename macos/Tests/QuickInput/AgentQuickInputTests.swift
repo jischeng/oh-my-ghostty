@@ -764,6 +764,7 @@ struct AgentQuickInputTests {
             try await Task.sleep(for: .milliseconds(50))
         }
         try #require(FileManager.default.fileExists(atPath: ready.path))
+        controller.keyWindowOverrideForTesting = true
         window.contentView?.layoutSubtreeIfNeeded()
         _ = window.makeFirstResponder(surface)
         surface.focusDidChange(true)

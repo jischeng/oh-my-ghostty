@@ -281,10 +281,10 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
             tab.objectWillChange.sink { [weak self] _ in
                 if self?.groupsByProject == true { self?.scheduleRefresh() }
             }.store(in: &metadataSubscriptions)
-            tab.$tabLastInteractionAt.dropFirst().sink { [weak self] _ in
+            tab.tabLastInteractionAtPublisher.dropFirst().sink { [weak self] _ in
                 if self?.followsRecency == true { self?.scheduleRefresh() }
             }.store(in: &metadataSubscriptions)
-            tab.$tabLastAgentActivityAt.dropFirst().sink { [weak self] _ in
+            tab.tabLastAgentActivityAtPublisher.dropFirst().sink { [weak self] _ in
                 if self?.followsRecency == true { self?.scheduleRefresh() }
             }.store(in: &metadataSubscriptions)
             // Only a change of state moves a tab into or out of Continue, or

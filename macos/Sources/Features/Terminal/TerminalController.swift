@@ -338,22 +338,34 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     let tabCreatedAt: Date
     @Published private(set) var tabLastActivatedAt: Date
     /// When an Agent in this tab last entered active work or a completion/attention state. Not persisted.
-    @Published private(set) var tabLastAgentActivityAt: Date?
+    /// Backed by a subject rather than `@Published` so recency updates do not
+    /// fire `objectWillChange` and invalidate the SwiftUI terminal shell.
+    private let tabLastAgentActivityAtSubject = CurrentValueSubject<Date?, Never>(nil)
+    var tabLastAgentActivityAt: Date? { tabLastAgentActivityAtSubject.value }
+    var tabLastAgentActivityAtPublisher: AnyPublisher<Date?, Never> {
+        tabLastAgentActivityAtSubject.eraseToAnyPublisher()
+    }
     /// When the user last sent terminal input or Quick Input to this tab.
     /// Selecting or viewing the tab never changes it. Persisted with the session.
-    @Published private(set) var tabLastInteractionAt: Date
+    /// Backed by a subject rather than `@Published` so typing and Quick Input
+    /// submission do not fire `objectWillChange` and disturb terminal focus.
+    private let tabLastInteractionAtSubject: CurrentValueSubject<Date, Never>
+    var tabLastInteractionAt: Date { tabLastInteractionAtSubject.value }
+    var tabLastInteractionAtPublisher: AnyPublisher<Date, Never> {
+        tabLastInteractionAtSubject.eraseToAnyPublisher()
+    }
 
     /// The only writer of `tabLastInteractionAt`. The rules for calling it
     /// are in TerminalController+TabInbox.swift.
     func recordTabInteraction(at date: Date) {
         guard tabLastInteractionAt != date else { return }
-        tabLastInteractionAt = date
+        tabLastInteractionAtSubject.send(date)
         scheduleRecentlyUsedTabReconciliation()
     }
 
     func recordTabAgentActivity(at date: Date) {
         guard tabLastAgentActivityAt != date else { return }
-        tabLastAgentActivityAt = date
+        tabLastAgentActivityAtSubject.send(date)
         scheduleRecentlyUsedTabReconciliation()
     }
 
@@ -676,7 +688,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         self.tabCreatedAt = createdAt
         self.tabLastActivatedAt = now
         // State saved before this field existed has no interaction date.
-        self.tabLastInteractionAt = tabLastInteractionAt ?? createdAt
+        self.tabLastInteractionAtSubject = CurrentValueSubject(tabLastInteractionAt ?? createdAt)
 
         let sessionBase = tree == nil
             ? Self.injectingSessionID(self.tabSessionID, into: resolvedBase)

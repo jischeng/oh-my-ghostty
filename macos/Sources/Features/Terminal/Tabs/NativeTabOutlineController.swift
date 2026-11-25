@@ -906,11 +906,12 @@ final class NativeTabCell: NSTableCellView {
     static let trailingInsetFromCellEdge: CGFloat = 12
 
     static func iconSizing(
-        preferredLogoSize: CGFloat = CGFloat(OhMyGhosttySettings.shared.tabIconSize)
+        preferredLogoSize: CGFloat? = nil
     ) -> NativeTabIconView.CustomSizing {
-        NativeTabIconView.CustomSizing(
+        let resolvedLogoSize = preferredLogoSize ?? CGFloat(OhMyGhosttySettings.shared.tabIconSize)
+        return NativeTabIconView.CustomSizing(
             composition: iconSize,
-            singleLogo: min(iconSize, max(12, preferredLogoSize)),
+            singleLogo: min(iconSize, max(12, resolvedLogoSize)),
             symbolBonus: 1,
             paneSize: 8.5
         )

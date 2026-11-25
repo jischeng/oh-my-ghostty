@@ -107,9 +107,10 @@ final class NativeCommandRevealMonitor {
             object: nil,
             queue: nil
         ) { [weak self] _ in
-            let handle = { [weak self] in
+            let handle: () -> Void = { [weak self] in
                 MainActor.assumeIsolated {
-                    self?.setLiveCommandHeld(false)
+                    guard let self else { return }
+                    self.setLiveCommandHeld(false)
                 }
             }
             if Thread.isMainThread {
@@ -123,9 +124,10 @@ final class NativeCommandRevealMonitor {
             object: nil,
             queue: nil
         ) { [weak self] _ in
-            let handle = { [weak self] in
+            let handle: () -> Void = { [weak self] in
                 MainActor.assumeIsolated {
-                    self?.publishIfNeeded()
+                    guard let self else { return }
+                    self.publishIfNeeded()
                 }
             }
             if Thread.isMainThread {

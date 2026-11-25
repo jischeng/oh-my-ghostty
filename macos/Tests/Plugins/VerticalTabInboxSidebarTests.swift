@@ -409,8 +409,10 @@ struct VerticalTabInboxSidebarTests {
         #expect(!toggle.isShown)
         #expect(abs(toggle.glyphRect.midX - toggle.bounds.midX) <= 0.01)
         #expect(abs(toggle.glyphRect.midY - toggle.bounds.midY) <= 0.01)
+        #expect(TabInboxHeaderButton.maxGlyphSlot == 16)
         #expect(toggle.glyphRect.width <= TabInboxHeaderButton.maxGlyphSlot + 0.01)
         #expect(toggle.glyphRect.height <= TabInboxHeaderButton.maxGlyphSlot + 0.01)
+        #expect(toggle.glyphRect.height >= 12)
         #expect(toggle.toolTip == strings.toggleInbox(shown: false))
         #expect(titles() == entries)
         // The Tabs view: no grouping, manual order.
@@ -661,6 +663,7 @@ struct VerticalTabInboxSidebarTests {
         #expect(button.toolTip == strings.toggleInbox(shown: false, attention: 2))
         #expect(value() == strings.inboxAttention(2))
         #expect(button.bounds.contains(button.badgeRect))
+        #expect(button.bounds.contains(button.badgeRect.insetBy(dx: -1, dy: -1)))
         try setAgentState(.error, on: controllers[0])
         sidebar.refresh()
         #expect(button.attentionCount == 3)

@@ -1,13 +1,15 @@
 import AppKit
 
 /// The sidebar header's inbox toggle. Matches sibling 24×24pt header icon controls
-/// (`12pt .medium` symbol scaled into a centered 14×14pt slot, `tray` with a 6×6pt
-/// accent dot when inactive and tabs wait for the user, `tray.fill` on a subtle
-/// borderless neutral active pill with `theme.foreground` glyph when shown).
+/// (`12pt .medium` symbol scaled into a centered 16×16pt slot — matching
+/// `NativeActionControl` so wide `tray`/`tray.fill` (~16×12.2pt) balances the optical
+/// weight and height of `rectangle.stack` next to it; `tray` with a 6×6pt accent dot
+/// when inactive and tabs wait for the user, `tray.fill` on a subtle borderless neutral
+/// active pill with `theme.foreground` glyph when shown).
 final class TabInboxHeaderButton: NativeActionControl {
     static let badgeDiameter: CGFloat = 6
     static let pillCornerRadius: CGFloat = 5
-    static let maxGlyphSlot: CGFloat = 14
+    static let maxGlyphSlot: CGFloat = 16
 
     private(set) var isShown = false
 

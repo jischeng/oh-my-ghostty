@@ -81,7 +81,7 @@ struct AITitleSanitizerTests {
         let cappedCJK = AITitleSanitizer.sanitize(cjk)
         #expect(cappedCJK == String(repeating: "会", count: 18))
         #expect(cappedCJK?.count == 18)
-        #expect(AITitleSanitizer.sanitize("修复 API 请求在弱网环境下的超时重试与幂等性校验问题") == "修复 API 请求在弱网环境下的超时重")
+        #expect(AITitleSanitizer.sanitize("修复 API 请求在弱网环境下的超时重试与幂等性校验问题") == "修复 API 请求在弱网环境下的超时重试")
         #expect(AITitleSanitizer.sanitize("重构客户端 NativeTabSidebarController") == "重构客户端")
 
         #expect(AITitleSanitizer.sanitize("会", maxWidth: 1) == nil)

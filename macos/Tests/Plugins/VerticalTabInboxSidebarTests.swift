@@ -1360,14 +1360,15 @@ struct VerticalTabInboxSidebarTests {
         let targetTab = try #require(sidebar.controllers.first)
         let surface = try #require(targetTab.surfaceTree.first)
         let conversation = try #require(AgentConversationID("99999999-aaaa-4bbb-8ccc-dddddddddddd"))
+        try setAgentState(.needsAttention, on: targetTab)
         targetTab.adoptAgentResumeDescriptor(
             .init(agent: .claude, conversationID: conversation, scope: .local, workingDirectory: "/tmp"),
             for: surface
         )
-        try setAgentState(.needsAttention, on: targetTab)
 
         let generator = BlockingTitleGenerator()
         let store = AgentConversationTitleStore()
+        store.set("旧标题", source: .generated, agent: .claude, conversationID: conversation)
         let coordinator = AgentConversationTitleCoordinator(
             store: store,
             generator: generator,

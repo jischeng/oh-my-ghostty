@@ -394,15 +394,17 @@ final class AgentConversationTitleCoordinator: ObservableObject {
         guard let flight = flights[target.key], flight.token == token else { return }
         flights[target.key] = nil
         syncPublishedFlightState()
-        guard flight.sawCompletedTurn, !flight.task.isCancelled else { return }
-        for owner in flight.owners {
-            request(
-                target,
-                trigger: .done,
-                owner: owner,
-                allowsGeneration: flight.generatingOwners.contains(owner)
-            )
-        }
+        guard flight.sawCompletedTurn, !flight.task.isCancelled,
+              isEnabled, mode() != .off, !flight.owners.isEmpty else { return }
+        start(
+            target,
+            delays: [.zero],
+            owners: flight.owners,
+            generatingOwners: flight.generatingOwners,
+            manualTabsByOwner: [:],
+            forced: false,
+            startsGenerating: false
+        )
     }
 
     private func generateTitle(

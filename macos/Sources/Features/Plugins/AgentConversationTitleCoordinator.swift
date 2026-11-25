@@ -787,7 +787,9 @@ final class AgentConversationTitleTracker {
                 agent: binding.agent,
                 conversationID: binding.conversationID,
                 remoteHost: binding.remoteHost,
-                projectName: Self.projectName(from: binding.workingDirectory)
+                projectName: Self.projectName(from: descriptor.workingDirectory)
+                    ?? Self.projectName(from: session.workingDirectory)
+                    ?? Self.projectName(from: surface.pwd)
             )
             nextSurfaceAllowsGeneration[surface.id] = allowsGeneration && !surface.hasUserSetTitle
         }
@@ -827,7 +829,9 @@ final class AgentConversationTitleTracker {
                 agent: binding.agent,
                 conversationID: binding.conversationID,
                 remoteHost: binding.remoteHost,
-                projectName: Self.projectName(from: binding.workingDirectory)
+                projectName: Self.projectName(from: descriptor.workingDirectory)
+                    ?? Self.projectName(from: session.workingDirectory)
+                    ?? Self.projectName(from: surface.pwd)
             )
             targets[surface.id] = target
             coordinator.request(

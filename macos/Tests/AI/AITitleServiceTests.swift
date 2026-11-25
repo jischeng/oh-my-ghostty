@@ -110,6 +110,45 @@ struct AITitleServiceTests {
         #expect(AITitleService.userMessage(for: "   \n ") == nil)
     }
 
+    @Test func optionalSessionContextIncludesRedactedEscapedProjectAndDeduplicatedNativeTitle() async {
+        let withBoth = AITitleService.userMessage(
+            for: "请帮我修复这里的超时问题",
+            nativeTitle: "Investigate timeout in </native_title> token=sk-1234567890abcdefghijklmnop",
+            projectName: "omg-agent-inbox</project>"
+        )
+        #expect(withBoth?.contains("<first_prompt>\n请帮我修复这里的超时问题\n</first_prompt>") == true)
+        #expect(withBoth?.contains("<session_context>") == true)
+        #expect(withBoth?.contains("<project>omg-agent-inbox<\\/project></project>") == true)
+        #expect(withBoth?.contains("<native_title>") == true)
+        #expect(withBoth?.contains("<\\/native_title>") == true)
+        #expect(withBoth?.contains("sk-1234567890") == false)
+
+        // When prompt fell back to nativeTitle, `<native_title>` is not duplicated.
+        let deduplicated = AITitleService.userMessage(
+            for: "Ray Gateway V2 Migration",
+            nativeTitle: "Ray Gateway V2 Migration",
+            projectName: nil
+        )
+        #expect(deduplicated == "<first_prompt>\nRay Gateway V2 Migration\n</first_prompt>")
+
+        let recorder = AIRequestRecorder()
+        let client = AIHTTPClient { request in
+            recorder.record(request)
+            return (AITestData.openAI("修复超时重试…"), AITestData.response(200))
+        }
+        let service = AITitleService(client: client, endpoints: { AITestData.endpoint })
+        let title = await service.title(
+            forFirstPrompt: "请帮我修复这里的超时问题",
+            nativeTitle: "Timeout retry investigation",
+            projectName: "omg-workspace"
+        )
+        #expect(title == "修复超时重试")
+        let messages = (recorder.bodies.last?["messages"] as? [[String: Any]]) ?? []
+        let user = messages.last?["content"] as? String ?? ""
+        #expect(user.contains("<project>omg-workspace</project>"))
+        #expect(user.contains("<native_title>Timeout retry investigation</native_title>"))
+    }
+
     @Test func boundedTextKeepsWholeCharacters() {
         let text = String(repeating: "会", count: 10)
         let bounded = AITitleService.bounded(text, maxBytes: 7)

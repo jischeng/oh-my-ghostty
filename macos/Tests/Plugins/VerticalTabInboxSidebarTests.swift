@@ -1327,4 +1327,154 @@ struct VerticalTabInboxSidebarTests {
         #expect(agentRemoteRow.titleLabel.frame.minX == NativeInboxMetrics.textLeadingX
             + NativeInboxMetrics.cloudIconWidth + NativeInboxMetrics.cloudIconGap)
     }
+
+    @Test func renamingSpinnerTrailingPriorityAndDisabledRenameMenuStatesInInboxAndSidebar() async throws {
+        actor BlockingTitleGenerator: AITitleGenerating {
+            private var continuations: [CheckedContinuation<Void, Never>] = []
+            private(set) var startedCount = 0
+
+            func title(forFirstPrompt prompt: String) async -> String? {
+                startedCount += 1
+                await withCheckedContinuation { continuations.append($0) }
+                return "精简收件箱标题"
+            }
+
+            func release() {
+                let pending = continuations
+                continuations.removeAll()
+                for continuation in pending { continuation.resume() }
+            }
+        }
+
+        let settings = OhMyGhosttySettings.shared
+        let restore = inboxSettings(view: .inbox, grouping: .date, ordering: .recentlyUsed)
+        let savedLanguage = settings.language
+        defer {
+            settings.language = savedLanguage
+            restore()
+        }
+        settings.language = .simplifiedChinese
+
+        let sidebar = try Sidebar()
+        defer { sidebar.close() }
+        let targetTab = try #require(sidebar.controllers.first)
+        let surface = try #require(targetTab.surfaceTree.first)
+        let conversation = try #require(AgentConversationID("99999999-aaaa-4bbb-8ccc-dddddddddddd"))
+        targetTab.adoptAgentResumeDescriptor(
+            .init(agent: .claude, conversationID: conversation, scope: .local, workingDirectory: "/tmp"),
+            for: surface
+        )
+        try setAgentState(.needsAttention, on: targetTab)
+
+        let generator = BlockingTitleGenerator()
+        let store = AgentConversationTitleStore()
+        let coordinator = AgentConversationTitleCoordinator(
+            store: store,
+            generator: generator,
+            loadSeed: { _ in .init(native: nil, firstPrompt: "请帮我精简标签页标题") },
+            mode: { .generate },
+            language: { .simplifiedChinese },
+            sleep: { _ in },
+            retryDelays: [.zero],
+            nativeGraceAttempts: 0
+        )
+        targetTab.startAgentConversationTitleTracking(coordinator: coordinator)
+        sidebar.refresh()
+
+        let row = try #require(sidebar.inbox.rowView(for: targetTab))
+        // Before rename starts, row shows `.status` badge (`needsAttention`).
+        #expect(row.trailingAccessory == .status)
+        #expect(row.renamingSpinner.isHidden)
+        #expect(!row.renamingSpinner.animationRequested)
+
+        // Start manual rename: row shows 12×12pt spinning indicator (`.renaming` > `.status`),
+        // context menu disables with `正在自动重命名…`, and sidebar `...` menu disables with `正在重命名工作区标签…`.
+        targetTab.autoRenameTab(force: true)
+        for _ in 0..<40 where await generator.startedCount == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        sidebar.refresh()
+        row.refreshPresentationNow(notifyHeightChange: false)
+        row.layoutSubtreeIfNeeded()
+
+        let strings = ChromeStrings.current
+        #expect(targetTab.isGeneratingTabTitle)
+        #expect(targetTab.isManualRenamingTab)
+        #expect(row.trailingAccessory == .renaming)
+        #expect(!row.renamingSpinner.isHidden)
+        #expect(row.renamingSpinner.animationRequested)
+        #expect(row.renamingSpinner.style == .spinning)
+        #expect(row.renamingSpinner.controlSize == .small)
+        #expect(row.renamingSpinner.frame.size == NSSize(width: 12, height: 12))
+        #expect(abs(row.renamingSpinner.frame.midX - row.closeButton.frame.midX) <= 0.5)
+        #expect(abs(row.renamingSpinner.frame.midY - 18) <= 0.5)
+        #expect(row.statusView.isHidden)
+        #expect(row.shortcutLabel.isHidden)
+        #expect(row.closeButton.isHidden)
+
+        // Priority check on Inbox row: `hover ✕ > ⌘-held shortcut > renaming spinner > status badge > empty`.
+        sidebar.inbox.isCommandModifierHeldOverride = true
+        defer { sidebar.inbox.isCommandModifierHeldOverride = nil }
+        row.layoutSubtreeIfNeeded()
+        #expect(row.trailingAccessory == .shortcut)
+        #expect(row.renamingSpinner.isHidden)
+        #expect(!row.renamingSpinner.animationRequested)
+        #expect(!row.shortcutLabel.isHidden)
+
+        sidebar.inbox.updateHover(at: NSPoint(x: row.frame.midX, y: row.frame.midY))
+        row.layoutSubtreeIfNeeded()
+        #expect(row.trailingAccessory == .close)
+        #expect(!row.closeButton.isHidden)
+        #expect(row.shortcutLabel.isHidden)
+        #expect(row.renamingSpinner.isHidden)
+
+        sidebar.inbox.clearHover()
+        sidebar.inbox.isCommandModifierHeldOverride = nil
+        row.layoutSubtreeIfNeeded()
+        #expect(row.trailingAccessory == .renaming)
+        #expect(!row.renamingSpinner.isHidden)
+        #expect(row.renamingSpinner.animationRequested)
+
+        // Context menu shows disabled "正在自动重命名…".
+        let inFlightContextMenu = NativeTabContextMenu.make(for: targetTab, host: targetTab)
+        let renamingItem = try #require(inFlightContextMenu.items.first { $0.title == strings.renamingTab })
+        #expect(!renamingItem.isEnabled)
+        #expect(!inFlightContextMenu.items.contains { $0.title == strings.autoRenameTab })
+
+        // Sidebar `...` menu shows disabled "正在重命名工作区标签…".
+        let options = try #require(descendants(sidebar.host).compactMap { $0 as? NativeOptionsControl }.first)
+        let workspaceRenamingEntry = options.entries.first { entry in
+            if case let .action(title, _, enabled, _, _) = entry {
+                return title == strings.renamingWorkspaceTabs && !enabled
+            }
+            return false
+        }
+        #expect(workspaceRenamingEntry != nil)
+
+        // Finish generation: spinner disappears immediately back to `.status`, and menus re-enable.
+        await generator.release()
+        await coordinator.waitUntilIdle()
+        sidebar.refresh()
+        row.refreshPresentationNow(notifyHeightChange: false)
+        row.layoutSubtreeIfNeeded()
+
+        #expect(!targetTab.isGeneratingTabTitle)
+        #expect(!targetTab.isManualRenamingTab)
+        #expect(row.trailingAccessory == .status)
+        #expect(row.renamingSpinner.isHidden)
+        #expect(!row.renamingSpinner.animationRequested)
+        #expect(!row.statusView.isHidden)
+
+        let finishedContextMenu = NativeTabContextMenu.make(for: targetTab, host: targetTab)
+        let autoRenameItem = try #require(finishedContextMenu.items.first { $0.title == strings.autoRenameTab })
+        #expect(autoRenameItem.isEnabled)
+
+        let restoredEntry = options.entries.first { entry in
+            if case let .action(title, _, enabled, _, _) = entry {
+                return title == strings.autoRenameWorkspaceTabs && enabled
+            }
+            return false
+        }
+        #expect(restoredEntry != nil)
+    }
 }

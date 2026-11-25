@@ -304,4 +304,21 @@ struct AIHTTPClientTests {
         }
         #expect(recorder.all.isEmpty)
     }
+
+    @Test func systemPromptEnforcesConciseEllipsisFreeSelfContainedTitles() {
+        let chinese = AIHTTPClient.systemPrompt(language: .simplifiedChinese)
+        let english = AIHTTPClient.systemPrompt(language: .english)
+
+        #expect(chinese.contains("Reply in Simplified Chinese"))
+        #expect(english.contains("Reply in English"))
+        for prompt in [chinese, english] {
+            #expect(prompt.contains("4–10 Chinese characters"))
+            #expect(prompt.contains("2–4 English words"))
+            #expect(prompt.contains("Never use ellipses"))
+            #expect(prompt.contains("never cut off mid-phrase"))
+            #expect(prompt.contains("shorthand"))
+            #expect(!prompt.localizedCaseInsensitiveContains("antigravity"))
+            #expect(!prompt.localizedCaseInsensitiveContains("claude-mem"))
+        }
+    }
 }

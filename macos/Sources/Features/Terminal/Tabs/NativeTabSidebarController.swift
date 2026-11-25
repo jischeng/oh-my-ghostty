@@ -270,6 +270,7 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
             OhMyGhosttySettings.shared.objectWillChange.eraseToAnyPublisher(),
             SessionRuntimeBackgroundStore.shared.objectWillChange.eraseToAnyPublisher(),
             AgentConversationTitleStore.shared.objectWillChange.eraseToAnyPublisher(),
+            AgentConversationTitleCoordinator.shared.generationStateChanges.eraseToAnyPublisher(),
             NotificationCenter.default.publisher(for: tabPresentationDidChangeNotification)
                 .map { _ in () }
                 .eraseToAnyPublisher(),
@@ -295,6 +296,9 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
         for tab in tabs {
             tab.objectWillChange.sink { [weak self] _ in
                 if self?.groupsByProject == true { self?.scheduleRefresh() }
+            }.store(in: &metadataSubscriptions)
+            tab.agentConversationTitleCoordinator.generationStateChanges.sink { [weak self] in
+                self?.scheduleRefresh()
             }.store(in: &metadataSubscriptions)
             tab.tabLastInteractionAtPublisher.dropFirst().sink { [weak self] _ in
                 if self?.followsRecency == true { self?.scheduleRefresh() }
@@ -431,7 +435,12 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
             entries.append(.action(strings.orderingTitle(mode), checked: ordering == mode) { setOrdering(mode) })
         }
         entries.append(.separator)
-        entries.append(.action(strings.autoRenameWorkspaceTabs, symbol: "sparkles") { [weak self] in
+        let isRenamingWorkspace = tabs.contains { $0.isManualRenamingTab }
+        entries.append(.action(
+            isRenamingWorkspace ? strings.renamingWorkspaceTabs : strings.autoRenameWorkspaceTabs,
+            symbol: "sparkles",
+            enabled: !isRenamingWorkspace
+        ) { [weak self] in
             guard let self else { return }
             TerminalController.autoRenameWorkspaceTabs(self.tabs)
         })

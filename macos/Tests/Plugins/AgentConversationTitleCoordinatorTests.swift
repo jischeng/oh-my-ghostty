@@ -26,13 +26,36 @@ struct AgentConversationTitleCoordinatorTests {
     }
 
     private actor Generator: AITitleGenerating {
-        private let result: String?
-        private(set) var prompts: [String] = []
+        struct Call: Equatable, Sendable {
+            let prompt: String
+            let nativeTitle: String?
+            let projectName: String?
+        }
 
-        init(_ result: String?) { self.result = result }
+        private let result: String?
+        private let gate: (@Sendable () async -> Void)?
+        private(set) var prompts: [String] = []
+        private(set) var calls: [Call] = []
+
+        init(_ result: String?, gate: (@Sendable () async -> Void)? = nil) {
+            self.result = result
+            self.gate = gate
+        }
 
         func title(forFirstPrompt prompt: String) async -> String? {
+            await title(forFirstPrompt: prompt, nativeTitle: nil, projectName: nil)
+        }
+
+        func title(
+            forFirstPrompt prompt: String,
+            nativeTitle: String?,
+            projectName: String?
+        ) async -> String? {
             prompts.append(prompt)
+            calls.append(.init(prompt: prompt, nativeTitle: nativeTitle, projectName: projectName))
+            if let gate {
+                await gate()
+            }
             return result
         }
     }
@@ -104,14 +127,16 @@ struct AgentConversationTitleCoordinatorTests {
             _ trigger: Coordinator.Trigger,
             owner: UUID? = nil,
             allowsGeneration: Bool = true,
-            force: Bool = false
+            force: Bool = false,
+            manualTabID: UUID? = nil
         ) {
             coordinator.request(
                 target,
                 trigger: trigger,
                 owner: owner ?? self.owner,
                 allowsGeneration: allowsGeneration,
-                force: force
+                force: force,
+                manualTabID: manualTabID
             )
         }
     }
@@ -614,5 +639,160 @@ struct AgentConversationTitleCoordinatorTests {
         ))
         #expect(store.title(agent: .claude, conversationID: defaultFixture.target.conversationID) == "定时任务重构")
         #expect(store.record(agent: .claude, conversationID: defaultFixture.target.conversationID)?.source == .generated)
+    }
+
+    @Test func inFlightGenerationCoalescesDuplicateTriggersAndPublishesRenamingState() async throws {
+        actor Gate {
+            private var continuations: [CheckedContinuation<Void, Never>] = []
+            private(set) var enteredCount = 0
+
+            func wait() async {
+                enteredCount += 1
+                await withCheckedContinuation { continuations.append($0) }
+            }
+
+            func releaseAll() {
+                let pending = continuations
+                continuations.removeAll()
+                for continuation in pending { continuation.resume() }
+            }
+        }
+
+        let workspaceFixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { workspaceFixture.close() }
+        let tab = try workspaceFixture.tab()
+        let surface = try #require(tab.surfaceTree.first)
+        let conversation = try #require(AgentConversationID("77777777-8888-4999-8aaa-bbbbbbbbbbbb"))
+        tab.adoptAgentResumeDescriptor(
+            .init(
+                agent: .claude,
+                conversationID: conversation,
+                scope: .local,
+                workingDirectory: "/Users/dev/code/omg-workspace"
+            ),
+            for: surface
+        )
+
+        let gate = Gate()
+        let store = AgentConversationTitleStore()
+        let seeds = Seeds(rest: Seed(
+            native: "Please help me investigate why inbox title rename truncates with dots",
+            firstPrompt: "排查收件箱标题自动重命名出现省略号的原因"
+        ))
+        let generator = Generator("收件箱标题防截断") {
+            await gate.wait()
+        }
+        let coordinator = Coordinator(
+            store: store,
+            generator: generator,
+            loadSeed: { await seeds.next($0) },
+            mode: { .generate },
+            alwaysUseAI: { true },
+            language: { .simplifiedChinese },
+            sleep: { _ in }
+        )
+
+        tab.startAgentConversationTitleTracking(coordinator: coordinator)
+        for _ in 0..<50 where await gate.enteredCount == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await gate.enteredCount == 1)
+
+        let key = AgentConversationTitleStore.Key(agent: .claude, conversationID: conversation)
+        #expect(coordinator.generatingTargets == [key])
+        #expect(coordinator.manualRenamingTabIDs.isEmpty)
+        #expect(tab.isGeneratingTabTitle)
+        #expect(!tab.isManualRenamingTab)
+
+        // While automatic generation is ALREADY in flight, triggering manual `autoRenameTab` and
+        // `autoRenameWorkspaceTabs` coalesces into the existing flight instead of spawning duplicate LLM calls!
+        tab.autoRenameTab(force: true)
+        TerminalController.autoRenameWorkspaceTabs([tab])
+        coordinator.request(
+            .init(agent: .claude, conversationID: conversation, remoteHost: nil),
+            trigger: .working,
+            owner: UUID()
+        )
+        #expect(coordinator.inFlightCount == 1)
+        #expect(coordinator.generatingTargets == [key])
+        #expect(coordinator.manualRenamingTabIDs == [tab.tabSessionID])
+        #expect(tab.isGeneratingTabTitle)
+        #expect(tab.isManualRenamingTab)
+
+        await gate.releaseAll()
+        await coordinator.waitUntilIdle()
+
+        #expect(coordinator.generatingTargets.isEmpty)
+        #expect(coordinator.manualRenamingTabIDs.isEmpty)
+        #expect(!tab.isGeneratingTabTitle)
+        #expect(!tab.isManualRenamingTab)
+        let recordedCalls = await generator.calls
+        #expect(recordedCalls == [
+            .init(
+                prompt: "排查收件箱标题自动重命名出现省略号的原因",
+                nativeTitle: "Please help me investigate why inbox title rename truncates with dots",
+                projectName: "omg-workspace"
+            ),
+        ])
+        #expect(store.title(agent: .claude, conversationID: conversation) == "收件箱标题防截断")
+        #expect(store.record(agent: .claude, conversationID: conversation)?.source == .generated)
+    }
+
+    @Test func forcedGeneratedTitleSurvivesSubsequentDoneTurnsUntilGenuineCLIRename() async {
+        let rawLongAITitle = "请帮我把整个项目里的所有定时任务都重构一下并且补充完整的单元测试"
+        let seeds = Seeds([
+            Seed(native: rawLongAITitle, firstPrompt: "重构定时任务"),
+            Seed(native: rawLongAITitle, firstPrompt: "重构定时任务"),
+            Seed(native: "手动 /rename 后的新标题", firstPrompt: "重构定时任务"),
+        ], rest: Seed(native: "手动 /rename 后的新标题", firstPrompt: "重构定时任务"))
+
+        // Even with `alwaysUseAI == false`, a manual forced rename (`force: true`) records the
+        // superseded native title so later `.done` turns neither re-invoke AI nor revert to `rawLongAITitle`.
+        let fixture = Fixture(
+            seeds: seeds,
+            generated: "重构定时任务",
+            mode: .generate,
+            alwaysUseAI: false,
+            language: .simplifiedChinese
+        )
+        fixture.request(.done, force: true, manualTabID: UUID())
+        await fixture.coordinator.waitUntilIdle()
+        #expect(fixture.record?.title == "重构定时任务")
+        #expect(fixture.record?.source == .generated)
+        #expect(await fixture.generator.prompts.count == 1)
+
+        fixture.request(.working)
+        #expect(fixture.coordinator.inFlightCount == 0)
+
+        fixture.request(.done)
+        await fixture.coordinator.waitUntilIdle()
+        #expect(fixture.record?.title == "重构定时任务")
+        #expect(fixture.record?.source == .generated)
+        #expect(await fixture.generator.prompts.count == 1)
+
+        // When the user later runs `/rename` in the CLI (`native` changes), `.done` upgrades to `.native`.
+        fixture.request(.done)
+        await fixture.coordinator.waitUntilIdle()
+        #expect(fixture.record?.title == "手动 /rename 后的新标题")
+        #expect(fixture.record?.source == .native)
+        #expect(await fixture.generator.prompts.count == 1)
+
+        // ASCII-only `.generated` title in Chinese mode (e.g. "OAuth2 PKCE") also never loops on `.done`.
+        let asciiChinese = Fixture(
+            seeds: Seeds(rest: Seed(native: "Implement OAuth2 PKCE flow", firstPrompt: "Implement OAuth2 PKCE")),
+            generated: "OAuth2 PKCE",
+            mode: .generate,
+            alwaysUseAI: false,
+            language: .simplifiedChinese
+        )
+        asciiChinese.request(.working)
+        await asciiChinese.coordinator.waitUntilIdle()
+        #expect(asciiChinese.record?.title == "OAuth2 PKCE")
+        #expect(await asciiChinese.generator.prompts.count == 1)
+
+        asciiChinese.request(.done)
+        await asciiChinese.coordinator.waitUntilIdle()
+        #expect(asciiChinese.record?.title == "OAuth2 PKCE")
+        #expect(await asciiChinese.generator.prompts.count == 1)
     }
 }

@@ -27,6 +27,9 @@ struct AgentConversationTitleRecord: Codable, Equatable, Sendable {
     var source: AgentConversationTitleSource
     /// The SSH destination the conversation ran on; nil for a local one.
     var remoteHost: String?
+    /// Native title that was active when an AI `.generated` title replaced it,
+    /// so later `.done` checks only upgrade when the Agent's native title changes.
+    var supersededNativeTitle: String?
     var updatedAt: Date
 }
 
@@ -165,7 +168,10 @@ final class AgentConversationTitleStore: ObservableObject {
             }
             var loaded: [Key: Record] = [:]
             for var record in archive.records {
-                guard let title = Self.displayTitle(record.title, columns: Self.maximumTitleColumns) else { continue }
+                let rawTitle = (record.source == .generated || record.source == .prompt)
+                    ? Self.trimTrailingEllipsis(record.title)
+                    : record.title
+                guard let title = Self.displayTitle(rawTitle, columns: Self.maximumTitleColumns) else { continue }
                 record.title = title
                 let key = Key(agent: record.agent, conversationID: record.conversationID)
                 if let existing = loaded[key], existing.updatedAt >= record.updatedAt { continue }
@@ -203,10 +209,15 @@ final class AgentConversationTitleStore: ObservableObject {
         conversationID: AgentConversationID,
         remoteHost: String? = nil,
         force: Bool = false,
-        allowGeneratedOverNative: Bool = false
+        allowGeneratedOverNative: Bool = false,
+        supersededNativeTitle: String? = nil
     ) -> Bool {
         let columns = source == .prompt ? Self.promptTitleColumns : Self.maximumTitleColumns
-        guard let title = Self.displayTitle(title, columns: columns) else { return false }
+        let prepared = (source == .generated || source == .prompt) ? Self.trimTrailingEllipsis(title) : title
+        guard let title = Self.displayTitle(prepared, columns: columns) else { return false }
+        let normalizedSuperseded = source == .generated
+            ? supersededNativeTitle.flatMap { Self.displayTitle($0, columns: Self.maximumTitleColumns) }
+            : nil
         let key = Key(agent: agent, conversationID: conversationID)
         if let existing = records[key], !force {
             let renamed = source == .native && existing.source == .native && existing.title != title
@@ -217,14 +228,25 @@ final class AgentConversationTitleStore: ObservableObject {
             let generatedOverride = allowGeneratedOverNative
                 && source == .generated
                 && existing.source == .native
+            let unchangedSuperseded = source == .native
+                && existing.source == .generated
+                && existing.supersededNativeTitle == title
+            if unchangedSuperseded {
+                return false
+            }
             guard source.rank > existing.source.rank || renamed || localizedUpgrade || generatedOverride else {
                 return false
             }
         }
         var next = records
         next[key] = Record(
-            agent: agent, conversationID: conversationID, title: title,
-            source: source, remoteHost: remoteHost, updatedAt: now()
+            agent: agent,
+            conversationID: conversationID,
+            title: title,
+            source: source,
+            remoteHost: remoteHost,
+            supersededNativeTitle: normalizedSuperseded,
+            updatedAt: now()
         )
         records = bounded(next)
         persist()
@@ -289,9 +311,11 @@ final class AgentConversationTitleStore: ObservableObject {
     // MARK: Title text
 
     /// A title as one line that fits a tab: the first line with text, without
-    /// control or direction-override characters, cut to `columns` display
-    /// columns. nil when nothing readable is left.
+    /// control or direction-override characters, cut cleanly to `columns`
+    /// display columns without baking in an ellipsis (AppKit's `NSTextField`
+    /// renders dynamic truncation when the sidebar is narrow). nil when empty.
     nonisolated static func displayTitle(_ raw: String, columns: Int) -> String? {
+        guard columns > 0 else { return nil }
         let firstLine = raw.split(whereSeparator: \.isNewline)
             .lazy
             .map { line -> String in
@@ -309,14 +333,38 @@ final class AgentConversationTitleStore: ObservableObject {
         guard let line = firstLine else { return nil }
         var used = 0
         var result = ""
+        var firstDropped: Character?
         for character in line {
             let width = isWide(character) ? 2 : 1
             guard used + width <= columns else {
-                let trimmed = result.trimmingCharacters(in: .whitespaces)
-                return trimmed.isEmpty ? nil : trimmed + "…"
+                firstDropped = character
+                break
             }
             result.append(character)
             used += width
+        }
+        guard let firstDropped else { return result }
+        if let lastKept = result.last,
+           !lastKept.isWhitespace,
+           !firstDropped.isWhitespace,
+           !isWide(lastKept),
+           !isWide(firstDropped),
+           let spaceIndex = result.lastIndex(where: \.isWhitespace) {
+            let wordBounded = String(result[..<spaceIndex]).trimmingCharacters(in: .whitespaces)
+            if !wordBounded.isEmpty {
+                result = wordBounded
+            }
+        }
+        let trimmed = result.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    nonisolated private static func trimTrailingEllipsis(_ text: String) -> String {
+        var result = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        while let last = result.last, last == "…" || last == "⋯" || last == "." || last.isWhitespace {
+            // Preserve legitimate abbreviations like "Node.js" where only a single period isn't trailing,
+            // and strip trailing ".", "...", "…", "⋯".
+            result.removeLast()
         }
         return result
     }

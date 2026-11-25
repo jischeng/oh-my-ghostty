@@ -15,7 +15,7 @@ import ObjectiveC
 /// Work is keyed by conversation, so several panes showing one conversation
 /// share one lookup, and it stops when the last tab that asked for it is gone.
 @MainActor
-final class AgentConversationTitleCoordinator {
+final class AgentConversationTitleCoordinator: ObservableObject {
     typealias Key = AgentConversationTitleStore.Key
 
     /// One conversation and the host its transcript is on.
@@ -24,8 +24,28 @@ final class AgentConversationTitleCoordinator {
         let conversationID: AgentConversationID
         /// The SSH destination of a remote conversation; nil for a local one.
         let remoteHost: String?
+        /// Optional workspace/repository folder name for shorthand context; excluded from identity equality.
+        let projectName: String?
+
+        init(
+            agent: SupportedAgent,
+            conversationID: AgentConversationID,
+            remoteHost: String?,
+            projectName: String? = nil
+        ) {
+            self.agent = agent
+            self.conversationID = conversationID
+            self.remoteHost = remoteHost
+            self.projectName = projectName
+        }
 
         var key: Key { .init(agent: agent, conversationID: conversationID) }
+
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.agent == rhs.agent
+                && lhs.conversationID == rhs.conversationID
+                && lhs.remoteHost == rhs.remoteHost
+        }
     }
 
     enum Trigger: String, Equatable, Sendable {
@@ -70,14 +90,26 @@ final class AgentConversationTitleCoordinator {
     private let settleInterval: TimeInterval
     private let isEnabled: Bool
 
+    @Published private(set) var generatingTargets: Set<Key> = []
+    @Published private(set) var manualRenamingTabIDs: Set<UUID> = []
+    /// Sent after `generatingTargets` or `manualRenamingTabIDs` mutates so chrome
+    /// observers read the updated state immediately without `@Published` `willSet` lag.
+    let generationStateChanges = PassthroughSubject<Void, Never>()
+
     private struct Flight {
         let token: UUID
         let task: Task<Void, Never>
         var owners: Set<UUID>
         var generatingOwners: Set<UUID>
+        var manualTabsByOwner: [UUID: Set<UUID>] = [:]
         var forced = false
+        var isGenerating = false
         /// A turn finished while the conversation was being read.
         var sawCompletedTurn = false
+
+        var manualTabIDs: Set<UUID> {
+            manualTabsByOwner.values.reduce(into: Set<UUID>()) { $0.formUnion($1) }
+        }
     }
 
     private var flights: [Key: Flight] = [:]
@@ -127,6 +159,46 @@ final class AgentConversationTitleCoordinator {
         mode() == .generate && alwaysUseAI()
     }
 
+    /// Whether AI or manual title generation is currently running for `controller`.
+    func isGeneratingTitle(for controller: TerminalController) -> Bool {
+        if manualRenamingTabIDs.contains(controller.tabSessionID) {
+            return true
+        }
+        guard !generatingTargets.isEmpty else { return false }
+        if let override = controller.titleOverride?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !override.isEmpty {
+            return false
+        }
+        for surface in controller.surfaceTree where !surface.hasUserSetTitle {
+            guard let descriptor = controller.agentResumeDescriptor(for: surface),
+                  let conversationID = descriptor.conversationID else { continue }
+            if generatingTargets.contains(Key(agent: descriptor.agent, conversationID: conversationID)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Whether an explicit manual or workspace-batch rename is in flight for `controller`.
+    func isManualRenaming(for controller: TerminalController) -> Bool {
+        manualRenamingTabIDs.contains(controller.tabSessionID)
+    }
+
+    private func syncPublishedFlightState() {
+        let nextGenerating = Set(flights.compactMap { key, flight in
+            flight.isGenerating ? key : nil
+        })
+        let nextManual = flights.values.reduce(into: Set<UUID>()) { result, flight in
+            result.formUnion(flight.manualTabIDs)
+        }
+        let generatingChanged = generatingTargets != nextGenerating
+        let manualChanged = manualRenamingTabIDs != nextManual
+        guard generatingChanged || manualChanged else { return }
+        if generatingChanged { generatingTargets = nextGenerating }
+        if manualChanged { manualRenamingTabIDs = nextManual }
+        generationStateChanges.send()
+    }
+
     /// Asks for the title of `target`.
     ///
     /// - Parameters:
@@ -135,12 +207,15 @@ final class AgentConversationTitleCoordinator {
     ///     skipping background LLM requests until the override is cleared.
     ///   - force: When true, bypasses cached titles and `settleInterval` to
     ///     immediately re-fetch the seed and regenerate the title.
+    ///   - manualTabID: The tab session ID when initiated from an explicit user
+    ///     Auto-Rename action, enabling menu and row progress feedback.
     func request(
         _ target: Target,
         trigger: Trigger,
         owner: UUID,
         allowsGeneration: Bool = true,
-        force: Bool = false
+        force: Bool = false,
+        manualTabID: UUID? = nil
     ) {
         guard isEnabled else { return }
         let currentMode = mode()
@@ -151,11 +226,19 @@ final class AgentConversationTitleCoordinator {
         let key = target.key
         var initialOwners: Set<UUID> = [owner]
         var initialGeneratingOwners: Set<UUID> = allowsGeneration ? [owner] : []
+        var initialManualTabs: [UUID: Set<UUID>] = [:]
+        if let manualTabID {
+            initialManualTabs[owner] = [manualTabID]
+        }
         if let existingFlight = flights[key] {
-            if force && !existingFlight.forced {
+            let alreadyGenerating = existingFlight.isGenerating || generatingTargets.contains(key)
+            if force && !existingFlight.forced && !alreadyGenerating {
                 existingFlight.task.cancel()
                 initialOwners.formUnion(existingFlight.owners)
                 initialGeneratingOwners.formUnion(existingFlight.generatingOwners)
+                for (existingOwner, tabs) in existingFlight.manualTabsByOwner {
+                    initialManualTabs[existingOwner, default: []].formUnion(tabs)
+                }
                 flights[key] = nil
             } else {
                 flights[key]?.owners.insert(owner)
@@ -164,7 +247,17 @@ final class AgentConversationTitleCoordinator {
                 } else {
                     flights[key]?.generatingOwners.remove(owner)
                 }
+                if let manualTabID {
+                    flights[key]?.manualTabsByOwner[owner, default: []].insert(manualTabID)
+                }
+                if force {
+                    flights[key]?.forced = true
+                    if currentMode == .generate, !(flights[key]?.generatingOwners.isEmpty ?? true) {
+                        flights[key]?.isGenerating = true
+                    }
+                }
                 if trigger == .done { flights[key]?.sawCompletedTurn = true }
+                syncPublishedFlightState()
                 skip(target, trigger, "already being read")
                 return
             }
@@ -221,7 +314,9 @@ final class AgentConversationTitleCoordinator {
             delays: delays,
             owners: initialOwners,
             generatingOwners: initialGeneratingOwners,
-            forced: force
+            manualTabsByOwner: initialManualTabs,
+            forced: force,
+            startsGenerating: force && currentMode == .generate && !initialGeneratingOwners.isEmpty
         )
     }
 
@@ -240,14 +335,20 @@ final class AgentConversationTitleCoordinator {
 
     /// Forgets a caller. Work nobody else asked for is cancelled.
     func release(owner: UUID) {
+        var mutated = false
         for (key, flight) in flights where flight.owners.contains(owner) {
+            mutated = true
             if flight.owners.count == 1 {
                 flight.task.cancel()
                 flights[key] = nil
             } else {
                 flights[key]?.owners.remove(owner)
                 flights[key]?.generatingOwners.remove(owner)
+                flights[key]?.manualTabsByOwner.removeValue(forKey: owner)
             }
+        }
+        if mutated {
+            syncPublishedFlightState()
         }
     }
 
@@ -262,12 +363,15 @@ final class AgentConversationTitleCoordinator {
         }
     }
 
+    // swiftlint:disable:next function_parameter_count
     private func start(
         _ target: Target,
         delays: [Duration],
         owners: Set<UUID>,
         generatingOwners: Set<UUID>,
-        forced: Bool
+        manualTabsByOwner: [UUID: Set<UUID>],
+        forced: Bool,
+        startsGenerating: Bool
     ) {
         let token = UUID()
         let task = Task { [weak self] in
@@ -279,13 +383,17 @@ final class AgentConversationTitleCoordinator {
             task: task,
             owners: owners,
             generatingOwners: generatingOwners,
-            forced: forced
+            manualTabsByOwner: manualTabsByOwner,
+            forced: forced,
+            isGenerating: startsGenerating
         )
+        syncPublishedFlightState()
     }
 
     private func finish(_ target: Target, token: UUID) {
         guard let flight = flights[target.key], flight.token == token else { return }
         flights[target.key] = nil
+        syncPublishedFlightState()
         guard flight.sawCompletedTurn, !flight.task.isCancelled else { return }
         for owner in flight.owners {
             request(
@@ -295,6 +403,29 @@ final class AgentConversationTitleCoordinator {
                 allowsGeneration: flight.generatingOwners.contains(owner)
             )
         }
+    }
+
+    private func generateTitle(
+        for target: Target,
+        prompt: String,
+        nativeTitle: String? = nil
+    ) async -> String? {
+        let token = flights[target.key]?.token
+        if let token, flights[target.key]?.token == token {
+            flights[target.key]?.isGenerating = true
+            syncPublishedFlightState()
+        }
+        defer {
+            if let token, flights[target.key]?.token == token {
+                flights[target.key]?.isGenerating = false
+                syncPublishedFlightState()
+            }
+        }
+        return await generator.title(
+            forFirstPrompt: prompt,
+            nativeTitle: nativeTitle,
+            projectName: target.projectName
+        )
     }
 
     private static func nonEmptyTrimmed(_ text: String?) -> String? {
@@ -351,15 +482,17 @@ final class AgentConversationTitleCoordinator {
         )
         let allowsGeneration = flights[target.key].map { !$0.generatingOwners.isEmpty } ?? true
         if mode() == .generate, allowsGeneration, let input = prompt ?? native ?? existingTitle {
-            if let title = await generator.title(forFirstPrompt: input) {
+            if let title = await generateTitle(for: target, prompt: input, nativeTitle: native) {
                 guard !Task.isCancelled else { return }
+                settledAt[target.key] = now()
                 store.set(
                     title,
                     source: .generated,
                     agent: target.agent,
                     conversationID: target.conversationID,
                     remoteHost: target.remoteHost,
-                    force: true
+                    force: true,
+                    supersededNativeTitle: native
                 )
                 return
             }
@@ -386,20 +519,33 @@ final class AgentConversationTitleCoordinator {
     }
 
     private func handleNativeTitle(_ target: Target, native: String, firstPrompt: String?) async {
+        let existing = store.record(agent: target.agent, conversationID: target.conversationID)
+        let displayNative = AgentConversationTitleStore.displayTitle(
+            native,
+            columns: AgentConversationTitleStore.maximumTitleColumns
+        )
+        if let existing, existing.source == .generated,
+           let displayNative, existing.supersededNativeTitle == displayNative {
+            return
+        }
         let allowsGeneration = flights[target.key].map { !$0.generatingOwners.isEmpty } ?? true
         let alwaysGenerate = prefersGeneratedTitles
         let shouldGenerateFromNative = allowsGeneration && (
             alwaysGenerate || (prefersChineseTitles && !AgentConversationTitleStore.containsCJK(native))
         )
         if shouldGenerateFromNative {
-            if let existing = store.record(agent: target.agent, conversationID: target.conversationID),
-               existing.source == .generated,
-               alwaysGenerate || AgentConversationTitleStore.containsCJK(existing.title) {
-                return
+            if let existing, existing.source == .generated {
+                let satisfiesLanguage = !prefersChineseTitles
+                    || AgentConversationTitleStore.containsCJK(existing.title)
+                    || settledAt[target.key] != nil
+                if alwaysGenerate || satisfiesLanguage {
+                    return
+                }
             }
             let input = Self.nonEmptyTrimmed(firstPrompt) ?? native
-            if let generated = await generator.title(forFirstPrompt: input) {
+            if let generated = await generateTitle(for: target, prompt: input, nativeTitle: native) {
                 guard !Task.isCancelled else { return }
+                settledAt[target.key] = now()
                 store.set(
                     generated,
                     source: .generated,
@@ -407,7 +553,8 @@ final class AgentConversationTitleCoordinator {
                     conversationID: target.conversationID,
                     remoteHost: target.remoteHost,
                     force: true,
-                    allowGeneratedOverNative: alwaysGenerate
+                    allowGeneratedOverNative: alwaysGenerate,
+                    supersededNativeTitle: native
                 )
                 return
             }
@@ -433,7 +580,11 @@ final class AgentConversationTitleCoordinator {
         let allowsGeneration = flights[target.key].map { !$0.generatingOwners.isEmpty } ?? true
         guard allowsGeneration else { return false }
         settledAt[target.key] = now()
-        guard let generated = await generator.title(forFirstPrompt: existing.title) else { return false }
+        guard let generated = await generateTitle(
+            for: target,
+            prompt: existing.title,
+            nativeTitle: existing.title
+        ) else { return false }
         guard !Task.isCancelled else { return true }
         store.set(
             generated,
@@ -442,7 +593,8 @@ final class AgentConversationTitleCoordinator {
             conversationID: target.conversationID,
             remoteHost: target.remoteHost,
             force: true,
-            allowGeneratedOverNative: alwaysGenerate
+            allowGeneratedOverNative: alwaysGenerate,
+            supersededNativeTitle: existing.title
         )
         return true
     }
@@ -453,14 +605,22 @@ final class AgentConversationTitleCoordinator {
         allowsGeneration: Bool
     ) async {
         let existing = store.record(agent: target.agent, conversationID: target.conversationID)?.source
-        guard existing == nil || existing == .prompt else { return }
+        let forcedFlight = flights[target.key]?.forced == true
+        guard forcedFlight || existing == nil || existing == .prompt else { return }
         let currentMode = mode()
         if currentMode == .generate, allowsGeneration {
             // Only the opening prompt leaves the process; the service redacts and bounds it.
-            if let title = await generator.title(forFirstPrompt: prompt) {
+            if let title = await generateTitle(for: target, prompt: prompt, nativeTitle: nil) {
                 guard !Task.isCancelled else { return }
-                store.set(title, source: .generated, agent: target.agent,
-                          conversationID: target.conversationID, remoteHost: target.remoteHost)
+                let forceStore = flights[target.key]?.forced == true
+                store.set(
+                    title,
+                    source: .generated,
+                    agent: target.agent,
+                    conversationID: target.conversationID,
+                    remoteHost: target.remoteHost,
+                    force: forceStore
+                )
                 return
             }
             AgentConversationTitleLog.info(
@@ -510,6 +670,8 @@ final class AgentConversationTitleTracker {
     private var targets: [UUID: Target] = [:]
     private var states: [UUID: TabActivityState] = [:]
     private var lastAllowsGeneration = true
+    private var lastIsGenerating = false
+    private var lastIsManualRenaming = false
     /// Why each Agent pane without a readable conversation has none, as last
     /// logged, so the reason is reported when it changes and not on every signal.
     private var unreadable: [UUID: String] = [:]
@@ -519,6 +681,8 @@ final class AgentConversationTitleTracker {
         self.controller = controller
         self.coordinator = coordinator
         self.lastAllowsGeneration = Self.allowsGeneration(in: controller)
+        self.lastIsGenerating = coordinator.isGeneratingTitle(for: controller)
+        self.lastIsManualRenaming = coordinator.isManualRenaming(for: controller)
         let changes: [AnyPublisher<Void, Never>] = [
             controller.$agentResumeDescriptors.map { _ in () }.eraseToAnyPublisher(),
             controller.$agentActivities.map { _ in () }.eraseToAnyPublisher(),
@@ -560,6 +724,12 @@ final class AgentConversationTitleTracker {
         coordinator.store.titleChanges
             .sink { [weak self] key in self?.titleChanged(key) }
             .store(in: &subscriptions)
+        coordinator.generationStateChanges
+            .sink { [weak self] in self?.generationStateChanged() }
+            .store(in: &subscriptions)
+        if lastIsGenerating || lastIsManualRenaming {
+            NotificationCenter.default.post(name: .ghosttyTabPresentationDidChange, object: controller)
+        }
         scheduleEvaluation()
     }
 
@@ -614,7 +784,10 @@ final class AgentConversationTitleTracker {
                 continue
             }
             nextTargets[surface.id] = Target(
-                agent: binding.agent, conversationID: binding.conversationID, remoteHost: binding.remoteHost
+                agent: binding.agent,
+                conversationID: binding.conversationID,
+                remoteHost: binding.remoteHost,
+                projectName: Self.projectName(from: binding.workingDirectory)
             )
             nextSurfaceAllowsGeneration[surface.id] = allowsGeneration && !surface.hasUserSetTitle
         }
@@ -641,6 +814,9 @@ final class AgentConversationTitleTracker {
     func autoRename(force: Bool) {
         guard let controller else { return }
         let allowsGeneration = Self.allowsGeneration(in: controller)
+        if force {
+            lastAllowsGeneration = allowsGeneration
+        }
         for surface in controller.surfaceTree {
             guard let descriptor = controller.agentResumeDescriptor(for: surface) else { continue }
             let session = controller.paneSessionContext(for: surface)
@@ -650,7 +826,8 @@ final class AgentConversationTitleTracker {
             let target = Target(
                 agent: binding.agent,
                 conversationID: binding.conversationID,
-                remoteHost: binding.remoteHost
+                remoteHost: binding.remoteHost,
+                projectName: Self.projectName(from: binding.workingDirectory)
             )
             targets[surface.id] = target
             coordinator.request(
@@ -658,9 +835,20 @@ final class AgentConversationTitleTracker {
                 trigger: .done,
                 owner: owner,
                 allowsGeneration: allowsGeneration && !surface.hasUserSetTitle,
-                force: force
+                force: force,
+                manualTabID: force ? controller.tabSessionID : nil
             )
         }
+    }
+
+    static func projectName(from workingDirectory: String?) -> String? {
+        guard let raw = workingDirectory?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty, raw != "~", raw != "/" else { return nil }
+        let expanded = (raw as NSString).expandingTildeInPath
+        if expanded == NSHomeDirectory() || expanded == "/" { return nil }
+        let name = URL(fileURLWithPath: expanded).lastPathComponent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty || name == "/" || name == "~" ? nil : name
     }
 
     /// What a pane's state asks for: a conversation it just became bound to is
@@ -692,6 +880,16 @@ final class AgentConversationTitleTracker {
         }) else { return }
         NotificationCenter.default.post(name: .ghosttyTabPresentationDidChange, object: controller)
     }
+
+    private func generationStateChanged() {
+        guard let controller else { return }
+        let nextGenerating = coordinator.isGeneratingTitle(for: controller)
+        let nextManual = coordinator.isManualRenaming(for: controller)
+        guard nextGenerating != lastIsGenerating || nextManual != lastIsManualRenaming else { return }
+        lastIsGenerating = nextGenerating
+        lastIsManualRenaming = nextManual
+        NotificationCenter.default.post(name: .ghosttyTabPresentationDidChange, object: controller)
+    }
 }
 
 private nonisolated(unsafe) var agentConversationTitleTrackerKey: UInt8 = 0
@@ -707,6 +905,25 @@ extension AgentConversationTitleStore {
 }
 
 extension TerminalController {
+    /// The title coordinator active on this tab (its tracker's coordinator when
+    /// injected by tests, otherwise `.shared`).
+    @MainActor
+    var agentConversationTitleCoordinator: AgentConversationTitleCoordinator {
+        (objc_getAssociatedObject(self, &agentConversationTitleTrackerKey) as? AgentConversationTitleTracker)?
+            .coordinator ?? .shared
+    }
+
+    /// Whether AI or manual title generation is currently running for this tab.
+    @MainActor
+    var isGeneratingTabTitle: Bool {
+        agentConversationTitleCoordinator.isGeneratingTitle(for: self)
+    }
+
+    /// Whether an explicit manual/batch rename is currently running for this tab.
+    @MainActor
+    var isManualRenamingTab: Bool {
+        agentConversationTitleCoordinator.isManualRenaming(for: self)
+    }
     /// The conversation title `surface` shows in the Inbox, if any.
     func agentConversationTitle(for surface: Ghostty.SurfaceView?) -> String? {
         AgentConversationTitleStore.shared.title(

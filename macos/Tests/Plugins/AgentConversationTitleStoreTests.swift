@@ -47,26 +47,51 @@ struct AgentConversationTitleStoreTests {
         #expect(published == 4)
     }
 
-    @Test func titlesAreOneReadableLineThatFitsATab() {
+    @Test func titlesAreOneReadableLineWithoutBakedInEllipsis() throws {
         let columns = AgentConversationTitleStore.promptTitleColumns
+        #expect(columns == 36)
         #expect(AgentConversationTitleStore.displayTitle("  \n\n  Fix   the\tbuild  \nand more", columns: columns) == "Fix the build")
         #expect(AgentConversationTitleStore.displayTitle(" \n\t ", columns: columns) == nil)
         #expect(AgentConversationTitleStore.displayTitle("a\u{0007}b\u{202E}c", columns: columns) == "abc")
 
         let long = String(repeating: "word ", count: 40)
         let cut = AgentConversationTitleStore.displayTitle(long, columns: 20)
-        #expect(cut == "word word word word…")
-        // A wide character takes two columns.
+        #expect(cut == "word word word word")
+        // A wide character takes two columns and cuts cleanly without appending "…".
         #expect(AgentConversationTitleStore.displayTitle(String(repeating: "标", count: 30), columns: 20)
-            == String(repeating: "标", count: 10) + "…")
+            == String(repeating: "标", count: 10))
         #expect(AgentConversationTitleStore.displayTitle("修复登录测试", columns: 20) == "修复登录测试")
 
         let store = AgentConversationTitleStore()
         #expect(!store.set("\n \n", source: .native, agent: .claude, conversationID: conversation))
         #expect(store.set(long, source: .prompt, agent: .claude, conversationID: conversation))
         let prompt = store.title(agent: .claude, conversationID: conversation) ?? ""
-        #expect(prompt.hasSuffix("…"))
-        #expect(prompt.count <= columns + 1)
+        #expect(!prompt.hasSuffix("…"))
+        #expect(!prompt.hasSuffix("."))
+        #expect(prompt.count <= columns)
+
+        // Generated titles and reloaded archives also strip trailing ellipses.
+        let file = temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let persisted = AgentConversationTitleStore(fileURL: file)
+        #expect(persisted.set("重命名为...", source: .generated, agent: .claude, conversationID: conversation, force: true))
+        #expect(persisted.title(agent: .claude, conversationID: conversation) == "重命名为")
+        persisted.flushPendingWrites()
+
+        // Simulate a legacy archive that stored "重命名为…" before the fix.
+        let legacy: [String: Any] = [
+            "version": 1,
+            "records": [[
+                "agent": "claude",
+                "conversationID": conversation.rawValue,
+                "title": "重命名为…",
+                "source": "generated",
+                "updatedAt": Date().timeIntervalSinceReferenceDate,
+            ]],
+        ]
+        try JSONSerialization.data(withJSONObject: legacy).write(to: file)
+        let reopened = AgentConversationTitleStore(fileURL: file)
+        #expect(reopened.title(agent: .claude, conversationID: conversation) == "重命名为")
     }
 
     @Test func lookupFollowsThePaneDescriptorAndTheMode() {
@@ -192,15 +217,21 @@ struct AgentConversationTitleStoreTests {
         #expect(!store.set("另一份中文标题", source: .generated, agent: .codex, conversationID: conversation))
         #expect(store.title(agent: .codex, conversationID: conversation) == "网关迁移收尾")
 
-        // Force replaces any existing record regardless of rank or language.
+        // Force replaces any existing record regardless of rank or language, and records
+        // supersededNativeTitle so an unchanged native title cannot overwrite it on `.done`.
         #expect(store.set(
             "强制生成标题",
             source: .generated,
             agent: .codex,
             conversationID: conversation,
-            force: true
+            force: true,
+            supersededNativeTitle: "网关迁移收尾"
         ))
         #expect(store.record(agent: .codex, conversationID: conversation)?.source == .generated)
         #expect(store.title(agent: .codex, conversationID: conversation) == "强制生成标题")
+        #expect(!store.set("网关迁移收尾", source: .native, agent: .codex, conversationID: conversation))
+        #expect(store.title(agent: .codex, conversationID: conversation) == "强制生成标题")
+        #expect(store.set("用户手动重命名", source: .native, agent: .codex, conversationID: conversation))
+        #expect(store.title(agent: .codex, conversationID: conversation) == "用户手动重命名")
     }
 }

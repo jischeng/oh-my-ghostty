@@ -2,8 +2,11 @@ import AppKit
 
 /// Shared single-slot trailing priority across both `.tabs` (`NativeTabCell`) and `.inbox` (`NativeInboxRowView`).
 enum NativeTabTrailingAccessory: Equatable, Sendable {
+    static let renamingSpinnerSize: CGFloat = 12
+
     case none
     case status
+    case renaming
     case shortcut
     case close
 
@@ -12,6 +15,7 @@ enum NativeTabTrailingAccessory: Equatable, Sendable {
         canClose: Bool,
         isCommandHeld: Bool,
         hasShortcut: Bool,
+        isRenaming: Bool = false,
         hasStatus: Bool
     ) -> Self {
         if isHovered && canClose {
@@ -19,6 +23,9 @@ enum NativeTabTrailingAccessory: Equatable, Sendable {
         }
         if isCommandHeld && hasShortcut {
             return .shortcut
+        }
+        if isRenaming {
+            return .renaming
         }
         if hasStatus {
             return .status

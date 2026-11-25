@@ -4,6 +4,17 @@ import Foundation
 /// or the endpoint failed. Never throws to the caller.
 protocol AITitleGenerating: Sendable {
     func title(forFirstPrompt prompt: String) async -> String?
+    func title(forFirstPrompt prompt: String, nativeTitle: String?, projectName: String?) async -> String?
+}
+
+extension AITitleGenerating {
+    func title(
+        forFirstPrompt prompt: String,
+        nativeTitle: String?,
+        projectName: String?
+    ) async -> String? {
+        await title(forFirstPrompt: prompt)
+    }
 }
 
 /// Generates conversation titles with a bounded background channel: at most two
@@ -70,13 +81,62 @@ actor AITitleService: AITitleGenerating {
         await MainActor.run { OhMyGhosttySettings.shared.language }
     }
 
-    /// Redacts, bounds and tags the first prompt so the endpoint only ever sees quoted text.
-    static func userMessage(for prompt: String, maxBytes: Int = Limits.default.maxPromptBytes) -> String? {
-        let redacted = AISecretRedactor.redact(prompt)
-        let content = bounded(redacted, maxBytes: maxBytes)
-            .replacingOccurrences(of: "</first_prompt>", with: "<\\/first_prompt>", options: .caseInsensitive)
-        guard !content.isEmpty else { return nil }
-        return "<first_prompt>\n\(content)\n</first_prompt>"
+    /// Redacts, bounds and tags the first prompt (plus optional native title and project context)
+    /// so the endpoint only ever sees quoted text.
+    static func userMessage(
+        for prompt: String,
+        nativeTitle: String? = nil,
+        projectName: String? = nil,
+        maxBytes: Int = Limits.default.maxPromptBytes
+    ) -> String? {
+        let content = sanitizedTagBody(prompt, closingTags: ["</first_prompt>"], maxBytes: maxBytes)
+        let cleanNative = nativeTitle.flatMap { raw -> String? in
+            let body = sanitizedTagBody(
+                raw,
+                closingTags: ["</native_title>", "</session_context>"],
+                maxBytes: min(maxBytes, 400)
+            )
+            return body.isEmpty || body == content ? nil : body
+        }
+        let cleanProject = projectName.flatMap { raw -> String? in
+            let body = sanitizedTagBody(
+                raw,
+                closingTags: ["</project>", "</session_context>"],
+                maxBytes: min(maxBytes, 120)
+            )
+            return body.isEmpty ? nil : body
+        }
+        guard !content.isEmpty || cleanNative != nil else { return nil }
+        var sections: [String] = []
+        if !content.isEmpty {
+            sections.append("<first_prompt>\n\(content)\n</first_prompt>")
+        }
+        if cleanNative != nil || cleanProject != nil {
+            var contextLines: [String] = ["<session_context>"]
+            if let cleanProject {
+                contextLines.append("<project>\(cleanProject)</project>")
+            }
+            if let cleanNative {
+                contextLines.append("<native_title>\(cleanNative)</native_title>")
+            }
+            contextLines.append("</session_context>")
+            sections.append(contextLines.joined(separator: "\n"))
+        }
+        return sections.joined(separator: "\n\n")
+    }
+
+    private static func sanitizedTagBody(
+        _ raw: String,
+        closingTags: [String],
+        maxBytes: Int
+    ) -> String {
+        let redacted = AISecretRedactor.redact(raw)
+        var content = bounded(redacted, maxBytes: maxBytes)
+        for tag in closingTags {
+            let escaped = "<\\/" + tag.dropFirst(2)
+            content = content.replacingOccurrences(of: tag, with: escaped, options: .caseInsensitive)
+        }
+        return content
     }
 
     /// Cuts at a character boundary so the endpoint never receives broken UTF-8.
@@ -95,11 +155,24 @@ actor AITitleService: AITitleGenerating {
     }
 
     func title(forFirstPrompt prompt: String) async -> String? {
+        await title(forFirstPrompt: prompt, nativeTitle: nil, projectName: nil)
+    }
+
+    func title(
+        forFirstPrompt prompt: String,
+        nativeTitle: String?,
+        projectName: String? = nil
+    ) async -> String? {
         guard !Task.isCancelled, let endpoint = await endpoints() else { return nil }
         noteEndpoint(endpoint)
         currentEndpoint = endpoint
         guard await waitUntilResolved(endpoint),
-              let message = Self.userMessage(for: prompt, maxBytes: limits.maxPromptBytes),
+              let message = Self.userMessage(
+                  for: prompt,
+                  nativeTitle: nativeTitle,
+                  projectName: projectName,
+                  maxBytes: limits.maxPromptBytes
+              ),
               acquireSlot(endpoint) else { return nil }
         defer { releaseSlot() }
 

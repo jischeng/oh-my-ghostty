@@ -1,10 +1,11 @@
 import Foundation
 
-/// Turns raw model output into a tab-sized title: one clean line, no markdown or
-/// quoting, at most `maxWidth` display columns (wide CJK characters count as two).
+/// Turns raw model output into a tab-sized title: one clean line, no markdown,
+/// quoting, or baked-in ellipses, bounded to `maxWidth` display columns (wide CJK
+/// characters count as two). AppKit's `NSTextField` handles visual width truncation.
 enum AITitleSanitizer {
-    /// Two or three words: a tab name, not a summary sentence.
-    static let maxWidth = 24
+    /// Guardrail against runaway model sentences; fits concise English or CJK titles cleanly.
+    static let maxWidth = 36
 
     private static let titlePrefixes = ["title:", "标题：", "标题:", "会话标题：", "会话标题:"]
 
@@ -102,31 +103,57 @@ enum AITitleSanitizer {
     }
 
     private static func trimEdgePunctuation(_ text: String) -> String {
-        var text = text
-        let trailing: Set<Character> = [".", "。", "!", "！", ",", "，", ";", "；", ":", "：", "、"]
-        while let last = text.last, trailing.contains(last) {
-            text.removeLast()
+        var text = text.trimmingCharacters(in: .whitespaces)
+        let trailing: Set<Character> = [
+            ".", "。", "…", "⋯", "!", "！", ",", "，", ";", "；", ":", "：", "、",
+        ]
+        while let last = text.last {
+            if trailing.contains(last) || last.isWhitespace {
+                text.removeLast()
+            } else {
+                break
+            }
         }
-        while let first = text.first, first == "," || first == "，" || first == ";" || first == "；" {
-            text.removeFirst()
+        let leading: Set<Character> = [",", "，", ";", "；", ".", "…", "⋯"]
+        while let first = text.first {
+            if leading.contains(first) || first.isWhitespace {
+                text.removeFirst()
+            } else {
+                break
+            }
         }
-        return text.trimmingCharacters(in: .whitespaces)
+        return text
     }
 
     private static func truncate(_ text: String, maxWidth: Int) -> String? {
         guard maxWidth > 0 else { return nil }
         guard width(text) > maxWidth else { return text }
-        guard maxWidth > 1 else { return nil }
         var kept = ""
         var used = 0
+        var firstDropped: Character?
         for character in text {
             let next = used + width(character)
-            if next > maxWidth - 1 { break }
+            if next > maxWidth {
+                firstDropped = character
+                break
+            }
             kept.append(character)
             used = next
         }
-        kept = kept.trimmingCharacters(in: .whitespaces)
-        return kept.isEmpty ? nil : kept + "…"
+        if let lastKept = kept.last,
+           let firstDropped,
+           !lastKept.isWhitespace,
+           !firstDropped.isWhitespace,
+           width(lastKept) == 1,
+           width(firstDropped) == 1,
+           let spaceIndex = kept.lastIndex(where: \.isWhitespace) {
+            let wordBounded = String(kept[..<spaceIndex]).trimmingCharacters(in: .whitespaces)
+            if !wordBounded.isEmpty {
+                kept = wordBounded
+            }
+        }
+        kept = trimEdgePunctuation(kept)
+        return kept.isEmpty ? nil : kept
     }
 
     static func width(_ text: String) -> Int {

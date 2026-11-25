@@ -919,4 +919,148 @@ struct VerticalNativeTabOutlineTests {
         monitor.syncFromCurrentModifiers()
         #expect(monitor.isCommandHeld)
     }
+
+    @Test func nativeTabCellShowsTwelvePointRenamingSpinnerWithExactTrailingPriority() async throws {
+        actor BlockingGenerator: AITitleGenerating {
+            private var continuations: [CheckedContinuation<Void, Never>] = []
+            private(set) var startedCount = 0
+
+            func title(forFirstPrompt prompt: String) async -> String? {
+                startedCount += 1
+                await withCheckedContinuation { continuations.append($0) }
+                return "Short Tab Title"
+            }
+
+            func release() {
+                let pending = continuations
+                continuations.removeAll()
+                for continuation in pending { continuation.resume() }
+            }
+        }
+
+        let fixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { fixture.close() }
+        let first = try fixture.tab()
+        let second = try fixture.tab(parent: first)
+        let surface = try #require(first.surfaceTree.first)
+        let conversation = try #require(AgentConversationID("12121212-3434-4567-89ab-cdef01234567"))
+        first.adoptAgentResumeDescriptor(
+            .init(agent: .codex, conversationID: conversation, scope: .local, workingDirectory: "/repo"),
+            for: surface
+        )
+
+        let generator = BlockingGenerator()
+        let store = AgentConversationTitleStore()
+        let titleCoordinator = AgentConversationTitleCoordinator(
+            store: store,
+            generator: generator,
+            loadSeed: { _ in .init(native: nil, firstPrompt: "Investigate flaky tab test") },
+            mode: { .generate },
+            language: { .english },
+            sleep: { _ in },
+            retryDelays: [.zero],
+            nativeGraceAttempts: 0
+        )
+        first.startAgentConversationTitleTracking(coordinator: titleCoordinator)
+
+        let attention = TabActivity(
+            source: "codex", state: .needsAttention, label: nil, message: nil, detail: nil, progress: nil,
+            icon: .init(kind: .bundledAsset, name: "AgentOpenAILogo")
+        )
+        let tabs = [first, second]
+        func makeConfig() -> NativeTabOutlineConfiguration {
+            NativeTabOutlineConfiguration(
+                groups: GhosttyTabOrganizationModel().groups(tabs: tabs, grouping: .none, ordering: .manual),
+                selectedID: ObjectIdentifier(first),
+                layoutState: first.tabLayoutState,
+                controller: first,
+                rowHeight: 36,
+                presentation: { tab in
+                    .init(
+                        title: "Tab \(tab.actualIndex)",
+                        remoteBreadcrumb: nil,
+                        shortcut: "⌘\(tab.actualIndex)",
+                        icon: .systemSymbol("terminal"),
+                        activity: tab.actualIndex == 1 ? attention : nil,
+                        selected: tab.actualIndex == 1,
+                        hovered: false
+                    )
+                }
+            )
+        }
+
+        let outlineController = NativeTabOutlineController(makeConfig())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 260, height: 180),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = outlineController.view
+        defer { window.contentView = nil; window.close() }
+
+        outlineController.update(makeConfig())
+        outlineController.view.layoutSubtreeIfNeeded()
+        let row = try #require(outlineController.outline.rowView(atRow: 0, makeIfNecessary: true) as? NativeTabRowView)
+        let cell = try #require(outlineController.outline.view(atColumn: 0, row: 0, makeIfNecessary: true) as? NativeTabCell)
+
+        // Initially `.status` (`needsAttention`).
+        #expect(cell.trailingAccessory == .status)
+        #expect(cell.renamingSpinner.isHidden)
+
+        // Trigger automatic AI generation: `.renaming` overrides `.status` with a 12×12pt spinner.
+        titleCoordinator.request(
+            .init(agent: .codex, conversationID: conversation, remoteHost: nil),
+            trigger: .working,
+            owner: UUID()
+        )
+        for _ in 0..<40 where await generator.startedCount == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try await Task.sleep(for: .milliseconds(20))
+        cell.layoutSubtreeIfNeeded()
+
+        #expect(cell.trailingAccessory == .renaming)
+        #expect(!cell.trailingSlot.isHidden)
+        #expect(!cell.renamingSpinner.isHidden)
+        #expect(cell.renamingSpinner.animationRequested)
+        #expect(cell.renamingSpinner.style == .spinning)
+        #expect(cell.renamingSpinner.controlSize == .small)
+        #expect(cell.renamingSpinner.frame.size == NSSize(width: 12, height: 12))
+        #expect(cell.status.isHidden)
+        #expect(cell.shortcut.isHidden)
+        #expect(cell.closeButton.isHidden)
+
+        // `⌘`-held shortcut overrides `.renaming`.
+        outlineController.isCommandModifierHeldOverride = true
+        defer { outlineController.isCommandModifierHeldOverride = nil }
+        cell.layoutSubtreeIfNeeded()
+        #expect(cell.trailingAccessory == .shortcut)
+        #expect(!cell.shortcut.isHidden)
+        #expect(cell.renamingSpinner.isHidden)
+
+        // Hover `✕` overrides both `⌘`-held shortcut and `.renaming`.
+        row.isHovered = true
+        cell.layoutSubtreeIfNeeded()
+        #expect(cell.trailingAccessory == .close)
+        #expect(!cell.closeButton.isHidden)
+        #expect(cell.shortcut.isHidden)
+        #expect(cell.renamingSpinner.isHidden)
+
+        // Exiting hover and releasing `⌘` restores `.renaming`, then finishes cleanly to `.status`.
+        row.isHovered = false
+        outlineController.isCommandModifierHeldOverride = nil
+        cell.layoutSubtreeIfNeeded()
+        #expect(cell.trailingAccessory == .renaming)
+
+        await generator.release()
+        await titleCoordinator.waitUntilIdle()
+        try await Task.sleep(for: .milliseconds(20))
+        cell.layoutSubtreeIfNeeded()
+        #expect(cell.trailingAccessory == .status)
+        #expect(cell.renamingSpinner.isHidden)
+        #expect(!cell.renamingSpinner.animationRequested)
+        #expect(!cell.status.isHidden)
+    }
 }

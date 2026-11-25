@@ -133,6 +133,7 @@ final class NativeInboxRowView: NSView {
     let remoteCloudView = NSImageView()
     let titleLabel = NSTextField(labelWithString: "")
     let statusView = NSImageView()
+    let renamingSpinner = NativeProgressIndicator()
     let shortcutLabel = NSTextField(labelWithString: "")
     let closeButton = NativeInboxCloseButton()
     let subtitleCloudView = NSImageView()
@@ -151,6 +152,7 @@ final class NativeInboxRowView: NSView {
     private(set) var hasRemoteBreadcrumb = false
     private(set) var showsRemoteCloud = false
     private(set) var hasStatusBadge = false
+    private(set) var isRenamingTitle = false
     private(set) var trailingAccessory: NativeTabTrailingAccessory = .none
 
     /// Returns `true` when the leading icon (single or split panes) already consists
@@ -255,6 +257,10 @@ final class NativeInboxRowView: NSView {
 
         statusView.imageScaling = .scaleProportionallyDown
         statusView.isHidden = true
+        renamingSpinner.style = .spinning
+        renamingSpinner.controlSize = .small
+        renamingSpinner.isDisplayedWhenStopped = false
+        renamingSpinner.isHidden = true
         shortcutLabel.isHidden = true
         closeButton.isHidden = true
         closeButton.onPress = { [weak self] in
@@ -262,7 +268,7 @@ final class NativeInboxRowView: NSView {
         }
 
         for child in [
-            iconView, remoteCloudView, titleLabel, statusView,
+            iconView, remoteCloudView, titleLabel, statusView, renamingSpinner,
             shortcutLabel, closeButton, subtitleCloudView, subtitleLabel,
         ] {
             addSubview(child)
@@ -326,6 +332,9 @@ final class NativeInboxRowView: NSView {
                    !controller.surfaceTree.contains(where: { $0 === surface }) { return }
                 self.scheduleRefresh()
             }
+            .store(in: &observations)
+        controller.agentConversationTitleCoordinator.generationStateChanges
+            .sink { [weak self] in self?.scheduleRefresh() }
             .store(in: &observations)
     }
 
@@ -413,16 +422,21 @@ final class NativeInboxRowView: NSView {
     }
 
     func updateTrailingVisibility() {
+        isRenamingTitle = configuredTab?.controller.isGeneratingTabTitle == true
+        renamingSpinner.toolTip = ChromeStrings.current.renamingTab
         let next = NativeTabTrailingAccessory.resolve(
             isHovered: isHovered,
             canClose: canClose,
             isCommandHeld: isCommandHeld,
             hasShortcut: !shortcutLabel.stringValue.isEmpty,
+            isRenaming: isRenamingTitle,
             hasStatus: hasStatusBadge
         )
         trailingAccessory = next
         closeButton.isHidden = next != .close
         shortcutLabel.isHidden = next != .shortcut
+        renamingSpinner.isHidden = next != .renaming
+        renamingSpinner.setAnimating(next == .renaming)
         statusView.isHidden = next != .status
         needsLayout = true
     }
@@ -460,6 +474,17 @@ final class NativeInboxRowView: NSView {
             height: shortcutSize.height
         )
 
+        let spinnerEdge = NativeTabTrailingAccessory.renamingSpinnerSize
+        let spinnerX = rightEdge - (closeEdge + spinnerEdge) / 2
+        renamingSpinner.frame = renamingSpinner.isHidden
+            ? .zero
+            : NSRect(
+                x: spinnerX,
+                y: topMidY - spinnerEdge / 2,
+                width: spinnerEdge,
+                height: spinnerEdge
+            )
+
         let statusEdge = NativeInboxMetrics.statusBadgeSize
         let statusX = rightEdge - (closeEdge + statusEdge) / 2
         statusView.frame = statusView.isHidden
@@ -477,6 +502,8 @@ final class NativeInboxRowView: NSView {
             titleMaxX = closeButton.frame.minX - 6
         case .shortcut:
             titleMaxX = shortcutLabel.frame.minX - 6
+        case .renaming:
+            titleMaxX = renamingSpinner.frame.minX - 6
         case .status:
             titleMaxX = statusView.frame.minX - 6
         case .none:

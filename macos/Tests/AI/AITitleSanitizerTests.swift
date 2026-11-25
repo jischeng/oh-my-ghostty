@@ -40,31 +40,53 @@ struct AITitleSanitizerTests {
         #expect(AITitleSanitizer.sanitize("Release\u{202E} plan") == "Release plan")
     }
 
-    @Test func trimsTrailingPunctuationButKeepsQuestions() {
+    @Test func trimsTrailingPunctuationAndEllipsesButKeepsQuestions() {
         #expect(AITitleSanitizer.sanitize("Release plan.") == "Release plan")
         #expect(AITitleSanitizer.sanitize("Release plan！") == "Release plan")
         #expect(AITitleSanitizer.sanitize("\"Release plan.\"") == "Release plan")
         #expect(AITitleSanitizer.sanitize("Release plan?") == "Release plan?")
-        #expect(AITitleSanitizer.sanitize("Release plan…") == "Release plan…")
+        #expect(AITitleSanitizer.sanitize("Release plan…") == "Release plan")
+        #expect(AITitleSanitizer.sanitize("Release plan...") == "Release plan")
+        #expect(AITitleSanitizer.sanitize("重命名为...") == "重命名为")
+        #expect(AITitleSanitizer.sanitize("“重命名为……”") == "重命名为")
         #expect(AITitleSanitizer.sanitize("Release plan:") == "Release plan")
+        #expect(AITitleSanitizer.sanitize("Fix Node.js") == "Fix Node.js")
+        #expect(AITitleSanitizer.sanitize("...") == nil)
+        #expect(AITitleSanitizer.sanitize("…\nReal title…") == "Real title")
     }
 
-    @Test func capsAtTwentyFourDisplayColumnsWithCJKCountingDouble() {
+    @Test func capsAtThirtySixDisplayColumnsCleanlyWithoutBakedInEllipsis() {
+        #expect(AITitleSanitizer.maxWidth == 36)
+
+        // Concise 13–18 CJK character titles fit within 36 columns without any chop or ellipsis.
+        let sixteenCJK = "修复收件箱标签页自动重命名省略号"
+        #expect(AITitleSanitizer.sanitize(sixteenCJK) == sixteenCJK)
+        #expect(AITitleSanitizer.sanitize(String(repeating: "会", count: 18)) == String(repeating: "会", count: 18))
+
+        // Runaway single-token ASCII cuts at 36 columns without appending "…".
         let ascii = String(repeating: "a", count: 60)
         let capped = AITitleSanitizer.sanitize(ascii)
-        #expect(capped == String(repeating: "a", count: 23) + "…")
-        #expect(AITitleSanitizer.width(capped ?? "") == 24)
+        #expect(capped == String(repeating: "a", count: 36))
+        #expect(AITitleSanitizer.width(capped ?? "") == 36)
+        #expect(capped?.contains("…") == false)
 
+        // Runaway multi-word English cuts cleanly at a word boundary without appending "…".
+        let sentence = "Fix the flaky login test across CI runners and retry"
+        let wordBounded = AITitleSanitizer.sanitize(sentence)
+        #expect(wordBounded == "Fix the flaky login test across CI")
+        #expect(AITitleSanitizer.width(wordBounded ?? "") <= 36)
+
+        // Runaway CJK cuts at character boundary without appending "…"; mixed CJK + half-cut ASCII word drops the broken word.
         let cjk = String(repeating: "会", count: 30)
         let cappedCJK = AITitleSanitizer.sanitize(cjk)
-        #expect(cappedCJK == String(repeating: "会", count: 11) + "…")
-        #expect(cappedCJK?.count == 12)
+        #expect(cappedCJK == String(repeating: "会", count: 18))
+        #expect(cappedCJK?.count == 18)
+        #expect(AITitleSanitizer.sanitize("修复 API 请求在弱网环境下的超时重试与幂等性校验问题") == "修复 API 请求在弱网环境下的超时重")
+        #expect(AITitleSanitizer.sanitize("重构客户端 NativeTabSidebarController") == "重构客户端")
 
-        // 24 columns of CJK is exactly the limit and is not truncated.
-        #expect(AITitleSanitizer.sanitize(String(repeating: "会", count: 12)) == String(repeating: "会", count: 12))
         #expect(AITitleSanitizer.sanitize("会", maxWidth: 1) == nil)
         #expect(AITitleSanitizer.sanitize("abc", maxWidth: 0) == nil)
-        #expect(AITitleSanitizer.sanitize("abcdef", maxWidth: 4) == "abc…")
+        #expect(AITitleSanitizer.sanitize("abcdef", maxWidth: 4) == "abcd")
     }
 
     @Test func measuresHalfwidthAndWideCharacters() {

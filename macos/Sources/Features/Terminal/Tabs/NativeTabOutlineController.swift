@@ -32,10 +32,15 @@ enum NativeTabContextMenu {
     static func make(for tab: TerminalController, host: TerminalController) -> NSMenu {
         let strings = ChromeStrings.current
         let workspaces = tab.workspaceCoordinator.store.workspaces
+        let isRenaming = tab.isGeneratingTabTitle
         var entries: [NativeMenuEntry] = [
             .action(strings.newTab, symbol: "plus") { [weak tab] in tab?.newVerticalTab() },
             .action(strings.renameTab, symbol: "pencil") { [weak tab] in tab?.promptTabTitle() },
-            .action(strings.autoRenameTab, symbol: "sparkles") { [weak tab] in tab?.autoRenameTab(force: true) },
+            .action(
+                isRenaming ? strings.renamingTab : strings.autoRenameTab,
+                symbol: "sparkles",
+                enabled: !isRenaming
+            ) { [weak tab] in tab?.autoRenameTab(force: true) },
             .separator,
         ]
         if workspaces.count > 1 {
@@ -922,6 +927,7 @@ final class NativeTabCell: NSTableCellView {
     let label = NSTextField(labelWithString: "")
     let shortcut = NSTextField(labelWithString: "")
     let status = NSImageView()
+    let renamingSpinner = NativeProgressIndicator()
     let closeButton = NativeInboxCloseButton()
     let trailingSlot = NSView()
     private(set) var rowStack: NSStackView!
@@ -936,6 +942,7 @@ final class NativeTabCell: NSTableCellView {
     private var refreshScheduled = false
     private var canClose = false
     private(set) var hasStatusBadge = false
+    private(set) var isRenamingTitle = false
     private(set) var trailingAccessory: NativeTabTrailingAccessory = .none
 
     var isCommandHeld = false {
@@ -971,24 +978,32 @@ final class NativeTabCell: NSTableCellView {
 
     func updateTrailingVisibility() {
         guard configuredTab != nil else {
+            isRenamingTitle = false
             trailingAccessory = .none
             closeButton.isHidden = true
             shortcut.isHidden = true
+            renamingSpinner.setAnimating(false)
+            renamingSpinner.isHidden = true
             status.isHidden = true
             trailingSlot.isHidden = true
             return
         }
+        isRenamingTitle = configuredTab?.controller.isGeneratingTabTitle == true
+        renamingSpinner.toolTip = ChromeStrings.current.renamingTab
         let hovered = (superview as? NativeHoverRowView)?.isHovered == true
         let next = NativeTabTrailingAccessory.resolve(
             isHovered: hovered,
             canClose: canClose,
             isCommandHeld: isCommandHeld,
             hasShortcut: !shortcut.stringValue.isEmpty,
+            isRenaming: isRenamingTitle,
             hasStatus: hasStatusBadge
         )
         trailingAccessory = next
         closeButton.isHidden = next != .close
         shortcut.isHidden = next != .shortcut
+        renamingSpinner.isHidden = next != .renaming
+        renamingSpinner.setAnimating(next == .renaming)
         status.isHidden = next != .status
         switch next {
         case .close:
@@ -999,6 +1014,10 @@ final class NativeTabCell: NSTableCellView {
                 NativeInboxMetrics.closeButtonSize,
                 ceil(shortcut.fittingSize.width)
             )
+            trailingSlot.isHidden = false
+        case .renaming:
+            trailingWidthConstraint.constant =
+                (NativeInboxMetrics.closeButtonSize + NativeTabTrailingAccessory.renamingSpinnerSize) / 2
             trailingSlot.isHidden = false
         case .status:
             trailingWidthConstraint.constant =
@@ -1017,20 +1036,30 @@ final class NativeTabCell: NSTableCellView {
         shortcut.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         shortcut.alignment = .right
         status.imageScaling = .scaleProportionallyDown
+        renamingSpinner.style = .spinning
+        renamingSpinner.controlSize = .small
+        renamingSpinner.isDisplayedWhenStopped = false
+        renamingSpinner.setContentHuggingPriority(.required, for: .horizontal)
+        renamingSpinner.setContentHuggingPriority(.required, for: .vertical)
+        renamingSpinner.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        renamingSpinner.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
         closeButton.onPress = { [weak self] in self?.closeTab() }
         closeButton.setAccessibilityLabel(ChromeStrings.current.closeTab)
         closeButton.isHidden = true
         shortcut.isHidden = true
+        renamingSpinner.isHidden = true
         status.isHidden = true
         trailingSlot.isHidden = true
 
         trailingSlot.translatesAutoresizingMaskIntoConstraints = false
-        for view in [shortcut, status, closeButton] {
+        for view in [shortcut, status, renamingSpinner, closeButton] {
             view.translatesAutoresizingMaskIntoConstraints = false
             trailingSlot.addSubview(view)
             view.centerYAnchor.constraint(equalTo: trailingSlot.centerYAnchor).isActive = true
         }
         let statusTrailingOffset = -(NativeInboxMetrics.closeButtonSize - NativeInboxMetrics.statusBadgeSize) / 2
+        let spinnerSize = NativeTabTrailingAccessory.renamingSpinnerSize
+        let spinnerTrailingOffset = -(NativeInboxMetrics.closeButtonSize - spinnerSize) / 2
         let widthConstraint = trailingSlot.widthAnchor.constraint(
             equalToConstant: NativeInboxMetrics.closeButtonSize
         )
@@ -1042,6 +1071,12 @@ final class NativeTabCell: NSTableCellView {
             closeButton.trailingAnchor.constraint(equalTo: trailingSlot.trailingAnchor),
             closeButton.widthAnchor.constraint(equalToConstant: NativeInboxMetrics.closeButtonSize),
             closeButton.heightAnchor.constraint(equalToConstant: NativeInboxMetrics.closeButtonSize),
+            renamingSpinner.trailingAnchor.constraint(
+                equalTo: trailingSlot.trailingAnchor,
+                constant: spinnerTrailingOffset
+            ),
+            renamingSpinner.widthAnchor.constraint(equalToConstant: spinnerSize),
+            renamingSpinner.heightAnchor.constraint(equalToConstant: spinnerSize),
             status.trailingAnchor.constraint(equalTo: trailingSlot.trailingAnchor, constant: statusTrailingOffset),
             status.widthAnchor.constraint(equalToConstant: NativeInboxMetrics.statusBadgeSize),
             status.heightAnchor.constraint(equalToConstant: NativeInboxMetrics.statusBadgeSize),
@@ -1152,6 +1187,9 @@ final class NativeTabCell: NSTableCellView {
                    !controller.surfaceTree.contains(where: { $0 === surface }) { return }
                 self.scheduleRefresh()
             }
+            .store(in: &observations)
+        controller.agentConversationTitleCoordinator.generationStateChanges
+            .sink { [weak self] in self?.scheduleRefresh() }
             .store(in: &observations)
     }
 

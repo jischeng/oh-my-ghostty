@@ -780,7 +780,9 @@ final class GitCommitAIAddModelsController: GitCommitSettingsPanelController,
                 selected.formIntersection(Set(result))
                 modelTable.reloadData()
                 if result.isEmpty {
-                    errorField.stringValue = GitL10n.text("No models found. Check the local ACP adapter and login.")
+                    errorField.stringValue = GitL10n.text(
+                        "No models found. Make sure the CLI and its local helper command are installed and logged in."
+                    )
                 }
             } catch {
                 guard !finished, !Task.isCancelled, loadingID == id, agent == requestedAgent else { return }

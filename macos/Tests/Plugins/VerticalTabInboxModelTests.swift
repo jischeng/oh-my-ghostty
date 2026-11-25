@@ -448,7 +448,7 @@ struct VerticalTabInboxModelTests {
         connectingSession.applyRuntimeConnection(
             runtimeDescriptor,
             workingDirectory: nil,
-            state: .connecting
+            state: .connecting(attempt: 1)
         )
         #expect(TerminalTabPresentationResolver.place(session: connectingSession, descriptor: remoteDescriptor)
             == "cloud › ~/deeproute/deepmine")

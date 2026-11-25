@@ -1052,6 +1052,7 @@ struct VerticalTabInboxSidebarTests {
         defer { restore() }
         let sidebar = try Sidebar()
         defer { sidebar.close() }
+        sidebar.group.selectedWindow = try #require(sidebar.controllers.first?.window)
 
         let visibleWindow = VisibleSidebarWindow(
             contentRect: NSRect(x: 0, y: 0, width: 250, height: 320),
@@ -1095,7 +1096,7 @@ struct VerticalTabInboxSidebarTests {
 
         // Pointer exit unfreezes order and animates row shift (0.16s).
         visibleWindow.simulatedMousePoint = NSPoint(x: -50, y: -50)
-        let exitEvent = try #require(NSEvent.mouseEvent(
+        let exitEvent = try #require(NSEvent.enterExitEvent(
             with: .mouseExited,
             location: visibleWindow.simulatedMousePoint,
             modifierFlags: [],
@@ -1103,8 +1104,8 @@ struct VerticalTabInboxSidebarTests {
             windowNumber: visibleWindow.windowNumber,
             context: nil,
             eventNumber: 2,
-            clickCount: 0,
-            pressure: 0
+            trackingNumber: 0,
+            userData: nil
         ))
         inbox.mouseExited(with: exitEvent)
         #expect(!inbox.isPointerHoldingOrder)

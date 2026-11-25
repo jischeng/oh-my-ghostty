@@ -607,14 +607,15 @@ struct VerticalNativeTabOutlineTests {
         coordinator.update(makeConfig())
         coordinator.view.layoutSubtreeIfNeeded()
         let outline = coordinator.outline
-        #expect(coordinator.reloadCount == 1)
+        #expect(coordinator.reloadCount == 0)
+        #expect(coordinator.membershipUpdateCount == 1)
         let initialNodes = try (0..<4).map { try #require(outline.item(atRow: $0) as? NativeTabNode) }
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 
         // Multi-item permutation in flat list uses moveSequence + beginUpdates/endUpdates without reloadData().
         groups = [GhosttyTabGroupPresentation(id: "flat", title: nil, icon: nil, tabs: [tabs[3], tabs[2], tabs[0], tabs[1]])]
         coordinator.update(makeConfig())
-        #expect(coordinator.reloadCount == 1)
+        #expect(coordinator.reloadCount == 0)
         #expect(coordinator.moveCount >= 2)
         if !reduceMotion {
             #expect(coordinator.animatedMoveCount == 1)

@@ -32,6 +32,13 @@ final class NativeSettingsController: NSViewController, NSTableViewDataSource, N
     let mobileAccessController: MobileAccessController
     var mobileDeviceProvisioner: MobileDeviceProvisioner = .shared
     let doctor: OMGDoctorService
+    /// Seams of the AI page: where API keys are kept, how API connections are called
+    /// and how the models of installed agents are discovered.
+    var aiCredentials: AICredentialStore = .shared
+    /// An API connection added from the AI page and not edited yet; leaving it untouched discards it.
+    var aiConnectionDraft: UUID?
+    var aiHTTPClient = AIHTTPClient()
+    var aiAgentCatalog: AIAgentModelCatalog = .shared
     var hostChoices: @Sendable () async -> [SSHRegistrationChoice] = { await SSHConfigurationCatalog.choices(live: []) }
     private(set) var selection: OhMyGhosttySettingsTab
     private let sidebar = NSTableView()
@@ -275,6 +282,9 @@ final class NativeSettingsController: NSViewController, NSTableViewDataSource, N
     }
 
     func setRoute(_ id: String) { routeID = id }
+
+    /// Renames the page being shown, e.g. after its subject was renamed.
+    func retitle(_ title: String) { titleLabel.stringValue = title }
 
     func validatedRuntimePolicy() throws -> SessionRuntimePolicy {
         let policy = settings.runtimePolicy

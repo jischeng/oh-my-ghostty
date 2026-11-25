@@ -204,6 +204,34 @@ extension AgentHistoryStore {
         return sessions
     }
 
+    /// One conversation of a database-backed Agent, asked for by its key, so
+    /// it is found whatever its age and without listing the others.
+    nonisolated static func databaseSession(
+        agent: SupportedAgent, conversationID: AgentConversationID, rootURL: URL?
+    ) -> AgentHistorySession? {
+        guard let url = rootURL ?? defaultDatabaseURL(for: agent) else { return nil }
+        let sessions: [AgentHistorySession]
+        if agent == .cursor {
+            sessions = cursorSessions(root: url, limit: 1, updatedAfter: nil, conversationID: conversationID)
+        } else if let database = AgentHistoryDatabase(path: url.path) {
+            switch agent {
+            case .opencode:
+                sessions = openCodeSessions(
+                    database, path: url.path, limit: 1, updatedAfter: nil, conversationID: conversationID
+                )
+            case .hermes:
+                sessions = hermesSessions(
+                    database, path: url.path, limit: 1, updatedAfter: nil, conversationID: conversationID
+                )
+            default:
+                sessions = []
+            }
+        } else {
+            sessions = []
+        }
+        return sessions.first { $0.conversationID == conversationID }
+    }
+
     /// nil when `session` does not belong to a database-backed Agent.
     nonisolated static func databaseMessages(for session: AgentHistorySession) -> [DatabaseMessage]? {
         guard usesDatabaseHistory(session.agent), session.remoteHost == nil else { return nil }
@@ -220,7 +248,8 @@ extension AgentHistoryStore {
     // MARK: OpenCode
 
     nonisolated private static func openCodeSessions(
-        _ database: AgentHistoryDatabase, path: String, limit: Int, updatedAfter: Date?
+        _ database: AgentHistoryDatabase, path: String, limit: Int, updatedAfter: Date?,
+        conversationID: AgentConversationID? = nil
     ) -> [AgentHistorySession] {
         var sessions: [AgentHistorySession] = []
         let cutoff = String(Int((updatedAfter?.timeIntervalSince1970 ?? 0) * 1_000))
@@ -244,6 +273,14 @@ extension AgentHistoryStore {
                 firstPrompt: prompt.map { String($0.prefix(maximumFirstPromptCharacters)) }
             ))
             return sessions.count < limit
+        }
+        if let conversationID {
+            // The pane is showing this session, archived or not, old or new.
+            database.query(
+                "SELECT id, title, directory, time_updated FROM session WHERE id = ?1",
+                [conversationID.rawValue], visit: visit
+            )
+            return sessions
         }
         // Sub-agent and archived sessions are not conversations to resume.
         let filtered = """
@@ -321,7 +358,8 @@ extension AgentHistoryStore {
     // MARK: Hermes
 
     nonisolated private static func hermesSessions(
-        _ database: AgentHistoryDatabase, path: String, limit: Int, updatedAfter: Date?
+        _ database: AgentHistoryDatabase, path: String, limit: Int, updatedAfter: Date?,
+        conversationID: AgentConversationID? = nil
     ) -> [AgentHistorySession] {
         var sessions: [AgentHistorySession] = []
         let cutoff = String(updatedAfter?.timeIntervalSince1970 ?? 0)
@@ -342,6 +380,17 @@ extension AgentHistoryStore {
             return sessions.count < limit
         }
         let activity = "COALESCE(last_activity_at, ended_at, started_at)"
+        if let conversationID {
+            // The pane is showing this session, whenever it was last active.
+            let key = [conversationID.rawValue]
+            if !database.query("SELECT id, title, cwd, \(activity) FROM sessions WHERE id = ?1", key, visit: visit) {
+                database.query(
+                    "SELECT id, title, cwd, COALESCE(ended_at, started_at) FROM sessions WHERE id = ?1",
+                    key, visit: visit
+                )
+            }
+            return sessions
+        }
         let filtered = """
         SELECT id, title, cwd, \(activity) FROM sessions
         WHERE message_count > 0 AND COALESCE(hidden, 0) = 0 AND \(activity) >= CAST(?1 AS REAL) ORDER BY 4 DESC
@@ -404,13 +453,15 @@ extension AgentHistoryStore {
     }
 
     nonisolated private static func cursorSessions(
-        root: URL, limit: Int, updatedAfter: Date?
+        root: URL, limit: Int, updatedAfter: Date?, conversationID: AgentConversationID? = nil
     ) -> [AgentHistorySession] {
         let manager = FileManager.default
         var stores: [(url: URL, updated: Date)] = []
         for workspace in (try? manager.contentsOfDirectory(atPath: root.path)) ?? [] {
             let folder = root.appendingPathComponent(workspace)
             for chat in (try? manager.contentsOfDirectory(atPath: folder.path)) ?? [] {
+                // A chat's folder is named after it, so one chat is one folder.
+                if let conversationID, chat != conversationID.rawValue { continue }
                 let store = folder.appendingPathComponent(chat).appendingPathComponent("store.db")
                 // Recent writes sit in the write-ahead log until a checkpoint.
                 // An empty log holds none; a reader can have created it.

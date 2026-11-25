@@ -9,11 +9,11 @@ Otty is a visual/information-architecture reference, not a feature-parity requir
 | Shell & Sessions | Shell integration, working-directory inheritance, startup/session restoration, terminal notifications |
 | Input & Controls | Quick Input size/history/privacy, terminal selection, clipboard permissions/paste safety, mouse focus, Option-as-Alt |
 | Editor | File/directory destination, editor keymap, wrapping/pairs, editor theme/font/tab width |
-| Integrations → Agent | Per-host Hook/CLI setup and maintenance, Agent history limit, automatic Quick Input opening, Agent notifications |
+| AI | Providers (installed agents over ACP, API connections with keys and model lists), the model per task (commit/tag/PR messages, tab titles), per-host Hook/CLI setup and maintenance, Agent history limit, automatic Quick Input opening, Agent notifications |
 | Views & Tabs | Horizontal/vertical tabs, sidebar geometry, grouping/order/path, tab density/icons, resize rendering |
 | Appearance | Terminal theme, fonts, opacity/blur, cursor and font inheritance |
 | Shortcuts | Quick Input and Inspector shortcut recorders; original Ghostty keybinding configuration access |
-| Integrations → Git | Auto-fetch, ordered AI commit routes and instructions |
+| Integrations → Git | Auto-fetch, commit style instructions, and a link to the AI models for Git messages |
 | Integrations → SSH | Explicit host registration and cached inventory |
 | Integrations → Plugins | Official and GitHub plugin installation/management |
 | Advanced | OMG/Ghostty config locations, precedence, open/reload/reveal actions |
@@ -37,8 +37,10 @@ This avoids the macOS SwiftUI Menu bridge discarding custom label layouts. Menu
 selection uses captured values, not mutable list positions. Disabled controls cannot
 commit changes. Short choices use `OMGSettingsSegments`; numeric fields use direct
 editing plus minus/plus controls. Destructive buttons remain red and keep their
-existing confirmations. Agent navigation keeps its `.agents` identifier but is now
-labelled **Agent** inside the expandable **Integrations** group.
+existing confirmations. The AI page keeps its `.agents` identifier, so deep links
+and the `agents.*` setting keys are unchanged, but is labelled **AI** everywhere:
+it lists the model providers and the model chosen for each task above the Agent
+integration it already held.
 
 ## Optional core behavior overrides
 

@@ -1679,6 +1679,7 @@ extension Ghostty {
         override func keyDown(with event: NSEvent) {
             if !event.isARepeat {
                 acknowledgeAgentCompletionFromUserInput(eventTimestamp: event.timestamp)
+                (window?.windowController as? TerminalController)?.noteTerminalInput()
             }
             guard let surface = self.surface else {
                 self.interpretKeyEvents([event])
@@ -2263,7 +2264,9 @@ extension Ghostty {
             let action = "paste_from_clipboard"
             if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
                 AppDelegate.logger.warning("action failed action=\(action, privacy: .public)")
+                return
             }
+            (window?.windowController as? TerminalController)?.noteTerminalInput()
         }
 
         @IBAction func pasteAsPlainText(_ sender: Any?) {
@@ -2271,7 +2274,9 @@ extension Ghostty {
             let action = "paste_from_clipboard"
             if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
                 AppDelegate.logger.warning("action failed action=\(action, privacy: .public)")
+                return
             }
+            (window?.windowController as? TerminalController)?.noteTerminalInput()
         }
 
         @IBAction func pasteSelection(_ sender: Any?) {
@@ -2279,7 +2284,9 @@ extension Ghostty {
             let action = "paste_from_selection"
             if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
                 AppDelegate.logger.warning("action failed action=\(action, privacy: .public)")
+                return
             }
+            (window?.windowController as? TerminalController)?.noteTerminalInput()
         }
 
         @IBAction override func selectAll(_ sender: Any?) {
@@ -2906,6 +2913,7 @@ extension Ghostty.SurfaceView: NSTextInputClient {
         // All committed text (IME, dictation, etc.) must be sent as key
         // events so programs treat it as typed input, never as a paste.
         if !chars.isEmpty {
+            (window?.windowController as? TerminalController)?.noteTerminalInput()
             _ = committedTextAction(GHOSTTY_ACTION_PRESS, text: chars)
         }
     }
@@ -3118,6 +3126,7 @@ extension Ghostty.SurfaceView {
                 // Dropped text is untrusted, so it goes through the same
                 // paste protection as a clipboard paste.
                 self.surfaceModel?.pasteText(content)
+                (self.window?.windowController as? TerminalController)?.noteTerminalInput()
             }
             return true
         }

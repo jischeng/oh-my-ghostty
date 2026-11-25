@@ -228,6 +228,69 @@ struct AIHTTPClientTests {
         }
     }
 
+    @Test func generateReturnsTheRawTextWithItsOwnBudget() async throws {
+        let recorder = AIRequestRecorder()
+        let message = "feat: add the inbox\n\n- keep \"quotes\" and a second line"
+        let client = AIHTTPClient { request in
+            recorder.record(request)
+            return (AITestData.openAI("<think>plan</think>" + message), AITestData.response(200))
+        }
+        let completion = try await client.generate(system: "sys", user: "user", endpoint: AITestData.endpoint,
+                                                   options: .message)
+        // Nothing of the title clean-up applies: quotes, markdown and line breaks survive.
+        #expect(completion == AIHTTPClient.Completion(text: message, truncated: false))
+        let request = try #require(recorder.all.first)
+        #expect(request.timeoutInterval == 75)
+        #expect(recorder.bodies.first?["max_tokens"] as? Int == 4096)
+        #expect(AIHTTPClient.Options.message.resourceTimeout == 90)
+        #expect(AIHTTPClient.Options.title == AIHTTPClient.Options())
+        #expect(AIHTTPClient.Options.title.requestTimeout == 15)
+        #expect(AIHTTPClient.Options.title.resourceTimeout == 20)
+
+        var custom = AIHTTPClient.Options.message
+        custom.maxOutputTokens = 321
+        custom.requestTimeout = 7
+        _ = try await client.generate(system: "sys", user: "user", endpoint: AITestData.endpoint, options: custom)
+        #expect(recorder.all.last?.timeoutInterval == 7)
+        #expect(recorder.bodies.last?["max_tokens"] as? Int == 321)
+    }
+
+    @Test func generateReportsACutOffAnswerAndHonoursItsResponseCap() async throws {
+        let cut = AIHTTPClient { _ in
+            (AITestData.openAI("feat: half a mess", finishReason: "length"), AITestData.response(200))
+        }
+        let completion = try await cut.generate(system: "s", user: "u", endpoint: AITestData.endpoint,
+                                                options: .message)
+        #expect(completion.truncated)
+        #expect(completion.text == "feat: half a mess")
+
+        // Larger than a title response is fine for a message, up to the message cap.
+        let body = String(repeating: "a", count: AIHTTPClient.maxResponseBytes + 10)
+        let long = AIHTTPClient { _ in (AITestData.openAI(body), AITestData.response(200)) }
+        #expect(try await long.generate(system: "s", user: "u", endpoint: AITestData.endpoint,
+                                        options: .message).text == body)
+        await #expect(throws: AIHTTPError.responseTooLarge) {
+            try await long.complete(user: "u", endpoint: AITestData.endpoint)
+        }
+    }
+
+    @Test func aCancelledTaskNeverReachesTheEndpoint() async {
+        let recorder = AIRequestRecorder()
+        let client = AIHTTPClient { request in
+            recorder.record(request)
+            return (AITestData.openAI("Never"), AITestData.response(200))
+        }
+        let task = Task {
+            // Wait for the cancellation below before asking.
+            while !Task.isCancelled { await Task.yield() }
+            return try await client.generate(system: "s", user: "u", endpoint: AITestData.endpoint,
+                                             options: .message)
+        }
+        task.cancel()
+        await #expect(throws: CancellationError.self) { try await task.value }
+        #expect(recorder.all.isEmpty)
+    }
+
     @Test func aPlainHTTPRemoteEndpointIsRefusedBeforeAnyRequest() async {
         let recorder = AIRequestRecorder()
         let endpoint = AIEndpoint(kind: .openAI, baseURL: URL(string: "http://api.example.com")!,

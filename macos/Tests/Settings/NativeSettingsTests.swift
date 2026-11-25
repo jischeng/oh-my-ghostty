@@ -246,7 +246,13 @@ struct NativeSettingsTests {
         let first = GitCommitAIRoute(agent: .codex, model: "first")
         let second = GitCommitAIRoute(agent: .claude, model: "second")
         settings.gitCommitAIRoutes = [first, second]
+        // The Git page now only summarises the models and links to the AI page that owns them.
         controller.select(.git)
+        #expect(!descendants(controller.view).contains { $0.accessibilityIdentifier() == "git.commit-ai.routes" })
+        let models = try #require(descendants(controller.view).compactMap { $0 as? NSButton }
+            .first { $0.accessibilityIdentifier() == "settings.git.ai-models" })
+        models.performClick(nil)
+        #expect(controller.isShowing("agents"))
         let table = try #require(descendants(controller.view).compactMap { $0 as? NSTableView }
             .first { $0.accessibilityIdentifier() == "git.commit-ai.routes" })
         let coordinator = try #require(table.delegate as? GitCommitAIRoutesTable.Coordinator)
@@ -289,7 +295,8 @@ struct NativeSettingsTests {
                 let cell = try #require(table.view(atColumn: 0, row: row, makeIfNecessary: true))
                 cell.layoutSubtreeIfNeeded()
                 let label = try #require(descendants(cell).compactMap { $0 as? NSTextField }.first)
-                #expect(label.bounds.width > 20 && label.bounds.height > 10)
+                // Laid out, not collapsed. The shortest title, "AI", is about 15 pt wide.
+                #expect(label.bounds.width > 10 && label.bounds.height > 10)
             }
             let form = try #require(controller.children.compactMap { $0 as? NativeSettingsForm }.first)
             #expect(!form.rowTitles.isEmpty)

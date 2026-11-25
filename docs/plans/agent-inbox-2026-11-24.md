@@ -210,3 +210,202 @@ tests under `macos/Tests/Plugins/Vertical*.swift`.
 - `python3 -m unittest discover -s dist -p 'test_omg_test_plan.py'` and
   `python3 dist/check_omg_docs.py`.
 - Manual check in OMG Dev: ATS behaviour for `http://127.0.0.1` and a LAN host.
+
+## Iteration 2 (2026-11-24, after the first look in OMG Dev)
+
+Feedback from running the first build, and what changes. Where this section
+contradicts the text above, this section wins.
+
+### Findings
+
+- No conversation title appeared on any agent tab and the title store was never
+  written. `titleSeed` only looks at transcripts modified in the last 15
+  minutes, so a restored or idle conversation is never found.
+- Inbox rows are too tight compared with Otty, and a named tab shows no path.
+- `⌘N` labels in the inbox are out of order (they name the native index).
+- The inbox needs the same grouping and ordering choices as the Tabs view.
+- Selecting a tab moved it to the top at once.
+- Nothing tells the user an agent finished while the Tabs view is shown.
+- Settings: the AI endpoint, the agents and the Git commit models belong in one
+  place, organised as providers.
+
+### Decisions
+
+- **Subtitle rule**: a tab with a name that is not its path (a manual tab name
+  or a conversation title) shows the place below it in small text: the
+  tilde-abbreviated working directory, prefixed with the host for SSH. This
+  holds for plain terminals with a manual name too.
+- **Row metrics**: the inbox uses roomier rows than the Tabs view (single line
+  36 pt, two lines 54 pt, 12 pt subtitle). The Tabs view keeps `tabs.rowDensity`.
+- **`⌘N` in the inbox** selects the Nth tab of the displayed inbox order, and
+  the labels count 1, 2, 3 … from the top. Next/previous tab follow the same
+  order. Outside the inbox nothing changes.
+- **Inbox grouping and ordering** are their own settings with the same choices
+  as the Tabs view: grouping none / project / date (default date), ordering
+  manual / created / recently used (default recently used). Continue is shown
+  above the date sections only with date grouping. The inbox stays display-only
+  and rows are not draggable; "manual" means the native tab order.
+- **Recency** is the last interaction, not the last activation: a tab becomes
+  the most recent when the user types into it or leaves it after visiting it,
+  never by merely being selected. It is persisted with the session so Today /
+  Yesterday survive a restart.
+- **Attention badge**: while the Tabs view is shown, the inbox button carries a
+  badge when tabs need attention, failed or finished unacknowledged.
+- **Settings**: the Agents page becomes **AI**. It lists providers (installed
+  agent CLIs reached over ACP, and API connections), lets an API connection
+  fetch its model list and set per-model context window and maximum output, and
+  holds the model choice per task: commit / tag / PR messages (moved from Git)
+  and tab titles. Tab titles stay limited to API connections.
+
+### Shared contracts (iteration 2)
+
+| Key | Property | Type | Default |
+| --- | --- | --- | --- |
+| `tabs.inboxGrouping` | `tabInboxGroupingMode` | `GhosttyTabGroupingMode` | `date` |
+| `tabs.inboxOrdering` | `tabInboxOrderingMode` | `GhosttyTabOrderingMode` | `recentlyUsed` |
+
+`tabInboxSortMode` and `GhosttyTabInboxSortMode` are removed. An old
+`tabs.inboxOrdering` value of `recent` falls back to the default.
+
+```swift
+// Stream T — AgentConversationTitleCoordinator.swift (TerminalController extension)
+/// True when this tab's row and chrome show a name with the place below it.
+var tabTitleHasSubtitle: Bool { get }
+
+// Stream S — TerminalController.swift
+@Published private(set) var tabLastInteractionAt: Date
+```
+
+`AITitleGenerating`, `AITitleService.shared`, `AgentSessionTitleMode` and
+`OhMyGhosttySettings.agentSessionTitleMode` keep their names and meaning.
+
+File ownership: stream S owns `TerminalController.swift`, `Terminal/Tabs/**`
+except `TerminalTabPresentationResolver.swift`, `ChromeStrings.swift` and the
+session-state files. Stream T owns `Plugins/AgentConversationTitle*.swift`,
+`Plugins/AgentHistory*.swift` and the resolver. Stream P owns `Features/AI/**`,
+`Features/Settings/**`, `Features/Git/GitCommitAI*.swift`,
+`Features/Git/GitACP*.swift`, `docs/settings/**`.
+
+## Iteration 3 (2026-11-24, second look in OMG Dev)
+
+- **Naming**: an agent tab is named by the user, its conversation, the title the
+  agent gives its terminal, else the agent itself. A terminal title counts only
+  with the decoration its agent adds (a leading glyph for Claude Code, a
+  trailing ` | folder` for Codex, the `π - ` prefix for Pi), so command lines
+  never become names. Plain terminal rows in the inbox show the directory;
+  the Tabs view and tab chrome keep following `tabs.pathDisplay`.
+- **Rows**: inbox rows are 38 pt, 58 pt with a subtitle, and the subtitle runs
+  under the icon across the row. Groups are flat, with no section icons.
+- **AI page**: providers read as two groups, the connection group carries a
+  plus, a new connection is a draft discarded when left untouched, rows say one
+  fact each, and the commit route list has a single Add Models entry.
+- **Verified in the VM**: real rows for Claude and Codex agents (including a
+  resumed conversation without an ID, named from the terminal title), rename
+  recency on leave, `⌘N` order, model fetch from a loopback mock
+  (`http://127.0.0.1:8089`), failure text when the endpoint is down, key kept
+  out of `settings.json`, Chinese and English layouts.
+- **Open**: a terminal flash on rename reported by the user could not be
+  reproduced in the VM and the recording was unreadable to the agent session.
+
+## Iteration 4 (2026-11-24, third look in OMG Dev)
+
+- **Renaming is a property of the inbox only.** The Tabs view, horizontal tabs,
+  window titles and AppleScript names keep the pre-inbox rules (`titleOverride`,
+  else `tabs.pathDisplay`); no second line is rendered there. The resolver's
+  `.sidebar` style is gone: `.chrome` (one line) and `.inbox` (a session row) are
+  the only two presentations.
+- **Inbox rows** are 42 pt, 64 pt with a subtitle, 6 pt apart. The name is 14 pt
+  medium, the place 12 pt secondary. Name and place form one block centred in
+  the row, and the place starts where the name starts. Section headers carry no
+  icon and are quiet secondary labels with their count on the right.
+- **A remote place leads with a cloud** at the subtitle's size, so a renamed SSH
+  row still says it is remote. An unnamed SSH row already shows `host › user`
+  with the cloud tab icon.
+- **Conversation discovery adopts resumed transcripts.** A tab that starts an
+  agent on an existing conversation keeps its old transcript and writes to it
+  immediately; `AgentConversationStore.discover` now also accepts files modified
+  after launch and picks the newest, so a resumed Codex/Claude pane gets its
+  conversation ID (and therefore its title). Two candidates touched within the
+  tolerance are still ambiguous and stay unnamed.
+- **Verified in the VM**: the Tabs view is unchanged (single-line place names,
+  original icons); the inbox shows names with the place below; a pending SSH
+  connection renders the cloud; 86 tests in 6 suites pass.
+
+## Iteration 5 (2026-11-25, dedicated AppKit Inbox & single-line Tabs restoration)
+
+Where this section contradicts earlier iterations, this section wins.
+
+- **Pure single-line Normal Tabs (`NativeTabOutlineController`)**: all Inbox
+  two-line mutations (`NativeTabRowMetrics.inbox`, `isTwoLine`,
+  `hasRenderedHeight`, synchronous `noteHeightOfRows` inside `viewFor`,
+  `flattensGroupRows`, `subtitleLine`) are removed from
+  `NativeTabOutlineController`. Normal Tabs stays 100% single-line (`rowHeight`
+  from `tabs.rowDensity`), centered vertically, with identical hover and
+  selection pill geometry (`bounds.insetBy(dx: 2, dy: 1)`, `cornerRadius: 6`).
+- **Dedicated flipped-document AppKit Inbox (`Features/Terminal/Tabs/Inbox/`)**:
+  `NativeTabSidebarController` mounts `NativeInboxViewController` alongside
+  `NativeTabOutlineController` and toggles visibility by `tabSidebarViewMode`.
+  `NativeInboxViewController` lays out reusable `NativeInboxSectionHeaderView`
+  (`26pt` height, non-flipped `chevron.down` layer rotating `+90°` over `0.18s`
+  `.easeInEaseOut` to right-pointing `>` when collapsed, flush-right count kept
+  visible in both states) and authentic Otty `NativeInboxRowView` cards (`x = 8,
+  width = panelWidth - 16`, `2pt` gap, smooth `cornerRadius = 8pt` borderless
+  `theme.selectedFill` / `theme.hoverFill` pill; `36pt` single-line and `52pt`
+  two-line rows with all Line-1 elements anchored on `midY = 18pt`: `18×18pt`
+  `iconView` at `x = 10, y = 9` rendering `16pt` single Agent logos, `17pt` SF
+  Symbols, and `8.5pt` split-pane marks separated by a `1pt` gap, `13pt`
+  `.regular`/`.medium` `titleLabel` at `x = 34pt`, and trailing `14×14pt` status
+  badge + `⌘1..9` / `18×18pt` button-only `✕` close control at
+  `rightEdge = width - 10pt`; Line-2 `11pt` path/host subtitle starting
+  flush-left beneath `iconView` at `x = 10pt` on `midY = 38pt`, with an inline
+  `cloud` SF Symbol before remote paths). `NativeTabIconView.customSizing`
+  defaults to `nil` so Normal Tabs (`.tabs`) icon sizing remains untouched.
+- **Smooth reorder & collapse/expand animations**: after initial layout, when
+  sidebar width is unchanged (`< 0.5pt`), `NativeInboxViewController` animates
+  surviving row/header vertical shifts over `0.16s` with control points
+  `(0.1, 0.9, 0.2, 1.0)` and fades newly inserted/expanded rows from `0` to `1`
+  over `0.10s`, while applying width-resize drags immediately. In `.tabs`,
+  `NativeTabOutlineController` animates within-parent tab permutations via
+  `beginUpdates()` + `moveItem` + `endUpdates()` over `0.16s`
+  `(0.1, 0.9, 0.2, 1.0)` instead of snapping via `reloadData()`.
+- **Visible-row `⌘1..9` order & borderless header toggle**: collapsing an Inbox
+  section persists its `inbox:` group ID in `collapsedGroupIDs` and excludes
+  hidden rows from `publishInboxDisplayOrder`, so `⌘1..9` and row `⌘N` labels
+  always match the visible rows top-to-bottom. `TabInboxHeaderButton` renders as
+  a clean borderless `24×24pt` icon control (`12pt .medium` symbol centered in a
+  `14×14pt` slot: `tray` with `6×6pt` accent dot when inactive; `tray.fill` on a
+  subtle neutral active pill with `theme.foreground` glyph when shown).
+- **Lightweight presentation notification**: tab title overrides and
+  conversation title updates post `GhosttyTabPresentationDidChange` instead of
+  emitting `BaseTerminalController.objectWillChange`, preventing SwiftUI surface
+  wrapper flashes while refreshing sidebar cells immediately.
+
+## Iteration 6 (2026-11-25, unified trailing slot, ⌘-hold shortcut reveal & Otty Normal Tabs proportions)
+
+Where this section contradicts earlier iterations, this section wins.
+
+- **Single shared rightmost trailing slot across `.tabs` and `.inbox`**:
+  `NativeTabCell` and `NativeInboxRowView` share `NativeTabTrailingAccessory`
+  priority in one rightmost column inset `10pt` from the pill edge:
+  1. Row hovered (`isHovered && canClose`) -> `18×18pt` `NativeInboxCloseButton`
+     (`✕` glyph on row hover, subtle circular hover disc only when the pointer is
+     over or pressing `✕`).
+  2. Else `⌘` held (`isCommandHeld && shortcut != nil`) -> `⌘1..⌘9` shortcut
+     label (`tabs.showShortcutLabels == false` disables it cleanly).
+  3. Else resting state -> `14×14pt` `AgentStatusBadge` centered on the same
+     trailing axis when active; otherwise `0pt` width so titles extend cleanly to
+     `10pt` inside the right pill edge.
+- **AppKit `⌘`-hold reveal monitor (`NativeCommandRevealMonitor`)**: observes
+  local `.flagsChanged` events on the key terminal window
+  (`flags.intersection([.command, .control, .option]) == .command`) and resets on
+  `NSWindow.didResignKeyNotification` and
+  `NSApplication.didResignActiveNotification` so Command-Tabbing never leaves
+  shortcuts stuck on. Updates instantiated rows in place without `reloadData()`.
+- **Normal Tabs (`.tabs`) Otty proportions**: `OhMyGhosttyTabRowDensity` defaults
+  to `comfortable` (`36pt` pill + `2pt` gap, matching Otty's `baseH = 36pt` and
+  1-line Inbox rows; `compact` uses `30pt` + `2pt` gap). `NativeHoverRowView`
+  keeps its `6pt` default corner radius for Inspector/Settings tables while
+  `NativeTabRowView` overrides `cornerRadius` to `8pt`. `NativeTabCell` aligns
+  horizontal rhythm and typography with 1-line Inbox rows (`18×18pt` leading icon
+  at `10pt` inside pill, `7pt` gap to `13pt` `.medium` selected / `.regular`
+  unselected title, and `10pt` right pill inset).

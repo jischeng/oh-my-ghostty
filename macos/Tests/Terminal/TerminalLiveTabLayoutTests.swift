@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import Testing
 @testable import Ghostty
@@ -308,58 +309,209 @@ struct TerminalLiveTabLayoutTests {
         let surface = try #require(controller.surfaceTree.first)
         surface.runtimeDescriptor = nil
         surface.pwd = ""
+        surface.setTitle("live title")
+        try await waitForAppKit { controller.window?.title == "live title" }
         let conversation = try #require(AgentConversationID(UUID().uuidString))
         controller.adoptAgentResumeDescriptor(.init(agent: .claude, conversationID: conversation,
             scope: .local, workingDirectory: "/tmp/project"), for: surface)
-        let path = settings.tabPathDisplay == .folderName ? "project" : "/tmp/project"
-        func resolved() throws -> GhosttyTabPresentation {
-            try #require(TerminalTabPresentationResolver.resolve(controller, index: 0, selected: true, activities: nil))
+        let chromePath = settings.tabPathDisplay == .folderName ? "project" : "/tmp/project"
+        func resolvedInbox() throws -> GhosttyTabPresentation {
+            try #require(TerminalTabPresentationResolver.resolve(
+                controller, index: 0, selected: true, activities: nil, style: .inbox))
         }
-        // A conversation without a stored title names its tab as before.
-        #expect(try resolved().title == path)
-        #expect(try resolved().subtitle == nil)
+        func resolvedChrome() throws -> GhosttyTabPresentation {
+            try #require(TerminalTabPresentationResolver.resolve(
+                controller, index: 0, selected: true, activities: nil, style: .chrome))
+        }
+        // Without a stored conversation title, the Inbox row stays a clean 1-line
+        // path row (no dummy "Claude Code" title or dangling subtitle).
+        #expect(try resolvedInbox().title == "/tmp/project")
+        #expect(try resolvedInbox().subtitle == nil)
+        #expect(try !resolvedInbox().showsSubtitle)
+        #expect(try resolvedChrome().title == chromePath)
+        #expect(try resolvedChrome().subtitle == nil)
         #expect(controller.tabAgentConversationTitle == nil)
 
-        // The title belongs to the conversation; the tab's own tracker relays it.
+        let savedShortcuts = settings.showShortcutLabels
+        settings.showShortcutLabels = false
+        #expect(try resolvedInbox().shortcut == nil)
+        #expect(try resolvedChrome().shortcut == nil)
+        settings.showShortcutLabels = savedShortcuts
+
+        // Once named, the Inbox row renders the session name + path subtitle,
+        // while .chrome and window.title remain pure non-AI terminal chrome.
         let store = AgentConversationTitleStore.shared
         #expect(store.set("Stabilise login", source: .native, agent: .claude, conversationID: conversation))
-        var value = try resolved()
-        #expect(value.title == "Stabilise login")
-        #expect(value.subtitle == path)
+        var value = try resolvedInbox()
+        #expect(value.title == "Stabilise login", "got \(value.title) / \(value.subtitle ?? "nil")")
+        #expect(value.subtitle == "/tmp/project")
+        #expect(value.showsSubtitle)
         #expect(value.remoteBreadcrumb == nil)
-        #expect(controller.presentedTerminalTitle(for: surface, terminalTitle: "live title") == "Stabilise login")
-        try await waitForAppKit { controller.window?.title == "Stabilise login" }
+        #expect(try resolvedChrome().title == chromePath)
+        #expect(try !resolvedChrome().showsSubtitle)
+        #expect(controller.presentedTerminalTitle(for: surface, terminalTitle: "live title") == "live title")
+        #expect(controller.window?.title == "live title")
 
-        // It is shown as the Agent wrote it, not cleaned like a terminal title.
+        // It is shown in the Inbox as the Agent wrote it, not cleaned like a terminal title.
         #expect(store.set("✳ Claude Code review", source: .native, agent: .claude, conversationID: conversation))
-        #expect(try resolved().title == "✳ Claude Code review")
-        try await waitForAppKit { controller.window?.title == "✳ Claude Code review" }
+        #expect(try resolvedInbox().title == "✳ Claude Code review")
+        #expect(controller.window?.title == "live title")
 
-        // A manual tab name always wins and leaves no subtitle.
+        // A manual tab name always wins in every presentation and sets window.title.
         controller.titleOverride = "User name"
-        value = try resolved()
+        value = try resolvedInbox()
         #expect(value.title == "User name")
-        #expect(value.subtitle == nil)
+        #expect(value.subtitle == "/tmp/project")
+        #expect(value.remoteBreadcrumb == nil)
+        #expect(try resolvedChrome().title == "User name")
+        #expect(try resolvedChrome().subtitle == nil)
         #expect(controller.window?.title == "User name")
         controller.titleOverride = nil
-        #expect(try resolved().title == "✳ Claude Code review")
+        #expect(try resolvedInbox().title == "✳ Claude Code review")
+        #expect(controller.window?.title == "live title")
 
-        // Turning titles off restores the path title everywhere.
+        // Turning titles off leaves the inbox row as a 1-line path row.
         settings.agentSessionTitleMode = .off
-        value = try resolved()
-        #expect(value.title == path)
+        value = try resolvedInbox()
+        #expect(value.title == "/tmp/project")
         #expect(value.subtitle == nil)
-        try await waitForAppKit { controller.window?.title != "✳ Claude Code review" }
         settings.agentSessionTitleMode = .native
-        try await waitForAppKit { controller.window?.title == "✳ Claude Code review" }
+        #expect(try resolvedInbox().title == "✳ Claude Code review")
 
         // Another conversation in the same pane does not inherit the title.
         let next = try #require(AgentConversationID(UUID().uuidString))
         controller.adoptAgentResumeDescriptor(.init(agent: .claude, conversationID: next,
             scope: .local, workingDirectory: "/tmp/project"), for: surface)
-        #expect(try resolved().title == path)
+        #expect(try resolvedInbox().title == "/tmp/project")
+        #expect(try resolvedInbox().subtitle == nil)
+    }
+
+    @Test func aManuallyNamedTerminalShowsItsDirectoryBelowTheName() throws {
+        let fixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { fixture.close() }
+        let controller = try fixture.tab()
+        let surface = try #require(controller.surfaceTree.first)
+        surface.runtimeDescriptor = nil
+        surface.pwd = NSHomeDirectory() + "/code/project"
+        func resolved() throws -> GhosttyTabPresentation {
+            try #require(TerminalTabPresentationResolver.resolve(
+                controller, index: 0, selected: true, activities: nil, style: .inbox))
+        }
+        // A terminal named after its path has one line.
         #expect(try resolved().subtitle == nil)
-        try await waitForAppKit { controller.window?.title != "✳ Claude Code review" }
+        #expect(try !resolved().showsSubtitle)
+
+        controller.titleOverride = "Scratch"
+        let named = try resolved()
+        #expect(named.title == "Scratch")
+        #expect(named.subtitle == "~/code/project")
+        #expect(named.showsSubtitle)
+        #expect(named.remoteBreadcrumb == nil)
+
+        controller.titleOverride = nil
+        #expect(try resolved().subtitle == nil)
+        #expect(try !resolved().showsSubtitle)
+    }
+
+    @Test func aNamedTabsPlaceIsItsDirectoryAfterItsHost() {
+        typealias Resolver = TerminalTabPresentationResolver
+        let home = NSHomeDirectory()
+        // The home folder is shortened without asking the file system.
+        #expect(Resolver.abbreviatingHome(home + "/code/project") == "~/code/project")
+        #expect(Resolver.abbreviatingHome(home) == "~")
+        #expect(Resolver.abbreviatingHome(home + "-backup/project") == home + "-backup/project")
+        #expect(Resolver.abbreviatingHome("/tmp/project") == "/tmp/project")
+        #expect(Resolver.abbreviatingHome("/Users/me/code", home: "/Users/me") == "~/code")
+        #expect(Resolver.abbreviatingHome("/code", home: "/") == "/code")
+
+        let local = PaneSessionContext(workingDirectory: home + "/code/project", terminalTitle: "vim")
+        #expect(Resolver.place(session: local, descriptor: nil) == "~/code/project")
+        // An Agent pane whose shell reported no directory uses the conversation's.
+        let bare = PaneSessionContext(workingDirectory: nil, terminalTitle: "")
+        let agent = AgentResumeDescriptor(agent: .codex, scope: .local, workingDirectory: "/tmp/project")
+        #expect(Resolver.place(session: bare, descriptor: agent) == "/tmp/project")
+        #expect(Resolver.place(session: bare, descriptor: nil) == nil)
+
+        // An SSH pane names its host first and keeps the remote path whole.
+        var remote = PaneSessionContext(workingDirectory: home, terminalTitle: "ssh")
+        remote.observeForegroundSSH(
+            alias: "build-box", transferTarget: "me@build-box", processGroupID: 4_242,
+            currentWorkingDirectory: home, currentTerminalTitle: "ssh",
+            remoteWorkingDirectory: "/home/me/code/project"
+        )
+        #expect(Resolver.place(session: remote, descriptor: nil) == "build-box › /home/me/code/project")
+        // The local directory belongs to the launcher while the host connects.
+        var connecting = PaneSessionContext(workingDirectory: home, terminalTitle: "ssh")
+        connecting.observeForegroundSSH(
+            alias: "build-box", transferTarget: "me@build-box", processGroupID: 4_242,
+            currentWorkingDirectory: home, currentTerminalTitle: "ssh"
+        )
+        #expect(Resolver.place(session: connecting, descriptor: nil) == "build-box")
+        let remoteAgent = AgentResumeDescriptor(agent: .codex, scope: .remote, workingDirectory: "/srv/app")
+        #expect(Resolver.place(session: connecting, descriptor: remoteAgent) == "build-box › /srv/app")
+        // A remote Agent whose connection is down still names where it ran.
+        #expect(Resolver.place(session: bare, descriptor: remoteAgent) == "/srv/app")
+
+        // Never empty: what the row showed before, else the Agent, else a word.
+        #expect(Resolver.namedSubtitle(location: nil, session: bare, agent: .codex, pathTitle: "Terminal")
+            == "Terminal")
+        #expect(Resolver.namedSubtitle(location: nil, session: bare, agent: .codex, pathTitle: "")
+            == SupportedAgent.codex.displayName)
+        #expect(Resolver.namedSubtitle(location: nil, session: bare, agent: nil, pathTitle: "") == "Terminal")
+    }
+
+    @Test func aTerminalTitleNamesASessionOnlyWithTheAgentsOwnDecoration() {
+        typealias Resolver = TerminalTabPresentationResolver
+        func name(_ title: String, _ agent: SupportedAgent, in directory: String? = "~/code/project") -> String? {
+            Resolver.sessionName(fromTerminalTitle: title, agent: agent, directory: directory)
+        }
+        // Claude Code leads its topic with a spinner or status glyph.
+        #expect(name("✳ Fix the login flow", .claude) == "Fix the login flow")
+        #expect(name("⠂ Fix the login flow", .claude) == "Fix the login flow")
+        #expect(name("✳ Claude Code", .claude) == nil)
+        // Codex appends the project after the thread name.
+        #expect(name("Write the DBX guide | project", .codex) == "Write the DBX guide")
+        #expect(name("编写南天门DBX链接文档 | chengjisheng", .codex, in: "~") == "编写南天门DBX链接文档")
+        #expect(name("π - Refactor parser", .pi) == "Refactor parser")
+        // What the shell leaves behind is the command line, not a name.
+        #expect(name("claude --resume 1234", .claude) == nil)
+        #expect(name("cd ~/code/project; claude", .claude) == nil)
+        #expect(name("/tmp/run-agent.sh", .claude) == nil)
+        #expect(name("~/code/project", .claude) == nil)
+        #expect(name("-zsh", .claude) == nil)
+        #expect(name("codex --yolo", .codex) == nil)
+        #expect(name("pi", .pi) == nil)
+        #expect(name("", .codex) == nil)
+        // The place alone is not a name either.
+        #expect(name("project | project", .codex) == nil)
+        // Agents without a known decoration are never named this way.
+        #expect(name("✳ Something", .opencode) == nil)
+    }
+
+    @Test func inboxRowsShowWhereAPlainTerminalIs() throws {
+        let fixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { fixture.close() }
+        let controller = try fixture.tab()
+        let surface = try #require(controller.surfaceTree.first)
+        surface.runtimeDescriptor = nil
+        surface.pwd = NSHomeDirectory() + "/code/project"
+        func row(_ style: TerminalTabPresentationResolver.Style) throws -> GhosttyTabPresentation {
+            try #require(TerminalTabPresentationResolver.resolve(
+                controller, index: 0, selected: true, activities: nil, style: style))
+        }
+        // The inbox shows the directory itself; the Tabs view and tab chrome
+        // keep following tabs.pathDisplay.
+        #expect(try row(.inbox).title == "~/code/project")
+        #expect(try row(.inbox).subtitle == nil)
+        #expect(try row(.chrome).subtitle == nil)
+        // A manual name is the title in every style; the place below it
+        // belongs to the inbox, which has a second line for it.
+        controller.titleOverride = "Scratch"
+        for style in [TerminalTabPresentationResolver.Style.chrome, .inbox] {
+            #expect(try row(style).title == "Scratch")
+        }
+        #expect(try row(.inbox).subtitle == "~/code/project")
+        #expect(try row(.chrome).subtitle == nil)
     }
 
     @Test func aBoundConversationIsLookedUpAndNamesItsTab() async throws {
@@ -386,14 +538,25 @@ struct TerminalLiveTabLayoutTests {
         )
         // The app's own coordinator stays out of tests; this one stands in for it.
         let tracker = AgentConversationTitleTracker(controller: controller, coordinator: coordinator)
+        var notifiedController = false
+        let cancellable = NotificationCenter.default
+            .publisher(for: Notification.Name("GhosttyTabPresentationDidChange"), object: controller)
+            .sink { _ in notifiedController = true }
+        defer { cancellable.cancel() }
         controller.adoptAgentResumeDescriptor(.init(agent: .codex, conversationID: conversation,
             scope: .local, workingDirectory: "/tmp/project"), for: surface)
-        try await waitForAppKit { controller.window?.title == "Stabilise login" }
+        try await waitForAppKit {
+            AgentConversationTitleStore.shared.title(agent: .codex, conversationID: conversation) == "Stabilise login"
+                && notifiedController
+        }
         withExtendedLifetime(tracker) {}
+        // The inbox row carries the conversation's name, while window.title stays non-AI chrome.
         let value = try #require(TerminalTabPresentationResolver.resolve(
-            controller, index: 0, selected: true, activities: nil
+            controller, index: 0, selected: true, activities: nil, style: .inbox
         ))
         #expect(value.title == "Stabilise login")
+        #expect(value.subtitle == "/tmp/project")
+        #expect(controller.window?.title != "Stabilise login")
         #expect(AgentConversationTitleStore.shared.record(agent: .codex, conversationID: conversation)?.source == .native)
         await coordinator.waitUntilIdle()
         #expect(coordinator.inFlightCount == 0)
@@ -409,10 +572,14 @@ struct TerminalLiveTabLayoutTests {
         let surface = try #require(controller.surfaceTree.first)
         #expect(controller.tabLastAgentActivityAt == nil)
 
+        // Starting idle is not active agent work and does not stamp recency.
         let start = Date()
         surface.contextSignal = .init(action: .start, id: "omg-program-status",
             metadata: "state=idle:app=antigravity")
         #expect(controller.agentActivities[surface.id]?.state == .idle)
+        #expect(controller.tabLastAgentActivityAt == nil)
+
+        // .idle -> .working stamps recency.
         surface.contextSignal = .init(action: .start, id: "omg-program-status",
             metadata: "state=working:app=antigravity")
         #expect(controller.agentActivities[surface.id]?.state == .working)
@@ -424,11 +591,41 @@ struct TerminalLiveTabLayoutTests {
             metadata: "state=working:app=antigravity")
         #expect(controller.tabLastAgentActivityAt == working)
 
+        // .working -> .needsAttention, .error, and .done each stamp recency.
+        surface.contextSignal = .init(action: .start, id: "omg-program-status",
+            metadata: "state=blocked:app=antigravity")
+        #expect(controller.agentActivities[surface.id]?.state == .needsAttention)
+        let attention = try #require(controller.tabLastAgentActivityAt)
+        #expect(attention >= working)
+
+        surface.contextSignal = .init(action: .start, id: "omg-program-status",
+            metadata: "state=working:app=antigravity")
+        let resumedWorking = try #require(controller.tabLastAgentActivityAt)
+        #expect(resumedWorking >= attention)
+
+        surface.contextSignal = .init(action: .start, id: "omg-program-status",
+            metadata: "state=error:app=antigravity")
+        #expect(controller.agentActivities[surface.id]?.state == .error)
+        let failed = try #require(controller.tabLastAgentActivityAt)
+        #expect(failed >= resumedWorking)
+
+        surface.contextSignal = .init(action: .start, id: "omg-program-status",
+            metadata: "state=working:app=antigravity")
         surface.contextSignal = .init(action: .start, id: "omg-program-status",
             metadata: "state=done:app=antigravity")
         #expect(controller.agentActivities[surface.id]?.state == .done)
         let done = try #require(controller.tabLastAgentActivityAt)
-        #expect(done >= working)
+        #expect(done >= failed)
+
+        // Acknowledging .done -> .idle (e.g. passively viewing a finished tab) never stamps recency.
+        controller.acknowledgeTerminalAgentState(for: surface)
+        #expect(controller.agentActivities[surface.id]?.state == .idle)
+        #expect(controller.tabLastAgentActivityAt == done)
+
+        surface.contextSignal = .init(action: .start, id: "omg-program-status",
+            metadata: "state=clear:app=antigravity")
+        #expect(controller.agentActivities[surface.id] == nil)
+        #expect(controller.tabLastAgentActivityAt == done)
     }
 
     @Test func horizontalTabsUseNativeAgentStatusAndSharedPresentation() async throws {

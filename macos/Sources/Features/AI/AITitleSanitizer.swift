@@ -3,7 +3,8 @@ import Foundation
 /// Turns raw model output into a tab-sized title: one clean line, no markdown or
 /// quoting, at most `maxWidth` display columns (wide CJK characters count as two).
 enum AITitleSanitizer {
-    static let maxWidth = 40
+    /// Two or three words: a tab name, not a summary sentence.
+    static let maxWidth = 24
 
     private static let titlePrefixes = ["title:", "标题：", "标题:", "会话标题：", "会话标题:"]
 

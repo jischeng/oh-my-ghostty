@@ -150,7 +150,7 @@ Vertical Tabs 不是独立 Sidebar 产品，而是 Ghostty tab bar 的另一种 
 - `horizontal`：使用 Ghostty 原有 window nib、titlebar style 和 native horizontal tab UI。
 - `vertical`（默认）：同一 `NSWindowTabGroup.windows` tab model 由左侧 vertical tab bar 呈现，native horizontal accessory 在加入窗口层级之前被拒绝。
 
-两种 layout 共享 `TerminalController`/`NSWindowTabGroup` 的新建、关闭、选择、恢复、顺序、标题和快捷键路径。Vertical presentation 消费统一的 title/shortcut/icon/selected/hovered metadata；插件未来只能提供可选 icon/metadata override，不能控制 tab bar view。split 继续由 terminal 内容区管理，不生成额外 tab 行。
+两种 layout 共享 `TerminalController`/`NSWindowTabGroup` 的新建、关闭、选择、恢复、顺序、标题和快捷键路径。Vertical sidebar 支持默认 `tabs` 视图（保持单行路径/手动标题与原生顺序）与只读 `inbox` 视图（从不重排 `NSWindowTabGroup`，仅在侧栏展示 `inbox` 时让行号标签与 `goto_tab`/`⌘1…⌘9` 跟随当前可见的收件箱行顺序，并在收件箱行内按“手动标题 > 会话标题 > 验证过的 Agent 终端标题”展示名称与下方路径副标题；非收件箱表面不读取会话标题）。插件未来只能提供可选 icon/metadata override，不能控制 tab bar view。split 继续由 terminal 内容区管理，不生成额外 tab 行。
 
 每个逻辑 `(windowSessionID, workspaceID)` 标签组只保留一份 live vertical sidebar hosting view。各 NSWindow 的 shell 预留 sidebar 容器，提交选择或关闭当前 tab 时移动同一份 view，保留行身份与滚动状态；旧窗口最多保留上一帧静态图像，不能以清空/重建行树优化后台开销。纵向模式下多个 workspace 可以共用一个物理原生组，只有当前 workspace 的 host 参与呈现。拖出新窗口会复制布局偏好并建立独立 presentation，合并后回到目标组。连续新建按最新待显示 tab 计算插入位置，过期显示任务不能重新抢焦点；选中变化把对应行滚入可见区域。
 
@@ -301,7 +301,7 @@ OMG 基本不基于内部 `libghostty-internal` 或尚未稳定的 `libghostty-v
 - Vertical organization menu 支持 No Grouping、By Project、By Date、Created Time 与 Recently Used；grouping/order 存在 `NSWindowTabGroup` 共享 layout state，last-used mode 通过 UserDefaults 持久化，collapsed group 只属于当前 window state。
 - By Project 从 cwd 向上查找 `.git` repository root 并按 cwd 缓存结果，非 Git cwd 回退到目录名；group presentation 使用可扩展的 title/icon/id 模型，不执行 `git` 子进程。
 - 标签侧边栏的右键菜单、organization menu、日期/Other 分组标题、窗口 chrome 提示与辅助功能标签通过 `ChromeStrings` 跟随 OMG 语言设置，开关提示显示用户配置的快捷键；设置变更会触发侧边栏刷新，无需重建窗口。上游构建的终端与原生标签右键菜单保持英文原文，由 `SettingsMenuLocalizer` 在构建后按标题翻译。
-- `NSWindowTabGroup.windows` 是唯一 canonical tab order。Ghostty `move_tab`、Vertical drag、Horizontal native UI、`goto_tab` 和 shortcut labels 都消费同一顺序；Created/Recently Used 会先重排 canonical windows，开始手动 drag 时 ordering 切换为 Manual。
+- `NSWindowTabGroup.windows` 是唯一 canonical tab order。Ghostty `move_tab`、Vertical `tabs` 视图拖拽、Horizontal native UI 默认消费同一顺序；Created/Recently Used 会先重排 canonical windows，开始手动 drag 时 ordering 切换为 Manual；Vertical `inbox` 视图作为只读投影不修改 canonical windows，仅在侧栏可见且处于 `inbox` 时将 `goto_tab`/`⌘1…⌘9` 映射到当前显示的收件箱顺序。
 - Vertical drag 使用稳定 tab session UUID payload 和 host-owned DropDelegate；同一 derived group 内允许 reorder，跨 project/date group 拒绝，drop 不移动 Surface/PTY ownership。
 - 每个 `TerminalController` 拥有可恢复的 `tabSessionID`，新 PTY 注入 `OH_MY_GHOSTTY_SESSION`；cwd/title 只用于 project presentation，不用于 status correlation。
 - 尺寸 HUD 根因是旧 tab presentation 在切换时改变 content frame（per-tab width 与 native accessory 进入/退出布局），进而改变 terminal rows/columns；修复后快速切换前后所有 surface dimensions 保持不变，不隐藏 HUD 本身。

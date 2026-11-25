@@ -66,6 +66,16 @@ struct AISecretRedactorTests {
         #expect(AISecretRedactor.redact("https://github.com/acme/repo") == "https://github.com/acme/repo")
     }
 
+    @Test func aKnownSecretIsRemovedFromServiceTextWhateverItLooksLike() {
+        let key = "plain-looking-value"
+        let body = #"{"error":"Incorrect API key provided: plain-looking-value. Find yours in the dashboard."}"#
+        let shown = AISecretRedactor.redact(body, hiding: key)
+        #expect(!shown.contains(key))
+        #expect(shown.contains("Incorrect API key provided"))
+        #expect(AISecretRedactor.redact(body, hiding: nil) == AISecretRedactor.redact(body))
+        #expect(AISecretRedactor.redact(body, hiding: "") == AISecretRedactor.redact(body))
+    }
+
     @Test func redactionIsIdempotent() {
         let prompt = "password: hunter2 and sk-abcdefghijklmnopqrstuvwx"
         let once = AISecretRedactor.redact(prompt)

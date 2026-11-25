@@ -369,13 +369,16 @@ struct TerminalWorkspaceIntegrationTests {
         var config = Ghostty.SurfaceConfiguration()
         config.command = "/bin/sleep 60"
         let ids = (0..<4).map { _ in UUID() }
+        // One tab was saved with an interaction date, the others before it existed.
+        let lastUsed = Date(timeIntervalSince1970: 1_000)
         var snapshot = TerminalWorkspaceSessionStore.Snapshot()
         for (index, id) in ids.enumerated() {
             let view = Ghostty.SurfaceView(nativeApp, baseConfig: config)
             let state = TerminalRestorableState.InternalState(
                 focusedSurface: view.id.uuidString, surfaceTree: SplitTree(view: view),
                 effectiveFullscreenMode: nil, tabColor: nil, titleOverride: "Order \(index)",
-                tabSessionID: id.uuidString, tabCreatedAt: Date(timeIntervalSince1970: Double(4 - index))
+                tabSessionID: id.uuidString, tabCreatedAt: Date(timeIntervalSince1970: Double(4 - index)),
+                tabLastInteractionAt: index == 1 ? lastUsed : nil
             )
             snapshot.tabs.append(.init(id: id, workspace: TerminalWorkspace.defaultID,
                 state: try JSONEncoder().encode(state)))
@@ -401,6 +404,14 @@ struct TerminalWorkspaceIntegrationTests {
         try await Task.sleep(for: .milliseconds(250))
         #expect(nativeOrder() == ids)
         #expect(first.tabControllers.map(\.tabSessionID) == ids)
+        // Restoring and grouping the tabs selects them for an instant, which
+        // is not a visit: each keeps its saved interaction date, or its
+        // creation date when the state has none.
+        for (index, id) in ids.enumerated() {
+            let controller = try #require(restored.first { $0.tabSessionID == id })
+            let created = Date(timeIntervalSince1970: Double(4 - index))
+            #expect(controller.tabLastInteractionAt == (index == 1 ? lastUsed : created))
+        }
         store.capture()
         let captured = try JSONDecoder().decode(TerminalWorkspaceSessionStore.Snapshot.self, from: Data(contentsOf: url))
         #expect(captured.tabs.filter { ids.contains($0.id) }.map(\.id) == ids)

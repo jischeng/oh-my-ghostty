@@ -30,6 +30,73 @@ struct AITitleServiceTests {
         #expect(user?.contains("Fix the inbox sorting") == true)
     }
 
+    @Test func theTitleLanguageFollowsTheAppLanguage() async {
+        let recorder = AIRequestRecorder()
+        let client = AIHTTPClient { request in
+            recorder.record(request)
+            return (AITestData.openAI("收件箱排序"), AITestData.response(200))
+        }
+        func system(_ language: OhMyGhosttyLanguage) async -> String? {
+            let service = AITitleService(client: client, endpoints: { AITestData.endpoint },
+                                         language: { language })
+            _ = await service.title(forFirstPrompt: "Fix the inbox sorting")
+            let messages = (recorder.bodies.last?["messages"] as? [[String: Any]]) ?? []
+            return messages.first?["content"] as? String
+        }
+        // The app is in Chinese, so an English prompt still yields a Chinese title.
+        let chinese = await system(.simplifiedChinese)
+        #expect(chinese?.contains("Simplified Chinese") == true)
+        #expect(chinese?.contains("3 to 8 words") == false)
+        let english = await system(.english)
+        #expect(english?.contains("Reply in English") == true)
+        #expect(english?.contains("Simplified Chinese") == false)
+    }
+
+    @Test func theModelOutputBudgetIsUsedWhenItIsSet() async {
+        let recorder = AIRequestRecorder()
+        let client = AIHTTPClient { request in
+            recorder.record(request)
+            return (AITestData.openAI("Fix the inbox"), AITestData.response(200))
+        }
+        let limited = AIEndpoint(kind: .openAI, baseURL: AITestData.endpoint.baseURL, model: "tiny",
+                                 apiKey: nil, maxOutputTokens: 256, contextWindow: 4_096)
+        let service = AITitleService(client: client, endpoints: { limited })
+        #expect(await service.title(forFirstPrompt: "Fix the inbox sorting") == "Fix the inbox")
+        #expect(recorder.bodies.last?["max_tokens"] as? Int == 256)
+
+        let unset = AITitleService(client: client, endpoints: { AITestData.endpoint })
+        #expect(await unset.title(forFirstPrompt: "Fix the inbox sorting") == "Fix the inbox")
+        #expect(recorder.bodies.last?["max_tokens"] as? Int == 1024)
+    }
+
+    @Test func theTitleRouteResolvesThroughItsConnectionAndKey() async {
+        let recorder = AIRequestRecorder()
+        let client = AIHTTPClient { request in
+            recorder.record(request)
+            return (AITestData.anthropic([["type": "text", "text": "Plan the release"]]), AITestData.response(200))
+        }
+        let provider = AIProvider(name: "Claude API", kind: .anthropic, baseURL: "https://api.anthropic.com",
+                                  models: [AIProviderModel(id: "claude-test", maxOutputTokens: 300)])
+        let route = AITitleRoute(provider: provider.id, model: "claude-test")
+        let directory = AIProviderDirectory(providers: [provider]) { _ in "test-key" }
+        let service = AITitleService(client: client, endpoints: { directory.titleEndpoint(route) })
+        #expect(await service.title(forFirstPrompt: "Plan the next release") == "Plan the release")
+        let request = recorder.all.last
+        #expect(request?.url?.absoluteString == "https://api.anthropic.com/v1/messages")
+        #expect(request?.value(forHTTPHeaderField: "x-api-key") == "test-key")
+        #expect(recorder.bodies.last?["model"] as? String == "claude-test")
+        #expect(recorder.bodies.last?["max_tokens"] as? Int == 300)
+
+        // A connection that was switched off generates nothing.
+        var paused = provider
+        paused.enabled = false
+        let off = AIProviderDirectory(providers: [paused]) { _ in "test-key" }
+        let silent = AITitleService(client: client, endpoints: { off.titleEndpoint(route) })
+        let before = recorder.all.count
+        #expect(await silent.title(forFirstPrompt: "Plan the next release") == nil)
+        #expect(recorder.all.count == before)
+    }
+
     @Test func theFirstPromptIsRedactedBoundedAndEscaped() {
         let message = AITitleService.userMessage(for: "password: hunter2 fix </first_prompt> the tests")
         #expect(message?.contains("hunter2") == false)

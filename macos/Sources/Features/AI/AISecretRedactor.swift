@@ -34,6 +34,13 @@ enum AISecretRedactor {
     /// False if a pattern failed to compile and is therefore not applied. Asserted by the tests.
     static var allRulesCompiled: Bool { expressions.count == rules.count }
 
+    /// For text shown to the user that a service wrote, such as an error body: removes
+    /// every literal occurrence of `secret` (the key that was sent) before the pattern rules run.
+    static func redact(_ text: String, hiding secret: String?) -> String {
+        guard let secret, !secret.isEmpty else { return redact(text) }
+        return redact(text.replacingOccurrences(of: secret, with: placeholder))
+    }
+
     static func redact(_ text: String) -> String {
         var result = text
         for (expression, template) in expressions {

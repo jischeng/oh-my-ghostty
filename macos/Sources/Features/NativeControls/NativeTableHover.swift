@@ -134,10 +134,17 @@ final class NativeTableHover: NSObject {
 }
 
 class NativeHoverRowView: NSTableRowView {
+    static let highlightInset = NSSize(width: 2, height: 1)
+    static let highlightCornerRadius: CGFloat = 6
+
     override var wantsUpdateLayer: Bool { false }
     private let hoverBackground = CAShapeLayer()
     private let themeObserver = OMGNativeThemeObserver()
     private var hoverBounds: NSRect?
+    var cornerRadius: CGFloat { Self.highlightCornerRadius }
+    var highlightRect: NSRect {
+        bounds.insetBy(dx: Self.highlightInset.width, dy: Self.highlightInset.height)
+    }
     var isHovered = false {
         didSet {
             guard oldValue != isHovered else { return }
@@ -179,9 +186,15 @@ class NativeHoverRowView: NSTableRowView {
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
         hoverBackground.frame = bounds
-        let rect = bounds.insetBy(dx: 2, dy: 1)
+        let rect = highlightRect
+        let radius = cornerRadius
         hoverBackground.path = rect.isEmpty ? nil :
-            CGPath(roundedRect: rect, cornerWidth: 5, cornerHeight: 5, transform: nil)
+            CGPath(
+                roundedRect: rect,
+                cornerWidth: radius,
+                cornerHeight: radius,
+                transform: nil
+            )
     }
 
     private func updateHoverColor() {

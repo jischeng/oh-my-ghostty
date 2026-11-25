@@ -92,18 +92,25 @@ struct AgentConversationTitleCoordinatorTests {
             store.record(agent: target.agent, conversationID: target.conversationID)
         }
 
-        func request(_ trigger: Coordinator.Trigger, owner: UUID? = nil) {
-            coordinator.request(target, trigger: trigger, owner: owner ?? self.owner)
+        func request(_ trigger: Coordinator.Trigger, owner: UUID? = nil, allowsGeneration: Bool = true) {
+            coordinator.request(
+                target,
+                trigger: trigger,
+                owner: owner ?? self.owner,
+                allowsGeneration: allowsGeneration
+            )
         }
     }
 
     private let prompt = "Fix the flaky login test\nIt fails about once in ten runs on CI."
 
-    @Test func theAgentsOwnTitleWinsAndEndsTheRetries() async {
+    @Test func theAgentsOwnTitleWinsWithoutFlashingPromptAndUpdatesOnLaterRenames() async {
         let fixture = Fixture(seeds: Seeds([
             nil,
             Seed(native: nil, firstPrompt: prompt),
             Seed(native: "Stabilise login", firstPrompt: prompt),
+            Seed(native: "Stabilise login", firstPrompt: prompt),
+            Seed(native: "Renamed on turn two", firstPrompt: prompt),
         ]), generated: "Never used")
         var sources: [AgentConversationTitleSource] = []
         let changes = fixture.store.titleChanges.sink { _ in
@@ -117,24 +124,40 @@ struct AgentConversationTitleCoordinatorTests {
 
         #expect(fixture.record?.title == "Stabilise login")
         #expect(fixture.record?.source == .native)
-        // The opening prompt stood in until the Agent named the conversation.
-        #expect(sources == [.prompt, .native])
-        // The transcript did not exist at the first prompt; the read backed off.
+        // No raw prompt stand-in flashed before the Agent's title arrived.
+        #expect(sources == [.native])
         #expect(fixture.delays.all == [.seconds(1), .seconds(2), .seconds(4)])
         #expect(await fixture.seeds.targets.count == 3)
         #expect(await fixture.generator.prompts.isEmpty)
         #expect(fixture.coordinator.inFlightCount == 0)
 
-        // With the Agent's title stored, nothing is read again.
+        // Bound and working turns do not re-scan a natively titled conversation.
         fixture.request(.working)
         fixture.request(.bound)
-        fixture.request(.done)
         #expect(fixture.coordinator.inFlightCount == 0)
         #expect(await fixture.seeds.targets.count == 3)
+
+        // Every completed turn checks once immediately so `/rename` on turn 2+ updates live.
+        fixture.request(.done)
+        await fixture.coordinator.waitUntilIdle()
+        #expect(fixture.record?.title == "Stabilise login")
+        fixture.request(.done)
+        await fixture.coordinator.waitUntilIdle()
+        #expect(fixture.record?.title == "Renamed on turn two")
+        #expect(await fixture.seeds.targets.count == 5)
     }
 
-    @Test func theOpeningPromptIsSummarisedOnceWhenTheAgentNamesNothing() async {
-        let fixture = Fixture(seeds: Seeds(rest: Seed(native: nil, firstPrompt: prompt)), generated: "Flaky login test")
+    @Test func theOpeningPromptIsSummarisedOnceWithoutRawPromptFlash() async {
+        let fixture = Fixture(
+            seeds: Seeds([
+                Seed(native: nil, firstPrompt: prompt),
+                Seed(native: nil, firstPrompt: prompt),
+                Seed(native: nil, firstPrompt: prompt),
+                Seed(native: nil, firstPrompt: prompt),
+                Seed(native: "Custom /rename title", firstPrompt: prompt),
+            ], rest: Seed(native: "Custom /rename title", firstPrompt: prompt)),
+            generated: "Flaky login test"
+        )
         var titles: [String] = []
         let changes = fixture.store.titleChanges.sink { _ in
             if let title = fixture.record?.title { titles.append(title) }
@@ -144,25 +167,26 @@ struct AgentConversationTitleCoordinatorTests {
         fixture.request(.working)
         await fixture.coordinator.waitUntilIdle()
 
-        #expect(titles == ["Fix the flaky login test", "Flaky login test"])
+        #expect(titles == ["Flaky login test"])
         #expect(fixture.record?.source == .generated)
-        // The Agent got two further looks to name the conversation first.
         #expect(await fixture.seeds.targets.count == 3)
-        // Only the opening prompt is sent, whole rather than cut to a tab's width.
         #expect(await fixture.generator.prompts == [prompt])
 
-        // A generated title is never generated again, on a turn or after a relaunch.
+        // A generated title is never regenerated on subsequent turns.
         fixture.request(.working)
         fixture.request(.bound)
         #expect(fixture.coordinator.inFlightCount == 0)
-        // The first completed turn looks once more for the Agent's own title.
         fixture.request(.done)
         await fixture.coordinator.waitUntilIdle()
-        fixture.request(.done)
-        await fixture.coordinator.waitUntilIdle()
-        #expect(await fixture.seeds.targets.count == 4)
         #expect(await fixture.generator.prompts.count == 1)
         #expect(fixture.record?.title == "Flaky login test")
+
+        // A later turn where the user ran `/rename` still upgrades to `.native`.
+        fixture.request(.done)
+        await fixture.coordinator.waitUntilIdle()
+        #expect(await fixture.generator.prompts.count == 1)
+        #expect(fixture.record?.title == "Custom /rename title")
+        #expect(fixture.record?.source == .native)
     }
 
     @Test func aCompletedTurnUpgradesToTheAgentsTitle() async {
@@ -174,18 +198,18 @@ struct AgentConversationTitleCoordinatorTests {
         await fixture.coordinator.waitUntilIdle()
         #expect(fixture.record?.title == "Stabilise login")
         #expect(fixture.record?.source == .native)
-        // The second look does not wait.
         #expect(fixture.delays.all.isEmpty)
         #expect(await fixture.generator.prompts.isEmpty)
     }
 
-    @Test func nativeModeKeepsThePromptAndSettles() async {
-        let fixture = Fixture(seeds: Seeds(rest: Seed(native: nil, firstPrompt: prompt)),
-                              generated: "Never used", mode: .native)
+    @Test func nativeModeSanitisesThePromptFallbackAndUpgradesWhenGenerateEnabled() async {
+        let decoratedPrompt = "Title: **Fix the flaky login test across CI runners**\nSecond line."
+        let fixture = Fixture(seeds: Seeds(rest: Seed(native: nil, firstPrompt: decoratedPrompt)),
+                              generated: "Login flake", mode: .native)
         fixture.request(.working)
         await fixture.coordinator.waitUntilIdle()
         #expect(fixture.record?.source == .prompt)
-        #expect(fixture.record?.title == "Fix the flaky login test")
+        #expect(fixture.record?.title == AITitleSanitizer.sanitize(decoratedPrompt))
         #expect(await fixture.generator.prompts.isEmpty)
         #expect(await fixture.seeds.targets.count == 3)
 
@@ -195,22 +219,41 @@ struct AgentConversationTitleCoordinatorTests {
         fixture.now = fixture.now.addingTimeInterval(11 * 60)
         fixture.request(.working)
         await fixture.coordinator.waitUntilIdle()
-        #expect(await fixture.seeds.targets.count == 6)
+        #expect(await fixture.seeds.targets.count == 4)
 
-        // Once the user allows it, the next look summarises the prompt.
+        // Once the user enables generation, even a `.bound` check upgrades `.prompt` -> `.generated`.
         fixture.mode = .generate
-        fixture.request(.done)
+        fixture.request(.bound)
+        await fixture.coordinator.waitUntilIdle()
+        #expect(await fixture.generator.prompts == [decoratedPrompt])
+        #expect(fixture.record?.source == .generated)
+        #expect(fixture.record?.title == "Login flake")
+    }
+
+    @Test func manualOverrideSkipsLLMGenerationUntilCleared() async {
+        let fixture = Fixture(seeds: Seeds(rest: Seed(native: nil, firstPrompt: prompt)),
+                              generated: "Flaky login test", mode: .generate)
+        fixture.request(.working, allowsGeneration: false)
+        await fixture.coordinator.waitUntilIdle()
+        #expect(await fixture.generator.prompts.isEmpty)
+        #expect(fixture.record?.source == .prompt)
+        #expect(fixture.record?.title == AITitleSanitizer.sanitize(prompt))
+
+        // Clearing `titleOverride` re-requests with `allowsGeneration: true` and summarises once.
+        fixture.request(.bound, allowsGeneration: true)
         await fixture.coordinator.waitUntilIdle()
         #expect(await fixture.generator.prompts == [prompt])
         #expect(fixture.record?.source == .generated)
+        #expect(fixture.record?.title == "Flaky login test")
     }
 
-    @Test func anUnconfiguredEndpointLeavesThePrompt() async {
+    @Test func anUnconfiguredEndpointFallsBackToSanitisedPrompt() async {
         let fixture = Fixture(seeds: Seeds(rest: Seed(native: nil, firstPrompt: prompt)), generated: nil)
         fixture.request(.working)
         await fixture.coordinator.waitUntilIdle()
         #expect(await fixture.generator.prompts == [prompt])
         #expect(fixture.record?.source == .prompt)
+        #expect(fixture.record?.title == AITitleSanitizer.sanitize(prompt))
     }
 
     @Test func offModeReadsNothing() async {
@@ -226,12 +269,10 @@ struct AgentConversationTitleCoordinatorTests {
 
     @Test func aBoundConversationIsReadOnceAndATurnRetries() async {
         let fixture = Fixture(seeds: Seeds())
-        // A restored or resumed tab: its transcript is there or it is not.
         fixture.request(.bound)
         await fixture.coordinator.waitUntilIdle()
         #expect(await fixture.seeds.targets.count == 1)
         #expect(fixture.delays.all == [.seconds(1)])
-        // A turn that just started can be ahead of its transcript.
         fixture.request(.working)
         await fixture.coordinator.waitUntilIdle()
         #expect(await fixture.seeds.targets.count == 1 + Coordinator.defaultRetryDelays.count)
@@ -239,8 +280,44 @@ struct AgentConversationTitleCoordinatorTests {
         #expect(await fixture.generator.prompts.isEmpty)
     }
 
+    @Test func aRestoredConversationIsTitledFromATranscriptWrittenDaysAgo() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omg-title-coordinator-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let id = "0f0e0d0c-1111-4222-8333-444455556666"
+        let file = root.appendingPathComponent("-repo/\(id).jsonl")
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let lines = [
+            #"{"type":"user","sessionId":"\#(id)","cwd":"/repo","message":{"role":"user","content":"Fix the flaky login test"}}"#,
+            #"{"type":"ai-title","aiTitle":"Stabilise login","sessionId":"\#(id)"}"#,
+        ]
+        try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: file)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(-9 * 86_400)], ofItemAtPath: file.path
+        )
+        let store = AgentConversationTitleStore()
+        let coordinator = Coordinator(
+            store: store,
+            generator: Generator(nil),
+            loadSeed: { target in
+                await AgentHistoryStore.titleSeed(
+                    agent: target.agent, conversationID: target.conversationID,
+                    remoteHost: target.remoteHost, rootURLs: [.claude: root]
+                )
+            },
+            mode: { .native },
+            sleep: { _ in }
+        )
+        let conversation = try #require(AgentConversationID(id))
+        coordinator.request(.init(agent: .claude, conversationID: conversation, remoteHost: nil),
+                            trigger: .bound, owner: UUID())
+        await coordinator.waitUntilIdle()
+        let record = store.record(agent: .claude, conversationID: conversation)
+        #expect(record?.title == "Stabilise login")
+        #expect(record?.source == .native)
+    }
+
     @Test func oneReadServesEveryTabAndStopsWithTheLastOne() async {
-        // The read never gets past its first wait unless it is cancelled.
         let fixture = Fixture(seeds: Seeds(rest: Seed(native: "Stabilise login", firstPrompt: prompt)),
                               sleep: { _ in try await Task.sleep(for: .seconds(600)) })
         let first = UUID()
@@ -271,7 +348,6 @@ struct AgentConversationTitleCoordinatorTests {
             Seed(native: "Stabilise login", firstPrompt: prompt),
         ]), mode: .native)
         fixture.request(.working)
-        // A short turn finishes before the first read has run.
         fixture.request(.done)
         #expect(fixture.coordinator.inFlightCount == 1)
         await fixture.coordinator.waitUntilIdle()
@@ -302,7 +378,6 @@ struct AgentConversationTitleCoordinatorTests {
         #expect(AgentConversationTitleTracker.trigger(for: .idle, newlyBound: false) == nil)
         #expect(AgentConversationTitleTracker.trigger(for: .needsAttention, newlyBound: false) == nil)
         #expect(AgentConversationTitleTracker.trigger(for: nil, newlyBound: false) == nil)
-        // A conversation a pane just became bound to is looked up whatever the Agent is doing.
         #expect(AgentConversationTitleTracker.trigger(for: nil, newlyBound: true) == .bound)
         #expect(AgentConversationTitleTracker.trigger(for: .idle, newlyBound: true) == .bound)
         #expect(AgentConversationTitleTracker.trigger(for: .working, newlyBound: true) == .working)

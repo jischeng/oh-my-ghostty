@@ -209,6 +209,17 @@ final class VerticalTabWindowLayoutState: ObservableObject {
         tabPresentation.updateTabs(controllers, selectedID: selectedID)
     }
 
+    /// The visible top-to-bottom order the inbox shows right now, published by
+    /// the sidebar that displays it (including while the pointer holds rows in
+    /// place). Empty when no sidebar shows the inbox. Not `@Published`: it is
+    /// written during a sidebar refresh and must not schedule another one.
+    private(set) var inboxDisplayOrder = TabInboxDisplayOrder()
+
+    func publishInboxDisplayOrder(_ tabs: [TerminalController]) {
+        guard !tabs.isEmpty || !inboxDisplayOrder.isEmpty else { return }
+        inboxDisplayOrder = TabInboxDisplayOrder(tabs)
+    }
+
     @Published private(set) var isSidebarVisible: Bool
     @Published private(set) var sidebarWidth: CGFloat
     @Published private(set) var committedSidebarWidth: CGFloat
@@ -647,10 +658,12 @@ struct CompositeGhosttyTabIconProvider: GhosttyTabIconProviding {
 struct GhosttyTabPresentation {
     let title: String
     let remoteBreadcrumb: RemoteTabBreadcrumb?
-    /// Non-nil exactly when `title` is a conversation title: what the tab
-    /// would otherwise have shown (directory, or `host › dir` for SSH). Rows
-    /// render it as a second line.
+    /// Non-nil exactly when `title` is a name rather than a place (a manual
+    /// tab name or a conversation title): the working directory, prefixed
+    /// with the host for SSH. Rows render it as a second line.
     var subtitle: String?
+    /// The subtitle names a place on another host: the row marks it with a cloud.
+    var subtitleIsRemote: Bool = false
     let shortcut: String?
     let icon: GhosttyTabIcon
     let activity: TabActivity?
@@ -711,13 +724,33 @@ final class GhosttyTabOrganizationModel: ObservableObject {
             }
         case .recentlyUsed:
             organized.sort {
-                if $0.controller.tabLastActivatedAt == $1.controller.tabLastActivatedAt {
+                let lhs = TabInboxModel.recency(
+                    createdAt: $0.controller.tabCreatedAt,
+                    lastInteractionAt: $0.controller.tabLastInteractionAt,
+                    lastAgentActivityAt: $0.controller.tabLastAgentActivityAt
+                )
+                let rhs = TabInboxModel.recency(
+                    createdAt: $1.controller.tabCreatedAt,
+                    lastInteractionAt: $1.controller.tabLastInteractionAt,
+                    lastAgentActivityAt: $1.controller.tabLastAgentActivityAt
+                )
+                if lhs == rhs {
                     return $0.actualIndex < $1.actualIndex
                 }
-                return $0.controller.tabLastActivatedAt > $1.controller.tabLastActivatedAt
+                return lhs > rhs
             }
         }
 
+        return groups(of: organized, grouping: grouping, now: now)
+    }
+
+    /// Groups tabs that are already in display order. A group takes the
+    /// place of its first tab.
+    func groups(
+        of organized: [GhosttyOrganizedTab],
+        grouping: GhosttyTabGroupingMode,
+        now: Date = Date()
+    ) -> [GhosttyTabGroupPresentation] {
         guard grouping != .none else {
             return [.init(id: "all", title: nil, icon: nil, tabs: organized)]
         }

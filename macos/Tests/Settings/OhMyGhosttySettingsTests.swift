@@ -949,66 +949,201 @@ struct OhMyGhosttySettingsTests {
         let (settings, url) = temporarySettings()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         #expect(settings.tabSidebarViewMode == .tabs)
-        #expect(settings.tabInboxSortMode == .recent)
+        #expect(settings.tabInboxGroupingMode == .date)
+        #expect(settings.tabInboxOrderingMode == .recentlyUsed)
+        #expect(settings.tabRowDensity == .comfortable)
+        #expect(OhMyGhosttyTabRowDensity.comfortable.rowHeight == 36)
+        #expect(OhMyGhosttyTabRowDensity.compact.rowHeight == 30)
         #expect(settings.agentSessionTitleMode == .generate)
-        #expect(settings.aiEndpointProtocol == .openAI)
-        #expect(settings.aiEndpointBaseURL.isEmpty)
-        #expect(settings.aiEndpointModel.isEmpty)
+        #expect(settings.aiProviders.isEmpty)
+        #expect(settings.aiTitleRoute == nil)
 
+        let density = OhMyGhosttySettings.descriptors.first { $0.id == "appearance.tabRowDensity" }
+        #expect(density?.defaultValue == "comfortable")
+        #expect(density?.allowedValues == ["compact", "comfortable"])
         let sidebar = OhMyGhosttySettings.descriptors.first { $0.id == "tabs.sidebarView" }
         #expect(sidebar?.defaultValue == "tabs")
         #expect(sidebar?.allowedValues == ["tabs", "inbox"])
+        let grouping = OhMyGhosttySettings.descriptors.first { $0.id == "tabs.inboxGrouping" }
+        #expect(grouping?.defaultValue == "date")
+        #expect(grouping?.allowedValues == ["none", "project", "date"])
         let ordering = OhMyGhosttySettings.descriptors.first { $0.id == "tabs.inboxOrdering" }
-        #expect(ordering?.defaultValue == "recent")
-        #expect(ordering?.allowedValues == ["recent", "created"])
+        #expect(ordering?.defaultValue == "recentlyUsed")
+        #expect(ordering?.allowedValues == ["manual", "created", "recentlyUsed"])
         #expect(OhMyGhosttySettings.descriptors.first { $0.id == "agents.sessionTitle.mode" }?
             .allowedValues == ["off", "native", "generate"])
-        #expect(OhMyGhosttySettings.descriptors.first { $0.id == "ai.endpoint.protocol" }?
-            .allowedValues == ["openai", "anthropic"])
-        #expect(OhMyGhosttySettings.descriptors.first { $0.id == "ai.endpoint.baseURL" }?
-            .defaultValue == "")
-        #expect(OhMyGhosttySettings.descriptors.first { $0.id == "ai.endpoint.model" }?
-            .defaultValue == "")
+        // The single endpoint of the first AI build is gone from the registry.
+        #expect(!OhMyGhosttySettings.descriptors.contains { $0.id.hasPrefix("ai.endpoint.") })
 
         settings.tabSidebarViewMode = .inbox
-        settings.tabInboxSortMode = .created
+        settings.tabInboxGroupingMode = .project
+        settings.tabInboxOrderingMode = .created
+        settings.tabRowDensity = .compact
         settings.agentSessionTitleMode = .native
-        settings.aiEndpointProtocol = .anthropic
-        settings.aiEndpointBaseURL = "  https://api.example.com  "
-        settings.aiEndpointModel = "claude-test"
 
         let object = try #require(
             JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
         )
         #expect(object["tabs.sidebarView"] as? String == "inbox")
+        #expect(object["tabs.inboxGrouping"] as? String == "project")
         #expect(object["tabs.inboxOrdering"] as? String == "created")
+        #expect(object["appearance.tabRowDensity"] as? String == "compact")
         #expect(object["agents.sessionTitle.mode"] as? String == "native")
-        #expect(object["ai.endpoint.protocol"] as? String == "anthropic")
-        #expect(object["ai.endpoint.baseURL"] as? String == "https://api.example.com")
-        #expect(object["ai.endpoint.model"] as? String == "claude-test")
-        #expect(object["apiKey"] == nil)
 
         let restored = OhMyGhosttySettings(fileURL: url)
         #expect(restored.tabSidebarViewMode == .inbox)
-        #expect(restored.tabInboxSortMode == .created)
+        #expect(restored.tabInboxGroupingMode == .project)
+        #expect(restored.tabInboxOrderingMode == .created)
+        #expect(restored.tabRowDensity == .compact)
         #expect(restored.agentSessionTitleMode == .native)
-        #expect(restored.aiEndpointProtocol == .anthropic)
-        #expect(restored.aiEndpointBaseURL == "https://api.example.com")
-        #expect(restored.aiEndpointModel == "claude-test")
     }
 
-    @Test func invalidInboxAndEndpointValuesFallBackToDefaults() throws {
+    @Test func invalidInboxAndTitleValuesFallBackToDefaults() throws {
         let (settings, url) = temporarySettings()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        try #"{"tabs.sidebarView":"grid","tabs.inboxOrdering":"alphabetical","agents.sessionTitle.mode":"always","ai.endpoint.protocol":"gemini","ai.endpoint.baseURL":"   ","ai.endpoint.model":5}"#
+        // `recent` is what the first inbox build stored for the ordering.
+        try #"{"tabs.sidebarView":"grid","tabs.inboxGrouping":"host","tabs.inboxOrdering":"recent","appearance.tabRowDensity":" cramped ","agents.sessionTitle.mode":"always","ai.providers":"none","ai.routes.title":["x"],"ai.routes.commit":{"kind":"agent"}}"#
             .write(to: url, atomically: true, encoding: .utf8)
         settings.reloadFromDisk()
         #expect(settings.tabSidebarViewMode == .tabs)
-        #expect(settings.tabInboxSortMode == .recent)
+        #expect(settings.tabInboxGroupingMode == .date)
+        #expect(settings.tabInboxOrderingMode == .recentlyUsed)
+        #expect(settings.tabRowDensity == .comfortable)
         #expect(settings.agentSessionTitleMode == .generate)
-        #expect(settings.aiEndpointProtocol == .openAI)
-        #expect(settings.aiEndpointBaseURL.isEmpty)
-        #expect(settings.aiEndpointModel.isEmpty)
+        #expect(settings.aiProviders.isEmpty)
+        #expect(settings.aiTitleRoute == nil)
+        #expect(settings.gitCommitAIRoutes.isEmpty)
+    }
+
+    @Test func aiProvidersAndTheTitleModelPersistWithoutAnySecret() throws {
+        let (settings, url) = temporarySettings()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let provider = AIProvider(
+            name: "Work proxy", kind: .anthropic, baseURL: "https://proxy.example.com",
+            models: [AIProviderModel(id: "claude-test", contextWindow: 200_000, maxOutputTokens: 8_192)]
+        )
+        settings.aiProviders = [provider]
+        settings.aiTitleRoute = AITitleRoute(provider: provider.id, model: "claude-test")
+
+        let text = try String(contentsOf: url, encoding: .utf8)
+        let object = try #require(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+        let stored = try #require((object["ai.providers"] as? [[String: Any]])?.first)
+        #expect(Set(stored.keys) == ["id", "name", "kind", "baseURL", "enabled", "models"])
+        #expect(stored["kind"] as? String == "anthropic")
+        let title = try #require(object["ai.routes.title"] as? [String: Any])
+        #expect(title["provider"] as? String == provider.id.uuidString)
+        #expect(title["model"] as? String == "claude-test")
+        #expect(!text.lowercased().contains("apikey"))
+        #expect(!text.lowercased().contains("api_key"))
+
+        let restored = OhMyGhosttySettings(fileURL: url)
+        #expect(restored.aiProviders == [provider])
+        #expect(restored.aiTitleRoute == settings.aiTitleRoute)
+
+        // Clearing the title model removes its key instead of writing an empty value.
+        restored.aiTitleRoute = nil
+        let cleared = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        #expect(cleared["ai.routes.title"] == nil)
+        #expect(OhMyGhosttySettings(fileURL: url).aiTitleRoute == nil)
+    }
+
+    @Test func editingProvidersKeepsModelChoicesAndStoredKeysConsistent() throws {
+        let (settings, url) = temporarySettings()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let credentials = AICredentialStore(
+            fileURL: url.deletingLastPathComponent().appendingPathComponent("credentials.json")
+        )
+        let kept = try #require(settings.addAIProvider(name: "Kept"))
+        let removed = try #require(settings.addAIProvider(name: "Removed"))
+        settings.updateAIProvider(kept.id) { $0.mergeModels(["a", "b"]) }
+        settings.updateAIProvider(removed.id) { $0.mergeModels(["x"]) }
+        try credentials.setAPIKey("kept-test-key", for: kept.id)
+        try credentials.setAPIKey("removed-test-key", for: removed.id)
+        settings.gitCommitAIRoutes = [
+            GitCommitAIRoute(agent: .claude, model: "sonnet"),
+            GitCommitAIRoute(provider: kept.id, model: "a"),
+            GitCommitAIRoute(provider: kept.id, model: "b"),
+            GitCommitAIRoute(provider: removed.id, model: "x"),
+        ]
+        settings.aiTitleRoute = AITitleRoute(provider: removed.id, model: "x")
+
+        try settings.removeAIProvider(removed.id, credentials: credentials)
+        #expect(settings.aiProviders.map(\.id) == [kept.id])
+        #expect(settings.gitCommitAIRoutes.map(\.model) == ["sonnet", "a", "b"])
+        #expect(settings.aiTitleRoute == nil)
+        #expect(credentials.apiKey(for: removed.id) == nil)
+        #expect(credentials.apiKey(for: kept.id) == "kept-test-key")
+
+        settings.aiTitleRoute = AITitleRoute(provider: kept.id, model: "b")
+        settings.removeAIProviderModel("b", from: kept.id)
+        #expect(settings.aiProvider(kept.id)?.models.map(\.id) == ["a"])
+        #expect(settings.gitCommitAIRoutes.map(\.model) == ["sonnet", "a"])
+        #expect(settings.aiTitleRoute == nil)
+
+        // An edit cannot change the identity the stored key hangs on.
+        settings.updateAIProvider(kept.id) { $0.id = UUID(); $0.name = "Renamed" }
+        #expect(settings.aiProviders.map(\.id) == [kept.id])
+        #expect(settings.aiProvider(kept.id)?.name == "Renamed")
+        #expect(settings.aiProviderDirectory(credentials: credentials).providers == settings.aiProviders)
+        #expect(OhMyGhosttySettings(fileURL: url).aiProviders == settings.aiProviders)
+    }
+
+    @Test func theFirstBuildEndpointMigratesToAConnectionAndTheTitleModel() throws {
+        let (settings, url) = temporarySettings()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try #"{"ai.endpoint.protocol":"anthropic","ai.endpoint.baseURL":" https://proxy.example.com/v1 ","ai.endpoint.model":"claude-test","future.key":"kept"}"#
+            .write(to: url, atomically: true, encoding: .utf8)
+        settings.reloadFromDisk()
+
+        let provider = try #require(settings.aiProviders.first)
+        #expect(settings.aiProviders.count == 1)
+        #expect(provider.id == AIProvider.legacyEndpointID)
+        #expect(provider.kind == .anthropic)
+        #expect(provider.baseURL == "https://proxy.example.com/v1")
+        #expect(provider.models.map(\.id) == ["claude-test"])
+        #expect(settings.aiTitleRoute == AITitleRoute(provider: provider.id, model: "claude-test"))
+
+        // The old keys are gone from the file, the new ones are saved, and unrelated keys stay.
+        let object = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        #expect(!object.keys.contains { $0.hasPrefix("ai.endpoint.") })
+        #expect((object["ai.providers"] as? [[String: Any]])?.count == 1)
+        #expect(object["ai.routes.title"] != nil)
+        #expect(object["future.key"] as? String == "kept")
+
+        // The migrated connection finds the old single key under the same identity.
+        let credentialsURL = url.deletingLastPathComponent().appendingPathComponent("credentials.json")
+        try Data(#"{"version":1,"apiKey":"legacy-test-key"}"#.utf8).write(to: credentialsURL)
+        let endpoint = settings.aiProviderDirectory(credentials: AICredentialStore(fileURL: credentialsURL))
+            .titleEndpoint(settings.aiTitleRoute)
+        #expect(endpoint?.apiKey == "legacy-test-key")
+        #expect(endpoint?.model == "claude-test")
+
+        // A second load changes nothing.
+        let again = OhMyGhosttySettings(fileURL: url)
+        #expect(again.aiProviders == settings.aiProviders)
+        #expect(again.aiTitleRoute == settings.aiTitleRoute)
+    }
+
+    @Test func legacyEndpointKeysNeverReplaceExistingProvidersOrAnIncompleteEndpoint() throws {
+        let (settings, url) = temporarySettings()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let existing = AIProvider(name: "Mine", baseURL: "https://api.example.com")
+        let providers = try JSONSerialization.data(withJSONObject: AIProvider.encode([existing]))
+        let json = #"{"ai.endpoint.baseURL":"https://old.example.com","ai.endpoint.model":"old","ai.providers":"#
+            + (String(bytes: providers, encoding: .utf8) ?? "[]") + "}"
+        try json.write(to: url, atomically: true, encoding: .utf8)
+        settings.reloadFromDisk()
+        #expect(settings.aiProviders == [existing])
+        #expect(settings.aiTitleRoute == nil)
+
+        // Only a model, no base URL: nothing to connect to, so the keys are simply dropped.
+        try #"{"ai.endpoint.protocol":"openai","ai.endpoint.model":"gpt-test"}"#
+            .write(to: url, atomically: true, encoding: .utf8)
+        settings.reloadFromDisk()
+        #expect(settings.aiProviders.isEmpty)
+        #expect(settings.aiTitleRoute == nil)
+        let object = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        #expect(!object.keys.contains { $0.hasPrefix("ai.") })
     }
 
     @Test func testingEnvironmentIsolatesDefaultSettingsFileURLFromRealHomeDirectory() {

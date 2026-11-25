@@ -21,6 +21,10 @@ extension TerminalRestorableState {
         let tabCreatedAt: Date?
 
         // MARK: - Version 9 (agent resume descriptors live on each SurfaceView)
+
+        /// Optional and last, so state saved without it still decodes; the
+        /// tab then counts as last used when it was created.
+        var tabLastInteractionAt: Date?
     }
 }
 
@@ -34,6 +38,7 @@ extension TerminalRestorableState.InternalState where ViewType == Ghostty.Surfac
             titleOverride: controller.titleOverride,
             tabSessionID: controller.tabSessionID.uuidString,
             tabCreatedAt: controller.tabCreatedAt,
+            tabLastInteractionAt: controller.tabLastInteractionAt,
         )
     }
 }

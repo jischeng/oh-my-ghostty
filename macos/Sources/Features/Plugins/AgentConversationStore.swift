@@ -63,6 +63,7 @@ enum AgentConversationStore {
         agent: SupportedAgent,
         workingDirectory: String,
         launchedAfter: Date,
+        excluding claimedConversationIDs: Set<AgentConversationID> = [],
         rootURL: URL? = nil
     ) -> AgentConversationID? {
         let resume = agent.definition.resume
@@ -70,7 +71,8 @@ enum AgentConversationStore {
             return discover(
                 command: command,
                 workingDirectory: workingDirectory,
-                launchedAfter: launchedAfter
+                launchedAfter: launchedAfter,
+                excluding: claimedConversationIDs
             )
         }
         guard let rootValue = resume.discover?.root ?? resume.store?.root else {
@@ -80,7 +82,7 @@ enum AgentConversationStore {
             fileURLWithPath: (rootValue as NSString).expandingTildeInPath
         )
         let target = canonical(workingDirectory)
-        let keys: Set<URLResourceKey> = [.creationDateKey, .isRegularFileKey]
+        let keys: Set<URLResourceKey> = [.creationDateKey, .contentModificationDateKey, .isRegularFileKey]
         guard let enumerator = FileManager.default.enumerator(
             at: root,
             includingPropertiesForKeys: Array(keys),
@@ -88,15 +90,21 @@ enum AgentConversationStore {
         ) else { return nil }
         let threshold = launchedAfter.addingTimeInterval(-creationTolerance)
         var inspected = 0
-        var matches = Set<AgentConversationID>()
+        // A conversation this launch started, and one the Agent resumed: a
+        // resumed session keeps its old transcript and writes to it again the
+        // moment it comes back. Conversations already claimed by another live
+        // pane are excluded so a second pane never adopts an active sibling's ID.
+        var created = Set<AgentConversationID>()
+        var resumed: [(id: AgentConversationID, modified: Date)] = []
         for case let url as URL in enumerator {
             inspected += 1
             guard inspected <= maximumFiles else { return nil }
             guard url.pathExtension == "jsonl",
                   let values = try? url.resourceValues(forKeys: keys),
                   values.isRegularFile == true,
-                  let created = values.creationDate,
-                  created >= threshold,
+                  let createdAt = values.creationDate,
+                  let modified = values.contentModificationDate,
+                  createdAt >= threshold || modified >= threshold,
                   let objects = headerObjects(at: url) else { continue }
             let candidate: (id: String, cwd: String)?
             if let discovery = resume.discover {
@@ -116,17 +124,33 @@ enum AgentConversationStore {
             }
             guard let candidate,
                   canonical(candidate.cwd) == target,
-                  let id = AgentConversationID(candidate.id) else { continue }
-            matches.insert(id)
-            if matches.count > 1 { return nil }
+                  let id = AgentConversationID(candidate.id),
+                  !claimedConversationIDs.contains(id) else { continue }
+            if createdAt >= threshold {
+                created.insert(id)
+                if created.count > 1 { return nil }
+            } else {
+                resumed.removeAll { $0.id == id }
+                resumed.append((id, modified))
+            }
         }
-        return matches.first
+        if let only = created.first { return only }
+        // Several resumed transcripts of one directory are common; the one the
+        // Agent touched when it came back is the newest. Two touched within a
+        // moment of each other cannot be told apart, so neither is adopted.
+        resumed.sort { $0.modified > $1.modified }
+        guard let newest = resumed.first else { return nil }
+        if resumed.count > 1, newest.modified.timeIntervalSince(resumed[1].modified) < creationTolerance {
+            return nil
+        }
+        return newest.id
     }
 
     private static func discover(
         command: AgentDefinition.ResumeSpec.CommandDiscovery,
         workingDirectory: String,
-        launchedAfter: Date
+        launchedAfter: Date,
+        excluding claimedConversationIDs: Set<AgentConversationID>
     ) -> AgentConversationID? {
         guard !workingDirectory.contains("\0"),
               workingDirectory.utf8.count <= 4_096 else { return nil }
@@ -162,8 +186,10 @@ enum AgentConversationStore {
                 guard let rawID = entry[command.idKey] as? String,
                       let rawDate = entry[command.createdAtKey] as? String,
                       let created = formatter.date(from: rawDate),
-                      created >= threshold else { return nil }
-                return AgentConversationID(rawID)
+                      created >= threshold,
+                      let id = AgentConversationID(rawID),
+                      !claimedConversationIDs.contains(id) else { return nil }
+                return id
             })
             return matches.count == 1 ? matches.first : nil
         } catch {

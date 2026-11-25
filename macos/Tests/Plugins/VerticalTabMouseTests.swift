@@ -69,8 +69,8 @@ struct VerticalTabMouseTests {
         let host = try #require(first.tabLayoutState.sidebarHost.liveView as? NativeTabSidebarHostingView)
         let outlineController = try #require(host.sidebar.list)
         let outline = outlineController.outline
-        func closeButton(in view: NSView) -> NativeActionControl? {
-            if let button = view as? NativeActionControl, button.accessibilityLabel() == ChromeStrings.current.closeTab {
+        func closeButton(in view: NSView) -> NativeInboxCloseButton? {
+            if let button = view as? NativeInboxCloseButton, button.accessibilityLabel() == ChromeStrings.current.closeTab {
                 return button
             }
             return view.subviews.lazy.compactMap(closeButton).first
@@ -84,7 +84,7 @@ struct VerticalTabMouseTests {
         func nativeRow(_ index: Int) throws -> NativeHoverRowView {
             try #require(outline.rowView(atRow: index, makeIfNecessary: true) as? NativeHoverRowView)
         }
-        func closeButton(_ index: Int) throws -> NativeActionControl {
+        func closeButton(_ index: Int) throws -> NativeInboxCloseButton {
             let cell = try #require(outline.view(atColumn: 0, row: index, makeIfNecessary: true))
             return try #require(closeButton(in: cell))
         }

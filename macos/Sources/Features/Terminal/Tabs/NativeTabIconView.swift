@@ -2,8 +2,21 @@ import AppKit
 
 /// Native split composition. Source images are never resized in the shared catalog.
 final class NativeTabIconView: NSView {
+    struct CustomSizing: Equatable, Sendable {
+        let composition: CGFloat
+        let singleLogo: CGFloat
+        let symbolBonus: CGFloat
+        let paneSize: CGFloat
+    }
+
     private static weak var previewOwner: NativeTabIconView?
     var previewEdge: NSRectEdge = .maxX
+    var customSizing: CustomSizing? {
+        didSet {
+            guard oldValue != customSizing else { return }
+            needsLayout = true
+        }
+    }
     private weak var controller: TerminalController?
     private var marks: [NSImageView] = []
     private var tracking: NSTrackingArea?
@@ -83,18 +96,47 @@ final class NativeTabIconView: NSView {
 
     override func layout() {
         super.layout()
-        let edge = min(TabIconMetrics.composition, min(bounds.width, bounds.height))
+        let compositionMetric = customSizing?.composition ?? TabIconMetrics.composition
+        let edge = min(compositionMetric, min(bounds.width, bounds.height))
         let composition = CGRect(x: bounds.midX - edge / 2, y: bounds.midY - edge / 2, width: edge, height: edge)
+        let singleLogo = customSizing?.singleLogo ?? TabIconMetrics.singleLogo(OhMyGhosttySettings.shared.tabIconSize)
+        let symbolBonus = customSizing?.symbolBonus ?? 3
+        let paneSize = customSizing?.paneSize ?? TabIconMetrics.pane
+        let isSplit = presentation.parts.count > 1
         for (mark, part) in zip(marks, presentation.parts) {
             let slot = part.rect
             let area = CGRect(x: composition.minX + slot.minX * edge, y: composition.minY + slot.minY * edge,
                               width: slot.width * edge, height: slot.height * edge)
-            let preferred = TabIconMetrics.singleLogo(OhMyGhosttySettings.shared.tabIconSize)
             let symbol: Bool
             if case .systemSymbol = part.icon { symbol = true } else { symbol = false }
-            let size = presentation.parts.count > 1 ? TabIconMetrics.pane
-                : min(edge, symbol ? preferred + 3 : preferred)
-            mark.frame = CGRect(x: area.midX - size / 2, y: area.midY - size / 2, width: size, height: size)
+            let size = isSplit
+                ? min(paneSize, min(area.width, area.height))
+                : min(edge, symbol ? singleLogo + symbolBonus : singleLogo)
+            let markX: CGFloat
+            if isSplit && slot.width < 1 {
+                if slot.minX <= 0.001 {
+                    markX = area.minX
+                } else if slot.maxX >= 0.999 {
+                    markX = area.maxX - size
+                } else {
+                    markX = area.midX - size / 2
+                }
+            } else {
+                markX = area.midX - size / 2
+            }
+            let markY: CGFloat
+            if isSplit && slot.height < 1 {
+                if slot.minY <= 0.001 {
+                    markY = area.minY
+                } else if slot.maxY >= 0.999 {
+                    markY = area.maxY - size
+                } else {
+                    markY = area.midY - size / 2
+                }
+            } else {
+                markY = area.midY - size / 2
+            }
+            mark.frame = CGRect(x: markX, y: markY, width: size, height: size)
         }
     }
 
@@ -116,8 +158,9 @@ final class NativeTabIconView: NSView {
             let agent = activity.flatMap { SupportedAgent(rawValue: $0.source) }
                 ?? controller.agentResumeDescriptor(for: surface)?.agent
             let rawTitle = surface.title.trimmingCharacters(in: .whitespacesAndNewlines)
-            let paneTitle: String = if let conversationTitle = controller.agentConversationTitle(for: surface) {
-                conversationTitle
+            let userTitle = surface.hasUserSetTitle ? rawTitle : ""
+            let paneTitle: String = if !userTitle.isEmpty {
+                userTitle
             } else if rawTitle.isEmpty || rawTitle == "👻" {
                 agent?.displayName ?? "Terminal"
             } else {

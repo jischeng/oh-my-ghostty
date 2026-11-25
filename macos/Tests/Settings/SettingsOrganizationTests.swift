@@ -24,14 +24,22 @@ struct SettingsOrganizationTests {
             #expect(entries.first { $0.settingIDs.contains("keyboard.quickInputOpacity") }?.tab == .controls)
             #expect(entries.first { $0.settingIDs.contains("keyboard.quickInput") }?.tab == .keyboard)
             #expect(entries.first { $0.settingIDs.contains("appearance.tabIconSize") }?.tab == .tabs)
+            #expect(entries.first { $0.settingIDs.contains("appearance.tabRowDensity") }?.tab == .tabs)
+            #expect(OhMyGhosttySettings.descriptors.first { $0.id == "appearance.tabRowDensity" }?.defaultValue == "comfortable")
             #expect(entries.first { $0.settingIDs.contains("tabs.sidebarView") }?.tab == .tabs)
+            #expect(entries.first { $0.settingIDs.contains("tabs.inboxGrouping") }?.tab == .tabs)
             #expect(entries.first { $0.settingIDs.contains("tabs.inboxOrdering") }?.tab == .tabs)
             #expect(entries.first { $0.settingIDs.contains("agents.sessionTitle.mode") }?.tab == .agents)
-            for key in ["ai.endpoint.protocol", "ai.endpoint.baseURL", "ai.endpoint.model"] {
-                #expect(entries.first { $0.settingIDs.contains(key) }?.tab == .agents)
-            }
+            #expect(!entries.contains { entry in entry.settingIDs.contains { $0.hasPrefix("ai.endpoint.") } })
             #expect(entries.contains { $0.matches("inbox") && $0.tab == .tabs })
             #expect(entries.contains { $0.matches("anthropic") && $0.tab == .agents })
+            // The AI page is found by its name and by what it now holds.
+            let copy = SettingsStrings(language: language)
+            #expect(entries.contains { $0.matches("AI") && $0.tab == .agents })
+            #expect(entries.first { $0.matches("provider api key") }?.title == copy.aiProvidersSection)
+            #expect(entries.first { $0.matches("commit fallback") }?.title == copy.aiTaskModelsSection)
+            #expect(entries.contains { $0.matches("提供商") && $0.tab == .agents })
+            #expect(entries.contains { $0.matches("context window") && $0.tab == .agents })
             #expect(entries.contains { $0.matches("收件箱") && $0.tab == .tabs })
             #expect(entries.contains { $0.matches("会话标题") && $0.tab == .agents })
             let focus = entries.first { $0.settingIDs.contains("terminal.focusedSplitBorderPosition") }

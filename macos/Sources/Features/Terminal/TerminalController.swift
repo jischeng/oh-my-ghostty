@@ -337,8 +337,25 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     lazy var workspacePopover = WorkspacePopoverPresentation(controller: self)
     let tabCreatedAt: Date
     @Published private(set) var tabLastActivatedAt: Date
-    /// When an Agent in this tab last changed state. Not persisted.
+    /// When an Agent in this tab last entered active work or a completion/attention state. Not persisted.
     @Published private(set) var tabLastAgentActivityAt: Date?
+    /// When the user last sent terminal input or Quick Input to this tab.
+    /// Selecting or viewing the tab never changes it. Persisted with the session.
+    @Published private(set) var tabLastInteractionAt: Date
+
+    /// The only writer of `tabLastInteractionAt`. The rules for calling it
+    /// are in TerminalController+TabInbox.swift.
+    func recordTabInteraction(at date: Date) {
+        guard tabLastInteractionAt != date else { return }
+        tabLastInteractionAt = date
+        scheduleRecentlyUsedTabReconciliation()
+    }
+
+    func recordTabAgentActivity(at date: Date) {
+        guard tabLastAgentActivityAt != date else { return }
+        tabLastAgentActivityAt = date
+        scheduleRecentlyUsedTabReconciliation()
+    }
 
     /// The real AppKit tabs in this controller's tab group, in display order.
     private(set) var tabControllers: [TerminalController] = []
@@ -448,6 +465,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     var quickInputLastTerminalSurfaceID: UUID?
     private var agentResumeContextIDs: [UUID: String] = [:]
     private var paneSessionObservers: [UUID: Set<AnyCancellable>] = [:]
+    private var observedUserSurfaceTitles: [UUID: String] = [:]
     var agentReducers: [UUID: AgentContextSignalReducer] = [:]
     private var agentProgramStatuses: [UUID: AgentProgramStatus] = [:]
     private var agentRuntimeSnapshots: [UUID: [Ghostty.ContextSignal]] = [:]
@@ -589,6 +607,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
          tabLayout: Ghostty.Config.MacOSTabLayout? = nil,
          tabSessionID: UUID? = nil,
          tabCreatedAt: Date? = nil,
+         tabLastInteractionAt: Date? = nil,
          workspaceID: UUID? = nil,
          windowSessionID: UUID? = nil,
          workspaceGroupID: UUID? = nil,
@@ -653,8 +672,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let inheritedGroup = parentController?.workspaceID == resolvedWorkspaceID ? parentController?.workspaceGroupID : nil
         self.workspaceGroupID = workspaceGroupID ?? inheritedGroup ?? UUID()
         let now = Date()
-        self.tabCreatedAt = tabCreatedAt ?? now
+        let createdAt = tabCreatedAt ?? now
+        self.tabCreatedAt = createdAt
         self.tabLastActivatedAt = now
+        // State saved before this field existed has no interaction date.
+        self.tabLastInteractionAt = tabLastInteractionAt ?? createdAt
 
         let sessionBase = tree == nil
             ? Self.injectingSessionID(self.tabSessionID, into: resolvedBase)
@@ -930,6 +952,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             cancelRevisionHandoff(for: surfaceID)
         }
         paneSessionObservers = paneSessionObservers.filter { activeIDs.contains($0.key) }
+        observedUserSurfaceTitles = observedUserSurfaceTitles.filter { activeIDs.contains($0.key) }
         paneSessionContexts = paneSessionContexts.filter { activeIDs.contains($0.key) }
         agentActivities = agentActivities.filter { activeIDs.contains($0.key) }
         agentResumeDescriptors = agentResumeDescriptors.filter {
@@ -1012,12 +1035,18 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                descriptor.isValid {
                 agentResumeDescriptors[surface.id] = descriptor
             }
+            observedUserSurfaceTitles[surface.id] = surface.titleOverride
             var observers: Set<AnyCancellable> = []
 
             Publishers.CombineLatest(surface.$pwd, surface.$title)
                 .dropFirst()
                 .sink { [weak self, weak surface] pwd, title in
                     guard let self, let surface, self.surfaceTree.contains(surface) else { return }
+                    let currentUserTitle = surface.titleOverride
+                    if self.observedUserSurfaceTitles[surface.id] != currentUserTitle {
+                        self.observedUserSurfaceTitles[surface.id] = currentUserTitle
+                        NotificationCenter.default.post(name: .ghosttyTabPresentationDidChange, object: self)
+                    }
                     var context = paneSessionContexts[surface.id] ?? .init(
                         workingDirectory: pwd,
                         terminalTitle: title
@@ -1586,6 +1615,27 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         ), for: surface.id)
     }
 
+    private func claimedConversationIDs(
+        for agent: SupportedAgent,
+        excludingSurfaceID: UUID
+    ) -> Set<AgentConversationID> {
+        var controllers = workspaceCoordinator.liveControllers
+        for controller in NSApp.windows.compactMap({ $0.windowController as? TerminalController })
+        where !controllers.contains(where: { $0 === controller }) {
+            controllers.append(controller)
+        }
+        var claimed = Set<AgentConversationID>()
+        for controller in controllers {
+            for (paneID, descriptor) in controller.agentResumeDescriptors
+            where paneID != excludingSurfaceID && descriptor.agent == agent && descriptor.scope == .local {
+                if let conversationID = descriptor.conversationID {
+                    claimed.insert(conversationID)
+                }
+            }
+        }
+        return claimed
+    }
+
     private func scheduleConversationDiscovery(
         agent: SupportedAgent,
         surfaceID: UUID,
@@ -1603,13 +1653,15 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             conversationDiscoveryPending.remove(surfaceID)
             return
         }
+        let claimed = claimedConversationIDs(for: agent, excludingSurfaceID: surfaceID)
         DispatchQueue.global(qos: .utility).asyncAfter(
             deadline: .now() + delays[attempt]
         ) { [weak self] in
             let conversationID = AgentConversationStore.discover(
                 agent: agent,
                 workingDirectory: workingDirectory,
-                launchedAfter: launchedAt
+                launchedAfter: launchedAt,
+                excluding: claimed
             )
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
@@ -1619,7 +1671,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                       descriptor.agent == agent,
                       descriptor.scope == .local,
                       descriptor.conversationID == nil else { return }
-                guard let conversationID else {
+                let stillClaimed = self.claimedConversationIDs(for: agent, excludingSurfaceID: surfaceID)
+                guard let conversationID, !stillClaimed.contains(conversationID) else {
                     scheduleConversationDiscovery(
                         agent: agent,
                         surfaceID: surfaceID,
@@ -2082,6 +2135,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         eventTimestamp: TimeInterval? = nil
     ) {
         guard surfaceTree.contains(where: { $0 === surface }) else { return }
+        noteTabInteractionFromUserInput()
         if let eventTimestamp,
            let arrived = agentCompletionArrivedUptime[surface.id] {
             let effective = eventTimestamp == 0
@@ -2196,7 +2250,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // Hydration changes presentation only. It must never dispatch queued
         // input or repeat completion notifications and composer actions.
         guard !restoring else { return }
-        if previousState != nextState { tabLastAgentActivityAt = Date() }
+        noteTabAgentActivityTransition(from: previousState, to: nextState)
         if let surface = surfaceTree.first(where: { $0.id == surfaceID }) {
             AgentActivityNotification.deliver(previous: previousActivity, next: next[surfaceID], surface: surface)
         }
@@ -2583,12 +2637,28 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     // MARK: Base Controller Overrides
 
+    override func tabRenamePlaceholder() -> String? {
+        guard let resolved = TerminalTabPresentationResolver.resolve(
+            self,
+            index: 1,
+            selected: false,
+            activities: (NSApp.delegate as? AppDelegate)?.tabActivities,
+            style: .chrome
+        ) else {
+            return nil
+        }
+        return resolved.remoteBreadcrumb?.title ?? resolved.title
+    }
+
     override func presentedTerminalTitle(
         for surface: Ghostty.SurfaceView,
         terminalTitle: String
     ) -> String {
-        agentConversationTitle(for: surface)
-            ?? restoredTitleFallback(for: surface, terminalTitle: terminalTitle)
+        if surface.hasUserSetTitle {
+            let trimmed = terminalTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return restoredTitleFallback(for: surface, terminalTitle: terminalTitle)
             ?? paneSessionContext(for: surface)?.presentationTitle ?? terminalTitle
     }
 
@@ -2971,14 +3041,20 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     func markTabActivated() {
         tabLastActivatedAt = Date()
+    }
+
+    private func scheduleRecentlyUsedTabReconciliation() {
         guard tabLayoutState.orderingMode == .recentlyUsed,
-              window?.tabGroup?.selectedWindow === window else { return }
+              !workspacePresentationIsParked,
+              window?.tabGroup != nil,
+              tabLayout != .vertical || OhMyGhosttySettings.shared.tabSidebarViewMode == .tabs else { return }
         pendingTabOrganizationWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
             defer { pendingTabOrganizationWorkItem = nil }
             guard tabLayoutState.orderingMode == .recentlyUsed,
-                  window?.tabGroup?.selectedWindow === window else { return }
+                  !workspacePresentationIsParked,
+                  tabLayout != .vertical || OhMyGhosttySettings.shared.tabSidebarViewMode == .tabs else { return }
             reconcileTabOrganization()
         }
         pendingTabOrganizationWorkItem = workItem
@@ -5907,7 +5983,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         guard let tabEnum = tabEnumAny as? ghostty_action_goto_tab_e else { return }
         let tabIndex: Int32 = tabEnum.rawValue
         if workspaceCoordinator.hasNonNativeFullscreen(in: windowSessionID) {
-            let tabs = tabControllers
+            let tabs = tabsInShortcutOrder(tabControllers)
             guard !tabs.isEmpty, let selected = tabs.firstIndex(where: { $0 === self }) else { return }
             let index: Int
             switch tabIndex {
@@ -5923,7 +5999,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
 
         guard let tabGroup = window.tabGroup else { return }
-        let tabbedWindows = workspaceTabWindows
+        // While the inbox is shown, numbers, last, next and previous all
+        // count its rows.
+        let tabbedWindows = tabWindowsInShortcutOrder(workspaceTabWindows)
         guard !tabbedWindows.isEmpty else { return }
 
         // This will be the index we want to actual go to
@@ -5975,13 +6053,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     static func selectTab(digit: Int, in window: NSWindow?) -> Bool {
         guard let controller = window?.windowController as? TerminalController else { return false }
         if controller.workspaceCoordinator.hasNonNativeFullscreen(in: controller.windowSessionID) {
-            let tabs = controller.tabControllers
+            let tabs = controller.tabsInShortcutOrder(controller.tabControllers)
             let index = digit == 9 ? tabs.count - 1 : digit - 1
             guard tabs.indices.contains(index) else { return false }
             return controller.workspaceCoordinator.selectNonNativeTab(tabs[index])
         }
         guard let tabGroup = window?.tabGroup else { return false }
-        let tabbedWindows = controller.workspaceTabWindows
+        let tabbedWindows = controller.tabWindowsInShortcutOrder(controller.workspaceTabWindows)
         guard tabbedWindows.count > 1 else { return false }
         let targetIndex = digit == 9 ? (tabbedWindows.count - 1) : (digit - 1)
         guard targetIndex >= 0, targetIndex < tabbedWindows.count else { return false }

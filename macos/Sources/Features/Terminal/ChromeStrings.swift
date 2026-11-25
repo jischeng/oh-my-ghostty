@@ -60,6 +60,7 @@ struct ChromeStrings: Equatable, Sendable {
 
     // Tab sidebar menus
     var renameTab: String { t("Rename Tab…", "重命名标签页…") }
+    var moveToWorkspace: String { t("Move to Workspace", "移到工作区") }
     var moveTabToNewWindow: String { t("Move Tab to New Window", "将标签页移到新窗口") }
     var closeOtherTabs: String { t("Close Other Tabs", "关闭其他标签页") }
     var closeTab: String { t("Close Tab", "关闭标签页") }
@@ -77,17 +78,20 @@ struct ChromeStrings: Equatable, Sendable {
 
     // Tab inbox
     var inbox: String { t("Inbox", "收件箱") }
-    func toggleInbox(shown: Bool) -> String { shown ? t("Show Tabs", "显示标签页") : t("Show Inbox", "显示收件箱") }
+    /// Tooltip of the inbox toggle. While the Tabs view is shown it also says
+    /// how many tabs wait for the user.
+    func toggleInbox(shown: Bool, attention: Int = 0) -> String {
+        guard !shown else { return t("Show Tabs", "显示标签页") }
+        let title = t("Show Inbox", "显示收件箱")
+        return attention > 0 ? "\(title) · \(inboxAttention(attention))" : title
+    }
+    /// Tabs whose agent needs attention, failed, or finished unseen.
+    func inboxAttention(_ count: Int) -> String {
+        t(count == 1 ? "1 tab needs attention" : "\(count) tabs need attention", "\(count) 个标签页待处理")
+    }
     /// Inbox section for tabs whose agent is working or waiting for the user.
     var inboxContinue: String { t("Continue", "继续") }
     var inboxEarlier: String { t("Earlier", "更早") }
-    var inboxSortHeader: String { t("SORT BY", "排序方式") }
-    func inboxSortTitle(_ mode: GhosttyTabInboxSortMode) -> String {
-        switch mode {
-        case .recent: t("Recent Activity", "最近活动")
-        case .created: t("Created Time", "创建时间")
-        }
-    }
 
     // Accessibility
     var tabs: String { t("Tabs", "标签页") }

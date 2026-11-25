@@ -407,7 +407,8 @@ struct SplitTabPresentationTests {
             #expect(TabInboxModel.isContinue(inboxItem.state))
         }
 
-        // Conversation titles integrate with both split panes (tab row title/subtitle/tooltip + hover menu).
+        // Conversation titles apply strictly to Inbox rows (with multi-pane tooltip),
+        // while `.chrome` and the split preview menu keep non-inbox pane naming.
         let savedTitleMode = OhMyGhosttySettings.shared.agentSessionTitleMode
         OhMyGhosttySettings.shared.agentSessionTitleMode = .native
         defer { OhMyGhosttySettings.shared.agentSessionTitleMode = savedTitleMode }
@@ -424,19 +425,31 @@ struct SplitTabPresentationTests {
             "Audit Claude hooks", source: .native, agent: .claude, conversationID: claudeConv
         )
         let titledPresentation = try #require(
-            TerminalTabPresentationResolver.resolve(controller, index: 1, selected: true, activities: nil)
+            TerminalTabPresentationResolver.resolve(
+                controller, index: 1, selected: true, activities: nil, style: .inbox
+            )
         )
         #expect(titledPresentation.title == "Coordinate status fix")
         #expect(titledPresentation.showsSubtitle)
+        #expect(titledPresentation.subtitle == "/tmp/repo")
         #expect(titledPresentation.toolTip?.contains("Coordinate status fix") == true)
         #expect(titledPresentation.toolTip?.contains("Claude Code") == true)
+
+        let chromePresentation = try #require(
+            TerminalTabPresentationResolver.resolve(
+                controller, index: 1, selected: true, activities: nil, style: .chrome
+            )
+        )
+        #expect(!chromePresentation.showsSubtitle)
+        #expect(chromePresentation.title != "Coordinate status fix")
+
         let titledMenu = NativeTabIconView.previewMenuEntries(for: controller)
         if case let .action(leftMenuTitle, _, _, _, _) = titledMenu[1],
            case let .action(rightMenuTitle, _, _, _, _) = titledMenu[2] {
-            #expect(leftMenuTitle == "Coordinate status fix")
-            #expect(rightMenuTitle == "Audit Claude hooks")
+            #expect(leftMenuTitle != "Coordinate status fix")
+            #expect(rightMenuTitle == SupportedAgent.claude.displayName)
         } else {
-            Issue.record("Expected conversation titles in split preview menu")
+            Issue.record("Expected non-inbox pane titles in split preview menu")
         }
 
         // Cross-workspace header attention indicator must also surface unfocused split `error`/`needsAttention`

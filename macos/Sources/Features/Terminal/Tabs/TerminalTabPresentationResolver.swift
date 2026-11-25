@@ -24,10 +24,16 @@ struct TerminalTabIconPresentation {
 enum TerminalTabPresentationResolver {
     static func paneIcon(
         for surface: Ghostty.SurfaceView,
-        in controller: TerminalController
+        in controller: TerminalController,
+        style: Style = .inbox
     ) -> GhosttyTabIcon {
-        if let requested = controller.agentActivity(for: surface)?.icon ??
-            controller.agentResumeDescriptor(for: surface)?.agent.icon {
+        if let requested = controller.agentActivity(for: surface)?.icon {
+            return requested.kind == .bundledAsset ? .asset(requested.name) : .systemSymbol(requested.name)
+        }
+        if style == .inbox,
+           let descriptor = controller.agentResumeDescriptor(for: surface),
+           descriptor.conversationID != nil {
+            let requested = descriptor.agent.icon
             return requested.kind == .bundledAsset ? .asset(requested.name) : .systemSymbol(requested.name)
         }
         let session = controller.paneSessionContext(for: surface)
@@ -51,7 +57,8 @@ enum TerminalTabPresentationResolver {
         if let activity = controller.agentActivity(for: surface) {
             return activity
         }
-        guard let descriptor = controller.agentResumeDescriptor(for: surface) else {
+        guard let descriptor = controller.agentResumeDescriptor(for: surface),
+              descriptor.conversationID != nil else {
             return nil
         }
         return .init(
@@ -88,39 +95,104 @@ enum TerminalTabPresentationResolver {
         return .init(parts: parts, paneCount: controller.surfaceTree.count)
     }
 
+    /// Where a presentation is shown, which decides how much it can say.
+    enum Style {
+        /// Tab chrome with one line: horizontal tabs, window titles, and the
+        /// Tabs view of the sidebar.
+        case chrome
+        /// A row of the inbox: a session row, named when a real session or
+        /// user title exists, with its place below it.
+        case inbox
+    }
+
     static func resolve(_ controller: TerminalController, index: Int, selected: Bool,
                         activities: TabActivityStore?,
-                        icons: AnyGhosttyTabIconProvider = .init(CompositeGhosttyTabIconProvider(overrides: []))) -> GhosttyTabPresentation? {
+                        icons: AnyGhosttyTabIconProvider = .init(CompositeGhosttyTabIconProvider(overrides: [])),
+                        style: Style = .chrome) -> GhosttyTabPresentation? {
         guard let surface = controller.focusedSurface ?? controller.surfaceTree.first else { return nil }
         let settings = OhMyGhosttySettings.shared
-        let session = controller.paneSessionContext(for: surface) ?? .init(workingDirectory: surface.pwd, terminalTitle: surface.title)
+        let session = controller.paneSessionContext(for: surface)
+            ?? .init(workingDirectory: surface.pwd, terminalTitle: surface.title)
         let focusedActivity = controller.focusedAgentActivity()
         let activity = controller.preferredAgentActivity() ?? activities?.activity(for: controller.tabSessionID)
         let descriptor = controller.agentResumeDescriptor(for: surface)
         let titleActivity = focusedActivity ?? (controller.surfaceTree.isSplit ? nil : activity)
-        let agent = titleActivity.flatMap { SupportedAgent(rawValue: $0.source) } ?? descriptor?.agent
-        // A manual tab name wins over the conversation's own title.
-        let conversationTitle = controller.titleOverride == nil ? controller.agentConversationTitle(for: surface) : nil
-        let restoredTitle = agent == nil ? controller.restoredTitleFallback(for: surface, terminalTitle: surface.title) : nil
-        let pathTitle = agent == nil ? session.presentationTitle(pathDisplay: settings.tabPathDisplay)
-            : session.agentPathTitle(pathDisplay: settings.tabPathDisplay, resumeDescriptor: descriptor)
-        let base = controller.titleOverride ?? conversationTitle ?? restoredTitle ?? pathTitle
-        // Title normalisation strips what an Agent adds to a terminal title;
-        // a conversation title is not one.
-        let title = conversationTitle ?? agent?.normalizedTitle(base) ?? base
-        let showsPath = controller.titleOverride == nil && conversationTitle == nil && restoredTitle == nil
-        // Never empty, so every row with a conversation title has two lines.
-        let place = session.remoteTabBreadcrumb?.title ?? pathTitle
-        let subtitle = place.isEmpty ? agent?.displayName : place
-        let resolvedBreadcrumb = showsPath ? session.remoteTabBreadcrumb : nil
-        let resolvedSubtitle = conversationTitle == nil ? nil : subtitle
-        let displayTitle = resolvedBreadcrumb?.title ?? title
-        let headerTitle = (resolvedSubtitle.flatMap { $0.isEmpty ? nil : $0 }).map { "\(displayTitle)\n\($0)" } ?? displayTitle
+        let userTabTitle = nonEmptyTrimmed(controller.titleOverride)
+        let userSurfaceTitle = surface.hasUserSetTitle ? nonEmptyTrimmed(surface.title) : nil
+        let explicitUserTitle = userTabTitle ?? userSurfaceTitle
+
+        let title: String
+        let subtitle: String?
+        let subtitleIsRemote: Bool
+        let breadcrumb: RemoteTabBreadcrumb?
+        let defaultIcon = paneIcon(for: surface, in: controller, style: style)
+
+        switch style {
+        case .chrome:
+            let chromeAgent = titleActivity.flatMap { SupportedAgent(rawValue: $0.source) } ?? descriptor?.agent
+            let restoredTitle = chromeAgent == nil
+                ? controller.restoredTitleFallback(for: surface, terminalTitle: surface.title)
+                : nil
+            let pathTitle = chromeAgent == nil
+                ? session.presentationTitle(pathDisplay: settings.tabPathDisplay)
+                : session.agentPathTitle(pathDisplay: settings.tabPathDisplay, resumeDescriptor: descriptor)
+            let base = explicitUserTitle ?? restoredTitle ?? pathTitle
+            title = explicitUserTitle != nil ? base : (chromeAgent?.normalizedTitle(base) ?? base)
+            subtitle = nil
+            subtitleIsRemote = false
+            breadcrumb = explicitUserTitle == nil && restoredTitle == nil ? session.remoteTabBreadcrumb : nil
+
+        case .inbox:
+            let resumedAgent = descriptor?.conversationID != nil ? descriptor?.agent : nil
+            let agent = titleActivity.flatMap { SupportedAgent(rawValue: $0.source) } ?? resumedAgent
+            let restoredTitle = agent == nil
+                ? controller.restoredTitleFallback(for: surface, terminalTitle: surface.title)
+                : nil
+            let pathTitle = agent == nil
+                ? session.presentationTitle(pathDisplay: settings.tabPathDisplay)
+                : session.agentPathTitle(pathDisplay: settings.tabPathDisplay, resumeDescriptor: descriptor)
+            let location = place(session: session, descriptor: descriptor)
+            let localPane: Bool = if case .local = session.state { true } else { false }
+            let remotePane: Bool = switch session.state {
+            case .sshReady, .sshConnecting: true
+            case .local: descriptor?.scope == .remote
+            }
+
+            var name: String? = explicitUserTitle
+            if name == nil, settings.agentSessionTitleMode != .off {
+                let conversation = controller.agentConversationTitle(for: surface)
+                let terminal = conversation == nil
+                    ? agent.flatMap {
+                        sessionName(
+                            fromTerminalTitle: surface.title,
+                            agent: $0,
+                            directory: location,
+                            rawDirectory: session.workingDirectory ?? descriptor?.workingDirectory
+                        )
+                    }
+                    : nil
+                name = conversation ?? terminal
+            }
+
+            title = name ?? restoredTitle
+                ?? (localPane && !remotePane ? location : nil)
+                ?? (agent?.normalizedTitle(pathTitle) ?? pathTitle)
+            subtitle = name == nil
+                ? nil
+                : namedSubtitle(location: location, session: session, agent: agent, pathTitle: pathTitle)
+            subtitleIsRemote = subtitle != nil && remotePane
+            breadcrumb = name == nil && restoredTitle == nil && !(localPane && !remotePane)
+                ? session.remoteTabBreadcrumb
+                : nil
+        }
+
+        let displayTitle = breadcrumb?.title ?? title
+        let headerTitle = subtitle.flatMap { $0.isEmpty ? nil : $0 }.map { "\(displayTitle)\n\($0)" } ?? displayTitle
         let context = GhosttyTabIconContext(
             tabID: controller.tabSessionID,
             title: title,
             activity: titleActivity,
-            defaultIcon: paneIcon(for: surface, in: controller)
+            defaultIcon: defaultIcon
         )
         let splitAgentSummaries: [TabActivity] = controller.surfaceTree.isSplit
             ? controller.surfaceTree.compactMap { paneSummaryActivity(for: $0, in: controller) }
@@ -132,12 +204,11 @@ enum TerminalTabPresentationResolver {
         } else {
             nil
         }
-        // Both tab renderers prefer the breadcrumb over the title, so a
-        // conversation title moves the place it would have named to the subtitle.
         return .init(
             title: title,
-            remoteBreadcrumb: resolvedBreadcrumb,
-            subtitle: resolvedSubtitle,
+            remoteBreadcrumb: breadcrumb,
+            subtitle: subtitle,
+            subtitleIsRemote: subtitleIsRemote,
             shortcut: settings.showShortcutLabels ? controller.tabShortcutLabel(for: index) : nil,
             icon: icons.icon(for: context) ?? .systemSymbol("terminal"),
             activity: activity,
@@ -145,5 +216,112 @@ enum TerminalTabPresentationResolver {
             selected: selected,
             hovered: false
         )
+    }
+
+    /// The name an Agent gave its session through the terminal title, such as
+    /// Claude Code's topic or a Codex thread name, without the decoration
+    /// around it.
+    ///
+    /// A terminal title is also what the shell leaves behind: the command
+    /// line that started the Agent. So a title only counts when it carries
+    /// the decoration that Agent is known to add; anything else is nil.
+    static func sessionName(
+        fromTerminalTitle raw: String,
+        agent: SupportedAgent,
+        directory: String?,
+        rawDirectory: String? = nil
+    ) -> String? {
+        let title = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name: Substring
+        switch agent {
+        case .claude:
+            // "<spinner or status glyph> <topic>". A path or an option also
+            // starts with a symbol, but not one that stands alone.
+            guard let glyph = title.first, !glyph.isLetter, !glyph.isNumber, !"/~.-_$".contains(glyph),
+                  title.dropFirst().first == " " else { return nil }
+            name = title.dropFirst(2)
+        case .codex:
+            // "<thread name> | <project folder>".
+            guard let separator = title.range(of: " | ", options: .backwards) else { return nil }
+            name = title[..<separator.lowerBound]
+        case .pi, .omp:
+            // "π - <session name>"; `normalizedTitle` knows the prefixes.
+            let stripped = agent.normalizedTitle(title)
+            guard stripped != title else { return nil }
+            name = Substring(stripped)
+        default:
+            return nil
+        }
+        let cleaned = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleaned.count >= 2, cleaned.lowercased() != agent.displayName.lowercased() else { return nil }
+        var excluded: Set<String> = ["~"]
+        if let directory, !directory.isEmpty {
+            excluded.insert(directory)
+            excluded.insert((directory as NSString).lastPathComponent)
+            if directory == "~" {
+                let homeFolder = (homeDirectory as NSString).lastPathComponent
+                if !homeFolder.isEmpty { excluded.insert(homeFolder) }
+            }
+        }
+        if let rawDirectory, !rawDirectory.isEmpty {
+            excluded.insert(rawDirectory)
+            excluded.insert(WorkspacePathPresentation.folderName(rawDirectory))
+            excluded.insert(abbreviatingHome(rawDirectory))
+        }
+        guard !excluded.contains(cleaned) else { return nil }
+        return AgentConversationTitleStore.displayTitle(
+            cleaned, columns: AgentConversationTitleStore.maximumTitleColumns)
+    }
+
+    /// What a named tab shows below its name: the place, else what the row
+    /// showed before it had a name, else the Agent.
+    static func namedSubtitle(location: String?, session: PaneSessionContext,
+                              agent: SupportedAgent?, pathTitle: String) -> String {
+        if let location { return location }
+        let previous = session.remoteTabBreadcrumb?.title ?? pathTitle
+        if !previous.isEmpty { return previous }
+        return agent?.displayName ?? "Terminal"
+    }
+
+    /// Where a pane is: its working directory with the home folder shortened
+    /// to `~`, after the host for an SSH pane.
+    static func place(session: PaneSessionContext, descriptor: AgentResumeDescriptor?) -> String? {
+        func nonEmpty(_ value: String?) -> String? { value.flatMap { $0.isEmpty ? nil : $0 } }
+        let restored = nonEmpty(descriptor?.workingDirectory)
+        let remoteAgentDirectory = descriptor?.scope == .remote ? restored : nil
+        switch session.state {
+        case .sshReady(let ssh, let workingDirectory):
+            let directory = nonEmpty(workingDirectory) ?? remoteAgentDirectory
+            return directory.map { RemoteTabBreadcrumb(host: ssh.alias, directory: $0).title } ?? ssh.alias
+        case .sshConnecting(let ssh):
+            // The local directory belongs to the SSH launcher until the host
+            // reports its own.
+            return remoteAgentDirectory.map { RemoteTabBreadcrumb(host: ssh.alias, directory: $0).title } ?? ssh.alias
+        case .local:
+            guard descriptor?.scope == .remote else {
+                return (nonEmpty(session.workingDirectory) ?? restored).map { abbreviatingHome($0) }
+            }
+            // A remote Agent whose connection is down: its host and directory.
+            guard let host = descriptor?.sshReplay?.transferTarget else { return restored }
+            return restored.map { RemoteTabBreadcrumb(host: host, directory: $0).title } ?? host
+        }
+    }
+
+    private static let homeDirectory = NSHomeDirectory()
+
+    private static func nonEmptyTrimmed(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+
+    /// `~` in place of the user's home folder, without touching the file
+    /// system: a row asks on every refresh.
+    static func abbreviatingHome(_ path: String, home: String? = nil) -> String {
+        let home = home ?? homeDirectory
+        guard home.count > 1, path.hasPrefix(home) else { return path }
+        let rest = path.dropFirst(home.count)
+        guard rest.isEmpty || rest.hasPrefix("/") else { return path }
+        return "~" + rest
     }
 }

@@ -42,31 +42,17 @@ extension NativeSettingsController {
             picker(form, strings.gitAutoFetchLabel, \.gitAutoFetchInterval,
                    Array(Set([0, 1, 2, 5, 10, 15, 30, 60, settings.gitAutoFetchInterval])).sorted().map { ($0, strings.gitAutoFetchIntervalTitle($0)) })
             form.section(text("Commit messages", "提交信息"))
-            let models = form.row(text("AI models", "AI 模型"), control:
-                SettingsActionButton(text("Add Models…", "添加模型…")) { [weak self] in
-                    guard let self else { return }
-                    GitCommitAISettingsPanel.presentAddModels(settings: self.settings, from: self.view.window)
-                })
-            let coordinator = GitCommitAIRoutesTable.Coordinator(settings: settings)
-            let routes = GitCommitAIRoutesTable.makeNativeView(coordinator: coordinator)
-            routes.hasVerticalScroller = false
-            form.retained.append(coordinator)
-            // The list grows with its rows; the page is the only scroll area.
-            let height = form.embed(routes, height: 0)
-            let copy = strings
-            let divider = form.embedSeparator
-            let update: ([GitCommitAIRoute]) -> Void = { [weak coordinator, weak routes, weak divider] list in
-                divider?.isHidden = list.isEmpty
-                coordinator?.tableView?.reloadData()
-                height?.constant = CGFloat(list.count) * GitCommitAIRoutesTable.rowHeight
-                routes?.isHidden = list.isEmpty
-                models?.setSubtitle(list.isEmpty
-                    ? copy.t("No models yet. Add one to generate commit messages with AI.", "尚未添加模型。添加后即可用 AI 生成提交信息。")
-                    : copy.t("Tried from top to bottom. Drag or use the arrows to reorder.", "按从上到下的顺序尝试，可拖动或用箭头调整。"))
+            let routes = settings.gitCommitAIRoutes
+            let first = routes.first?.title(providers: settings.aiProviders) ?? ""
+            let summary = routes.isEmpty
+                ? text("No models yet. Choose them in AI settings to generate commit, tag and PR messages.",
+                       "尚未选择模型。在 AI 设置中选择后，即可生成提交、标签与 PR 信息。")
+                : text("\(strings.aiModelCount(routes.count)), tried in order, starting with \(first). Managed in AI settings.",
+                       "\(strings.aiModelCount(routes.count))，按顺序尝试，首选 \(first)。在 AI 设置中管理。")
+            let models = form.link(text("AI models", "AI 模型"), subtitle: summary) { [weak self] in
+                self?.select(.agents)
             }
-            update(settings.gitCommitAIRoutes)
-            let token = settings.$gitCommitAIRoutes.receive(on: RunLoop.main).sink { update($0) }
-            form.retained.append(token)
+            models?.setAccessibilityIdentifier("settings.git.ai-models")
             form.section(text("Commit style", "提交风格"))
             form.row(text("Custom prompt", "自定义提示词"),
                      subtitle: text("Custom instructions for generated messages.", "自定义生成提交信息时使用的提示词。"),
@@ -75,7 +61,7 @@ extension NativeSettingsController {
             })
         case .ssh: remoteHosts(form)
         case .mobile: mobileAccess(form)
-        case .agents: agentOverview(form)
+        case .agents: aiOverview(form)
         case .plugins: plugins(form)
         case .advanced:
             form.section(strings.settingsLocationsSection)

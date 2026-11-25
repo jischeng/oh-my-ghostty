@@ -61,7 +61,7 @@ struct SettingsStrings: Equatable, Sendable {
         case .git: "Git"
         case .mobile: t("Mobile Devices", "移动设备")
         case .ssh: t("Remote Machines", "远程机器")
-        case .agents: "Agent"
+        case .agents: "AI"
         case .plugins: t("Plugins", "插件")
         case .advanced: t("Advanced", "高级")
         }
@@ -858,12 +858,74 @@ struct SettingsStrings: Equatable, Sendable {
         tone == .systemDefault ? t("System Default", "系统默认") : tone.rawValue
     }
 
-    // MARK: Conversation titles and the AI endpoint
+    // MARK: AI providers, task models and conversation titles
+
+    var aiProvidersSection: String { t("Providers", "提供商") }
+    /// One line under the providers: what the two groups are.
+    var aiProvidersCaption: String {
+        t("Agents run models through their own CLI and login; API connections call a service directly.",
+          "Agent 通过本机 CLI 和自身登录运行模型；API 连接直接调用服务。")
+    }
+    /// Where API keys live, said once for the whole section.
+    var aiProvidersFootnote: String {
+        t("API keys are kept in a private file on this Mac, never in settings.json.",
+          "API 密钥保存在本机的私有文件中，不会写入 settings.json。")
+    }
+    var aiInstalledGroup: String { t("Installed", "已安装") }
+    var aiAddConnection: String { t("Add…", "添加…") }
+    var aiAddConnectionHelp: String { t("Add an API connection", "添加 API 连接") }
+    var aiAddModels: String { t("Add Models…", "添加模型…") }
+    var aiConnectionsGroup: String { t("API connections", "API 连接") }
+    var aiTaskModelsSection: String { t("Models per Task", "任务模型") }
+    var aiCommitModelsGroup: String { t("Commit, tag and PR messages", "提交、标签与 PR 信息") }
+    var aiTitleModelGroup: String { t("Tab titles", "标签标题") }
+    var aiNewConnectionName: String { t("New connection", "新连接") }
+
+    func aiProviderKindTitle(_ kind: AIEndpointProtocol) -> String {
+        switch kind {
+        case .openAI: t("OpenAI-compatible", "OpenAI 兼容")
+        case .anthropic: "Anthropic"
+        }
+    }
+
+    func aiModelCount(_ count: Int) -> String {
+        count == 1 ? t("1 model", "1 个模型") : t("\(count) models", "\(count) 个模型")
+    }
+
+    /// One line for an API connection in a list: what it is and what is missing.
+    func aiProviderSummary(_ provider: AIProvider) -> String {
+        var parts = [aiProviderKindTitle(provider.kind)]
+        if provider.baseURL.isEmpty {
+            parts.append(t("No address yet", "尚未填写地址"))
+        } else {
+            parts.append(aiModelCount(provider.models.count))
+        }
+        if !provider.enabled { parts.append(t("Off", "已停用")) }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Why a base URL was refused, in terms of what to type instead.
+    func aiBaseURLProblem(_ error: AIEndpointError) -> String {
+        switch error {
+        case .insecureRemoteHost:
+            t("Use https://, or plain http:// only for a loopback, private or .local host.",
+              "请使用 https://；http:// 仅适用于回环地址、私有网段或 .local 主机。")
+        case .credentialsInURL:
+            t("Remove the user name and password from the URL and enter the key below.",
+              "请去掉 URL 中的用户名和密码，在下方填写密钥。")
+        case .queryNotAllowed:
+            t("Remove the query string from the URL.", "请去掉 URL 中的查询参数。")
+        case .empty:
+            t("Enter the base URL of the service first.", "请先填写服务的基础 URL。")
+        case .invalidURL, .unsupportedScheme:
+            t("Enter an http:// or https:// URL.", "请输入 http:// 或 https:// 地址。")
+        }
+    }
 
     var agentSessionTitleLabel: String { t("Conversation Titles", "会话标题") }
     var agentSessionTitleCaption: String {
-        t("Off hides agent-reported titles. Agent Reported shows only the title the CLI records. Generate asks the AI endpoint below for a title when the CLI reports none; without an endpoint it behaves like Agent Reported.",
-          "“关闭”不显示 Agent 上报的标题；“Agent 上报”只显示 CLI 记录的标题；“生成”在 CLI 未上报标题时向下方 AI 端点请求标题；未配置端点时等同于“Agent 上报”。")
+        t("Generate asks the model below only when the agent reports no title.",
+          "“生成”仅在 Agent 未上报标题时向下方的模型请求标题。")
     }
 
     func agentSessionTitleModeTitle(_ mode: AgentSessionTitleMode) -> String {
@@ -874,36 +936,21 @@ struct SettingsStrings: Equatable, Sendable {
         }
     }
 
-    var aiEndpointLink: String { t("AI Endpoint", "AI 端点") }
-    var aiEndpointSection: String { t("AI Endpoint", "AI 端点") }
-    var aiEndpointProtocolLabel: String { t("Protocol", "协议") }
-    var aiEndpointBaseURLLabel: String { t("Base URL", "基础 URL") }
-    var aiEndpointModelLabel: String { t("Model", "模型") }
-    var aiEndpointAPIKeyLabel: String { t("API Key", "API 密钥") }
-    static func aiEndpointURLPlaceholder(_ kind: AIEndpointProtocol) -> String {
+    var aiTitleModelLabel: String { t("Title Model", "标题模型") }
+    var aiTitleModelUnset: String {
+        t("Not set: only titles the agent reports are shown.",
+          "未选择：仅显示 Agent 上报的标题。")
+    }
+    var aiTitleModelCaption: String {
+        t("API connections only. OMG sends the first prompt with likely secrets removed.",
+          "仅支持 API 连接。发送前会尽量移除首条提示词中的敏感信息。")
+    }
+
+    static func aiBaseURLPlaceholder(_ kind: AIEndpointProtocol) -> String {
         switch kind {
         case .openAI: "https://api.openai.com"
         case .anthropic: "https://api.anthropic.com"
         }
-    }
-    var aiEndpointCaption: String {
-        t("OMG sends the first prompt of a conversation, with likely secrets removed, to this endpoint to generate a tab title. No project files or terminal output are sent. The API key is stored outside settings.json in a private file.",
-          "OMG 会把一段对话的第一条提示词（已尽量移除敏感信息）发送到此端点以生成标签页标题，不会发送项目文件或终端输出。API 密钥保存在 settings.json 之外的私有文件中。")
-    }
-    var aiEndpointMissingFieldsCaption: String {
-        t("A base URL and a model are required before OMG sends anything.",
-          "必须填写基础 URL 和模型后，OMG 才会发送请求。")
-    }
-    var aiEndpointInsecureURLCaption: String {
-        t("Use https://, or plain http:// only for a loopback, private or .local host.",
-          "请使用 https://；http:// 仅适用于回环地址、私有网段或 .local 主机。")
-    }
-    var aiEndpointKeyStoredCaption: String {
-        t("Leave empty to send no authentication header and to delete the stored key.",
-          "留空则不发送认证头，并删除已保存的密钥。")
-    }
-    var aiEndpointKeySaveFailed: String {
-        t("The API key could not be saved.", "无法保存 API 密钥。")
     }
 
     // MARK: Native Session Runtime

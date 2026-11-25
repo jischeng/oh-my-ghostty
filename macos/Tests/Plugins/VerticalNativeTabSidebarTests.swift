@@ -130,9 +130,16 @@ struct VerticalNativeTabSidebarTests {
         host.layoutSubtreeIfNeeded()
         for child in descendants(host) { child.needsDisplay = true }
         window.displayIfNeeded()
-        let labels = descendants(host).compactMap { $0 as? NSTextField }.filter { !$0.stringValue.isEmpty }
-        #expect(labels.count >= 5)
-        #expect(labels.allSatisfy { $0.bounds.width > 0 && !$0.isHiddenOrHasHiddenAncestor })
+        let restingLabels = descendants(host).compactMap { $0 as? NSTextField }
+            .filter { !$0.stringValue.isEmpty && !$0.isHiddenOrHasHiddenAncestor }
+        #expect(restingLabels.count >= 3)
+        #expect(restingLabels.allSatisfy { $0.bounds.width > 0 })
+        host.sidebar.list.isCommandModifierHeldOverride = true
+        defer { host.sidebar.list.isCommandModifierHeldOverride = nil }
+        host.layoutSubtreeIfNeeded()
+        let commandHeldLabels = descendants(host).compactMap { $0 as? NSTextField }.filter { !$0.stringValue.isEmpty }
+        #expect(commandHeldLabels.count >= 5)
+        #expect(commandHeldLabels.allSatisfy { $0.bounds.width > 0 && !$0.isHiddenOrHasHiddenAncestor })
         let bitmap = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
         host.cacheDisplay(in: host.bounds, to: bitmap)
         try #require(bitmap.representation(using: .png, properties: [:]))

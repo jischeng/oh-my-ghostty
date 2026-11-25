@@ -90,7 +90,7 @@ final class SettingsTextField: NSTextField, NSTextFieldDelegate {
 }
 
 /// Password-style field for values that must not be shown on screen, such as the
-/// AI endpoint API key. Mirrors `SettingsTextField`.
+/// API key of an AI connection. Mirrors `SettingsTextField`.
 final class SettingsSecureField: NSSecureTextField, NSTextFieldDelegate {
     var commit: ((String) -> Void)?
     init(_ value: String, placeholder: String = "", commit: @escaping (String) -> Void) {
@@ -452,17 +452,19 @@ final class NativeSettingsForm: NSViewController {
         return NativeSettingsRow(view: row, labels: labels, separator: divider)
     }
 
-    func link(_ title: String, subtitle: String? = nil, action: @escaping () -> Void) {
+    /// Returns the row's hit target so callers can give it an accessibility identifier.
+    @discardableResult
+    func link(_ title: String, subtitle: String? = nil, action: @escaping () -> Void) -> NSButton? {
         let arrow = NSImageView(image: NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil) ?? NSImage())
         arrow.contentTintColor = .tertiaryLabelColor
         arrow.widthAnchor.constraint(equalToConstant: 14).isActive = true
         arrow.setAccessibilityElement(false)
-        guard let row = row(title, subtitle: subtitle, control: arrow) else { return }
+        guard let row = row(title, subtitle: subtitle, control: arrow) else { return nil }
         let button = SettingsActionButton("", action: action)
         button.isTransparent = true
         button.setAccessibilityLabel(title)
         button.translatesAutoresizingMaskIntoConstraints = false
-        guard let group else { return }
+        guard let group else { return nil }
         // Keep the hit target outside NSStackView's arranged layout.
         group.removeArrangedSubview(row.view)
         row.view.removeFromSuperview()
@@ -483,6 +485,7 @@ final class NativeSettingsForm: NSViewController {
             button.topAnchor.constraint(equalTo: container.topAnchor),
             button.bottomAnchor.constraint(equalTo: container.bottomAnchor)
         ])
+        return button
     }
 
     func toggle(_ title: String, value: Bool, help: String? = nil, change: @escaping (Bool) -> Void) {

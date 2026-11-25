@@ -33,7 +33,8 @@ final class TerminalWorkspacePickerModel: ObservableObject {
 
     var currentID: UUID? { controller?.workspaceID }
     var movingTabTitle: String {
-        controller?.titleOverride ?? controller?.tabAgentConversationTitle ?? controller?.window?.title
+        let userSurfaceTitle = (controller?.focusedSurface ?? controller?.surfaceTree.first)?.titleOverride
+        return controller?.titleOverride ?? userSurfaceTitle ?? controller?.window?.title
             ?? WorkspaceL10n.text("Current tab", "当前标签")
     }
     var filtered: [TerminalWorkspace] {

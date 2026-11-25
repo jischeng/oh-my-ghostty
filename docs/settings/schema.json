@@ -74,6 +74,12 @@
       "enum": ["off", "native", "generate"],
       "type": "string"
     },
+    "agents.sessionTitle.alwaysUseAI": {
+      "category": "plugins",
+      "default": false,
+      "description": "Always use the configured AI title model to shorten conversation titles instead of keeping long native Agent titles.",
+      "type": "boolean"
+    },
     "ai.providers": {
       "category": "agents",
       "default": [],

@@ -955,6 +955,7 @@ struct OhMyGhosttySettingsTests {
         #expect(OhMyGhosttyTabRowDensity.comfortable.rowHeight == 36)
         #expect(OhMyGhosttyTabRowDensity.compact.rowHeight == 30)
         #expect(settings.agentSessionTitleMode == .generate)
+        #expect(!settings.agentSessionTitleAlwaysUseAI)
         #expect(settings.aiProviders.isEmpty)
         #expect(settings.aiTitleRoute == nil)
 
@@ -972,6 +973,9 @@ struct OhMyGhosttySettingsTests {
         #expect(ordering?.allowedValues == ["manual", "created", "recentlyUsed"])
         #expect(OhMyGhosttySettings.descriptors.first { $0.id == "agents.sessionTitle.mode" }?
             .allowedValues == ["off", "native", "generate"])
+        let alwaysUseAI = OhMyGhosttySettings.descriptors.first { $0.id == "agents.sessionTitle.alwaysUseAI" }
+        #expect(alwaysUseAI?.type == .boolean)
+        #expect(alwaysUseAI?.defaultValue == "false")
         // The single endpoint of the first AI build is gone from the registry.
         #expect(!OhMyGhosttySettings.descriptors.contains { $0.id.hasPrefix("ai.endpoint.") })
 
@@ -980,6 +984,7 @@ struct OhMyGhosttySettingsTests {
         settings.tabInboxOrderingMode = .created
         settings.tabRowDensity = .compact
         settings.agentSessionTitleMode = .native
+        settings.agentSessionTitleAlwaysUseAI = true
 
         let object = try #require(
             JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
@@ -989,6 +994,7 @@ struct OhMyGhosttySettingsTests {
         #expect(object["tabs.inboxOrdering"] as? String == "created")
         #expect(object["appearance.tabRowDensity"] as? String == "compact")
         #expect(object["agents.sessionTitle.mode"] as? String == "native")
+        #expect(object["agents.sessionTitle.alwaysUseAI"] as? Bool == true)
 
         let restored = OhMyGhosttySettings(fileURL: url)
         #expect(restored.tabSidebarViewMode == .inbox)
@@ -996,13 +1002,14 @@ struct OhMyGhosttySettingsTests {
         #expect(restored.tabInboxOrderingMode == .created)
         #expect(restored.tabRowDensity == .compact)
         #expect(restored.agentSessionTitleMode == .native)
+        #expect(restored.agentSessionTitleAlwaysUseAI)
     }
 
     @Test func invalidInboxAndTitleValuesFallBackToDefaults() throws {
         let (settings, url) = temporarySettings()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         // `recent` is what the first inbox build stored for the ordering.
-        try #"{"tabs.sidebarView":"grid","tabs.inboxGrouping":"host","tabs.inboxOrdering":"recent","appearance.tabRowDensity":" cramped ","agents.sessionTitle.mode":"always","ai.providers":"none","ai.routes.title":["x"],"ai.routes.commit":{"kind":"agent"}}"#
+        try #"{"tabs.sidebarView":"grid","tabs.inboxGrouping":"host","tabs.inboxOrdering":"recent","appearance.tabRowDensity":" cramped ","agents.sessionTitle.mode":"always","agents.sessionTitle.alwaysUseAI":"yes","ai.providers":"none","ai.routes.title":["x"],"ai.routes.commit":{"kind":"agent"}}"#
             .write(to: url, atomically: true, encoding: .utf8)
         settings.reloadFromDisk()
         #expect(settings.tabSidebarViewMode == .tabs)
@@ -1010,6 +1017,7 @@ struct OhMyGhosttySettingsTests {
         #expect(settings.tabInboxOrderingMode == .recentlyUsed)
         #expect(settings.tabRowDensity == .comfortable)
         #expect(settings.agentSessionTitleMode == .generate)
+        #expect(!settings.agentSessionTitleAlwaysUseAI)
         #expect(settings.aiProviders.isEmpty)
         #expect(settings.aiTitleRoute == nil)
         #expect(settings.gitCommitAIRoutes.isEmpty)

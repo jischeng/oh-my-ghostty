@@ -57,6 +57,7 @@ final class AgentConversationTitleCoordinator {
     private let generator: any AITitleGenerating
     private let loadSeed: SeedLoader
     private let mode: @MainActor () -> AgentSessionTitleMode
+    private let alwaysUseAI: @MainActor () -> Bool
     private let language: @MainActor () -> OhMyGhosttyLanguage
     private let sleep: Sleep
     private let now: () -> Date
@@ -95,6 +96,7 @@ final class AgentConversationTitleCoordinator {
             )
         },
         mode: @escaping @MainActor () -> AgentSessionTitleMode = { OhMyGhosttySettings.shared.agentSessionTitleMode },
+        alwaysUseAI: @escaping @MainActor () -> Bool = { OhMyGhosttySettings.shared.agentSessionTitleAlwaysUseAI },
         language: @escaping @MainActor () -> OhMyGhosttyLanguage = { OhMyGhosttySettings.shared.language },
         sleep: @escaping Sleep = { try await Task.sleep(for: $0) },
         now: @escaping () -> Date = Date.init,
@@ -107,6 +109,7 @@ final class AgentConversationTitleCoordinator {
         self.generator = generator
         self.loadSeed = loadSeed
         self.mode = mode
+        self.alwaysUseAI = alwaysUseAI
         self.language = language
         self.sleep = sleep
         self.now = now
@@ -118,6 +121,10 @@ final class AgentConversationTitleCoordinator {
 
     private var prefersChineseTitles: Bool {
         mode() == .generate && SettingsStrings(language: language()).isChinese
+    }
+
+    private var prefersGeneratedTitles: Bool {
+        mode() == .generate && alwaysUseAI()
     }
 
     /// Asks for the title of `target`.
@@ -165,12 +172,12 @@ final class AgentConversationTitleCoordinator {
         let existingRecord = store.record(agent: target.agent, conversationID: target.conversationID)
         let source = existingRecord?.source
         let isChinese = SettingsStrings(language: language()).isChinese
-        let canLocalizeNative = existingRecord.map { record in
+        let alwaysGenerate = currentMode == .generate && alwaysUseAI()
+        let canUpgradeNative = existingRecord.map { record in
             record.source == .native
                 && currentMode == .generate
-                && isChinese
                 && allowsGeneration
-                && !AgentConversationTitleStore.containsCJK(record.title)
+                && (alwaysGenerate || (isChinese && !AgentConversationTitleStore.containsCJK(record.title)))
         } ?? false
         let delays: [Duration]
         if force {
@@ -183,7 +190,7 @@ final class AgentConversationTitleCoordinator {
                 // Claude `/rename` (`custom-title`) and Codex `thread_name` update live.
                 delays = [.zero]
             case .bound, .working:
-                guard source == nil || source == .prompt || canLocalizeNative else {
+                guard source == nil || source == .prompt || canUpgradeNative else {
                     skip(target, trigger, "has a \(source?.rawValue ?? "stored") title")
                     return
                 }
@@ -194,7 +201,7 @@ final class AgentConversationTitleCoordinator {
                     skip(target, trigger, "read recently, the Agent named nothing")
                     return
                 }
-                if canLocalizeNative {
+                if canUpgradeNative {
                     delays = [.zero]
                 } else if source == .prompt {
                     // Once a prompt was already read, the transcript exists: check once without grace retries.
@@ -322,7 +329,7 @@ final class AgentConversationTitleCoordinator {
             if graceLeft <= 0 { break }
         }
         guard let prompt else {
-            if await localizeCachedEnglishNativeIfNeeded(target) { return }
+            if await upgradeCachedNativeIfNeeded(target) { return }
             AgentConversationTitleLog.info(
                 "no title \(Self.describe(target)): nothing to read after \(delays.count) look(s)"
             )
@@ -380,22 +387,27 @@ final class AgentConversationTitleCoordinator {
 
     private func handleNativeTitle(_ target: Target, native: String, firstPrompt: String?) async {
         let allowsGeneration = flights[target.key].map { !$0.generatingOwners.isEmpty } ?? true
-        if prefersChineseTitles, allowsGeneration, !AgentConversationTitleStore.containsCJK(native) {
+        let alwaysGenerate = prefersGeneratedTitles
+        let shouldGenerateFromNative = allowsGeneration && (
+            alwaysGenerate || (prefersChineseTitles && !AgentConversationTitleStore.containsCJK(native))
+        )
+        if shouldGenerateFromNative {
             if let existing = store.record(agent: target.agent, conversationID: target.conversationID),
                existing.source == .generated,
-               AgentConversationTitleStore.containsCJK(existing.title) {
+               alwaysGenerate || AgentConversationTitleStore.containsCJK(existing.title) {
                 return
             }
             let input = Self.nonEmptyTrimmed(firstPrompt) ?? native
-            if let localized = await generator.title(forFirstPrompt: input) {
+            if let generated = await generator.title(forFirstPrompt: input) {
                 guard !Task.isCancelled else { return }
                 store.set(
-                    localized,
+                    generated,
                     source: .generated,
                     agent: target.agent,
                     conversationID: target.conversationID,
                     remoteHost: target.remoteHost,
-                    force: true
+                    force: true,
+                    allowGeneratedOverNative: alwaysGenerate
                 )
                 return
             }
@@ -410,25 +422,27 @@ final class AgentConversationTitleCoordinator {
         )
     }
 
-    private func localizeCachedEnglishNativeIfNeeded(_ target: Target) async -> Bool {
-        guard prefersChineseTitles,
+    private func upgradeCachedNativeIfNeeded(_ target: Target) async -> Bool {
+        let alwaysGenerate = prefersGeneratedTitles
+        guard alwaysGenerate || prefersChineseTitles,
               let existing = store.record(agent: target.agent, conversationID: target.conversationID),
               existing.source == .native,
-              !AgentConversationTitleStore.containsCJK(existing.title) else {
+              alwaysGenerate || !AgentConversationTitleStore.containsCJK(existing.title) else {
             return false
         }
         let allowsGeneration = flights[target.key].map { !$0.generatingOwners.isEmpty } ?? true
         guard allowsGeneration else { return false }
         settledAt[target.key] = now()
-        guard let localized = await generator.title(forFirstPrompt: existing.title) else { return false }
+        guard let generated = await generator.title(forFirstPrompt: existing.title) else { return false }
         guard !Task.isCancelled else { return true }
         store.set(
-            localized,
+            generated,
             source: .generated,
             agent: target.agent,
             conversationID: target.conversationID,
             remoteHost: target.remoteHost,
-            force: true
+            force: true,
+            allowGeneratedOverNative: alwaysGenerate
         )
         return true
     }
@@ -529,6 +543,11 @@ final class AgentConversationTitleTracker {
             .sink { [weak self] _ in self?.scheduleEvaluation() }
             .store(in: &subscriptions)
         OhMyGhosttySettings.shared.$agentSessionTitleMode
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in self?.modeChanged() }
+            .store(in: &subscriptions)
+        OhMyGhosttySettings.shared.$agentSessionTitleAlwaysUseAI
             .removeDuplicates()
             .dropFirst()
             .sink { [weak self] _ in self?.modeChanged() }

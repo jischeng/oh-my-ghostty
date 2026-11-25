@@ -202,6 +202,16 @@ extension NativeSettingsController {
         titlePopup.setAccessibilityIdentifier("settings.ai.title.mode")
         form.row(strings.agentSessionTitleLabel, subtitle: strings.agentSessionTitleCaption, control: titlePopup)
 
+        let alwaysUseAISwitch = SettingsSwitch(value: settings.agentSessionTitleAlwaysUseAI) { [weak settings] value in
+            settings?.agentSessionTitleAlwaysUseAI = value
+        }
+        alwaysUseAISwitch.setAccessibilityIdentifier("settings.ai.title.always-use-ai")
+        form.row(
+            strings.agentSessionTitleAlwaysUseAILabel,
+            subtitle: strings.agentSessionTitleAlwaysUseAICaption,
+            control: alwaysUseAISwitch
+        )
+
         let choose = SettingsActionButton(text("Choose…", "选择…")) { [weak self] in
             guard let self else { return }
             GitCommitAISettingsPanel.presentTitleModel(settings: self.settings, from: self.view.window)
@@ -213,11 +223,13 @@ extension NativeSettingsController {
         titleButtons.spacing = 8
         let titleModel = form.row(strings.aiTitleModelLabel, subtitle: aiTitleModelSummary(),
                                   control: titleButtons, help: strings.aiTitleModelCaption)
-        let syncTitleModel = { [weak self, weak clear, weak titlePopup] in
+        let syncTitleModel = { [weak self, weak clear, weak titlePopup, weak alwaysUseAISwitch] in
             guard let self else { return }
             titleModel?.setSubtitle(self.aiTitleModelSummary())
             clear?.isEnabled = self.settings.aiTitleRoute != nil
             titlePopup?.selectItem(at: titleModes.firstIndex(of: self.settings.agentSessionTitleMode) ?? 0)
+            alwaysUseAISwitch?.state = self.settings.agentSessionTitleAlwaysUseAI ? .on : .off
+            alwaysUseAISwitch?.isEnabled = self.settings.agentSessionTitleMode == .generate
         }
         syncTitleModel()
         form.refreshers.append(syncTitleModel)

@@ -189,8 +189,10 @@ final class AgentConversationTitleStore: ObservableObject {
     /// Records a title unless a better one is already known. A source is never
     /// downgraded, and among equals only the Agent renames its own
     /// conversation: the opening prompt does not change and a generated title
-    /// is never generated again, except when `force` is true or a Chinese
-    /// generated title localizes an English-only native title.
+    /// is never generated again, except when `force` is true, when
+    /// `allowGeneratedOverNative` is true for a `.generated` title replacing a
+    /// `.native` title, or when a Chinese generated title localizes an
+    /// English-only native title.
     ///
     /// - Returns: Whether the conversation's title changed.
     @discardableResult
@@ -200,7 +202,8 @@ final class AgentConversationTitleStore: ObservableObject {
         agent: SupportedAgent,
         conversationID: AgentConversationID,
         remoteHost: String? = nil,
-        force: Bool = false
+        force: Bool = false,
+        allowGeneratedOverNative: Bool = false
     ) -> Bool {
         let columns = source == .prompt ? Self.promptTitleColumns : Self.maximumTitleColumns
         guard let title = Self.displayTitle(title, columns: columns) else { return false }
@@ -211,7 +214,12 @@ final class AgentConversationTitleStore: ObservableObject {
                 && existing.source == .native
                 && !Self.containsCJK(existing.title)
                 && Self.containsCJK(title)
-            guard source.rank > existing.source.rank || renamed || localizedUpgrade else { return false }
+            let generatedOverride = allowGeneratedOverNative
+                && source == .generated
+                && existing.source == .native
+            guard source.rank > existing.source.rank || renamed || localizedUpgrade || generatedOverride else {
+                return false
+            }
         }
         var next = records
         next[key] = Record(

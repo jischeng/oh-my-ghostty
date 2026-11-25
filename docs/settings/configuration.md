@@ -268,6 +268,7 @@ Window UI state is intentionally separate: `InspectorPresentationStore` owns las
 | `agents.openQuickInputOnStart`    | boolean | `false`                       | `true`, `false`                                                                                        | Settings > Editor > Quick Input    | Next Agent start             |
 | `agents.openQuickInputOnComplete` | boolean | `false`                       | `true`, `false`                                                                                        | Settings > Editor > Quick Input    | Next Agent completion        |
 | `agents.sessionTitle.mode`        | enum    | `generate`                    | `off`, `native`, `generate`                                                                            | Settings > AI > Models per Task    | Next conversation title      |
+| `agents.sessionTitle.alwaysUseAI` | boolean | `false`                       | `true`, `false`                                                                                        | Settings > AI > Models per Task    | Next conversation title      |
 | `keyboard.inspectorPanel1`        | string  | `option+1`                    | Modifier combination plus one key                                                                      | Settings > Keyboard                | Runtime                      |
 | `keyboard.inspectorPanel2`        | string  | `option+2`                    | Modifier combination plus one key                                                                      | Settings > Keyboard                | Runtime                      |
 | `keyboard.inspectorPanel3`        | string  | `option+3`                    | Modifier combination plus one key                                                                      | Settings > Keyboard                | Runtime                      |
@@ -331,7 +332,10 @@ Agent tabs can show a conversation title instead of the working directory. The
 title belongs to the conversation, not to the tab, and a manual rename always
 wins. `agents.sessionTitle.mode` chooses `off` (no conversation titles),
 `native` (only the title the Agent CLI records) or `generate` (ask the title
-model when the CLI reports none). `generate` behaves like `native` until
+model when the CLI reports none). Setting `agents.sessionTitle.alwaysUseAI` to
+`true` while `agents.sessionTitle.mode` is `generate` always asks the configured
+AI model to shorten conversation titles instead of keeping long native Agent
+titles (manual renames still win). `generate` behaves like `native` until
 `ai.routes.title` names a model of an enabled API connection, so the default
 sends nothing anywhere. Generation is HTTP only: OMG sends the first prompt of
 the conversation, with likely secrets removed and capped at 1500 bytes, and never

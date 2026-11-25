@@ -114,6 +114,10 @@ struct NativeAISettingsTests {
                 _ = try find(NSButton.self, identifier, in: view)
             }
             _ = try find(SettingsPopup.self, "settings.ai.title.mode", in: view)
+            let alwaysUseAI = try find(SettingsSwitch.self, "settings.ai.title.always-use-ai", in: view)
+            #expect(alwaysUseAI.state == .off)
+            #expect(alwaysUseAI.isEnabled)
+            #expect(rows.contains(strings.agentSessionTitleAlwaysUseAILabel))
             _ = try find(NSTableView.self, "git.commit-ai.routes", in: view)
             // Showing the page asked no agent and no service for anything.
             #expect(fixture.controller.aiAgentCatalog.entry(.claude) == AIAgentModelCatalog.Entry())
@@ -390,6 +394,17 @@ struct NativeAISettingsTests {
         #expect(controller.aiTitleModelSummary().hasPrefix("alpha: "))
 
         controller.select(.agents)
+        let alwaysUseAI = try find(SettingsSwitch.self, "settings.ai.title.always-use-ai", in: controller.view)
+        #expect(alwaysUseAI.isEnabled)
+        alwaysUseAI.state = .on
+        alwaysUseAI.change?(true)
+        #expect(fixture.settings.agentSessionTitleAlwaysUseAI)
+        fixture.settings.agentSessionTitleMode = .native
+        controller.select(.agents)
+        let disabledAlwaysUseAI = try find(SettingsSwitch.self, "settings.ai.title.always-use-ai", in: controller.view)
+        #expect(!disabledAlwaysUseAI.isEnabled)
+        #expect(disabledAlwaysUseAI.state == .on)
+
         let clear = try find(NSButton.self, "settings.ai.title.clear-model", in: controller.view)
         #expect(clear.isEnabled)
         clear.performClick(nil)

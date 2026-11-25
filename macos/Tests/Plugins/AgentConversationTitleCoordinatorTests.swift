@@ -61,6 +61,7 @@ struct AgentConversationTitleCoordinatorTests {
         let generator: Generator
         let delays = Delays()
         var mode: AgentSessionTitleMode
+        var alwaysUseAI: Bool
         var language: OhMyGhosttyLanguage
         var now = Date(timeIntervalSince1970: 1_800_000_000)
         private(set) var coordinator: Coordinator!
@@ -71,11 +72,13 @@ struct AgentConversationTitleCoordinatorTests {
         )
 
         init(seeds: Seeds, generated: String? = nil, mode: AgentSessionTitleMode = .generate,
+             alwaysUseAI: Bool = false,
              language: OhMyGhosttyLanguage = .english,
              sleep: Coordinator.Sleep? = nil) {
             self.seeds = seeds
             self.generator = Generator(generated)
             self.mode = mode
+            self.alwaysUseAI = alwaysUseAI
             self.language = language
             let delays = self.delays
             coordinator = Coordinator(
@@ -83,6 +86,7 @@ struct AgentConversationTitleCoordinatorTests {
                 generator: generator,
                 loadSeed: { await seeds.next($0) },
                 mode: { [unowned self] in self.mode },
+                alwaysUseAI: { [unowned self] in self.alwaysUseAI },
                 language: { [unowned self] in self.language },
                 sleep: sleep ?? { delay in
                     delays.append(delay)
@@ -522,5 +526,93 @@ struct AgentConversationTitleCoordinatorTests {
         #expect(manualTab.titleOverride == nil)
         #expect(store.title(agent: .codex, conversationID: manualConversation) == "Ray 网关 V2 迁移")
         #expect(store.record(agent: .codex, conversationID: manualConversation)?.source == .generated)
+    }
+
+    @Test func alwaysUseAIShortensLongNativeTitlesAndRespectsManualOverride() async {
+        let longChineseNative = "请帮我把整个项目里的所有定时任务都重构一下并且补充完整的单元测试和文档说明"
+        let firstPrompt = "重构定时任务并补充单元测试"
+
+        // Default (`alwaysUseAI == false`) keeps a Chinese native title without calling AI.
+        let defaultFixture = Fixture(
+            seeds: Seeds(rest: Seed(native: longChineseNative, firstPrompt: firstPrompt)),
+            generated: "重构定时任务",
+            mode: .generate,
+            alwaysUseAI: false,
+            language: .simplifiedChinese
+        )
+        defaultFixture.coordinator.request(defaultFixture.target, trigger: .bound, owner: defaultFixture.owner)
+        await defaultFixture.coordinator.waitUntilIdle()
+        #expect(defaultFixture.store.title(agent: .claude, conversationID: defaultFixture.target.conversationID)
+            == longChineseNative)
+        #expect(defaultFixture.store.record(agent: .claude, conversationID: defaultFixture.target.conversationID)?.source
+            == .native)
+        #expect(await defaultFixture.generator.prompts.isEmpty)
+
+        // When `alwaysUseAI` is enabled, even a Chinese native title is shortened via AI (preferring `firstPrompt`)
+        // and replaces `.native` with `.generated`.
+        defaultFixture.alwaysUseAI = true
+        defaultFixture.coordinator.request(defaultFixture.target, trigger: .bound, owner: defaultFixture.owner)
+        await defaultFixture.coordinator.waitUntilIdle()
+        #expect(defaultFixture.store.title(agent: .claude, conversationID: defaultFixture.target.conversationID)
+            == "重构定时任务")
+        #expect(defaultFixture.store.record(agent: .claude, conversationID: defaultFixture.target.conversationID)?.source
+            == .generated)
+        #expect(await defaultFixture.generator.prompts == [firstPrompt])
+
+        // A subsequent `.done` turn keeps the `.generated` title without regenerating or reverting to `.native`.
+        defaultFixture.coordinator.request(defaultFixture.target, trigger: .done, owner: defaultFixture.owner)
+        await defaultFixture.coordinator.waitUntilIdle()
+        #expect(defaultFixture.store.title(agent: .claude, conversationID: defaultFixture.target.conversationID)
+            == "重构定时任务")
+        #expect(defaultFixture.store.record(agent: .claude, conversationID: defaultFixture.target.conversationID)?.source
+            == .generated)
+        #expect(await defaultFixture.generator.prompts == [firstPrompt])
+
+        // Without `firstPrompt`, `alwaysUseAI` falls back to passing `native` to the AI generator.
+        let nativeOnlyFixture = Fixture(
+            seeds: Seeds(rest: Seed(native: longChineseNative, firstPrompt: nil)),
+            generated: "定时任务重构",
+            mode: .generate,
+            alwaysUseAI: true,
+            language: .english
+        )
+        nativeOnlyFixture.coordinator.request(nativeOnlyFixture.target, trigger: .bound, owner: nativeOnlyFixture.owner)
+        await nativeOnlyFixture.coordinator.waitUntilIdle()
+        #expect(nativeOnlyFixture.store.title(agent: .claude, conversationID: nativeOnlyFixture.target.conversationID)
+            == "定时任务重构")
+        #expect(await nativeOnlyFixture.generator.prompts == [longChineseNative])
+
+        // Manual override (`allowsGeneration: false`) still skips AI generation even when `alwaysUseAI` is enabled.
+        let manualFixture = Fixture(
+            seeds: Seeds(rest: Seed(native: longChineseNative, firstPrompt: firstPrompt)),
+            generated: "不应被调用",
+            mode: .generate,
+            alwaysUseAI: true,
+            language: .simplifiedChinese
+        )
+        manualFixture.coordinator.request(
+            manualFixture.target,
+            trigger: .bound,
+            owner: manualFixture.owner,
+            allowsGeneration: false
+        )
+        await manualFixture.coordinator.waitUntilIdle()
+        #expect(await manualFixture.generator.prompts.isEmpty)
+        #expect(manualFixture.store.record(agent: .claude, conversationID: manualFixture.target.conversationID)?.source
+            == .native)
+
+        // Direct store rule: `.generated` replaces `.native` only when `allowGeneratedOverNative` is true.
+        let store = AgentConversationTitleStore()
+        #expect(store.set(longChineseNative, source: .native, agent: .claude, conversationID: defaultFixture.target.conversationID))
+        #expect(!store.set("定时任务重构", source: .generated, agent: .claude, conversationID: defaultFixture.target.conversationID))
+        #expect(store.set(
+            "定时任务重构",
+            source: .generated,
+            agent: .claude,
+            conversationID: defaultFixture.target.conversationID,
+            allowGeneratedOverNative: true
+        ))
+        #expect(store.title(agent: .claude, conversationID: defaultFixture.target.conversationID) == "定时任务重构")
+        #expect(store.record(agent: .claude, conversationID: defaultFixture.target.conversationID)?.source == .generated)
     }
 }

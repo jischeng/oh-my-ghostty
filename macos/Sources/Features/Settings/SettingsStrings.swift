@@ -941,6 +941,14 @@ struct SettingsStrings: Equatable, Sendable {
         }
     }
 
+    var agentSessionTitleAlwaysUseAILabel: String {
+        t("Always use AI to shorten tab titles", "强制使用 AI 精简标签标题")
+    }
+    var agentSessionTitleAlwaysUseAICaption: String {
+        t("Always generate short titles with the configured AI model instead of keeping long native Agent titles. Manual renames still win.",
+          "始终使用已配置的 AI 模型精简 Agent 会话标题，不再保留过长的原生标题（手动重命名仍优先）。")
+    }
+
     var aiTitleModelLabel: String { t("Title Model", "标题模型") }
     var aiTitleModelUnset: String {
         t("Not set: only titles the agent reports are shown.",

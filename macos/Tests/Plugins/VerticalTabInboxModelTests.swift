@@ -33,14 +33,15 @@ struct VerticalTabInboxModelTests {
     }
 
     @Test func sectionsChangeAtTheStartOfTheCalendarDay() throws {
-        let now = try date(24, 0, 0, 30)
+        let now = try date(24, 0, 20, 0)
         let cases: [(created: Date, expected: TabInboxSection)] = [
+            (try date(24, 0, 10, 0), .continue),
             (try date(24, 0, 0, 0), .today),
             (try date(23, 23, 59, 59), .yesterday),
             (try date(23, 0, 0, 0), .yesterday),
             (try date(22, 23, 59, 59), .earlier),
             (try date(1, 12), .earlier),
-            (try date(25, 9), .today),
+            (try date(25, 9), .continue),
         ]
         for (created, expected) in cases {
             for ordering in GhosttyTabOrderingMode.allCases {
@@ -96,7 +97,7 @@ struct VerticalTabInboxModelTests {
         #expect(arrangement(items, .manual, now: now) == [.today: [2, 3], .yesterday: [1], .earlier: [0]])
     }
 
-    @Test func continueListsTabsWaitingForTheUserFirstThenByTheOrdering() throws {
+    @Test func continueListsTabsWaitingForTheUserFirstThenByRecencyIndependentlyOfOrdering() throws {
         let created = try date(20, 9)
         let items = [
             item(.working, created: created, interacted: try date(24, 11, 50)),
@@ -114,20 +115,64 @@ struct VerticalTabInboxModelTests {
         #expect(Set(recent.keys) == [.continue, .today])
 
         let manual = arrangement(items, .manual, now: now)
-        #expect(manual == [.continue: [2, 4, 3, 1, 0], .earlier: [5, 6]])
+        #expect(manual == [.continue: [4, 2, 3, 1, 0], .earlier: [5, 6]])
         #expect(arrangement(items, .created, now: now) == manual)
     }
 
-    @Test func theOrderingAlsoOrdersContinueWithinTheSameState() throws {
+    @Test func continueStaysIndependentOfCreatedAndManualOrdering() throws {
         let items = [
             item(.working, created: try date(24, 9)),
             item(.working, created: try date(24, 8), interacted: try date(24, 11)),
             item(.working, created: try date(24, 10)),
+            item(nil, created: try date(24, 11, 50)),
+            item(.idle, created: try date(23, 9), interacted: try date(24, 11, 55)),
         ]
         let now = try date(24, 12)
-        #expect(arrangement(items, .recentlyUsed, now: now) == [.continue: [1, 2, 0]])
-        #expect(arrangement(items, .created, now: now) == [.continue: [2, 0, 1]])
-        #expect(arrangement(items, .manual, now: now) == [.continue: [0, 1, 2]])
+        // Inside Continue: active agent states precede recent non-agent tabs,
+        // and ties always sort by recency descending regardless of ordering mode.
+        for ordering in GhosttyTabOrderingMode.allCases {
+            #expect(arrangement(items, ordering, now: now) == [.continue: [1, 2, 0, 4, 3]])
+        }
+    }
+
+    @Test func recentlyCreatedOrInteractedTabsEnterContinueAndDropBackAfterFifteenMinutes() throws {
+        let now = try date(24, 12, 0, 0)
+        let activeNew = item(created: try date(24, 11, 50, 0))
+        let activeYesterdayTyped = item(created: try date(23, 10, 0, 0), interacted: try date(24, 11, 45, 1))
+        let expiredToday = item(created: try date(24, 11, 45, 0))
+        let expiredYesterday = item(created: try date(23, 10, 0, 0), interacted: try date(23, 10, 0, 0))
+
+        #expect(TabInboxModel.isContinue(activeNew, now: now))
+        #expect(TabInboxModel.isContinue(activeYesterdayTyped, now: now))
+        #expect(!TabInboxModel.isContinue(expiredToday, now: now))
+        #expect(!TabInboxModel.isContinue(expiredYesterday, now: now))
+
+        let items = [activeNew, activeYesterdayTyped, expiredToday, expiredYesterday]
+        #expect(arrangement(items, .recentlyUsed, now: now) == [
+            .continue: [0, 1],
+            .today: [2],
+            .yesterday: [3],
+        ])
+        #expect(arrangement(items, .created, now: now) == [
+            .continue: [0, 1],
+            .today: [2],
+            .yesterday: [3],
+        ])
+
+        // 15 minutes later (12:05): both previously active tabs have expired (>= 15m idle).
+        let later = try date(24, 12, 5, 0)
+        #expect(arrangement(items, .recentlyUsed, now: later) == [
+            .today: [0, 1, 2],
+            .yesterday: [3],
+        ])
+        #expect(arrangement(items, .created, now: later) == [
+            .today: [0, 2],
+            .yesterday: [1, 3],
+        ])
+        #expect(arrangement(items, .manual, now: later) == [
+            .today: [0, 2],
+            .yesterday: [1, 3],
+        ])
     }
 
     @Test func acknowledgedOrAbsentAgentsAreNotInContinue() {

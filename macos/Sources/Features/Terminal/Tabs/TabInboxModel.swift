@@ -75,11 +75,22 @@ enum TabInboxModel {
     /// view's group of the same project open.
     static let groupIDPrefix = "inbox:"
 
+    /// How long a newly created or recently interacted tab stays in Continue
+    /// without active agent work before returning to Today / Yesterday / Earlier.
+    static let continueActiveWindow: TimeInterval = 15 * 60
+
     /// An acknowledged finished agent reports `.idle` (or nothing), so it
-    /// leaves Continue as soon as the user has seen it.
+    /// leaves Continue once its recent-activity window has elapsed.
     static func isContinue(_ state: TabActivityState?) -> Bool {
         guard let state else { return false }
         return state != .idle
+    }
+
+    /// A tab belongs in Continue while an agent is active/waiting OR its
+    /// recency (creation, terminal input, or agent activity) is within the
+    /// 15-minute active window.
+    static func isContinue(_ item: TabInboxItem, now: Date) -> Bool {
+        isContinue(item.state) || now.timeIntervalSince(recency(item)) < continueActiveWindow
     }
 
     /// Order inside Continue: tabs waiting for the user come first.
@@ -153,7 +164,7 @@ enum TabInboxModel {
         now: Date,
         calendar: Calendar = .current
     ) -> TabInboxSection {
-        if isContinue(item.state) { return .continue }
+        if isContinue(item, now: now) { return .continue }
         let used = date(item, ordering: ordering)
         let today = calendar.startOfDay(for: now)
         if used >= today { return .today }
@@ -174,11 +185,18 @@ enum TabInboxModel {
             let target = section(for: items[index], ordering: ordering, now: now, calendar: calendar)
             result[target, default: []].append(index)
         }
-        // Tabs waiting for the user lead Continue; the ordering decides among equals.
-        if let waiting = result[.continue] {
-            result[.continue] = waiting.enumerated().sorted { lhs, rhs in
-                (continueRank(items[lhs.element].state), lhs.offset) < (continueRank(items[rhs.element].state), rhs.offset)
-            }.map(\.element)
+        // Continue is independent of the ordering mode: urgency rank ascending,
+        // then recency descending, then native index ascending.
+        if let active = result[.continue] {
+            result[.continue] = active.sorted { lhs, rhs in
+                let lhsRank = continueRank(items[lhs].state)
+                let rhsRank = continueRank(items[rhs].state)
+                if lhsRank != rhsRank { return lhsRank < rhsRank }
+                let lhsRecency = recency(items[lhs])
+                let rhsRecency = recency(items[rhs])
+                if lhsRecency != rhsRecency { return lhsRecency > rhsRecency }
+                return lhs < rhs
+            }
         }
         return result
     }

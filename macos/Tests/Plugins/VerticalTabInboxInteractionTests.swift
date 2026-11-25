@@ -303,4 +303,36 @@ struct VerticalTabInboxInteractionTests {
         #expect(row.subtitleLabel.stringValue == "~/code/project")
         #expect(controller.tabLastInteractionAt == created)
     }
+
+    @Test func typingMovesYesterdayTabIntoContinueAndExpiresBackAfterFifteenMinutes() throws {
+        let yesterday = try #require(calendar.date(from: DateComponents(year: 2026, month: 11, day: 23, hour: 15)))
+        let todayNoon = try #require(calendar.date(from: DateComponents(year: 2026, month: 11, day: 24, hour: 12)))
+        let controller = try terminal(created: yesterday)
+        defer { close([controller]) }
+
+        // Passive viewing never bumps interaction, so the tab stays in Yesterday.
+        let beforeGroups = TabInboxModel.groups(
+            tabs: [controller], grouping: .date, ordering: .recentlyUsed, now: todayNoon, calendar: calendar
+        )
+        #expect(beforeGroups.map(\.id) == [TabInboxSection.yesterday.groupID])
+
+        // Real terminal input enters Continue immediately.
+        controller.noteTerminalInput(at: todayNoon)
+        let activeGroups = TabInboxModel.groups(
+            tabs: [controller], grouping: .date, ordering: .created,
+            now: todayNoon.addingTimeInterval(10 * 60), calendar: calendar
+        )
+        #expect(activeGroups.map(\.id) == [TabInboxSection.continue.groupID])
+
+        // Once idle for 15 minutes, it returns to Today (recentlyUsed) or Yesterday (created/manual).
+        let expiredNow = todayNoon.addingTimeInterval(TabInboxModel.continueActiveWindow)
+        let expiredRecent = TabInboxModel.groups(
+            tabs: [controller], grouping: .date, ordering: .recentlyUsed, now: expiredNow, calendar: calendar
+        )
+        let expiredCreated = TabInboxModel.groups(
+            tabs: [controller], grouping: .date, ordering: .created, now: expiredNow, calendar: calendar
+        )
+        #expect(expiredRecent.map(\.id) == [TabInboxSection.today.groupID])
+        #expect(expiredCreated.map(\.id) == [TabInboxSection.yesterday.groupID])
+    }
 }

@@ -1828,6 +1828,19 @@ class BaseTerminalController: NSWindowController,
         tabLayoutState.toggleSidebar()
     }
 
+    @IBAction func toggleInbox(_ sender: Any?) {
+        guard supportsSidebar else { return }
+        let settings = OhMyGhosttySettings.shared
+        let nextMode: GhosttyTabSidebarViewMode = settings.tabSidebarViewMode == .inbox ? .tabs : .inbox
+        settings.tabSidebarViewMode = nextMode
+        if nextMode == .inbox && !tabLayoutState.isSidebarVisible {
+            tabLayoutState.setSidebarVisible(true)
+        }
+        if nextMode == .tabs, tabLayoutState.orderingMode == .recentlyUsed {
+            (self as? TerminalController)?.reconcileTabOrganization()
+        }
+    }
+
     @IBAction func toggleCommandPalette(_ sender: Any?) {
         commandPaletteIsShowing.toggle()
         if commandPaletteIsShowing {

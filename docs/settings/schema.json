@@ -421,6 +421,13 @@
       "pattern": "^(control\\+|option\\+|shift\\+|command\\+)+[^+]$",
       "type": "string"
     },
+    "keyboard.toggleInbox": {
+      "category": "keyboard",
+      "default": "shift+command+i",
+      "description": "Shortcut that switches the tab sidebar between Tabs and Inbox.",
+      "pattern": "^(control\\+|option\\+|shift\\+|command\\+)+[^+]$",
+      "type": "string"
+    },
     "keyboard.toggleInspector": {
       "category": "keyboard",
       "default": "shift+command+b",

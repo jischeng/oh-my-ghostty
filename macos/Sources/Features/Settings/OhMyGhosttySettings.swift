@@ -507,6 +507,12 @@ final class OhMyGhosttySettings: ObservableObject {
             description: "Shortcut that shows or hides the tab sidebar.",
             requiresNewWindow: false, category: "keyboard"),
         .init(
+            id: "keyboard.toggleInbox", type: .string,
+            defaultValue: OMGKeyboardShortcut.defaultToggleInbox.storageValue,
+            allowedValues: nil, minimum: nil, maximum: nil,
+            description: "Shortcut that switches the tab sidebar between Tabs and Inbox.",
+            requiresNewWindow: false, category: "keyboard"),
+        .init(
             id: "keyboard.toggleInspector", type: .string,
             defaultValue: OMGKeyboardShortcut.defaultToggleInspector.storageValue,
             allowedValues: nil, minimum: nil, maximum: nil,
@@ -970,6 +976,17 @@ final class OhMyGhosttySettings: ObservableObject {
                 toggleSidebarShortcut = normalized
             } else {
                 persist("keyboard.toggleSidebar", normalized)
+            }
+        }
+    }
+    @Published var toggleInboxShortcut = OMGKeyboardShortcut.defaultToggleInbox.storageValue {
+        didSet {
+            let normalized = OMGKeyboardShortcut(storageValue: toggleInboxShortcut)?.storageValue
+                ?? OMGKeyboardShortcut.defaultToggleInbox.storageValue
+            if toggleInboxShortcut != normalized {
+                toggleInboxShortcut = normalized
+            } else {
+                persist("keyboard.toggleInbox", normalized)
             }
         }
     }
@@ -1601,6 +1618,10 @@ final class OhMyGhosttySettings: ObservableObject {
             toggleSidebarShortcut = validatedShortcutValue(
                 "keyboard.toggleSidebar",
                 fallback: OMGKeyboardShortcut.defaultToggleSidebar.storageValue
+            )
+            toggleInboxShortcut = validatedShortcutValue(
+                "keyboard.toggleInbox",
+                fallback: OMGKeyboardShortcut.defaultToggleInbox.storageValue
             )
             toggleInspectorShortcut = validatedShortcutValue(
                 "keyboard.toggleInspector",

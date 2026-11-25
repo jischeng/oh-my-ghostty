@@ -15,6 +15,7 @@ struct OMGKeyboardShortcut: Equatable {
     )
 
     static let defaultToggleSidebar = OMGKeyboardShortcut(key: "b", modifiers: [.command])
+    static let defaultToggleInbox = OMGKeyboardShortcut(key: "i", modifiers: [.command, .shift])
     static let defaultToggleInspector = OMGKeyboardShortcut(key: "b", modifiers: [.command, .shift])
 
     static let defaultInspectorPanel1 = OMGKeyboardShortcut(

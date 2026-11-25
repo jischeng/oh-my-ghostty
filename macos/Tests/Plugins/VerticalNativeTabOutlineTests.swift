@@ -840,4 +840,82 @@ struct VerticalNativeTabOutlineTests {
         #expect(coordinator.reloadCount == reloadsAfterGrouping)
         #expect(coordinator.animatedMoveCount == animatedDisabledBaseline)
     }
+
+    @Test func commandRevealMonitorPreservesHeldCommandAcrossNativeTabWindowSwitch() async throws {
+        final class SimulatedKeyWindow: NSWindow {
+            var simulatedIsKey = false
+            var simulatedIsVisible = true
+            override var isKeyWindow: Bool { simulatedIsKey }
+            override var isVisible: Bool { simulatedIsVisible }
+        }
+
+        let window1 = SimulatedKeyWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 240),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let window2 = SimulatedKeyWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 240),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window1.isReleasedWhenClosed = false
+        window2.isReleasedWhenClosed = false
+        defer {
+            window1.contentView = nil
+            window2.contentView = nil
+            window1.close()
+            window2.close()
+        }
+
+        let hostView = NSView(frame: NSRect(x: 0, y: 0, width: 200, height: 200))
+        window1.contentView = hostView
+        window1.simulatedIsKey = true
+
+        var modifiers: NSEvent.ModifierFlags = [.command]
+        var appActive = true
+        var activeKeyWindow: NSWindow? = window1
+
+        let monitor = NativeCommandRevealMonitor()
+        monitor.currentModifiersProvider = { modifiers }
+        monitor.isAppActiveProvider = { appActive }
+        monitor.keyWindowProvider = { activeKeyWindow }
+        monitor.hostView = hostView
+
+        // Initial sync picks up already-held ⌘ in the key window.
+        #expect(monitor.isCommandHeld)
+
+        // Native tab switch: old window resigns key, sidebar moves to new tab window, new window becomes key.
+        window1.simulatedIsKey = false
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window1)
+        #expect(monitor.isCommandHeld, "Deferred resign-key must not synchronously clear ⌘ during tab switch")
+
+        window2.contentView = hostView
+        window2.simulatedIsKey = true
+        activeKeyWindow = window2
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: window2)
+        #expect(monitor.isCommandHeld)
+
+        // After the deferred resign-key runloop tick runs, ⌘ remains revealed.
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(monitor.isCommandHeld)
+
+        // Releasing ⌘ or deactivating the app clears live state.
+        appActive = false
+        activeKeyWindow = nil
+        window2.simulatedIsKey = false
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window2)
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(!monitor.isCommandHeld)
+
+        // Returning to an active key window while ⌘ is held re-syncs immediately.
+        appActive = true
+        activeKeyWindow = window2
+        window2.simulatedIsKey = true
+        modifiers = [.command]
+        monitor.syncFromCurrentModifiers()
+        #expect(monitor.isCommandHeld)
+    }
 }

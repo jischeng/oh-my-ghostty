@@ -1313,6 +1313,16 @@ class AppDelegate: NSObject,
         controller.toggleSidebar(sender)
     }
 
+    @IBAction func toggleInbox(_ sender: Any?) {
+        let focusedController = (NSApp.keyWindow ?? NSApp.mainWindow)?
+            .windowController as? BaseTerminalController
+        let controller = focusedController ?? TerminalController.all.first {
+            $0.window?.isVisible == true
+        }
+        guard let controller, controller.supportsSidebar else { return }
+        controller.toggleInbox(sender)
+    }
+
     @IBAction func toggleInspector(_ sender: Any?) {
         let focusedController = (NSApp.keyWindow ?? NSApp.mainWindow)?
             .windowController as? TerminalController
@@ -1673,7 +1683,7 @@ extension AppDelegate: NSMenuItemValidation {
         case #selector(setAsDefaultTerminal(_:)):
             return NSWorkspace.shared.defaultTerminal != Bundle.main.bundleURL
 
-        case #selector(toggleSidebar(_:)):
+        case #selector(toggleSidebar(_:)), #selector(toggleInbox(_:)):
             let controller = (NSApp.keyWindow ?? NSApp.mainWindow)?
                 .windowController as? BaseTerminalController
             return controller?.supportsSidebar == true

@@ -1170,6 +1170,31 @@ struct OhMyGhosttySettingsTests {
         #expect(settings.quickInputOpacity == 0.2)
     }
 
+    @Test func toggleInboxShortcutDefaultsPersistsAndBindsMenuItem() throws {
+        let (settings, url) = temporarySettings()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        #expect(OMGKeyboardShortcut.defaultToggleInbox == OMGKeyboardShortcut(key: "i", modifiers: [.command, .shift]))
+        #expect(settings.toggleInboxShortcut == "shift+command+i")
+        let descriptor = OhMyGhosttySettings.descriptors.first { $0.id == "keyboard.toggleInbox" }
+        #expect(descriptor?.defaultValue == "shift+command+i")
+        #expect(descriptor?.category == "keyboard")
+
+        settings.toggleInboxShortcut = "option+command+i"
+        let restored = OhMyGhosttySettings(fileURL: url)
+        #expect(restored.toggleInboxShortcut == "option+command+i")
+
+        let menu = NSMenu(title: "View")
+        let item = NSMenuItem(title: "Toggle Inbox", action: #selector(AppDelegate.toggleInbox(_:)), keyEquivalent: "i")
+        item.keyEquivalentModifierMask = [.command, .shift]
+        menu.addItem(item)
+        OMGMenuShortcuts.apply(to: menu, settings: restored)
+        #expect(item.keyEquivalent == "i")
+        #expect(item.keyEquivalentModifierMask == [.option, .command])
+
+        settings.toggleInboxShortcut = "invalid"
+        #expect(settings.toggleInboxShortcut == "shift+command+i")
+    }
+
     private func temporarySettings() -> (OhMyGhosttySettings, URL) {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)

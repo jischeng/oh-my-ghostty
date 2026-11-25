@@ -406,6 +406,9 @@ extension NativeSettingsController {
         shortcut(form, text("Show or Hide Left Sidebar", "显示或隐藏左侧边栏"), value: settings.toggleSidebarShortcut,
                  fallback: OMGKeyboardShortcut.defaultToggleSidebar.storageValue,
                  menuAction: #selector(AppDelegate.toggleSidebar(_:))) { [weak settings] in settings?.toggleSidebarShortcut = $0 }
+        shortcut(form, strings.toggleInboxShortcutLabel, value: settings.toggleInboxShortcut,
+                 fallback: OMGKeyboardShortcut.defaultToggleInbox.storageValue,
+                 menuAction: #selector(AppDelegate.toggleInbox(_:))) { [weak settings] in settings?.toggleInboxShortcut = $0 }
         shortcut(form, text("Show or Hide Right Sidebar", "显示或隐藏右侧边栏"), value: settings.toggleInspectorShortcut,
                  fallback: OMGKeyboardShortcut.defaultToggleInspector.storageValue,
                  menuAction: #selector(AppDelegate.toggleInspector(_:))) { [weak settings] in settings?.toggleInspectorShortcut = $0 }

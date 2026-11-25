@@ -72,6 +72,7 @@ enum OMGMenuShortcuts {
         guard let menu else { return }
         let bindings: [(Selector, String)] = [
             (#selector(AppDelegate.toggleSidebar(_:)), settings.toggleSidebarShortcut),
+            (#selector(AppDelegate.toggleInbox(_:)), settings.toggleInboxShortcut),
             (#selector(AppDelegate.toggleInspector(_:)), settings.toggleInspectorShortcut),
         ]
         for item in menu.items {

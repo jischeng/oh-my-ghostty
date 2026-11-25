@@ -35,6 +35,7 @@ enum NativeTabContextMenu {
         var entries: [NativeMenuEntry] = [
             .action(strings.newTab, symbol: "plus") { [weak tab] in tab?.newVerticalTab() },
             .action(strings.renameTab, symbol: "pencil") { [weak tab] in tab?.promptTabTitle() },
+            .action(strings.autoRenameTab, symbol: "sparkles") { [weak tab] in tab?.autoRenameTab(force: true) },
             .separator,
         ]
         if workspaces.count > 1 {

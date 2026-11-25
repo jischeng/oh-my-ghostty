@@ -33,8 +33,9 @@ Status: in implementation on branch `feat/agent-inbox` (2026-11-24).
 - The API key is stored in a 0600 file under Application Support, never in
   `settings.json`. No environment-variable references in v1.
 - Not in v1: ACP fallback, inbox across parked workspaces / background sessions,
-  remapping `⌘N` to inbox order, a keyboard shortcut for the toggle, persisted
-  activity timestamps, manual drag into Continue, last-message preview line.
+  remapping `⌘N` to inbox order, persisted activity timestamps, manual drag into
+  Continue, last-message preview line. (A customizable `keyboard.toggleInbox`
+  shortcut defaulting to `⌘⇧I` was added in v0.25.1.)
 
 ## Shared contracts
 

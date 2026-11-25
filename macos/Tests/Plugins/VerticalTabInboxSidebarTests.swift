@@ -1190,4 +1190,110 @@ struct VerticalTabInboxSidebarTests {
         sidebar.refresh()
         #expect(inbox.animatedLayoutCount == countWithAnimationsDisabled)
     }
+
+    @Test func autoRenameMenusAndToggleInboxActionAndSingleLineCloudDeduplication() throws {
+        let fixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { fixture.close() }
+        let settings = OhMyGhosttySettings.shared
+        let savedMode = settings.tabSidebarViewMode
+        let savedShortcut = settings.toggleInboxShortcut
+        defer {
+            settings.tabSidebarViewMode = savedMode
+            settings.toggleInboxShortcut = savedShortcut
+        }
+
+        let controller = try fixture.tab()
+        let second = try fixture.tab()
+        let strings = ChromeStrings.current
+
+        // 1. Tab context menu includes Auto-Rename Tab right after Rename Tab….
+        let contextMenu = NativeTabContextMenu.make(for: controller, host: controller)
+        let titles = contextMenu.items.map(\.title)
+        let renameIndex = try #require(titles.firstIndex(of: strings.renameTab))
+        let autoRenameIndex = try #require(titles.firstIndex(of: strings.autoRenameTab))
+        #expect(autoRenameIndex == renameIndex + 1)
+
+        // 2. Sidebar `...` options menu includes Auto-Rename Workspace Tabs in both .tabs and .inbox modes.
+        let sidebar = try SidebarHarness(controllers: [controller, second])
+        func optionsControl() throws -> NativeOptionsControl {
+            var queue: [NSView] = [sidebar.host]
+            while !queue.isEmpty {
+                let view = queue.removeFirst()
+                if let control = view as? NativeOptionsControl,
+                   control.accessibilityIdentifier() == "tabs.organize" {
+                    return control
+                }
+                queue.append(contentsOf: view.subviews)
+            }
+            throw CocoaError(.featureUnsupported)
+        }
+
+        for mode in [GhosttyTabSidebarViewMode.tabs, .inbox] {
+            settings.tabSidebarViewMode = mode
+            sidebar.refresh()
+            let options = try optionsControl()
+            let entryTitles = options.entries.compactMap { entry -> String? in
+                if case .action(let title, _, _, _, _) = entry { return title }
+                return nil
+            }
+            #expect(entryTitles.contains(strings.autoRenameWorkspaceTabs))
+        }
+
+        // 3. Toggle Inbox tooltip includes formatted shortcut and action reveals hidden sidebar when entering Inbox.
+        settings.toggleInboxShortcut = OMGKeyboardShortcut.defaultToggleInbox.storageValue
+        let currentStrings = ChromeStrings.current
+        #expect(currentStrings.toggleInbox(shown: false).contains("⇧⌘I"))
+        #expect(currentStrings.toggleInbox(shown: true).contains("⇧⌘I"))
+
+        settings.tabSidebarViewMode = .tabs
+        controller.tabLayoutState.setSidebarVisible(false)
+        #expect(!controller.tabLayoutState.isSidebarVisible)
+        controller.toggleInbox(nil)
+        #expect(settings.tabSidebarViewMode == .inbox)
+        #expect(controller.tabLayoutState.isSidebarVisible)
+        controller.toggleInbox(nil)
+        #expect(settings.tabSidebarViewMode == .tabs)
+
+        // 4. 1-line SSH rows hide inline remoteCloudView when leading icon is already a cloud,
+        //    preventing duplicate/triple clouds while preserving it when leading icon is an Agent logo.
+        let organized = GhosttyOrganizedTab(controller: controller, actualIndex: 1)
+        let cloudRow = NativeInboxRowView(frame: NSRect(x: 0, y: 0, width: 234, height: 36))
+        cloudRow.configure(tab: organized, selected: false, canClose: true) { _ in
+            .init(
+                title: "cloud",
+                remoteBreadcrumb: RemoteTabBreadcrumb(host: "cloud", directory: "lance-spark"),
+                subtitle: nil,
+                shortcut: "⌘1",
+                icon: .systemSymbol("cloud"),
+                activity: nil,
+                selected: false,
+                hovered: false
+            )
+        }
+        cloudRow.layoutSubtreeIfNeeded()
+        #expect(cloudRow.hasRemoteBreadcrumb)
+        #expect(!cloudRow.showsRemoteCloud)
+        #expect(cloudRow.remoteCloudView.isHidden)
+        #expect(cloudRow.titleLabel.frame.minX == NativeInboxMetrics.textLeadingX)
+
+        let agentRemoteRow = NativeInboxRowView(frame: NSRect(x: 0, y: 0, width: 234, height: 36))
+        agentRemoteRow.configure(tab: organized, selected: false, canClose: true) { _ in
+            .init(
+                title: "cloud",
+                remoteBreadcrumb: RemoteTabBreadcrumb(host: "cloud", directory: "lance-spark"),
+                subtitle: nil,
+                shortcut: "⌘1",
+                icon: .asset("AgentOpenAILogo"),
+                activity: nil,
+                selected: false,
+                hovered: false
+            )
+        }
+        agentRemoteRow.layoutSubtreeIfNeeded()
+        #expect(agentRemoteRow.hasRemoteBreadcrumb)
+        #expect(agentRemoteRow.showsRemoteCloud)
+        #expect(!agentRemoteRow.remoteCloudView.isHidden)
+        #expect(agentRemoteRow.titleLabel.frame.minX == NativeInboxMetrics.textLeadingX
+            + NativeInboxMetrics.cloudIconWidth + NativeInboxMetrics.cloudIconGap)
+    }
 }

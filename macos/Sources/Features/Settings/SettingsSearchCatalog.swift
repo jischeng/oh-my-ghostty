@@ -67,7 +67,7 @@ enum SettingsSearchCatalog {
             item(.appearance, \.cursorSection, ["appearance.cursor"], "cursor 光标"),
             item(.keyboard, \.quickInputShortcutLabel, ["keyboard.quickInput"], "shortcut 快捷键 快捷输入"),
             item(.keyboard, \.numberShortcutsSection, ["keyboard.inspector", "keyboard.tabNumber", "keyboard.toggle"],
-                 "inspector sidebar toggle tab workspace panel number modifier 快捷键 检查器 面板 侧边栏 标签 工作区 数字 修饰键"),
+                 "inspector sidebar inbox toggle tab workspace panel number modifier 快捷键 检查器 面板 侧边栏 收件箱 标签 工作区 数字 修饰键"),
             item(.keyboard, \.keybindingsSection, [], "keybind terminal shortcut 键位 终端 快捷键"),
             item(.git, \.gitSection, ["git.autoFetch"], "fetch Git 自动拉取"),
             item(.git, \.gitAISettingsTitle, ["git.commitAI"], "commit AI prompt style 提交 提示词 风格", anchor: "gitAI"),

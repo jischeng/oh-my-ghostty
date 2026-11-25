@@ -363,9 +363,11 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
         list.view.isHidden = inboxMode
         inbox.view.isHidden = !inboxMode
         if inboxMode {
+            inbox.commandMonitor.syncFromCurrentModifiers()
             inbox.update(inboxConfiguration())
         } else {
             forgetInboxOrder()
+            list.commandMonitor.syncFromCurrentModifiers()
             list.update(outlineConfiguration())
         }
         view.needsLayout = true
@@ -412,6 +414,11 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
         for mode in GhosttyTabOrderingMode.allCases {
             entries.append(.action(strings.orderingTitle(mode), checked: ordering == mode) { setOrdering(mode) })
         }
+        entries.append(.separator)
+        entries.append(.action(strings.autoRenameWorkspaceTabs, symbol: "sparkles") { [weak self] in
+            guard let self else { return }
+            TerminalController.autoRenameWorkspaceTabs(self.tabs)
+        })
         return entries
     }
 

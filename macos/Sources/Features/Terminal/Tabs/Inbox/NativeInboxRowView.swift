@@ -149,8 +149,29 @@ final class NativeInboxRowView: NSView {
     private(set) var showsSubtitle = false
     private(set) var subtitleIsRemote = false
     private(set) var hasRemoteBreadcrumb = false
+    private(set) var showsRemoteCloud = false
     private(set) var hasStatusBadge = false
     private(set) var trailingAccessory: NativeTabTrailingAccessory = .none
+
+    /// Returns `true` when the leading icon (single or split panes) already consists
+    /// exclusively of cloud icons, avoiding duplicate/triple clouds before a 1-line SSH breadcrumb.
+    static func leadingIconShowsCloud(
+        controller: TerminalController?,
+        icon: GhosttyTabIcon,
+        selected: Bool,
+        activity: TabActivity?
+    ) -> Bool {
+        let iconPresentation = TerminalTabPresentationResolver.iconPresentation(
+            controller: controller,
+            icon: icon,
+            selected: selected,
+            activity: activity
+        )
+        guard !iconPresentation.parts.isEmpty else {
+            return icon == .systemSymbol("cloud")
+        }
+        return iconPresentation.parts.allSatisfy { $0.icon == .systemSymbol("cloud") }
+    }
 
     var canClose = false {
         didSet {
@@ -336,6 +357,12 @@ final class NativeInboxRowView: NSView {
         showsSubtitle = detail != nil
         subtitleIsRemote = detail != nil && value.subtitleIsRemote
         hasRemoteBreadcrumb = detail == nil && value.remoteBreadcrumb != nil
+        showsRemoteCloud = hasRemoteBreadcrumb && !Self.leadingIconShowsCloud(
+            controller: tab.controller,
+            icon: value.icon,
+            selected: isSelected,
+            activity: value.activity
+        )
 
         let displayTitle = value.remoteBreadcrumb?.title ?? value.title
         let titleWeight: NSFont.Weight = (isSelected || value.selected) ? .medium : .regular
@@ -346,7 +373,7 @@ final class NativeInboxRowView: NSView {
         subtitleLabel.stringValue = detail ?? ""
         subtitleLabel.isHidden = detail == nil
         subtitleCloudView.isHidden = !subtitleIsRemote
-        remoteCloudView.isHidden = !hasRemoteBreadcrumb
+        remoteCloudView.isHidden = !showsRemoteCloud
 
         shortcutLabel.stringValue = value.shortcut ?? ""
         iconView.customSizing = NativeInboxMetrics.iconSizing
@@ -457,7 +484,7 @@ final class NativeInboxRowView: NSView {
         }
 
         var titleX = NativeInboxMetrics.textLeadingX
-        if hasRemoteBreadcrumb {
+        if showsRemoteCloud {
             remoteCloudView.frame = NSRect(
                 x: titleX,
                 y: topMidY - NativeInboxMetrics.cloudIconHeight / 2,

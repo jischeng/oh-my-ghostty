@@ -352,6 +352,12 @@
                                     <action selector="toggleSidebar:" target="bbz-4X-AYv" id="OMG-SB-Act"/>
                                 </connections>
                             </menuItem>
+                            <menuItem title="Toggle Inbox" keyEquivalent="i" id="OMG-IB-Tgl">
+                                <modifierMask key="keyEquivalentModifierMask" shift="YES" command="YES"/>
+                                <connections>
+                                    <action selector="toggleInbox:" target="bbz-4X-AYv" id="OMG-IB-Act"/>
+                                </connections>
+                            </menuItem>
                             <menuItem title="Toggle Inspector" keyEquivalent="b" id="OMG-IN-Tgl">
                                 <modifierMask key="keyEquivalentModifierMask" shift="YES" command="YES"/>
                                 <connections>

@@ -65,6 +65,11 @@ final class NativeCommandRevealMonitor {
 
     var onChange: ((Bool) -> Void)?
 
+    /// Injectable environment hooks for deterministic unit testing.
+    var currentModifiersProvider: () -> NSEvent.ModifierFlags = { NSEvent.modifierFlags }
+    var isAppActiveProvider: () -> Bool = { NSApp.isActive }
+    var keyWindowProvider: () -> NSWindow? = { NSApp.keyWindow }
+
     private var liveCommandHeld = false
     private(set) var isCommandHeld = false
     private var localMonitor: Any?
@@ -80,26 +85,36 @@ final class NativeCommandRevealMonitor {
         )
         let center = NotificationCenter.default
         observers.append(center.addObserver(
-            forName: NSWindow.didResignKeyNotification,
+            forName: NSWindow.didBecomeKeyNotification,
             object: nil,
             queue: nil
         ) { [weak self] note in
-            let handle = { [weak self] in
+            let becomingWindow = note.object as? NSWindow
+            let handle: () -> Void = { [weak self] in
                 MainActor.assumeIsolated {
                     guard let self else { return }
-                    if let window = self.hostView?.window {
-                        if (note.object as? NSWindow) === window || !window.isKeyWindow {
-                            self.setLiveCommandHeld(false)
-                        }
-                    } else {
-                        self.setLiveCommandHeld(false)
-                    }
+                    self.handleWindowDidBecomeKey(becomingWindow)
                 }
             }
             if Thread.isMainThread {
                 handle()
             } else {
                 DispatchQueue.main.async(execute: handle)
+            }
+        })
+        observers.append(center.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            // Defer to the next main runloop tick so native tab switches (where
+            // the old tab's window resigns key right before the new tab's window
+            // becomes key) preserve an already-held ⌘ without a new .flagsChanged.
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.handleWindowDidResignKeyDeferred()
+                }
             }
         })
         observers.append(center.addObserver(
@@ -161,14 +176,57 @@ final class NativeCommandRevealMonitor {
         setLiveCommandHeld(false)
     }
 
-    func reconcileWindowFocus() {
-        guard let hostView,
-              let window = hostView.window,
-              window.isVisible,
-              window.isKeyWindow else {
+    /// Synchronizes live `⌘` reveal state from current modifier flags when the
+    /// sidebar activates, refreshes, or moves into a newly focused tab window.
+    func syncFromCurrentModifiers() {
+        guard isAppActiveProvider() else {
             setLiveCommandHeld(false)
             return
         }
+        if let hostView {
+            guard let window = hostView.window, window.isVisible, window.isKeyWindow else {
+                setLiveCommandHeld(false)
+                return
+            }
+        } else if keyWindowProvider() == nil {
+            setLiveCommandHeld(false)
+            return
+        }
+        setLiveCommandHeld(Self.shouldRevealShortcuts(for: currentModifiersProvider()))
+    }
+
+    func reconcileWindowFocus() {
+        syncFromCurrentModifiers()
+    }
+
+    private func handleWindowDidBecomeKey(_ becomingWindow: NSWindow?) {
+        guard isAppActiveProvider() else {
+            setLiveCommandHeld(false)
+            return
+        }
+        if let window = hostView?.window {
+            if window === becomingWindow || window.isKeyWindow {
+                setLiveCommandHeld(Self.shouldRevealShortcuts(for: currentModifiersProvider()))
+            } else {
+                setLiveCommandHeld(false)
+            }
+        } else if becomingWindow != nil || keyWindowProvider() != nil {
+            setLiveCommandHeld(Self.shouldRevealShortcuts(for: currentModifiersProvider()))
+        } else {
+            setLiveCommandHeld(false)
+        }
+    }
+
+    private func handleWindowDidResignKeyDeferred() {
+        guard isAppActiveProvider(), let activeKeyWindow = keyWindowProvider() else {
+            setLiveCommandHeld(false)
+            return
+        }
+        if let window = hostView?.window, window !== activeKeyWindow, !window.isKeyWindow {
+            setLiveCommandHeld(false)
+            return
+        }
+        setLiveCommandHeld(Self.shouldRevealShortcuts(for: currentModifiersProvider()))
     }
 
     private func setLiveCommandHeld(_ next: Bool) {

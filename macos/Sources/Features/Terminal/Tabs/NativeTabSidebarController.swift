@@ -546,7 +546,10 @@ final class NativeTabSidebarController: NSViewController, NSPopoverDelegate {
             selected: tab.id == configuration.layoutState.tabSnapshot.selectedID,
             activities: configuration.statusStore,
             icons: configuration.iconProvider,
-            style: style
+            style: style,
+            includeRemoteHost: style == .inbox
+                ? TerminalTabPresentationResolver.hasMultipleRemoteHosts(in: tabs)
+                : true
         )
     }
 }

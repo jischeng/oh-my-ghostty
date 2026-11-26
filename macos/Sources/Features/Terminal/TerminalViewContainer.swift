@@ -372,6 +372,23 @@ class TerminalGlassView: NSView, ObservableObject {
 #endif // compiler(>=6.2)
 
 extension TerminalViewContainer {
+    /// Vertical offset from `TerminalViewContainer.topAnchor` to `NSThemeFrame`'s top edge.
+    /// Windows using `.fullSizeContentView` (e.g. `macos-titlebar-style = hidden`) or
+    /// `.fullScreen` already extend `contentView` to the top of `NSThemeFrame` even when
+    /// `themeFrameView.safeAreaInsets.top > 0`, so their backdrop offset must stay `0`
+    /// rather than overshooting above the window's top rounded corners.
+    private var backdropTopOffset: CGFloat {
+        guard let themeFrameView = windowThemeFrameView else {
+            return 0
+        }
+        if let window,
+           window.styleMask.contains(.fullScreen) ||
+           window.styleMask.contains(.fullSizeContentView) {
+            return 0
+        }
+        return -themeFrameView.safeAreaInsets.top
+    }
+
 #if compiler(>=6.2)
     @available(macOS 26.0, *)
     private func addGlassEffectViewIfNeeded() -> TerminalGlassView? {
@@ -379,10 +396,10 @@ extension TerminalViewContainer {
             updateGlassEffectTopInsetIfNeeded()
             return existed
         }
-        guard let themeFrameView = windowThemeFrameView else {
+        guard windowThemeFrameView != nil else {
             return nil
         }
-        let effectView = TerminalGlassView(topOffset: -themeFrameView.safeAreaInsets.top)
+        let effectView = TerminalGlassView(topOffset: backdropTopOffset)
         addSubview(effectView, positioned: .below, relativeTo: terminalView)
         NSLayoutConstraint.activate([
             effectView.topAnchor.constraint(equalTo: topAnchor),
@@ -400,10 +417,10 @@ extension TerminalViewContainer {
             updateGlassEffectTopInsetIfNeeded()
             return existed
         }
-        guard let themeFrameView = windowThemeFrameView else {
+        guard windowThemeFrameView != nil else {
             return nil
         }
-        let effectView = TerminalBackdropBlurView(topOffset: -themeFrameView.safeAreaInsets.top)
+        let effectView = TerminalBackdropBlurView(topOffset: backdropTopOffset)
         addSubview(effectView, positioned: .below, relativeTo: terminalView)
         NSLayoutConstraint.activate([
             effectView.topAnchor.constraint(equalTo: topAnchor),
@@ -420,10 +437,10 @@ extension TerminalViewContainer {
             updateGlassEffectTopInsetIfNeeded()
             return existed
         }
-        guard let themeFrameView = windowThemeFrameView else {
+        guard windowThemeFrameView != nil else {
             return nil
         }
-        let backingView = TerminalOpaqueBackdropView(topOffset: -themeFrameView.safeAreaInsets.top)
+        let backingView = TerminalOpaqueBackdropView(topOffset: backdropTopOffset)
         addSubview(backingView, positioned: .below, relativeTo: terminalView)
         NSLayoutConstraint.activate([
             backingView.topAnchor.constraint(equalTo: topAnchor),
@@ -495,8 +512,8 @@ extension TerminalViewContainer {
     }
 
     private func updateGlassEffectTopInsetIfNeeded() {
-        guard let themeFrameView = windowThemeFrameView else { return }
-        let inset = -themeFrameView.safeAreaInsets.top
+        guard windowThemeFrameView != nil else { return }
+        let inset = backdropTopOffset
         backdropBlurView?.updateTopInset(inset)
         opaqueBackdropView?.updateTopInset(inset)
 #if compiler(>=6.2)

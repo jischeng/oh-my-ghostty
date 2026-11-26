@@ -37,9 +37,24 @@ extension Ghostty {
             if let terminalController {
                 return window?.styleMask.contains(.fullScreen) == true ||
                     terminalController.isBackgroundOpaque ||
+                    NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency ||
                     missionControl.shouldSuppressBehindWindowBlur(for: window)
             }
             return window?.isOpaque ?? false
+        }
+
+        private var decorativeAnimationsPaused: Bool {
+            let window = surfaceView.window
+            if missionControl.shouldSuppressBehindWindowBlur(for: window) {
+                return true
+            }
+            if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                return true
+            }
+            if let window {
+                return !window.isVisible || window.isMiniaturized || !window.occlusionState.contains(.visible)
+            }
+            return false
         }
 
         private var unfocusedSplitMask: OMGThemeBackground.UnfocusedSplitMask {
@@ -114,7 +129,10 @@ extension Ghostty {
                 // Progress report
                 if let progressReport = surfaceView.progressReport, progressReport.state != .remove {
                     VStack(spacing: 0) {
-                        SurfaceProgressBar(report: progressReport)
+                        SurfaceProgressBar(
+                            report: progressReport,
+                            isPaused: decorativeAnimationsPaused
+                        )
                         Spacer()
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -132,7 +150,8 @@ extension Ghostty {
                 // Show key state indicator for active key tables and/or pending key sequences
                 KeyStateIndicator(
                     keyTables: surfaceView.keyTables,
-                    keySequence: surfaceView.keySequence
+                    keySequence: surfaceView.keySequence,
+                    isPaused: decorativeAnimationsPaused
                 )
                 .zIndex(1)
 
@@ -740,6 +759,7 @@ extension Ghostty {
     struct KeyStateIndicator: View {
         let keyTables: [String]
         let keySequence: [KeyboardShortcut]
+        var isPaused: Bool = false
 
         @State private var isShowingPopover = false
         @State private var position: Position = .bottom
@@ -846,7 +866,7 @@ extension Ghostty {
                         }
 
                         // Animated ellipsis to indicate waiting for next key
-                        PendingIndicator(paused: isDragging)
+                        PendingIndicator(paused: isDragging || isPaused)
                     }
                 }
             }

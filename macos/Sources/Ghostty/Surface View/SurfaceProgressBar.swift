@@ -5,6 +5,7 @@ import SwiftUI
 /// control.
 struct SurfaceProgressBar: View {
     let report: Ghostty.Action.ProgressReport
+    var isPaused: Bool = false
 
     private var color: Color {
         switch report.state {
@@ -58,6 +59,10 @@ struct SurfaceProgressBar: View {
                             height: geometry.size.height
                         )
                         .animation(.easeInOut(duration: 0.2), value: progress)
+                } else if isPaused {
+                    // Static bar while Mission Control, off-Space thumbnail, or Reduce Motion is active
+                    // so unmounting `BouncingProgressBar` immediately removes its `CAAnimation`.
+                    StaticIndeterminateProgressBar(color: color)
                 } else {
                     // Indeterminate states without specific progress - all use bouncing animation
                     BouncingProgressBar(color: color)
@@ -71,6 +76,27 @@ struct SurfaceProgressBar: View {
         .accessibilityAddTraits(.updatesFrequently)
         .accessibilityLabel(accessibilityLabel)
         .accessibilityValue(accessibilityValue)
+    }
+}
+
+/// Static fallback rendered while indeterminate animation is paused (e.g. Mission Control Exposé).
+private struct StaticIndeterminateProgressBar: View {
+    let color: Color
+    private let barWidthRatio: CGFloat = 0.25
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                Rectangle()
+                    .fill(color.opacity(0.3))
+                Rectangle()
+                    .fill(color)
+                    .frame(
+                        width: geometry.size.width * barWidthRatio,
+                        height: geometry.size.height
+                    )
+            }
+        }
     }
 }
 

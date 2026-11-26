@@ -314,6 +314,11 @@ class BaseTerminalController: NSWindowController,
             selector: #selector(missionControlPresentationDidChange(_:)),
             name: MissionControlPresentationMonitor.didChangeNotification,
             object: nil)
+        center.addObserver(
+            self,
+            selector: #selector(missionControlWindowSpaceDidSettle(_:)),
+            name: MissionControlPresentationMonitor.windowSpaceOrStateDidSettleNotification,
+            object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
             selector: #selector(activeSpaceDidChange(_:)),
@@ -1362,6 +1367,12 @@ class BaseTerminalController: NSWindowController,
         syncMissionControlPresentation()
     }
 
+    @objc private func missionControlWindowSpaceDidSettle(_ notification: Notification) {
+        guard let window, window.isVisible else { return }
+        syncSurfaceTreeOcclusionState()
+        syncMissionControlPresentation()
+    }
+
     func syncMissionControlPresentation() {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -1594,7 +1605,11 @@ class BaseTerminalController: NSWindowController,
     }
 
     func windowDidDeminiaturize(_ notification: Notification) {
+        MissionControlPresentationMonitor.shared.refreshBeforeWindowAppearanceSync(for: window)
         syncSurfaceTreeOcclusionState()
+        if let window, window.isVisible {
+            syncMissionControlPresentation()
+        }
         sessionCheckpointStateDidChange()
     }
 
@@ -1647,6 +1662,9 @@ class BaseTerminalController: NSWindowController,
             return override
         }
         guard let window else { return false }
+        guard window.isOnActiveSpace, window.tabGroup?.isOverviewVisible != true else {
+            return false
+        }
         return window.occlusionState.contains(.visible)
     }
 

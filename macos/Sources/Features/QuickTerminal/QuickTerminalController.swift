@@ -590,21 +590,22 @@ class QuickTerminalController: BaseTerminalController {
         // Also check if the user has overridden transparency to be fully opaque or if
         // Mission Control Exposé is active.
         let reduceTransparency = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
-        let wantsBehindWindowBlur = !isBackgroundOpaque &&
+        let wantsNonOpaqueBacking = !isBackgroundOpaque &&
             !reduceTransparency &&
-            (derivedConfig.backgroundBlur.isGlassStyle ||
-                (derivedConfig.backgroundOpacity < 1 && derivedConfig.backgroundBlur.isEnabled))
+            (derivedConfig.backgroundOpacity < 1 || derivedConfig.backgroundBlur.isGlassStyle)
         MissionControlPresentationMonitor.shared.updateWindowEligibility(
             window,
-            wantsBehindWindowBlur: wantsBehindWindowBlur
+            wantsBehindWindowBlur: wantsNonOpaqueBacking
         )
 
         let forceOpaque = isBackgroundOpaque ||
+            reduceTransparency ||
             MissionControlPresentationMonitor.shared.shouldSuppressBehindWindowBlur(for: window)
+        let preferredColor = focusedSurface?.backgroundColor.map { NSColor($0) }
         if !forceOpaque && (self.derivedConfig.backgroundOpacity < 1 || derivedConfig.backgroundBlur.isGlassStyle) {
             window.isOpaque = false
             if derivedConfig.backgroundBlur.isEnabled {
-                window.backgroundColor = NSColor(ghostty.config.backgroundColor).withAlphaComponent(0.001)
+                window.backgroundColor = (preferredColor ?? NSColor(ghostty.config.backgroundColor)).withAlphaComponent(0.001)
                 window.setAutoFlattenLayerTreeEnabled(false)
             } else {
                 window.backgroundColor = .white.withAlphaComponent(0.001)
@@ -622,7 +623,7 @@ class QuickTerminalController: BaseTerminalController {
 
         terminalViewContainer?.ghosttyConfigDidChange(
             ghostty.config,
-            preferredBackgroundColor: nil,
+            preferredBackgroundColor: preferredColor,
             isWindowOpaque: forceOpaque,
             immediately: true
         )
@@ -714,10 +715,11 @@ class QuickTerminalController: BaseTerminalController {
         syncAppearance()
         if window?.isVisible != true {
             let forceOpaque = isBackgroundOpaque ||
+                NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency ||
                 MissionControlPresentationMonitor.shared.shouldSuppressBehindWindowBlur(for: window)
             terminalViewContainer?.ghosttyConfigDidChange(
                 config,
-                preferredBackgroundColor: nil,
+                preferredBackgroundColor: focusedSurface?.backgroundColor.map { NSColor($0) },
                 isWindowOpaque: forceOpaque
             )
         }

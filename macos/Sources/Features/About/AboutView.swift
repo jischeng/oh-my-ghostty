@@ -2,6 +2,8 @@ import SwiftUI
 
 struct AboutView: View {
     @Environment(\.openURL) var openURL
+    @EnvironmentObject private var viewModel: AboutViewModel
+    @ObservedObject private var missionControl = MissionControlPresentationMonitor.shared
 
     private let githubURL = OhMyGhosttyVersion.repositoryURL
     private let upstreamURL = OhMyGhosttyVersion.upstreamURL
@@ -128,7 +130,14 @@ struct AboutView: View {
         .padding(.top, 8)
         .padding(32)
         .frame(minWidth: 256)
-        .background(VisualEffectBackground(material: .underWindowBackground).ignoresSafeArea())
+        .background {
+            if viewModel.suppressBlur || missionControl.isMissionControlActive ||
+                NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency {
+                Color(nsColor: .windowBackgroundColor).ignoresSafeArea()
+            } else {
+                VisualEffectBackground(material: .underWindowBackground).ignoresSafeArea()
+            }
+        }
     }
 
     private struct PropertyRow: View {
@@ -173,6 +182,6 @@ struct AboutView: View {
 
 struct AboutView_Previews: PreviewProvider {
     static var previews: some View {
-        AboutView()
+        AboutView().environmentObject(AboutViewModel())
     }
 }

@@ -4591,6 +4591,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // Control / off-Space / occluded blur suppression each force an opaque window.
         let windowIsOpaque = window.styleMask.contains(.fullScreen) ||
             isBackgroundOpaque ||
+            NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency ||
             MissionControlPresentationMonitor.shared.shouldSuppressBehindWindowBlur(for: window)
         let chromeBackground = Self.chromeBackground(
             color: backgroundColor,

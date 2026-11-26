@@ -2052,27 +2052,135 @@ struct QuickInputBackdropBlurView: NSViewRepresentable {
     let isLight: Bool
     var materialOverride: NSVisualEffectView.Material?
     var backdropOpacity: Double = 1.0
+    var fallbackSolidColor: NSColor = .windowBackgroundColor
 
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
+    func makeNSView(context: Context) -> QuickInputBackdropContainerView {
+        let view = QuickInputBackdropContainerView()
         configure(view)
         return view
     }
 
-    func updateNSView(_ view: NSVisualEffectView, context: Context) {
+    func updateNSView(_ view: QuickInputBackdropContainerView, context: Context) {
         configure(view)
     }
 
-    private func configure(_ view: NSVisualEffectView) {
-        view.blendingMode = .withinWindow
-        view.state = .active
-        view.material = materialOverride ?? (isLight ? .selection : .hudWindow)
-        view.appearance = NSAppearance(named: isLight ? .aqua : .darkAqua)
-        view.alphaValue = CGFloat(min(max(backdropOpacity, 0), 1))
-        view.wantsLayer = true
-        view.layer?.cornerRadius = cornerRadius
-        view.layer?.cornerCurve = .continuous
-        view.layer?.masksToBounds = true
+    private func configure(_ view: QuickInputBackdropContainerView) {
+        view.applyConfiguration(
+            cornerRadius: cornerRadius,
+            isLight: isLight,
+            materialOverride: materialOverride,
+            backdropOpacity: backdropOpacity,
+            fallbackSolidColor: fallbackSolidColor
+        )
+    }
+}
+
+final class QuickInputBackdropContainerView: NSView {
+    private var effectView: NSVisualEffectView?
+    private var cornerRadius: CGFloat = 0
+    private var isLight: Bool = false
+    private var materialOverride: NSVisualEffectView.Material?
+    private var backdropOpacity: Double = 1.0
+    private var fallbackSolidColor: NSColor = .windowBackgroundColor
+    private var windowTokens: [NSObjectProtocol] = []
+    private var workspaceToken: NSObjectProtocol?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        clipsToBounds = true
+        layer?.cornerCurve = .continuous
+        layer?.masksToBounds = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    deinit {
+        windowTokens.forEach(NotificationCenter.default.removeObserver)
+        if let workspaceToken {
+            NSWorkspace.shared.notificationCenter.removeObserver(workspaceToken)
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        windowTokens.forEach(NotificationCenter.default.removeObserver)
+        windowTokens.removeAll()
+        if let workspaceToken {
+            NSWorkspace.shared.notificationCenter.removeObserver(workspaceToken)
+            self.workspaceToken = nil
+        }
+        if let window {
+            windowTokens.append(NotificationCenter.default.addObserver(
+                forName: NSWindow.didChangeOcclusionStateNotification, object: window, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.reconcileBackdrop() }
+            })
+            for name in [
+                MissionControlPresentationMonitor.didChangeNotification,
+                MissionControlPresentationMonitor.windowSpaceOrStateDidSettleNotification,
+            ] {
+                windowTokens.append(NotificationCenter.default.addObserver(
+                    forName: name, object: nil, queue: .main
+                ) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.reconcileBackdrop() }
+                })
+            }
+            workspaceToken = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.reconcileBackdrop() }
+            }
+        }
+        reconcileBackdrop()
+    }
+
+    func applyConfiguration(
+        cornerRadius: CGFloat,
+        isLight: Bool,
+        materialOverride: NSVisualEffectView.Material?,
+        backdropOpacity: Double,
+        fallbackSolidColor: NSColor
+    ) {
+        self.cornerRadius = cornerRadius
+        self.isLight = isLight
+        self.materialOverride = materialOverride
+        self.backdropOpacity = backdropOpacity
+        self.fallbackSolidColor = fallbackSolidColor
+        reconcileBackdrop()
+    }
+
+    private func reconcileBackdrop() {
+        layer?.cornerRadius = cornerRadius
+        let suppress = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency ||
+            MissionControlPresentationMonitor.shared.shouldSuppressBehindWindowBlur(for: window)
+        if suppress {
+            effectView?.removeFromSuperview()
+            effectView = nil
+            let solid = fallbackSolidColor.withAlphaComponent(1)
+            layer?.isOpaque = true
+            layer?.backgroundColor = solid.cgColor
+            return
+        }
+        layer?.isOpaque = false
+        layer?.backgroundColor = nil
+        let effect: NSVisualEffectView
+        if let existing = effectView {
+            effect = existing
+        } else {
+            let created = NSVisualEffectView(frame: bounds)
+            created.autoresizingMask = [.width, .height]
+            addSubview(created)
+            effectView = created
+            effect = created
+        }
+        effect.frame = bounds
+        effect.blendingMode = .withinWindow
+        effect.state = .active
+        effect.material = materialOverride ?? (isLight ? .selection : .hudWindow)
+        effect.appearance = NSAppearance(named: isLight ? .aqua : .darkAqua)
+        effect.alphaValue = CGFloat(min(max(backdropOpacity, 0), 1))
     }
 }
 
@@ -2126,7 +2234,8 @@ struct QuickInputGlassSurface: View {
                         cornerRadius: cornerRadius,
                         isLight: colorScheme == .light,
                         materialOverride: materialOverride,
-                        backdropOpacity: backdropOpacity
+                        backdropOpacity: backdropOpacity,
+                        fallbackSolidColor: NSColor(themeColor)
                     )
                     shape.fill(themeColor.opacity(tintOpacity))
                 }

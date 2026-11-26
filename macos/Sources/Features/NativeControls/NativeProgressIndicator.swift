@@ -6,6 +6,7 @@ final class NativeProgressIndicator: NSProgressIndicator {
     private(set) var animationRequested = false
     private(set) var animationIsRunning = false
     private var observations: [NSObjectProtocol] = []
+    private var workspaceObservation: NSObjectProtocol?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -13,7 +14,12 @@ final class NativeProgressIndicator: NSProgressIndicator {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    deinit { observations.forEach(NotificationCenter.default.removeObserver) }
+    deinit {
+        observations.forEach(NotificationCenter.default.removeObserver)
+        if let workspaceObservation {
+            NSWorkspace.shared.notificationCenter.removeObserver(workspaceObservation)
+        }
+    }
 
     func setAnimating(_ requested: Bool) {
         animationRequested = requested
@@ -24,6 +30,10 @@ final class NativeProgressIndicator: NSProgressIndicator {
         super.viewDidMoveToWindow()
         observations.forEach(NotificationCenter.default.removeObserver)
         observations.removeAll()
+        if let workspaceObservation {
+            NSWorkspace.shared.notificationCenter.removeObserver(workspaceObservation)
+            self.workspaceObservation = nil
+        }
         if let window {
             observations.append(NotificationCenter.default.addObserver(
                 forName: NSWindow.didChangeOcclusionStateNotification, object: window, queue: .main
@@ -35,11 +45,21 @@ final class NativeProgressIndicator: NSProgressIndicator {
             ) { [weak self] _ in
                 MainActor.assumeIsolated { self?.setRunning(false) }
             })
-            observations.append(NotificationCenter.default.addObserver(
-                forName: MissionControlPresentationMonitor.didChangeNotification, object: nil, queue: .main
+            for name in [
+                MissionControlPresentationMonitor.didChangeNotification,
+                MissionControlPresentationMonitor.windowSpaceOrStateDidSettleNotification,
+            ] {
+                observations.append(NotificationCenter.default.addObserver(
+                    forName: name, object: nil, queue: .main
+                ) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.reconcileAnimation() }
+                })
+            }
+            workspaceObservation = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main
             ) { [weak self] _ in
                 MainActor.assumeIsolated { self?.reconcileAnimation() }
-            })
+            }
         }
         reconcileAnimation()
     }
@@ -61,8 +81,8 @@ final class NativeProgressIndicator: NSProgressIndicator {
 
     private func reconcileAnimation() {
         let visible = window.map { $0.isVisible && !$0.isMiniaturized && $0.occlusionState.contains(.visible) } ?? false
-        let missionControlActive = MissionControlPresentationMonitor.shared.isMissionControlActive
-        setRunning(animationRequested && visible && !missionControlActive && !isHiddenOrHasHiddenAncestor)
+        let suppress = MissionControlPresentationMonitor.shared.shouldSuppressBehindWindowBlur(for: window)
+        setRunning(animationRequested && visible && !suppress && !isHiddenOrHasHiddenAncestor)
     }
 
     private func setRunning(_ running: Bool) {

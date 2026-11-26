@@ -25,11 +25,11 @@ struct OMGNativeTheme: Equatable {
         self.accent = accent
     }
 
-    /// Configuration-level desire for behind-window blur/glass prior to any
-    /// temporary `isMissionControlActive` opaque override, so auxiliary windows
+    /// Configuration-level desire for non-opaque / behind-window blur/glass prior to
+    /// any temporary Mission Control / off-Space opaque override, so auxiliary windows
     /// stay registered with `MissionControlPresentationMonitor` across Exposé.
     var wantsBehindWindowBlur: Bool {
-        configuredWantsBehindWindowBlur ?? (blur.isGlassStyle || (opacity < 1 && blur.isEnabled))
+        configuredWantsBehindWindowBlur ?? (blur.isGlassStyle || opacity < 1)
     }
 
     var secondary: NSColor { foreground.withAlphaComponent(0.62) }
@@ -43,10 +43,12 @@ struct OMGNativeTheme: Equatable {
     @MainActor
     static func resolve(
         for window: NSWindow?,
+        presentationWindow: NSWindow? = nil,
         config: Ghostty.Config? = nil,
         missionControlMonitor: MissionControlPresentationMonitor = .shared
     ) -> OMGNativeTheme {
         let origin = window?.sheetParent ?? window
+        let targetWindow = presentationWindow ?? origin
         let config = config ?? (origin?.windowController as? TerminalController)?.ghostty.config
             ?? (NSApp.delegate as? AppDelegate)?.ghostty.config
         guard let config else {
@@ -61,14 +63,17 @@ struct OMGNativeTheme: Equatable {
         let palette = OMGThemeBackground.palette(for: origin, config: config)
         var theme = OMGNativeTheme(background: palette.background, foreground: palette.foreground,
                                    accent: config.nativeControlAccent(background: palette.background))
-        let configForceOpaque = origin?.styleMask.contains(.fullScreen) == true ||
-            (origin?.windowController as? TerminalController)?.isBackgroundOpaque == true
+        let reduceTransparency = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+        let configForceOpaque = targetWindow?.styleMask.contains(.fullScreen) == true ||
+            origin?.styleMask.contains(.fullScreen) == true ||
+            (origin?.windowController as? TerminalController)?.isBackgroundOpaque == true ||
+            reduceTransparency
         let configOpacity = config.backgroundOpacity.clamped(to: 0...1)
         let configBlur = config.backgroundBlur
         let wantsBehindWindowBlur = !configForceOpaque &&
-            (configBlur.isGlassStyle || (configOpacity < 1 && configBlur.isEnabled))
+            (configBlur.isGlassStyle || configOpacity < 1)
         let forceOpaque = configForceOpaque ||
-            missionControlMonitor.shouldSuppressBehindWindowBlur(for: origin)
+            missionControlMonitor.shouldSuppressBehindWindowBlur(for: targetWindow)
         if !forceOpaque {
             theme.opacity = configOpacity
             theme.blur = configBlur
@@ -124,6 +129,9 @@ final class OMGNativeThemeObserver: NSObject {
         notificationCenter.addObserver(self, selector: #selector(missionControlChanged),
                                        name: MissionControlPresentationMonitor.didChangeNotification,
                                        object: missionControlMonitor)
+        notificationCenter.addObserver(self, selector: #selector(missionControlChanged),
+                                       name: MissionControlPresentationMonitor.windowSpaceOrStateDidSettleNotification,
+                                       object: missionControlMonitor)
         spaceToken = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.activeSpaceDidChangeNotification,
             object: nil,
@@ -152,15 +160,20 @@ final class OMGNativeThemeObserver: NSObject {
         if let sourceWindow { targets.append(sourceWindow) }
         if let hostWindow, hostWindow !== sourceWindow { targets.append(hostWindow) }
         for target in targets {
-            windowTokens.append(
-                notificationCenter.addObserver(
-                    forName: NSWindow.didChangeOcclusionStateNotification,
-                    object: target,
-                    queue: .main
-                ) { [weak self] _ in
-                    MainActor.assumeIsolated { self?.handleWindowSpaceOrOcclusionChange() }
-                }
-            )
+            for name in [
+                NSWindow.didChangeOcclusionStateNotification,
+                NSWindow.didDeminiaturizeNotification,
+            ] {
+                windowTokens.append(
+                    notificationCenter.addObserver(
+                        forName: name,
+                        object: target,
+                        queue: .main
+                    ) { [weak self] _ in
+                        MainActor.assumeIsolated { self?.handleWindowSpaceOrOcclusionChange() }
+                    }
+                )
+            }
         }
     }
 
@@ -174,6 +187,7 @@ final class OMGNativeThemeObserver: NSObject {
         onChange?(
             OMGNativeTheme.resolve(
                 for: sourceWindow ?? hostWindow,
+                presentationWindow: hostWindow,
                 config: explicitConfig,
                 missionControlMonitor: missionControlMonitor
             )
@@ -191,6 +205,7 @@ final class OMGNativeThemeObserver: NSObject {
         onChange?(
             OMGNativeTheme.resolve(
                 for: sourceWindow ?? hostWindow,
+                presentationWindow: hostWindow,
                 config: config,
                 missionControlMonitor: missionControlMonitor
             )

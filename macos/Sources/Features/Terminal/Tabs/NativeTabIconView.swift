@@ -36,6 +36,8 @@ final class NativeTabIconView: NSView {
         preview.animates = false
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(refreshPresentation),
             name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(refreshPresentation),
+            name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     deinit {
@@ -77,7 +79,7 @@ final class NativeTabIconView: NSView {
         }
         let visible = window.map { $0.isVisible && !$0.isMiniaturized && $0.occlusionState.contains(.visible) } ?? false
         let animates = visible && !isHiddenOrHasHiddenAncestor &&
-            !MissionControlPresentationMonitor.shared.isMissionControlActive &&
+            !MissionControlPresentationMonitor.shared.shouldSuppressBehindWindowBlur(for: window) &&
             !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         for (mark, part) in zip(marks, parts) {
             mark.image = Self.image(part.icon)
@@ -238,13 +240,18 @@ final class NativeTabIconView: NSView {
                     MainActor.assumeIsolated { self?.refreshPresentation() }
                 })
             }
-            windowObservers.append(NotificationCenter.default.addObserver(
-                forName: MissionControlPresentationMonitor.didChangeNotification,
-                object: nil,
-                queue: .main
-            ) { [weak self] _ in
-                MainActor.assumeIsolated { self?.refreshPresentation() }
-            })
+            for name in [
+                MissionControlPresentationMonitor.didChangeNotification,
+                MissionControlPresentationMonitor.windowSpaceOrStateDidSettleNotification,
+            ] {
+                windowObservers.append(NotificationCenter.default.addObserver(
+                    forName: name,
+                    object: nil,
+                    queue: .main
+                ) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.refreshPresentation() }
+                })
+            }
             refreshPresentation()
         }
     }

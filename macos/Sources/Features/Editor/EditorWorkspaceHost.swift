@@ -396,6 +396,7 @@ struct EditorWorkspaceHost<Terminal: View>: View {
         let window = controller.window
         let windowIsOpaque = window?.styleMask.contains(.fullScreen) == true ||
             controller.isBackgroundOpaque ||
+            NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency ||
             missionControl.shouldSuppressBehindWindowBlur(for: window)
         return NSColor(OMGThemeBackground.matchingChrome(
             color: terminalColor,
@@ -1750,20 +1751,23 @@ struct EditorBackdrop: NSViewRepresentable {
     func makeNSView(context: Context) -> BackdropView { BackdropView() }
 
     func updateNSView(_ view: BackdropView, context: Context) {
-        let suppressBlur = missionControl.shouldSuppressBehindWindowBlur(for: view.window)
-        let blur = (usesWindowBlur || suppressBlur) ? .disabled : localEffect
-        if context.coordinator.blur != blur {
+        let reduceTransparency = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+        let wantsStandaloneBlur = !usesWindowBlur && !reduceTransparency && blur != .disabled
+        view.updateStandaloneBlurEligibility(wantsBehindWindowBlur: wantsStandaloneBlur)
+        let suppressBlur = reduceTransparency || missionControl.shouldSuppressBehindWindowBlur(for: view.window)
+        let effectiveBlur = (usesWindowBlur || suppressBlur) ? .disabled : localEffect
+        if context.coordinator.blur != effectiveBlur {
             view.subviews.forEach { $0.removeFromSuperview() }
-            context.coordinator.blur = blur
+            context.coordinator.blur = effectiveBlur
             let effect: NSView?
 #if compiler(>=6.2)
-            if #available(macOS 26.0, *), blur == .macosGlassRegular || blur == .macosGlassClear {
+            if #available(macOS 26.0, *), effectiveBlur == .macosGlassRegular || effectiveBlur == .macosGlassClear {
                 effect = TerminalGlassView(topOffset: 0)
             } else {
-                effect = blur == .disabled ? nil : NSVisualEffectView()
+                effect = effectiveBlur == .disabled ? nil : NSVisualEffectView()
             }
 #else
-            effect = blur == .disabled ? nil : NSVisualEffectView()
+            effect = effectiveBlur == .disabled ? nil : NSVisualEffectView()
 #endif
             if let effect {
                 effect.translatesAutoresizingMaskIntoConstraints = false
@@ -1776,15 +1780,15 @@ struct EditorBackdrop: NSViewRepresentable {
                 ])
             }
         }
-        if let windowChromeFill, blur == .disabled {
+        if let windowChromeFill, effectiveBlur == .disabled {
             view.fillColor = windowChromeFill
         } else {
             let effectiveOpacity = suppressBlur ? 1.0 : opacity
-            view.fillColor = blur == .disabled ? color.withAlphaComponent(effectiveOpacity) : .clear
+            view.fillColor = effectiveBlur == .disabled ? color.withAlphaComponent(effectiveOpacity) : .clear
         }
 #if compiler(>=6.2)
         if #available(macOS 26.0, *), let glass = view.subviews.first as? TerminalGlassView {
-            glass.configure(style: blur == .macosGlassClear ? .clear : .regular,
+            glass.configure(style: effectiveBlur == .macosGlassClear ? .clear : .regular,
                             backgroundColor: color, backgroundOpacity: opacity, cornerRadius: 0,
                             isKeyWindow: activeState != .inactive)
         }
@@ -1799,6 +1803,9 @@ struct EditorBackdrop: NSViewRepresentable {
     }
 
     final class BackdropView: NSView {
+        private var wantsStandaloneBlur = false
+        private weak var registeredWindow: NSWindow?
+
         // AppKit can invalidate beyond an un-clipped view's bounds. Painting
         // dirtyRect into a shared backing store tinted neighbouring terminal
         // panes after split resizing/reordering. Own and clip the background.
@@ -1812,8 +1819,49 @@ struct EditorBackdrop: NSViewRepresentable {
         @available(*, unavailable)
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+        override func viewWillMove(toWindow newWindow: NSWindow?) {
+            if let registeredWindow, registeredWindow !== newWindow {
+                MissionControlPresentationMonitor.shared.unregisterWindow(
+                    registeredWindow,
+                    owner: ObjectIdentifier(self)
+                )
+                self.registeredWindow = nil
+            }
+            super.viewWillMove(toWindow: newWindow)
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            syncRegistration()
+        }
+
+        func updateStandaloneBlurEligibility(wantsBehindWindowBlur: Bool) {
+            wantsStandaloneBlur = wantsBehindWindowBlur
+            syncRegistration()
+        }
+
+        private func syncRegistration() {
+            if let registeredWindow, registeredWindow !== window {
+                MissionControlPresentationMonitor.shared.unregisterWindow(
+                    registeredWindow,
+                    owner: ObjectIdentifier(self)
+                )
+                self.registeredWindow = nil
+            }
+            guard let window else { return }
+            MissionControlPresentationMonitor.shared.updateWindowEligibility(
+                window,
+                wantsBehindWindowBlur: wantsStandaloneBlur,
+                owner: ObjectIdentifier(self)
+            )
+            registeredWindow = wantsStandaloneBlur ? window : nil
+        }
+
         var fillColor: NSColor = .clear {
-            didSet { layer?.backgroundColor = fillColor.cgColor }
+            didSet {
+                layer?.isOpaque = fillColor.alphaComponent >= 1
+                layer?.backgroundColor = fillColor.cgColor
+            }
         }
     }
 

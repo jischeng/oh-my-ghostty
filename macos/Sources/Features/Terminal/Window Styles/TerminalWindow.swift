@@ -576,17 +576,17 @@ class TerminalWindow: NSWindow {
         // multi-Space Exposé drops behind-window `CABackdropLayer` sampling).
         let userForceOpaque = terminalController?.isBackgroundOpaque ?? false
         let reduceTransparency = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
-        let wantsBehindWindowBlur = !styleMask.contains(.fullScreen) &&
+        let wantsNonOpaqueBacking = !styleMask.contains(.fullScreen) &&
             !userForceOpaque &&
             !reduceTransparency &&
-            (surfaceConfig.backgroundBlur.isGlassStyle ||
-                (surfaceConfig.backgroundOpacity < 1 && surfaceConfig.backgroundBlur.isEnabled))
+            (surfaceConfig.backgroundOpacity < 1 || surfaceConfig.backgroundBlur.isGlassStyle)
         MissionControlPresentationMonitor.shared.updateWindowEligibility(
             self,
-            wantsBehindWindowBlur: wantsBehindWindowBlur
+            wantsBehindWindowBlur: wantsNonOpaqueBacking
         )
 
         let forceOpaque = userForceOpaque ||
+            reduceTransparency ||
             MissionControlPresentationMonitor.shared.shouldSuppressBehindWindowBlur(for: self)
         if !styleMask.contains(.fullScreen) &&
             !forceOpaque &&
@@ -660,6 +660,7 @@ class TerminalWindow: NSWindow {
     var renderedTitlebarBackgroundColor: NSColor? {
         let forceOpaque = styleMask.contains(.fullScreen) ||
             (terminalController?.isBackgroundOpaque ?? false) ||
+            NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency ||
             MissionControlPresentationMonitor.shared.shouldSuppressBehindWindowBlur(for: self)
         let colorspaceIsDisplayP3 = terminalController?.ghostty.config.windowColorspaceIsDisplayP3 ?? false
         let linearBlending = terminalController?.ghostty.config.usesLinearAlphaBlending ?? false

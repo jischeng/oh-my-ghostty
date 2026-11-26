@@ -34,6 +34,10 @@ final class MissionControlPresentationMonitor: ObservableObject {
         "com.jischeng.omg.missionControlPresentationDidChange"
     )
 
+    static let windowSpaceOrStateDidSettleNotification = Notification.Name(
+        "com.jischeng.omg.missionControlWindowSpaceDidSettle"
+    )
+
     struct WindowSnapshot: Equatable {
         let ownerPID: pid_t
         let ownerName: String
@@ -62,12 +66,14 @@ final class MissionControlPresentationMonitor: ObservableObject {
     }
 
     private let eligibleWindows = NSHashTable<NSWindow>.weakObjects()
+    private var eligibleOwnersByWindow: [ObjectIdentifier: Set<AnyHashable>] = [:]
     private var observedWindowTokens: [ObjectIdentifier: [NSObjectProtocol]] = [:]
     private var workspaceTokens: [NSObjectProtocol] = []
     private var localEventMonitor: Any?
     private var timer: DispatchSourceTimer?
     private var timerIntervalMilliseconds: Int = 0
     private var burstWorkItems: [DispatchWorkItem] = []
+    private var spaceSettleWorkItems: [DispatchWorkItem] = []
     private var displaysAwake: Bool = true
     private var bundleIDCache: [pid_t: String] = [:]
 
@@ -109,22 +115,40 @@ final class MissionControlPresentationMonitor: ObservableObject {
         if let localEventMonitor {
             NSEvent.removeMonitor(localEventMonitor)
         }
+        for item in spaceSettleWorkItems {
+            item.cancel()
+        }
         timer?.cancel()
     }
 
     // MARK: - Window Eligibility Registration
 
-    /// Registers or unregisters `window` according to whether its configuration
-    /// uses behind-window blur or liquid glass when in normal desktop mode.
+    /// Registers or unregisters `window` according to whether `owner` desires
+    /// non-opaque / behind-window blur or liquid-glass backing in normal desktop mode.
     ///
-    /// Callers must pass the configuration-level desire for behind-window blur
+    /// Callers must pass the configuration-level desire for non-opaque backing
     /// (excluding `isMissionControlActive` itself) so the window stays registered
     /// while Mission Control temporarily forces it opaque.
-    func updateWindowEligibility(_ window: NSWindow, wantsBehindWindowBlur: Bool) {
+    func updateWindowEligibility(
+        _ window: NSWindow,
+        wantsBehindWindowBlur: Bool,
+        owner: AnyHashable = "window"
+    ) {
+        let key = ObjectIdentifier(window)
         if wantsBehindWindowBlur {
+            var owners = eligibleOwnersByWindow[key] ?? []
+            owners.insert(owner)
+            eligibleOwnersByWindow[key] = owners
             if !eligibleWindows.contains(window) {
                 eligibleWindows.add(window)
                 observeWindowLifecycle(window)
+            }
+        } else if var owners = eligibleOwnersByWindow[key] {
+            owners.remove(owner)
+            if owners.isEmpty {
+                removeWindow(window)
+            } else {
+                eligibleOwnersByWindow[key] = owners
             }
         } else {
             removeWindow(window)
@@ -132,7 +156,11 @@ final class MissionControlPresentationMonitor: ObservableObject {
         reevaluateMonitoring()
     }
 
-    func unregisterWindow(_ window: NSWindow) {
+    func unregisterWindow(_ window: NSWindow, owner: AnyHashable? = nil) {
+        if let owner {
+            updateWindowEligibility(window, wantsBehindWindowBlur: false, owner: owner)
+            return
+        }
         removeWindow(window)
         reevaluateMonitoring()
     }
@@ -140,6 +168,7 @@ final class MissionControlPresentationMonitor: ObservableObject {
     private func removeWindow(_ window: NSWindow) {
         eligibleWindows.remove(window)
         let key = ObjectIdentifier(window)
+        eligibleOwnersByWindow.removeValue(forKey: key)
         if let tokens = observedWindowTokens.removeValue(forKey: key) {
             for token in tokens {
                 notificationCenter.removeObserver(token)
@@ -201,8 +230,9 @@ final class MissionControlPresentationMonitor: ObservableObject {
                         self.scheduleBurstProbes(reason: "active-space-changed")
                     }
                     if !self.eligibleWindows.allObjects.isEmpty {
-                        self.objectWillChange.send()
+                        self.scheduleSpaceSettleReconciliation()
                     }
+                    self.objectWillChange.send()
                 }
             }
         )
@@ -259,6 +289,9 @@ final class MissionControlPresentationMonitor: ObservableObject {
 
     private func pruneDeallocatedWindowTokens() {
         let liveKeys = Set(eligibleWindows.allObjects.map(ObjectIdentifier.init))
+        for key in Array(eligibleOwnersByWindow.keys) where !liveKeys.contains(key) {
+            eligibleOwnersByWindow.removeValue(forKey: key)
+        }
         for (key, tokens) in observedWindowTokens where !liveKeys.contains(key) {
             for token in tokens {
                 notificationCenter.removeObserver(token)
@@ -267,24 +300,60 @@ final class MissionControlPresentationMonitor: ObservableObject {
         }
     }
 
+    private func scheduleSpaceSettleReconciliation() {
+        cancelSpaceSettleReconciliation()
+        for delayMs in [120, 320] {
+            let item = DispatchWorkItem { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    let wasMonitoring = self.isMonitoring
+                    self.reevaluateMonitoring()
+                    if self.isMonitoring && wasMonitoring {
+                        self.probeNow(reason: "space-settled")
+                    }
+                    self.objectWillChange.send()
+                    self.notificationCenter.post(
+                        name: Self.windowSpaceOrStateDidSettleNotification,
+                        object: self
+                    )
+                }
+            }
+            spaceSettleWorkItems.append(item)
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(delayMs), execute: item)
+        }
+    }
+
+    private func cancelSpaceSettleReconciliation() {
+        for item in spaceSettleWorkItems {
+            item.cancel()
+        }
+        spaceSettleWorkItems.removeAll()
+    }
+
     // MARK: - Monitoring State Machine
 
-    /// Returns `true` when behind-window blur/glass should be replaced by solid
+    /// Returns `true` when non-opaque / behind-window blur/glass should be replaced by solid
     /// renderer-matched opaque theme backing:
     /// - Whenever Mission Control / Exposé is actively presenting (`isMissionControlActive`).
-    /// - Whenever `window` is miniaturized or off the active Space (`!window.isOnActiveSpace`),
-    ///   unless an explicit testing override is active. Off-Space windows appear inside
-    ///   Mission Control's top Spaces bar thumbnails without receiving `.visible` occlusion
-    ///   updates; keeping them pre-opaque eliminates thumbnail washout and flicker while
-    ///   requiring zero timers when working in Fullscreen or other Spaces.
+    /// - Whenever `window` is miniaturized, showing native Tab Overview (`isOverviewVisible`),
+    ///   or off the active Space (`!window.isOnActiveSpace`), unless an explicit testing
+    ///   override is active. Off-Space windows appear inside Mission Control's top Spaces bar
+    ///   thumbnails without receiving `.visible` occlusion updates; keeping them pre-opaque
+    ///   eliminates thumbnail washout and flicker while requiring zero timers off-Space.
     func shouldSuppressBehindWindowBlur(for window: NSWindow?) -> Bool {
         if isMissionControlActive {
             return true
         }
-        guard overrideForTesting == nil, let window, window.isVisible else {
+        guard overrideForTesting == nil, let window else {
             return false
         }
         if window.isMiniaturized {
+            return true
+        }
+        guard window.isVisible else {
+            return false
+        }
+        if window.tabGroup?.isOverviewVisible == true {
             return true
         }
         return !window.isOnActiveSpace
@@ -598,10 +667,13 @@ final class MissionControlPresentationMonitor: ObservableObject {
                 let spansTopStrip = win.bounds.height >= 36 &&
                     win.bounds.height <= 380 &&
                     validScreens.contains { screen in
-                        abs(win.bounds.minY - screen.minY) <= 8 &&
-                            win.bounds.maxX - screen.minX >= screen.width * 0.85 &&
-                            screen.maxX - win.bounds.minX >= screen.width * 0.85 &&
+                        let overlap = screen.intersection(win.bounds)
+                        guard !overlap.isNull else { return false }
+                        return win.bounds.minY >= screen.minY - 240 &&
+                            win.bounds.minY <= screen.minY + 48 &&
+                            overlap.width >= screen.width * 0.85 &&
                             win.bounds.width >= screen.width * 0.85 &&
+                            overlap.height >= 36 &&
                             win.bounds.height < screen.height * 0.6
                     }
                 if spansTopStrip {

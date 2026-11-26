@@ -12,6 +12,7 @@ class TransparentTitlebarTerminalWindow: TerminalWindow {
     private weak var observedTabGroup: NSWindowTabGroup?
     private var tabGroupWindowsObservation: NSKeyValueObservation?
     private var tabBarVisibleObservation: NSKeyValueObservation?
+    private var tabOverviewObservation: NSKeyValueObservation?
     private var appearanceRefreshPending = false
     private var observationRefreshPending = false
     private var isClosing = false
@@ -19,6 +20,7 @@ class TransparentTitlebarTerminalWindow: TerminalWindow {
     deinit {
         tabGroupWindowsObservation?.invalidate()
         tabBarVisibleObservation?.invalidate()
+        tabOverviewObservation?.invalidate()
     }
 
     // MARK: NSWindow
@@ -29,6 +31,8 @@ class TransparentTitlebarTerminalWindow: TerminalWindow {
         tabGroupWindowsObservation = nil
         tabBarVisibleObservation?.invalidate()
         tabBarVisibleObservation = nil
+        tabOverviewObservation?.invalidate()
+        tabOverviewObservation = nil
         observedTabGroup = nil
         super.close()
     }
@@ -166,7 +170,8 @@ class TransparentTitlebarTerminalWindow: TerminalWindow {
             let currentTabGroup = self.tabGroup
             let observationsValid = currentTabGroup == nil || (
                 self.tabGroupWindowsObservation != nil &&
-                self.tabBarVisibleObservation != nil
+                self.tabBarVisibleObservation != nil &&
+                self.tabOverviewObservation != nil
             )
 
             // Keep the existing observations when they already match.
@@ -175,6 +180,7 @@ class TransparentTitlebarTerminalWindow: TerminalWindow {
             self.observedTabGroup = currentTabGroup
             self.setupTabGroupObservation()
             self.setupTabBarVisibleObservation()
+            self.setupTabOverviewObservation()
         }
     }
 
@@ -188,7 +194,11 @@ class TransparentTitlebarTerminalWindow: TerminalWindow {
             // titlebar pixels to repair, after AppKit finishes changing the group.
             guard !self.isClosing, self.isVisible, self.isSelectedInTabGroup,
                   let config = self.lastSurfaceConfig else { return }
-            self.syncAppearance(config)
+            if let terminalController = self.terminalController {
+                terminalController.syncTabPresentationAppearance()
+            } else {
+                self.syncAppearance(config)
+            }
         }
     }
 
@@ -229,6 +239,19 @@ class TransparentTitlebarTerminalWindow: TerminalWindow {
              options: []
         ) { [weak self] _, _ in
             self?.scheduleTabAppearanceRefresh()
+        }
+    }
+
+    private func setupTabOverviewObservation() {
+        tabOverviewObservation?.invalidate()
+        tabOverviewObservation = nil
+
+        tabOverviewObservation = tabGroup?.observe(
+            \.isOverviewVisible,
+             options: []
+        ) { [weak self] _, _ in
+            self?.scheduleTabAppearanceRefresh()
+            self?.terminalController?.syncSurfaceTreeOcclusionState()
         }
     }
 

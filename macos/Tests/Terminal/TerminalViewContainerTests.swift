@@ -148,4 +148,57 @@ struct TerminalViewContainerTests {
             #expect(view.glassEffectView != nil)
         }
     }
+
+    @MainActor
+    @Test func fullSizeContentViewKeepsZeroBackdropTopOffsetWhileTitledWindowExtendsIntoTitlebar() throws {
+        let config = MockConfig(backgroundBlur: .disabled, backgroundColor: .black, backgroundOpacity: 0.75)
+
+        let titledWindow = NSWindow(
+            contentRect: NSRect(x: 80, y: 80, width: 480, height: 320),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        titledWindow.isReleasedWhenClosed = false
+        let titledContainer = TerminalViewContainer { Color.clear }
+        titledWindow.contentView = titledContainer
+        titledWindow.displayIfNeeded()
+        titledContainer.layoutSubtreeIfNeeded()
+
+        let fullSizeWindow = NSWindow(
+            contentRect: NSRect(x: 80, y: 80, width: 480, height: 320),
+            styleMask: [.titled, .fullSizeContentView, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        fullSizeWindow.isReleasedWhenClosed = false
+        let fullSizeContainer = TerminalViewContainer { Color.clear }
+        fullSizeWindow.contentView = fullSizeContainer
+        fullSizeWindow.displayIfNeeded()
+        fullSizeContainer.layoutSubtreeIfNeeded()
+
+        defer {
+            titledWindow.contentView = nil
+            titledWindow.close()
+            fullSizeWindow.contentView = nil
+            fullSizeWindow.close()
+        }
+
+        // Translucent config without blur still mounts TerminalOpaqueBackdropView when forced opaque.
+        titledContainer.ghosttyConfigDidChange(config, preferredBackgroundColor: .black, isWindowOpaque: true, immediately: true)
+        titledContainer.layoutSubtreeIfNeeded()
+        let titledBacking = try #require(titledContainer.opaqueBackdropView)
+        let titledSafeTop = titledContainer.windowThemeFrameView?.safeAreaInsets.top ?? 0
+        if titledSafeTop > 0 {
+            #expect(abs(titledBacking.backingView.frame.height - (titledContainer.bounds.height + titledSafeTop)) < 0.5)
+        }
+
+        // `.fullSizeContentView` (used by `macos-titlebar-style = hidden`) already fills `NSThemeFrame`,
+        // so `backingView` must NOT overshoot `safeAreaInsets.top` past the window's top rounded corners.
+        fullSizeContainer.ghosttyConfigDidChange(config, preferredBackgroundColor: .black, isWindowOpaque: true, immediately: true)
+        fullSizeContainer.layoutSubtreeIfNeeded()
+        let fullSizeBacking = try #require(fullSizeContainer.opaqueBackdropView)
+        #expect(abs(fullSizeBacking.backingView.frame.height - fullSizeContainer.bounds.height) < 0.5)
+        #expect(abs(fullSizeBacking.backingView.frame.maxY - fullSizeContainer.bounds.maxY) < 0.5)
+    }
 }

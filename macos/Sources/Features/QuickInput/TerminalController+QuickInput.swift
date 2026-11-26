@@ -43,6 +43,7 @@ extension TerminalController {
             ?? ghostty.config.backgroundBlur.isGlassStyle
         let windowIsOpaque = window?.styleMask.contains(.fullScreen) == true
             || isBackgroundOpaque
+            || NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
             || MissionControlPresentationMonitor.shared.shouldSuppressBehindWindowBlur(for: window)
         return Self.quickInputDockedBackground(
             color: surfaceColor,

@@ -1,4 +1,5 @@
 import AppKit
+import GhosttyKit
 import SwiftUI
 import Testing
 @testable import Ghostty
@@ -106,6 +107,25 @@ struct MissionControlPresentationMonitorTests {
         ]
         #expect(!MissionControlPresentationMonitor.isMissionControlPresented(
             windows: thinMenuBarStrip,
+            screenBounds: screens,
+            bundleIdentifierForPID: { bundleMap[$0] }
+        ))
+
+        // 4d. Notched MacBook Pro top strip positioned below 37pt camera housing (`minY == 37`)
+        //     and mid-swipe slide-in (`minY == -90`, `height == 150` -> `60pt` visible) -> true.
+        let notchedSpacesStrip: [MissionControlPresentationMonitor.WindowSnapshot] = [
+            .init(ownerPID: 523, ownerName: "WindowManager", layer: 17, bounds: CGRect(x: 0, y: 37, width: 1920, height: 150)),
+        ]
+        #expect(MissionControlPresentationMonitor.isMissionControlPresented(
+            windows: notchedSpacesStrip,
+            screenBounds: screens,
+            bundleIdentifierForPID: { bundleMap[$0] }
+        ))
+        let midSwipeSpacesStrip: [MissionControlPresentationMonitor.WindowSnapshot] = [
+            .init(ownerPID: 523, ownerName: "WindowManager", layer: 17, bounds: CGRect(x: 0, y: -90, width: 1920, height: 150)),
+        ]
+        #expect(MissionControlPresentationMonitor.isMissionControlPresented(
+            windows: midSwipeSpacesStrip,
             screenBounds: screens,
             bundleIdentifierForPID: { bundleMap[$0] }
         ))
@@ -552,5 +572,125 @@ struct MissionControlPresentationMonitorTests {
             #expect(monitor.isMissionControlActive)
             #expect(monitor.shouldSuppressBehindWindowBlur(for: targetWindow))
         }
+    }
+
+    @Test
+    func translucentWithoutBlurMultiOwnerEligibilityAndIndeterminateProgressPauseWorkAcrossMissionControl() async throws {
+        let shared = MissionControlPresentationMonitor.shared
+        defer { shared.overrideForTesting = nil }
+        shared.overrideForTesting = nil
+
+        // 1. Translucent window WITHOUT blur (`background-opacity = 0.70, background-blur = false`)
+        //    must still register with `MissionControlPresentationMonitor`, switch opaque during
+        //    Mission Control, and restore non-opaque backing on exit.
+        let window = VerticalTabsTerminalWindow(
+            contentRect: NSRect(x: 110, y: 110, width: 520, height: 340),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.orderFront(nil)
+        defer {
+            shared.unregisterWindow(window)
+            window.close()
+        }
+        try await Task.sleep(for: .milliseconds(50))
+
+        let translucentNoBlur = MockConfig(
+            backgroundBlur: .disabled,
+            backgroundColor: Color(.sRGB, red: 0.12, green: 0.12, blue: 0.18),
+            backgroundOpacity: 0.70
+        )
+        let surfaceCfg = Ghostty.SurfaceView.DerivedConfig(translucentNoBlur)
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency else { return }
+
+        shared.overrideForTesting = false
+        window.syncAppearance(surfaceCfg)
+        #expect(!window.isOpaque)
+        if window.isOnActiveSpace {
+            #expect(shared.isMonitoring)
+        }
+
+        shared.overrideForTesting = true
+        window.syncAppearance(surfaceCfg)
+        #expect(window.isOpaque)
+        #expect(abs((window.backgroundColor?.alphaComponent ?? 0) - 1.0) < 0.001)
+
+        shared.overrideForTesting = false
+        window.syncAppearance(surfaceCfg)
+        #expect(!window.isOpaque)
+
+        // 2. Multi-owner eligibility: an opaque window (`owner: "window"` -> false) hosting a
+        //    standalone blurred pane (`owner: "editor"` -> true) stays monitored until all
+        //    blur owners unregister.
+        let localMonitor = MissionControlPresentationMonitor(
+            snapshotProvider: { [] },
+            screenBoundsProvider: { [CGRect(x: 0, y: 0, width: 1512, height: 982)] },
+            bundleIdentifierProvider: { _ in nil },
+            notificationCenter: NotificationCenter(),
+            workspaceNotificationCenter: NotificationCenter(),
+            enableEventMonitors: false
+        )
+        localMonitor.updateWindowEligibility(window, wantsBehindWindowBlur: true, owner: "editor")
+        localMonitor.updateWindowEligibility(window, wantsBehindWindowBlur: false, owner: "window")
+        if window.isOnActiveSpace {
+            #expect(localMonitor.isMonitoring)
+        }
+        localMonitor.unregisterWindow(window, owner: "editor")
+        #expect(!localMonitor.isMonitoring)
+
+        // 3. Auxiliary `OMGNativeTheme.resolve` separates `sourceWindow` palette lookup from
+        //    `presentationWindow` blur suppression.
+        shared.overrideForTesting = nil
+        let hiddenOffscreenWindow = NSWindow(
+            contentRect: NSRect(x: 40, y: 40, width: 200, height: 150),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        hiddenOffscreenWindow.isReleasedWhenClosed = false
+        defer { hiddenOffscreenWindow.close() }
+        let blurFile = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: blurFile) }
+        try "background = 1e2030\nforeground = c8d3f5\nbackground-opacity = 0.70\nbackground-blur = 20\n"
+            .write(to: blurFile, atomically: true, encoding: .utf8)
+        let blurConfig = Ghostty.Config(at: blurFile.path)
+        if window.isOnActiveSpace {
+            let resolved = OMGNativeTheme.resolve(
+                for: hiddenOffscreenWindow,
+                presentationWindow: window,
+                config: blurConfig,
+                missionControlMonitor: localMonitor
+            )
+            #expect(abs(resolved.opacity - 0.70) < 0.001)
+            #expect(resolved.blur.isEnabled)
+        }
+
+        // 4. Indeterminate `SurfaceProgressBar` removes all `CAAnimation`s when `isPaused == true`.
+        func countLayerAnimations(in layer: CALayer?) -> Int {
+            guard let layer else { return 0 }
+            let own = layer.animationKeys()?.count ?? 0
+            return own + (layer.sublayers ?? []).reduce(0) { $0 + countLayerAnimations(in: $1) }
+        }
+        var cReport = ghostty_action_progress_report_s()
+        cReport.state = GHOSTTY_PROGRESS_STATE_INDETERMINATE
+        cReport.progress = -1
+        let indeterminateReport = Ghostty.Action.ProgressReport(c: cReport)
+        let progHost = NSHostingView(
+            rootView: SurfaceProgressBar(report: indeterminateReport, isPaused: false)
+                .frame(width: 240, height: 4)
+        )
+        progHost.frame = NSRect(x: 0, y: 0, width: 240, height: 4)
+        window.contentView?.addSubview(progHost)
+        progHost.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(60))
+
+        progHost.rootView = SurfaceProgressBar(report: indeterminateReport, isPaused: true)
+            .frame(width: 240, height: 4)
+        progHost.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(60))
+        #expect(countLayerAnimations(in: progHost.layer) == 0)
+        progHost.removeFromSuperview()
     }
 }

@@ -3,6 +3,7 @@ import Combine
 class AboutViewModel: ObservableObject {
     @Published var currentIcon: Ghostty.MacOSIcon?
     @Published var isHovering: Bool = false
+    @Published var suppressBlur: Bool = false
 
     private var timerCancellable: AnyCancellable?
 
@@ -22,7 +23,7 @@ class AboutViewModel: ObservableObject {
         timerCancellable = Timer.publish(every: 3, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
-                guard let self, !isHovering else { return }
+                guard let self, !isHovering, !suppressBlur else { return }
                 advanceToNextIcon()
             }
     }

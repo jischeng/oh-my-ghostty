@@ -148,8 +148,11 @@ class TitlebarTabsVenturaTerminalWindow: TerminalWindow {
         let themeChanged = isLightTheme != NSColor(surfaceConfig.backgroundColor).isLightColor
         isLightTheme = NSColor(surfaceConfig.backgroundColor).isLightColor
 
-        // Update our titlebar color
-        if let preferredBackgroundColor {
+        // Update our titlebar color (using renderedTitlebarBackgroundColor so
+        // fullscreen, Mission Control, and off-Space opaque overrides emit alpha == 1).
+        if let renderedTitlebarBackgroundColor {
+            titlebarColor = renderedTitlebarBackgroundColor
+        } else if let preferredBackgroundColor {
             titlebarColor = preferredBackgroundColor
         } else {
             titlebarColor = derivedConfig.backgroundColor.withAlphaComponent(derivedConfig.backgroundOpacity)

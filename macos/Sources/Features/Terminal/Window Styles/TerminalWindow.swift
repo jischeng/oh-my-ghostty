@@ -586,7 +586,8 @@ class TerminalWindow: NSWindow {
             wantsBehindWindowBlur: wantsBehindWindowBlur
         )
 
-        let forceOpaque = userForceOpaque || MissionControlPresentationMonitor.shared.isMissionControlActive
+        let forceOpaque = userForceOpaque ||
+            MissionControlPresentationMonitor.shared.shouldSuppressBehindWindowBlur(for: self)
         if !styleMask.contains(.fullScreen) &&
             !forceOpaque &&
             (surfaceConfig.backgroundOpacity < 1 || surfaceConfig.backgroundBlur.isGlassStyle) {
@@ -659,7 +660,7 @@ class TerminalWindow: NSWindow {
     var renderedTitlebarBackgroundColor: NSColor? {
         let forceOpaque = styleMask.contains(.fullScreen) ||
             (terminalController?.isBackgroundOpaque ?? false) ||
-            MissionControlPresentationMonitor.shared.isMissionControlActive
+            MissionControlPresentationMonitor.shared.shouldSuppressBehindWindowBlur(for: self)
         let colorspaceIsDisplayP3 = terminalController?.ghostty.config.windowColorspaceIsDisplayP3 ?? false
         let linearBlending = terminalController?.ghostty.config.usesLinearAlphaBlending ?? false
         let allowsGlassClear = derivedConfig.macosTitlebarStyle == .transparent ||

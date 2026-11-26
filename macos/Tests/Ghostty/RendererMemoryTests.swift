@@ -202,5 +202,25 @@ struct RendererMemoryTests {
         #expect(primarySurface.lastSentCoreHibernationEligible == true)
         #expect(secondSurface.lastSentCoreOcclusionState == false)
         #expect(secondSurface.lastSentCoreHibernationEligible == true)
+
+        // 8. Mission Control Exposé pauses live surface presentation (cursor blink / spinner swaps)
+        //    while keeping the active tab's front GPU frame retained (`hibernationEligible == false`).
+        let mcMonitor = MissionControlPresentationMonitor.shared
+        defer { mcMonitor.overrideForTesting = nil }
+        controller.presentationRetainedOverrideForTesting = true
+        controller.windowOcclusionOverrideForTesting = true
+        mcMonitor.overrideForTesting = true
+        controller.syncSurfaceTreeOcclusionState()
+        #expect(primarySurface.lastSentCoreOcclusionState == false)
+        #expect(primarySurface.lastSentCoreHibernationEligible == false)
+        #expect(secondSurface.lastSentCoreOcclusionState == false)
+        #expect(secondSurface.lastSentCoreHibernationEligible == false)
+
+        mcMonitor.overrideForTesting = false
+        controller.syncSurfaceTreeOcclusionState()
+        #expect(primarySurface.lastSentCoreOcclusionState == true)
+        #expect(primarySurface.lastSentCoreHibernationEligible == false)
+        #expect(secondSurface.lastSentCoreOcclusionState == true)
+        #expect(secondSurface.lastSentCoreHibernationEligible == false)
     }
 }

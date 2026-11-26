@@ -599,7 +599,8 @@ class QuickTerminalController: BaseTerminalController {
             wantsBehindWindowBlur: wantsBehindWindowBlur
         )
 
-        let forceOpaque = isBackgroundOpaque || MissionControlPresentationMonitor.shared.isMissionControlActive
+        let forceOpaque = isBackgroundOpaque ||
+            MissionControlPresentationMonitor.shared.shouldSuppressBehindWindowBlur(for: window)
         if !forceOpaque && (self.derivedConfig.backgroundOpacity < 1 || derivedConfig.backgroundBlur.isGlassStyle) {
             window.isOpaque = false
             if derivedConfig.backgroundBlur.isEnabled {
@@ -711,8 +712,15 @@ class QuickTerminalController: BaseTerminalController {
         self.derivedConfig = DerivedConfig(config)
 
         syncAppearance()
-
-        terminalViewContainer?.ghosttyConfigDidChange(config, preferredBackgroundColor: nil)
+        if window?.isVisible != true {
+            let forceOpaque = isBackgroundOpaque ||
+                MissionControlPresentationMonitor.shared.shouldSuppressBehindWindowBlur(for: window)
+            terminalViewContainer?.ghosttyConfigDidChange(
+                config,
+                preferredBackgroundColor: nil,
+                isWindowOpaque: forceOpaque
+            )
+        }
     }
 
     @objc private func onNewTab(notification: SwiftUI.Notification) {

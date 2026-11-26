@@ -67,7 +67,8 @@ struct OMGNativeTheme: Equatable {
         let configBlur = config.backgroundBlur
         let wantsBehindWindowBlur = !configForceOpaque &&
             (configBlur.isGlassStyle || (configOpacity < 1 && configBlur.isEnabled))
-        let forceOpaque = configForceOpaque || missionControlMonitor.isMissionControlActive
+        let forceOpaque = configForceOpaque ||
+            missionControlMonitor.shouldSuppressBehindWindowBlur(for: origin)
         if !forceOpaque {
             theme.opacity = configOpacity
             theme.blur = configBlur
@@ -90,10 +91,25 @@ struct OMGNativeTheme: Equatable {
 /// Explicit popup origin avoids guessing the active window after a sheet becomes key.
 @MainActor
 final class OMGNativeThemeObserver: NSObject {
-    weak var sourceWindow: NSWindow?
+    weak var sourceWindow: NSWindow? {
+        didSet {
+            if oldValue !== sourceWindow {
+                rebindWindowLifecycleObservers()
+            }
+        }
+    }
+    weak var hostWindow: NSWindow? {
+        didSet {
+            if oldValue !== hostWindow {
+                rebindWindowLifecycleObservers()
+            }
+        }
+    }
     var explicitConfig: Ghostty.Config?
     let missionControlMonitor: MissionControlPresentationMonitor
     private let notificationCenter: NotificationCenter
+    private var windowTokens: [NSObjectProtocol] = []
+    private var spaceToken: NSObjectProtocol?
     var onChange: ((OMGNativeTheme) -> Void)?
 
     init(
@@ -108,14 +124,56 @@ final class OMGNativeThemeObserver: NSObject {
         notificationCenter.addObserver(self, selector: #selector(missionControlChanged),
                                        name: MissionControlPresentationMonitor.didChangeNotification,
                                        object: missionControlMonitor)
+        spaceToken = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.handleWindowSpaceOrOcclusionChange() }
+        }
     }
 
-    deinit { notificationCenter.removeObserver(self) }
+    deinit {
+        for token in windowTokens {
+            notificationCenter.removeObserver(token)
+        }
+        if let spaceToken {
+            NSWorkspace.shared.notificationCenter.removeObserver(spaceToken)
+        }
+        notificationCenter.removeObserver(self)
+    }
+
+    private func rebindWindowLifecycleObservers() {
+        for token in windowTokens {
+            notificationCenter.removeObserver(token)
+        }
+        windowTokens.removeAll()
+        var targets: [NSWindow] = []
+        if let sourceWindow { targets.append(sourceWindow) }
+        if let hostWindow, hostWindow !== sourceWindow { targets.append(hostWindow) }
+        for target in targets {
+            windowTokens.append(
+                notificationCenter.addObserver(
+                    forName: NSWindow.didChangeOcclusionStateNotification,
+                    object: target,
+                    queue: .main
+                ) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.handleWindowSpaceOrOcclusionChange() }
+                }
+            )
+        }
+    }
+
+    private func handleWindowSpaceOrOcclusionChange() {
+        let effectiveWindow = hostWindow ?? sourceWindow
+        missionControlMonitor.refreshBeforeWindowAppearanceSync(for: effectiveWindow)
+        refresh()
+    }
 
     func refresh() {
         onChange?(
             OMGNativeTheme.resolve(
-                for: sourceWindow,
+                for: sourceWindow ?? hostWindow,
                 config: explicitConfig,
                 missionControlMonitor: missionControlMonitor
             )
@@ -132,7 +190,7 @@ final class OMGNativeThemeObserver: NSObject {
             ?? explicitConfig
         onChange?(
             OMGNativeTheme.resolve(
-                for: sourceWindow,
+                for: sourceWindow ?? hostWindow,
                 config: config,
                 missionControlMonitor: missionControlMonitor
             )
@@ -215,6 +273,7 @@ class OMGNativeSurfaceView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        themeObserver.hostWindow = window
         if !hasExplicitSource { themeObserver.sourceWindow = window }
         themeObserver.refresh()
     }
@@ -274,7 +333,7 @@ class OMGNativeSurfaceView: NSView {
             )
             let isAuxOpaque = reduceTransparency ||
                 (effectiveOpacity >= 1 && !blur.isGlassStyle) ||
-                monitor.isMissionControlActive
+                monitor.shouldSuppressBehindWindowBlur(for: window)
             window.isOpaque = isAuxOpaque
             window.setAutoFlattenLayerTreeEnabled(!wantsBlur || isAuxOpaque)
             window.backgroundColor = isAuxOpaque ? theme.background : theme.background.withAlphaComponent(0.001)
@@ -292,6 +351,8 @@ class OMGNativeSurfaceView: NSView {
 #else
         usesGlassBackdrop = false
 #endif
+        let solidFill = paintsBackground && !usesGlassBackdrop && effectiveOpacity >= 1
+        layer?.isOpaque = solidFill
         layer?.backgroundColor = (paintsBackground && !usesGlassBackdrop ? theme.background.withAlphaComponent(effectiveOpacity) : .clear).cgColor
     }
 }

@@ -90,6 +90,25 @@ struct MissionControlPresentationMonitorTests {
             screenBounds: screens,
             bundleIdentifierForPID: { bundleMap[$0] }
         ))
+
+        // 4c. macOS 27 WindowManager layer 17 collapsed pill Spaces bar (height 44pt) -> true,
+        //     while 30pt menu-bar strip -> false.
+        let collapsedMacOS27Strip: [MissionControlPresentationMonitor.WindowSnapshot] = [
+            .init(ownerPID: 523, ownerName: "WindowManager", layer: 17, bounds: CGRect(x: 0, y: 0, width: 1920, height: 44)),
+        ]
+        #expect(MissionControlPresentationMonitor.isMissionControlPresented(
+            windows: collapsedMacOS27Strip,
+            screenBounds: screens,
+            bundleIdentifierForPID: { bundleMap[$0] }
+        ))
+        let thinMenuBarStrip: [MissionControlPresentationMonitor.WindowSnapshot] = [
+            .init(ownerPID: 523, ownerName: "WindowManager", layer: 17, bounds: CGRect(x: 0, y: 0, width: 1920, height: 30)),
+        ]
+        #expect(!MissionControlPresentationMonitor.isMissionControlPresented(
+            windows: thinMenuBarStrip,
+            screenBounds: screens,
+            bundleIdentifierForPID: { bundleMap[$0] }
+        ))
     }
 
     @Test
@@ -279,9 +298,12 @@ struct MissionControlPresentationMonitorTests {
         activeHost.frame = NSRect(x: 0, y: 140, width: 300, height: 120)
 
         let iconView = NativeTabIconView(frame: NSRect(x: 320, y: 20, width: 26, height: 24))
+        let spinner = NativeProgressIndicator(frame: NSRect(x: 360, y: 20, width: 16, height: 16))
+        spinner.style = .spinning
         stack.addSubview(hiddenHost)
         stack.addSubview(activeHost)
         stack.addSubview(iconView)
+        stack.addSubview(spinner)
         window.contentView = stack
         window.orderFront(nil)
         defer {
@@ -327,12 +349,16 @@ struct MissionControlPresentationMonitorTests {
         )
         let couldAnimateBefore = window.occlusionState.contains(.visible) &&
             !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        spinner.setAnimating(true)
         if couldAnimateBefore {
             #expect(iconView.isBreathingAnimationRunning)
         }
+        if window.occlusionState.contains(.visible) {
+            #expect(spinner.animationIsRunning)
+        }
 
         // Enter Mission Control: window turns opaque with solid dark backing,
-        // Quick Input within-window blur detaches, and breathing animation pauses.
+        // Quick Input within-window blur detaches, and breathing + spinner animations pause.
         monitor.overrideForTesting = true
         window.syncAppearance(surfaceCfg)
         try await Task.sleep(for: .milliseconds(60))
@@ -342,8 +368,9 @@ struct MissionControlPresentationMonitorTests {
         #expect(abs((window.backgroundColor?.alphaComponent ?? 0) - 1.0) < 0.001)
         #expect(countVisualEffectViews(in: activeHost) == 0)
         #expect(!iconView.isBreathingAnimationRunning)
+        #expect(!spinner.animationIsRunning)
 
-        // Exit Mission Control: non-opaque backing, within-window blur, and breath all resume.
+        // Exit Mission Control: non-opaque backing, within-window blur, and breath + spinner resume.
         monitor.overrideForTesting = false
         window.syncAppearance(surfaceCfg)
         try await Task.sleep(for: .milliseconds(60))
@@ -355,6 +382,9 @@ struct MissionControlPresentationMonitorTests {
         }
         if couldAnimateBefore {
             #expect(iconView.isBreathingAnimationRunning)
+        }
+        if window.occlusionState.contains(.visible) {
+            #expect(spinner.animationIsRunning)
         }
     }
 
@@ -456,6 +486,71 @@ struct MissionControlPresentationMonitorTests {
         if #available(macOS 26.0, *) {
             surface.bindTheme(to: nil, config: glassConfig)
             #expect(!auxWindow.isOpaque)
+        }
+    }
+
+    @Test
+    func coveredActiveSpaceWindowStaysMonitoredAndProbesSynchronouslyWhenRevealedInMissionControl() {
+        var snapshots: [MissionControlPresentationMonitor.WindowSnapshot] = []
+        let center = NotificationCenter()
+        let workspaceCenter = NotificationCenter()
+        let monitor = MissionControlPresentationMonitor(
+            snapshotProvider: { snapshots },
+            screenBoundsProvider: { [CGRect(x: 0, y: 0, width: 1512, height: 982)] },
+            bundleIdentifierProvider: { $0 == 401 ? "com.apple.dock" : nil },
+            notificationCenter: center,
+            workspaceNotificationCenter: workspaceCenter,
+            enableEventMonitors: false
+        )
+
+        let targetWindow = NSWindow(
+            contentRect: NSRect(x: 150, y: 150, width: 280, height: 180),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        targetWindow.isReleasedWhenClosed = false
+        let coveringWindow = NSWindow(
+            contentRect: NSRect(x: 80, y: 80, width: 520, height: 400),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        coveringWindow.isOpaque = true
+        coveringWindow.backgroundColor = .black
+        coveringWindow.isReleasedWhenClosed = false
+        defer {
+            monitor.unregisterWindow(targetWindow)
+            targetWindow.close()
+            coveringWindow.close()
+        }
+
+        targetWindow.orderFront(nil)
+        coveringWindow.orderFront(nil)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.08))
+
+        monitor.updateWindowEligibility(targetWindow, wantsBehindWindowBlur: true)
+        if targetWindow.isOnActiveSpace {
+            #expect(monitor.isMonitoring)
+            #expect(!monitor.shouldSuppressBehindWindowBlur(for: targetWindow))
+        }
+
+        // Simulate Exposé spreading `coveringWindow` away while Mission Control is open:
+        // `refreshBeforeWindowAppearanceSync` must synchronously detect Mission Control
+        // so `shouldSuppressBehindWindowBlur` flips to `true` with zero intermediate frames.
+        let dockLevel = Int(CGWindowLevelForKey(.dockWindow))
+        snapshots = [
+            .init(ownerPID: 401, ownerName: "Dock", layer: dockLevel, bounds: CGRect(x: 0, y: 0, width: 1512, height: 982)),
+            .init(ownerPID: 401, ownerName: "Dock", layer: dockLevel - 2, bounds: CGRect(x: 0, y: 0, width: 1512, height: 982)),
+        ]
+        coveringWindow.orderOut(nil)
+        targetWindow.orderFront(nil)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+
+        monitor.refreshBeforeWindowAppearanceSync(for: targetWindow)
+        if targetWindow.isOnActiveSpace {
+            #expect(monitor.isMissionControlActive)
+            #expect(monitor.shouldSuppressBehindWindowBlur(for: targetWindow))
         }
     }
 }

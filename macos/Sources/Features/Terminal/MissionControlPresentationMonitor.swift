@@ -22,9 +22,10 @@ import os
 /// - While at least one visible window uses behind-window blur/glass, monitoring
 ///   combines immediate event-driven probes (space/occlusion notifications and
 ///   in-app swipe / Mission Control / Control+Arrow shortcuts) with a low-duty
-///   coalesced watchdog timer (`250ms` + `60ms` leeway, `< 0.05%` CPU) so Hot
+///   coalesced watchdog timer (`120ms` + `20ms` leeway, `< 0.03%` CPU) so Hot
 ///   Corners, Dock gestures, and `Mission Control.app` are caught with zero
-///   global pointer or scroll event-tap IPC.
+///   global pointer or scroll event-tap IPC. Off-Space and occluded windows
+///   pre-emptively switch to opaque theme backing with zero timers active.
 @MainActor
 final class MissionControlPresentationMonitor: ObservableObject {
     static let shared = MissionControlPresentationMonitor()
@@ -191,9 +192,16 @@ final class MissionControlPresentationMonitor: ObservableObject {
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
                     guard let self else { return }
+                    let wasMonitoring = self.isMonitoring
                     self.reevaluateMonitoring()
                     if self.isMonitoring {
+                        if wasMonitoring {
+                            self.probeNow(reason: "active-space-changed")
+                        }
                         self.scheduleBurstProbes(reason: "active-space-changed")
+                    }
+                    if !self.eligibleWindows.allObjects.isEmpty {
+                        self.objectWillChange.send()
                     }
                 }
             }
@@ -236,9 +244,16 @@ final class MissionControlPresentationMonitor: ObservableObject {
 
     private func handleWindowLifecycleEvent() {
         pruneDeallocatedWindowTokens()
+        let wasMonitoring = isMonitoring
         reevaluateMonitoring()
         if isMonitoring {
+            if wasMonitoring {
+                probeNow(reason: "window-lifecycle")
+            }
             scheduleBurstProbes(reason: "window-lifecycle")
+        }
+        if !eligibleWindows.allObjects.isEmpty {
+            objectWillChange.send()
         }
     }
 
@@ -254,11 +269,66 @@ final class MissionControlPresentationMonitor: ObservableObject {
 
     // MARK: - Monitoring State Machine
 
+    /// Returns `true` when behind-window blur/glass should be replaced by solid
+    /// renderer-matched opaque theme backing:
+    /// - Whenever Mission Control / Exposé is actively presenting (`isMissionControlActive`).
+    /// - Whenever `window` is miniaturized or off the active Space (`!window.isOnActiveSpace`),
+    ///   unless an explicit testing override is active. Off-Space windows appear inside
+    ///   Mission Control's top Spaces bar thumbnails without receiving `.visible` occlusion
+    ///   updates; keeping them pre-opaque eliminates thumbnail washout and flicker while
+    ///   requiring zero timers when working in Fullscreen or other Spaces.
+    func shouldSuppressBehindWindowBlur(for window: NSWindow?) -> Bool {
+        if isMissionControlActive {
+            return true
+        }
+        guard overrideForTesting == nil, let window, window.isVisible else {
+            return false
+        }
+        if window.isMiniaturized {
+            return true
+        }
+        return !window.isOnActiveSpace
+    }
+
+    /// Synchronously reconciles monitoring and probes Mission Control state before
+    /// `window` recomputes its appearance on occlusion or Space transitions so an
+    /// occluded or off-Space window revealed by Exposé never flashes non-opaque.
+    func refreshBeforeWindowAppearanceSync(for window: NSWindow?) {
+        let wasMonitoring = isMonitoring
+        reevaluateMonitoring()
+        if wasMonitoring,
+           isMonitoring,
+           overrideForTesting == nil,
+           let window,
+           window.isVisible,
+           !window.isMiniaturized,
+           window.isOnActiveSpace {
+            probeNow(reason: "window-visibility-sync")
+        }
+    }
+
+    /// True when at least one eligible blurred desktop window lives on the current
+    /// active Space (including windows temporarily covered behind another app on the
+    /// same Space, which Exposé spreads into thumbnails when Mission Control opens).
+    var hasActiveSpaceEligibleBlurredWindow: Bool {
+        for window in eligibleWindows.allObjects {
+            guard window.isVisible,
+                  !window.isMiniaturized,
+                  !window.styleMask.contains(.fullScreen),
+                  window.isOnActiveSpace else {
+                continue
+            }
+            return true
+        }
+        return false
+    }
+
     var hasVisibleEligibleBlurredWindow: Bool {
         for window in eligibleWindows.allObjects {
             guard window.isVisible,
                   !window.isMiniaturized,
                   !window.styleMask.contains(.fullScreen),
+                  window.isOnActiveSpace,
                   window.occlusionState.contains(.visible) else {
                 continue
             }
@@ -274,10 +344,11 @@ final class MissionControlPresentationMonitor: ObservableObject {
             applyActiveState(false, reason: "no-eligible-windows")
         }
 
-        // Keep monitoring while Mission Control is currently active so an occlusion
-        // change mid-Exposé never strands `isMissionControlActive == true`.
+        // Monitor whenever an eligible blurred window is on the active Space (even if
+        // covered behind another app on that Space so Exposé spread is caught), while
+        // running zero timers when working in Fullscreen Spaces or other Spaces.
         let shouldMonitor = displaysAwake && (
-            hasVisibleEligibleBlurredWindow || (isMissionControlActive && hasAnyRegisteredWindow)
+            hasActiveSpaceEligibleBlurredWindow || (isMissionControlActive && hasAnyRegisteredWindow)
         )
 
         if shouldMonitor {
@@ -291,7 +362,14 @@ final class MissionControlPresentationMonitor: ObservableObject {
     }
 
     private func startMonitoringIfNeeded() {
-        let desiredInterval = isMissionControlActive ? 100 : 250
+        let desiredInterval: Int
+        if isMissionControlActive {
+            desiredInterval = 80
+        } else if hasVisibleEligibleBlurredWindow {
+            desiredInterval = 120
+        } else {
+            desiredInterval = 250
+        }
         let wasMonitoring = isMonitoring
         isMonitoring = true
 
@@ -333,7 +411,14 @@ final class MissionControlPresentationMonitor: ObservableObject {
         timer?.cancel()
         timerIntervalMilliseconds = intervalMilliseconds
         let source = DispatchSource.makeTimerSource(queue: .main)
-        let leewayMilliseconds = intervalMilliseconds <= 100 ? 20 : 60
+        let leewayMilliseconds: Int
+        if intervalMilliseconds <= 80 {
+            leewayMilliseconds = 15
+        } else if intervalMilliseconds <= 120 {
+            leewayMilliseconds = 20
+        } else {
+            leewayMilliseconds = 60
+        }
         source.schedule(
             deadline: .now() + .milliseconds(intervalMilliseconds),
             repeating: .milliseconds(intervalMilliseconds),
@@ -451,8 +536,10 @@ final class MissionControlPresentationMonitor: ObservableObject {
     ///    `layer == dockLevel` Dock root container per display on normal desktop and
     ///    spawns an additional full-screen Exposé layer on top during Mission Control).
     /// 2. `com.apple.WindowManager` onscreen Mission Control top Spaces strip at
-    ///    `layer` `14...16` spanning `>= 85%` of any screen's width along that
-    ///    display's Quartz top edge (`win.bounds.minY ~= screen.minY`).
+    ///    `layer` `14..<dockLevel` (`14...19`, including macOS 27's `layer == 17`)
+    ///    spanning `>= 85%` of any screen's width along that display's Quartz top edge
+    ///    (`win.bounds.minY ~= screen.minY`), in either collapsed pill or expanded
+    ///    thumbnail bar height (`36...380pt`).
     ///
     /// Rejects:
     /// - Menu-bar Control Center (`com.apple.controlcenter`), Notification Center,
@@ -504,11 +591,11 @@ final class MissionControlPresentationMonitor: ObservableObject {
                 }
             }
 
-            // 2. macOS 26/27 WindowManager top Spaces bar (`layer` 14..16, full width, display top edge).
+            // 2. macOS 26/27 WindowManager top Spaces bar (`layer` 14..<dockLevel, full width, display top edge).
             let isWindowManager = bundleID == "com.apple.WindowManager" ||
                 (bundleID == nil && win.ownerName == "WindowManager")
-            if isWindowManager && (14...16).contains(win.layer) {
-                let spansTopStrip = win.bounds.height >= 70 &&
+            if isWindowManager && (14..<max(18, dockLevel)).contains(win.layer) {
+                let spansTopStrip = win.bounds.height >= 36 &&
                     win.bounds.height <= 380 &&
                     validScreens.contains { screen in
                         abs(win.bounds.minY - screen.minY) <= 8 &&

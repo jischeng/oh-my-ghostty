@@ -393,9 +393,10 @@ struct EditorWorkspaceHost<Terminal: View>: View {
 
     private var followsOMGBackdropFill: NSColor? {
         guard settings.editorSettings.followsOMG else { return nil }
-        let windowIsOpaque = controller.window?.styleMask.contains(.fullScreen) == true ||
+        let window = controller.window
+        let windowIsOpaque = window?.styleMask.contains(.fullScreen) == true ||
             controller.isBackgroundOpaque ||
-            missionControl.isMissionControlActive
+            missionControl.shouldSuppressBehindWindowBlur(for: window)
         return NSColor(OMGThemeBackground.matchingChrome(
             color: terminalColor,
             opacity: terminalOpacity,
@@ -1749,7 +1750,8 @@ struct EditorBackdrop: NSViewRepresentable {
     func makeNSView(context: Context) -> BackdropView { BackdropView() }
 
     func updateNSView(_ view: BackdropView, context: Context) {
-        let blur = localEffect
+        let suppressBlur = missionControl.shouldSuppressBehindWindowBlur(for: view.window)
+        let blur = (usesWindowBlur || suppressBlur) ? .disabled : localEffect
         if context.coordinator.blur != blur {
             view.subviews.forEach { $0.removeFromSuperview() }
             context.coordinator.blur = blur
@@ -1777,7 +1779,7 @@ struct EditorBackdrop: NSViewRepresentable {
         if let windowChromeFill, blur == .disabled {
             view.fillColor = windowChromeFill
         } else {
-            let effectiveOpacity = missionControl.isMissionControlActive ? 1.0 : opacity
+            let effectiveOpacity = suppressBlur ? 1.0 : opacity
             view.fillColor = blur == .disabled ? color.withAlphaComponent(effectiveOpacity) : .clear
         }
 #if compiler(>=6.2)

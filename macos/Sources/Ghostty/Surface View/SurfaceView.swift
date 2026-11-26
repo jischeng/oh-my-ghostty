@@ -37,7 +37,7 @@ extension Ghostty {
             if let terminalController {
                 return window?.styleMask.contains(.fullScreen) == true ||
                     terminalController.isBackgroundOpaque ||
-                    missionControl.isMissionControlActive
+                    missionControl.shouldSuppressBehindWindowBlur(for: window)
             }
             return window?.isOpaque ?? false
         }

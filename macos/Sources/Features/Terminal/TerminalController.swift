@@ -4588,10 +4588,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let backgroundOpacity = surfaceConfig.backgroundOpacity
         // Mirrors the opaque-window condition in `TerminalWindow.syncAppearance`:
         // native fullscreen, the user's opaque-background toggle, and Mission
-        // Control Exposé each force an opaque window.
+        // Control / off-Space / occluded blur suppression each force an opaque window.
         let windowIsOpaque = window.styleMask.contains(.fullScreen) ||
             isBackgroundOpaque ||
-            MissionControlPresentationMonitor.shared.isMissionControlActive
+            MissionControlPresentationMonitor.shared.shouldSuppressBehindWindowBlur(for: window)
         let chromeBackground = Self.chromeBackground(
             color: backgroundColor,
             opacity: backgroundOpacity,

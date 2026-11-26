@@ -10,6 +10,11 @@ class TerminalViewContainer: NSView {
     private(set) var glassEffectView: NSView?
     /// Behind-window CoreAnimation blur view for classic radius/boolean blur modes
     private(set) var backdropBlurView: TerminalBackdropBlurView?
+    /// Explicit opaque CoreAnimation backing view when forcing a translucent/glass
+    /// window opaque (e.g. Mission Control, off-Space, occluded, or opaque toggle),
+    /// because macOS 27 `CUIWindowFrameLayer` stays `isOpaque == false` and lags
+    /// `window.backgroundColor` updates across off-Space and synchronous commits.
+    private(set) var opaqueBackdropView: TerminalOpaqueBackdropView?
     private var derivedConfig: DerivedConfig?
 
     var windowThemeFrameView: NSView? {
@@ -86,21 +91,27 @@ class TerminalViewContainer: NSView {
         isWindowOpaque: Bool = false,
         immediately: Bool = false
     ) {
+        let effectiveCornerRadius = window?.styleMask.contains(.fullScreen) == true
+            ? 0
+            : windowCornerRadius
         let newValue = DerivedConfig(
             config: config,
             preferredBackgroundColor: preferredBackgroundColor,
-            cornerRadius: windowCornerRadius,
+            cornerRadius: effectiveCornerRadius,
             isWindowOpaque: isWindowOpaque,
             reduceTransparency: shouldReduceTransparency
         )
         guard newValue != derivedConfig else { return }
+        let wasOpaqueEffect = derivedConfig?.effect == .opaque
+        let isOpaqueEffect = newValue?.effect == .opaque
         derivedConfig = newValue
 
-        // Attach or detach synchronously when missing, when forcing opaque
-        // (e.g. fullscreen / Mission Control), or when explicitly requested
-        // outside SwiftUI's render pass so window.isOpaque and the backdrop
+        // Attach or detach synchronously when missing, when forcing or leaving
+        // opaque (e.g. fullscreen / Mission Control / off-Space), or when explicitly
+        // requested outside SwiftUI's render pass so window.isOpaque and the backdrop
         // view never diverge for a frame.
-        if immediately || newValue == nil || (glassEffectView == nil && backdropBlurView == nil) {
+        if immediately || wasOpaqueEffect != isOpaqueEffect || newValue == nil ||
+            (glassEffectView == nil && backdropBlurView == nil && opaqueBackdropView == nil) {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             updateGlassEffectIfNeeded()
@@ -194,6 +205,64 @@ final class TerminalBackdropBlurView: NSView {
         clipView.layer?.backgroundColor = fallbackAlpha > 0.001
             ? backgroundColor.withAlphaComponent(fallbackAlpha).cgColor
             : nil
+    }
+
+    func updateTopInset(_ offset: CGFloat) {
+        topConstraint.constant = offset
+    }
+}
+
+/// Solid renderer-matched CoreAnimation backing layer mounted beneath `terminalView`
+/// whenever a translucent or liquid-glass terminal window is forced opaque.
+final class TerminalOpaqueBackdropView: NSView {
+    private(set) var backingView: NSView
+    private var topConstraint: NSLayoutConstraint!
+
+    init(topOffset: CGFloat) {
+        self.backingView = NSView()
+        super.init(frame: .zero)
+
+        translatesAutoresizingMaskIntoConstraints = false
+
+        backingView.translatesAutoresizingMaskIntoConstraints = false
+        backingView.wantsLayer = true
+        backingView.clipsToBounds = true
+        backingView.layer?.isOpaque = true
+        backingView.layer?.cornerCurve = .continuous
+        backingView.layer?.masksToBounds = true
+        addSubview(backingView)
+
+        topConstraint = backingView.topAnchor.constraint(
+            equalTo: topAnchor,
+            constant: topOffset
+        )
+        NSLayoutConstraint.activate([
+            topConstraint,
+            backingView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            backingView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            backingView.trailingAnchor.constraint(equalTo: trailingAnchor),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func configure(
+        backgroundColor: NSColor,
+        colorspaceIsDisplayP3: Bool,
+        cornerRadius: CGFloat?
+    ) {
+        let rendered = TerminalRenderColorQuantizer.matchingRenderedNSColor(
+            backgroundColor,
+            colorspaceIsDisplayP3: colorspaceIsDisplayP3
+        ).withAlphaComponent(1)
+        backingView.layer?.isOpaque = true
+        backingView.layer?.cornerRadius = cornerRadius ?? 0
+        backingView.layer?.backgroundColor = rendered.cgColor
     }
 
     func updateTopInset(_ offset: CGFloat) {
@@ -346,19 +415,54 @@ extension TerminalViewContainer {
         return effectView
     }
 
+    private func addOpaqueBackdropViewIfNeeded() -> TerminalOpaqueBackdropView? {
+        if let existed = opaqueBackdropView {
+            updateGlassEffectTopInsetIfNeeded()
+            return existed
+        }
+        guard let themeFrameView = windowThemeFrameView else {
+            return nil
+        }
+        let backingView = TerminalOpaqueBackdropView(topOffset: -themeFrameView.safeAreaInsets.top)
+        addSubview(backingView, positioned: .below, relativeTo: terminalView)
+        NSLayoutConstraint.activate([
+            backingView.topAnchor.constraint(equalTo: topAnchor),
+            backingView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            backingView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            backingView.trailingAnchor.constraint(equalTo: trailingAnchor),
+        ])
+        opaqueBackdropView = backingView
+        return backingView
+    }
+
     private func updateGlassEffectIfNeeded() {
         guard let derivedConfig else {
             glassEffectView?.removeFromSuperview()
             glassEffectView = nil
             backdropBlurView?.removeFromSuperview()
             backdropBlurView = nil
+            opaqueBackdropView?.removeFromSuperview()
+            opaqueBackdropView = nil
             return
         }
 
         switch derivedConfig.effect {
+        case .opaque:
+            glassEffectView?.removeFromSuperview()
+            glassEffectView = nil
+            backdropBlurView?.removeFromSuperview()
+            backdropBlurView = nil
+            guard let backingView = addOpaqueBackdropViewIfNeeded() else { return }
+            backingView.configure(
+                backgroundColor: derivedConfig.backgroundColor,
+                colorspaceIsDisplayP3: derivedConfig.colorspaceIsDisplayP3,
+                cornerRadius: derivedConfig.cornerRadius
+            )
         case .glass(let glass):
             backdropBlurView?.removeFromSuperview()
             backdropBlurView = nil
+            opaqueBackdropView?.removeFromSuperview()
+            opaqueBackdropView = nil
 #if compiler(>=6.2)
             guard #available(macOS 26.0, *), let effectView = addGlassEffectViewIfNeeded() else {
                 glassEffectView?.removeFromSuperview()
@@ -378,6 +482,8 @@ extension TerminalViewContainer {
         case .blur(let radius):
             glassEffectView?.removeFromSuperview()
             glassEffectView = nil
+            opaqueBackdropView?.removeFromSuperview()
+            opaqueBackdropView = nil
             guard let effectView = addBackdropBlurViewIfNeeded() else { return }
             effectView.configure(
                 radius: radius,
@@ -392,6 +498,7 @@ extension TerminalViewContainer {
         guard let themeFrameView = windowThemeFrameView else { return }
         let inset = -themeFrameView.safeAreaInsets.top
         backdropBlurView?.updateTopInset(inset)
+        opaqueBackdropView?.updateTopInset(inset)
 #if compiler(>=6.2)
         if #available(macOS 26.0, *), let effectView = glassEffectView as? TerminalGlassView {
             effectView.updateTopInset(inset)
@@ -401,6 +508,7 @@ extension TerminalViewContainer {
 
     struct DerivedConfig: Equatable {
         enum Effect: Equatable {
+            case opaque
             case glass(BackportGlass)
             case blur(radius: Int)
         }
@@ -408,6 +516,7 @@ extension TerminalViewContainer {
         let effect: Effect
         let backgroundColor: NSColor
         let backgroundOpacity: Double
+        let colorspaceIsDisplayP3: Bool
         let cornerRadius: CGFloat?
 
         init?(
@@ -417,21 +526,28 @@ extension TerminalViewContainer {
             isWindowOpaque: Bool = false,
             reduceTransparency: Bool = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
         ) {
-            guard !isWindowOpaque else { return nil }
-            switch config.backgroundBlur {
-            case .macosGlassRegular:
-                effect = .glass(.regular)
-            case .macosGlassClear:
-                effect = .glass(.clear)
-            case .radius(let radius) where radius > 0
-                && config.backgroundOpacity < 1
-                && !reduceTransparency:
-                effect = .blur(radius: radius)
-            default:
-                return nil
+            if isWindowOpaque {
+                guard config.backgroundOpacity < 1 || config.backgroundBlur.isGlassStyle else {
+                    return nil
+                }
+                effect = .opaque
+            } else {
+                switch config.backgroundBlur {
+                case .macosGlassRegular:
+                    effect = .glass(.regular)
+                case .macosGlassClear:
+                    effect = .glass(.clear)
+                case .radius(let radius) where radius > 0
+                    && config.backgroundOpacity < 1
+                    && !reduceTransparency:
+                    effect = .blur(radius: radius)
+                default:
+                    return nil
+                }
             }
             self.backgroundColor = preferredBackgroundColor ?? NSColor(config.backgroundColor)
             self.backgroundOpacity = config.backgroundOpacity
+            self.colorspaceIsDisplayP3 = config.windowColorspaceIsDisplayP3
             self.cornerRadius = cornerRadius
         }
     }

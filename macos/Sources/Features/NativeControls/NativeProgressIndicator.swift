@@ -35,6 +35,11 @@ final class NativeProgressIndicator: NSProgressIndicator {
             ) { [weak self] _ in
                 MainActor.assumeIsolated { self?.setRunning(false) }
             })
+            observations.append(NotificationCenter.default.addObserver(
+                forName: MissionControlPresentationMonitor.didChangeNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.reconcileAnimation() }
+            })
         }
         reconcileAnimation()
     }
@@ -56,7 +61,8 @@ final class NativeProgressIndicator: NSProgressIndicator {
 
     private func reconcileAnimation() {
         let visible = window.map { $0.isVisible && !$0.isMiniaturized && $0.occlusionState.contains(.visible) } ?? false
-        setRunning(animationRequested && visible && !isHiddenOrHasHiddenAncestor)
+        let missionControlActive = MissionControlPresentationMonitor.shared.isMissionControlActive
+        setRunning(animationRequested && visible && !missionControlActive && !isHiddenOrHasHiddenAncestor)
     }
 
     private func setRunning(_ running: Bool) {

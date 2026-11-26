@@ -320,6 +320,8 @@ private final class SessionRuntimeLibraryWindowController: NSWindowController, N
             defer: false
         )
         window.title = SessionRuntimeLibraryStrings(language: OhMyGhosttySettings.shared.language).windowTitle
+        window.isOpaque = true
+        window.backgroundColor = .windowBackgroundColor
         window.minSize = NSSize(width: 780, height: 440)
         window.center()
         super.init(window: window)
@@ -368,10 +370,7 @@ private final class SessionRuntimeLibraryViewController: NSViewController, NSTab
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override func loadView() {
-        let root = NSVisualEffectView()
-        root.material = .windowBackground
-        root.blendingMode = .behindWindow
-        root.state = .followsWindowActiveState
+        let root = NativeSettingsCanvas()
         view = root
 
         configureEndpointTable()

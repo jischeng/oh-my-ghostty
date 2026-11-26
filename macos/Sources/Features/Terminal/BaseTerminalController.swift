@@ -314,6 +314,11 @@ class BaseTerminalController: NSWindowController,
             selector: #selector(missionControlPresentationDidChange(_:)),
             name: MissionControlPresentationMonitor.didChangeNotification,
             object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(activeSpaceDidChange(_:)),
+            name: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil)
 
         // Listen for local events that we need to know of outside of
         // single surface handlers.
@@ -327,6 +332,7 @@ class BaseTerminalController: NSWindowController,
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
         undoManager?.removeAllActions(withTarget: self)
         if let eventMonitor {
             NSEvent.removeMonitor(eventMonitor)
@@ -1345,6 +1351,14 @@ class BaseTerminalController: NSWindowController,
     }
 
     @objc private func missionControlPresentationDidChange(_ notification: Notification) {
+        syncSurfaceTreeOcclusionState()
+        syncMissionControlPresentation()
+    }
+
+    @objc private func activeSpaceDidChange(_ notification: Notification) {
+        guard let window, window.isVisible else { return }
+        MissionControlPresentationMonitor.shared.refreshBeforeWindowAppearanceSync(for: window)
+        syncSurfaceTreeOcclusionState()
         syncMissionControlPresentation()
     }
 
@@ -1567,7 +1581,11 @@ class BaseTerminalController: NSWindowController,
     }
 
     func windowDidChangeOcclusionState(_ notification: Notification) {
+        MissionControlPresentationMonitor.shared.refreshBeforeWindowAppearanceSync(for: window)
         syncSurfaceTreeOcclusionState()
+        if let window, window.isVisible {
+            syncMissionControlPresentation()
+        }
     }
 
     func windowDidMiniaturize(_ notification: Notification) {
@@ -1619,8 +1637,12 @@ class BaseTerminalController: NSWindowController,
     }
 
     /// Whether this controller's window and tab container are actively presenting surfaces on screen.
+    /// While Mission Control Exposé is active, front GPU frames remain retained
+    /// (`isControllerRetainingPresentedSurfaces == true`) while live cursor-blink
+    /// and spinner `IOSurface` swaps pause so Exposé thumbnails stay rock-solid.
     var isControllerPresentingSurfaces: Bool {
         guard isControllerRetainingPresentedSurfaces else { return false }
+        guard !MissionControlPresentationMonitor.shared.isMissionControlActive else { return false }
         if let override = windowOcclusionOverrideForTesting {
             return override
         }

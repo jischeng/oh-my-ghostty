@@ -101,21 +101,34 @@ struct TerminalViewContainerTests {
         #expect(blurView.clipView.layer?.backgroundColor != nil)
         #expect((blurView.effectView.layer?.cornerRadius ?? 0) == 0)
 
-        // Window opaque override (e.g. native fullscreen or toggle_background_opacity) removes the blur view.
+        // Window opaque override (e.g. native fullscreen, Mission Control, or off-Space)
+        // synchronously removes the blur view and mounts an explicit opaque CALayer backing.
         view.ghosttyConfigDidChange(lightHalfBlur, preferredBackgroundColor: .white, isWindowOpaque: true)
-        try await Task.sleep(for: .milliseconds(50))
         #expect(view.backdropBlurView == nil)
+        #expect(view.glassEffectView == nil)
+        let opaqueBacking = try #require(view.opaqueBackdropView)
+        #expect(opaqueBacking.backingView.layer?.isOpaque == true)
+        #expect(opaqueBacking.backingView.layer?.cornerRadius == 12)
+        #expect(opaqueBacking.backingView.layer?.backgroundColor != nil)
+        #expect(opaqueBacking.hitTest(.zero) == nil)
 
-        // Restoring non-opaque re-mounts, while full backgroundOpacity (1.0), disabled blur,
-        // or Accessibility Reduce Transparency each tear it down cleanly.
+        // Restoring non-opaque synchronously removes opaqueBackdropView and re-mounts blur,
+        // while full backgroundOpacity (1.0), disabled blur, or Accessibility Reduce
+        // Transparency each tear it down cleanly.
         view.ghosttyConfigDidChange(darkBlur, preferredBackgroundColor: .black, isWindowOpaque: false)
         try await Task.sleep(for: .milliseconds(50))
+        #expect(view.opaqueBackdropView == nil)
         #expect(view.backdropBlurView != nil)
 
         let fullOpacity = MockConfig(backgroundBlur: .radius(20), backgroundColor: .black, backgroundOpacity: 1.0)
         view.ghosttyConfigDidChange(fullOpacity, preferredBackgroundColor: .black)
         try await Task.sleep(for: .milliseconds(50))
         #expect(view.backdropBlurView == nil)
+        #expect(view.opaqueBackdropView == nil)
+
+        // Full-opacity non-glass config needs no extra opaqueBackdropView even when isWindowOpaque == true.
+        view.ghosttyConfigDidChange(fullOpacity, preferredBackgroundColor: .black, isWindowOpaque: true)
+        #expect(view.opaqueBackdropView == nil)
 
         view._shouldReduceTransparency = true
         view.ghosttyConfigDidChange(darkBlur, preferredBackgroundColor: .black)

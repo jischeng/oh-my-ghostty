@@ -1356,6 +1356,9 @@ GHOSTTY_API bool ghostty_surface_omg_export_scrollback_vt(
 GHOSTTY_API void ghostty_surface_omg_set_hibernation_eligible(ghostty_surface_t, bool);
 // True when the terminal's active screen is the alternate screen buffer.
 GHOSTTY_API bool ghostty_surface_omg_is_alternate_screen(ghostty_surface_t);
+// True when dock/layout resizes must commit immediately to the child PTY
+// (alternate screen, primary-screen inline TUIs, or auto-committed visual resize).
+GHOSTTY_API bool ghostty_surface_omg_requires_committed_resize(ghostty_surface_t);
 
 #ifdef __APPLE__
 GHOSTTY_API void ghostty_surface_set_display_id(ghostty_surface_t, uint32_t);

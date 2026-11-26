@@ -444,6 +444,7 @@ final class AgentQuickInputModel: ObservableObject {
     private var currentSurfaceID: (() -> UUID?)?
 
     private var draftBeforeEditing: String?
+    private var lastEditorBridgeImportAt: [UUID: ContinuousClock.Instant] = [:]
     private var isApplyingState = false
     private var pendingDockHeight: CGFloat?
     private var dockResizeWorkItem: DispatchWorkItem?
@@ -550,14 +551,31 @@ final class AgentQuickInputModel: ObservableObject {
     }
 
     /// Agent imports are snapshots, unlike explicit history insertion.
-    func importAgentDraft(_ text: String, shortcut: String = "control+g", processID: Int? = nil) {
+    func importAgentDraft(
+        _ text: String,
+        shortcut: String = "control+g",
+        processID: Int? = nil,
+        importedAt: ContinuousClock.Instant = ContinuousClock.now
+    ) {
         guard let targetSurfaceID, !isEditingQueuedItem else { return }
+        lastEditorBridgeImportAt[targetSurfaceID] = importedAt
         var state = paneStates[targetSurfaceID] ?? .init()
         state.agentDraftShortcut = text.isEmpty ? nil : shortcut
         state.agentDraftProcessID = text.isEmpty ? nil : processID
         paneStates[targetSurfaceID] = state
         guard !text.isEmpty, !draft.hasPrefix(text), !draft.hasSuffix(text) else { return }
         useHistoryText(text)
+    }
+
+    func remainingPostImportSettleDelay(
+        for surfaceID: UUID,
+        now: ContinuousClock.Instant = ContinuousClock.now,
+        minimumInterval: Duration = .milliseconds(250)
+    ) -> Duration {
+        guard let importedAt = lastEditorBridgeImportAt[surfaceID] else { return .zero }
+        let deadline = importedAt.advanced(by: minimumInterval)
+        guard now < deadline else { return .zero }
+        return now.duration(to: deadline)
     }
 
     func agentDraftShortcut(for surfaceID: UUID, foregroundPID: Int?) -> String? {
@@ -567,6 +585,7 @@ final class AgentQuickInputModel: ObservableObject {
     }
 
     func didSubmitAgentDraft(for surfaceID: UUID) {
+        lastEditorBridgeImportAt.removeValue(forKey: surfaceID)
         guard var state = paneStates[surfaceID] else { return }
         state.agentDraftShortcut = nil
         state.agentDraftProcessID = nil
@@ -889,6 +908,7 @@ final class AgentQuickInputModel: ObservableObject {
     }
 
     func removeState(for surfaceID: UUID) {
+        lastEditorBridgeImportAt.removeValue(forKey: surfaceID)
         paneStates.removeValue(forKey: surfaceID)
         paneLocations.removeValue(forKey: surfaceID)
         if targetSurfaceID == surfaceID {
@@ -1498,7 +1518,7 @@ private struct AgentQuickInputResizeHandle: View {
                 )
             },
             accessibilityLabel: "Resize Agent Quick Input",
-            defersTerminalResize: false
+            defersTerminalResize: true
         )
     }
 }

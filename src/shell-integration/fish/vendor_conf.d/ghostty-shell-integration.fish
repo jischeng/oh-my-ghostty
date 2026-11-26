@@ -60,6 +60,17 @@ end
 function __ghostty_setup --on-event fish_prompt -d "Setup ghostty integration"
     functions -e __ghostty_setup
 
+    if set -q OMG_QUICK_INPUT_BRIDGE; and test -n "$OMG_QUICK_INPUT_BRIDGE" -a -x "$OMG_QUICK_INPUT_BRIDGE/editor"
+        set -l __omg_bridge_editor "$OMG_QUICK_INPUT_BRIDGE/editor"
+        if set -q VISUAL; and test -n "$VISUAL" -a "$VISUAL" != "$__omg_bridge_editor"
+            set -gx OMG_QUICK_INPUT_ORIGINAL_EDITOR "$VISUAL"
+        else if set -q EDITOR; and test -n "$EDITOR" -a "$EDITOR" != "$__omg_bridge_editor"
+            set -gx OMG_QUICK_INPUT_ORIGINAL_EDITOR "$EDITOR"
+        end
+        set -gx VISUAL "$__omg_bridge_editor"
+        set -gx EDITOR "$__omg_bridge_editor"
+    end
+
     set --local features (string split , $GHOSTTY_SHELL_FEATURES)
 
     # Parse the fish version for feature detection.

@@ -50,10 +50,10 @@ if [ -n "$GHOSTTY_BASH_INJECT" ]; then
   # run_startup_files() in shell.c in the Bash source code.
   if builtin shopt -q login_shell; then
     if [[ $__ghostty_bash_flags != *"--noprofile"* ]]; then
-      [ -r /etc/profile ] && builtin source "/etc/profile"
+      if [ -r /etc/profile ]; then builtin source "/etc/profile" || builtin true; fi
       for __ghostty_rcfile in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
         [ -r "$__ghostty_rcfile" ] && {
-          builtin source "$__ghostty_rcfile"
+          builtin source "$__ghostty_rcfile" || builtin true
           break
         }
       done
@@ -68,18 +68,28 @@ if [ -n "$GHOSTTY_BASH_INJECT" ]; then
       #  Nixos uses /etc/bashrc
       for __ghostty_rcfile in /etc/bash.bashrc /etc/bash/bashrc /etc/bashrc; do
         [ -r "$__ghostty_rcfile" ] && {
-          builtin source "$__ghostty_rcfile"
+          builtin source "$__ghostty_rcfile" || builtin true
           break
         }
       done
       if [[ -z "$GHOSTTY_BASH_RCFILE" ]]; then GHOSTTY_BASH_RCFILE="$HOME/.bashrc"; fi
-      [ -r "$GHOSTTY_BASH_RCFILE" ] && builtin source "$GHOSTTY_BASH_RCFILE"
+      if [ -r "$GHOSTTY_BASH_RCFILE" ]; then builtin source "$GHOSTTY_BASH_RCFILE" || builtin true; fi
     fi
   fi
 
   builtin unset __ghostty_rcfile
   builtin unset __ghostty_bash_flags
   builtin unset GHOSTTY_BASH_RCFILE
+fi
+
+# OMG adapter: preserve Quick Input draft bridge if user startup files overrode VISUAL/EDITOR.
+if [[ -n "${OMG_QUICK_INPUT_BRIDGE:-}" && -x "$OMG_QUICK_INPUT_BRIDGE/editor" ]]; then
+  if [[ -n "${VISUAL:-}" && "$VISUAL" != "$OMG_QUICK_INPUT_BRIDGE/editor" ]]; then
+    export OMG_QUICK_INPUT_ORIGINAL_EDITOR="$VISUAL"
+  elif [[ -n "${EDITOR:-}" && "$EDITOR" != "$OMG_QUICK_INPUT_BRIDGE/editor" ]]; then
+    export OMG_QUICK_INPUT_ORIGINAL_EDITOR="$EDITOR"
+  fi
+  export VISUAL="$OMG_QUICK_INPUT_BRIDGE/editor" EDITOR="$OMG_QUICK_INPUT_BRIDGE/editor"
 fi
 
 # OMG adapter: replay saved display output before drawing the new prompt.

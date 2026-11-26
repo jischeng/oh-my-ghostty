@@ -69,6 +69,15 @@ terminal_stream: StreamHandler.Stream,
 /// flooding with cursor resets.
 last_cursor_reset: ?std.Io.Timestamp = null,
 
+/// True while a visual-only live resize has updated `self.size` and the
+/// terminal grid without yet publishing that geometry to `self.backend`.
+has_uncommitted_visual_resize: bool = false,
+
+/// True when `processOutputLocked` promoted an uncommitted visual resize to a
+/// backend commit because the child entered alternate-screen or inline-TUI mode
+/// while docked. Cleared on the next explicit host `resize`.
+visual_dock_auto_committed: bool = false,
+
 /// State we have for thread enter. This may be null if we don't need
 /// to keep track of any state or if its already been freed.
 thread_enter_state: ?*ThreadEnterState = null,
@@ -568,6 +577,9 @@ pub fn resize(
 ) !void {
     try self.resizeVisual(size, true);
     try self.commitResize(td, size);
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    self.visual_dock_auto_committed = false;
+    self.renderer_state.mutex.unlock(global.io());
 }
 
 /// Resize the terminal model and renderer without notifying the child PTY.
@@ -590,6 +602,9 @@ pub fn resizeVisual(
         self.renderer_state.mutex.lockUncancelable(global.io());
         defer self.renderer_state.mutex.unlock(global.io());
 
+        if (!redraw_prompt) {
+            self.has_uncommitted_visual_resize = true;
+        }
         try self.resizeTerminalLocked(
             .{
                 .cols = grid_size.columns,
@@ -631,6 +646,26 @@ fn activeHasContentBelowCursor(screen: *const terminalpkg.Screen) bool {
             if (!cell.isEmpty()) return true;
         }
     }
+    return false;
+}
+
+/// True when the active terminal program addresses grid coordinates relative to
+/// TIOCSWINSZ (alternate screen or primary-screen inline TUI such as BubbleTea
+/// cursedRenderer/agy, Ink/claude, Ratatui/codex, or fzf), or when a visual
+/// dock resize has already been promoted to a backend commit.
+/// Caller must hold `renderer_state.mutex`.
+pub fn requiresCommittedDockResizeLocked(self: *const Termio) bool {
+    if (self.visual_dock_auto_committed) return true;
+    if (self.terminal_stream.handler.isRemoteSshSession()) return true;
+    const t = &self.terminal;
+    if (t.screens.active_key == .alternate) return true;
+    if (self.terminal_stream.handler.seen_synchronized_output) return true;
+    if (t.modes.get(.synchronized_output)) return true;
+    if (!t.modes.get(.cursor_visible)) return true;
+    if (t.modes.get(.in_band_size_reports)) return true;
+    if (t.flags.mouse_event != .none) return true;
+    if (t.scrolling_region.top != 0 or t.scrolling_region.bottom + 1 != t.rows) return true;
+    if (activeHasContentBelowCursor(t.screens.active)) return true;
     return false;
 }
 
@@ -715,8 +750,11 @@ pub fn commitResize(
     {
         self.renderer_state.mutex.lockUncancelable(global.io());
         defer self.renderer_state.mutex.unlock(global.io());
-        try self.backend.resize(grid_size, size.terminal());
-        self.terminal_stream.handler.noteChildResizeCommitted();
+        self.has_uncommitted_visual_resize = false;
+        const committed_now = try self.backend.resize(td, grid_size, size.terminal());
+        if (committed_now) {
+            self.terminal_stream.handler.noteChildResizeCommitted();
+        }
         if (self.backend != .omg_session and self.terminal.modes.get(.in_band_size_reports)) {
             try self.sizeReportLocked(td, .mode_2048);
         }
@@ -943,6 +981,12 @@ fn processOutputLocked(self: *Termio, buf: []const u8) void {
 
     if (buf.len > 0) {
         self.terminal_stream.handler.noteActiveSynchronizedOutput(now);
+        if (self.has_uncommitted_visual_resize and self.requiresCommittedDockResizeLocked()) {
+            self.has_uncommitted_visual_resize = false;
+            self.visual_dock_auto_committed = true;
+            self.mailbox.send(.{ .resize_commit = self.size }, self.renderer_state.mutex);
+            self.terminal_stream.handler.termio_messaged = true;
+        }
     }
 
     // If our stream handling caused messages to be sent to the mailbox
@@ -1282,4 +1326,146 @@ test "Termio: resetSynchronizedOutput releases tui_wipe_hold, processOutput rene
     try io.clearScreen(&td, true);
     try testing.expect(!io.terminal.modes.get(.synchronized_output));
     try testing.expect(!io.terminal_stream.handler.tui_wipe_hold.active);
+}
+
+test "Termio: requiresCommittedDockResizeLocked distinguishes plain shell from inline TUIs and promotes pending visual resize" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var term = try terminalpkg.Terminal.init(testing.io, alloc, .{
+        .cols = 40,
+        .rows = 10,
+    });
+    errdefer term.deinit(alloc);
+
+    var mutex: std.Io.Mutex = .init;
+    var renderer_state: renderer.State = .{
+        .mutex = &mutex,
+        .terminal = &term,
+    };
+    var renderer_mailbox: renderer.Thread.Mailbox = .{};
+    var wakeup = try xev.Async.init();
+    errdefer wakeup.deinit();
+    var mailbox = try termio.Mailbox.initSPSC(alloc);
+    errdefer mailbox.deinit(alloc);
+
+    var io: Termio = .{
+        .alloc = alloc,
+        .backend = undefined,
+        .config = undefined,
+        .terminal = term,
+        .renderer_state = &renderer_state,
+        .renderer_wakeup = wakeup,
+        .renderer_mailbox = &renderer_mailbox,
+        .surface_mailbox = undefined,
+        .size = .{
+            .screen = .{ .width = 400, .height = 200 },
+            .cell = .{ .width = 10, .height = 20 },
+            .padding = .{},
+        },
+        .mailbox = mailbox,
+        .terminal_stream = undefined,
+    };
+    io.renderer_state.terminal = &io.terminal;
+    io.terminal_stream = .init(.{
+        .allocator = alloc,
+        .handler = .{
+            .alloc = alloc,
+            .size = &io.size,
+            .terminal = &io.terminal,
+            .termio_mailbox = &io.mailbox,
+            .surface_mailbox = undefined,
+            .renderer_state = io.renderer_state,
+            .renderer_mailbox = io.renderer_mailbox,
+            .renderer_wakeup = io.renderer_wakeup,
+            .enquiry_response = "",
+            .osc_color_report_format = .none,
+            .clipboard_write = .deny,
+        },
+    });
+    defer {
+        io.terminal_stream.deinit();
+        io.renderer_wakeup.deinit();
+        io.terminal.deinit(alloc);
+        io.mailbox.deinit(alloc);
+    }
+
+    // 1. Plain shell prompt with DEC 1004 focus reporting and bracketed paste stays visual-only.
+    io.processOutput("\x1b[?1004h\x1b[?2004h\x1b]133;A\x07$ \x1b]133;B\x07");
+    while (io.mailbox.spsc.queue.pop(global.io())) |msg| msg.deinit();
+    try testing.expect(!io.requiresCommittedDockResizeLocked());
+
+    // 2. Visually docking shrinks `io.size` without committing to the backend, then launching a
+    // primary-screen inline TUI (`?25l` / `?2026h`) promotes `.resize_commit` immediately.
+    const docked_size: renderer.Size = .{
+        .screen = .{ .width = 400, .height = 140 },
+        .cell = .{ .width = 10, .height = 20 },
+        .padding = .{},
+    };
+    try io.resizeVisual(docked_size, false);
+    try testing.expect(io.has_uncommitted_visual_resize);
+    try testing.expect(!io.requiresCommittedDockResizeLocked());
+
+    io.processOutput("\x1b[?25l\x1b[?2026h❯  \r\n────────\x1b[1A\x1b[?2026l");
+    try testing.expect(io.requiresCommittedDockResizeLocked());
+    try testing.expect(!io.has_uncommitted_visual_resize);
+    try testing.expect(io.visual_dock_auto_committed);
+
+    var saw_resize_commit = false;
+    while (io.mailbox.spsc.queue.pop(global.io())) |msg| {
+        defer msg.deinit();
+        switch (msg) {
+            .resize_commit => |committed| {
+                saw_resize_commit = true;
+                try testing.expectEqual(docked_size, committed);
+            },
+            else => {},
+        }
+    }
+    try testing.expect(saw_resize_commit);
+
+    // 3. Even after the TUI exits back to a plain prompt, `visual_dock_auto_committed` keeps
+    // committed resize armed until the host restores outer size, then returns to visual-only.
+    io.processOutput("\x1b[2J\x1b[H\x1b[?25h\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+    while (io.mailbox.spsc.queue.pop(global.io())) |msg| msg.deinit();
+    try testing.expect(io.requiresCommittedDockResizeLocked());
+    io.visual_dock_auto_committed = false;
+    try testing.expect(!io.requiresCommittedDockResizeLocked());
+
+    // 4. Entering an OSC 3008 `type=remote` SSH session inside an already visually docked local
+    // shell immediately promotes `.resize_commit` even before any remote TUI starts, then returns
+    // to visual-only once SSH exits and the host restores outer size.
+    const full_size: renderer.Size = .{
+        .screen = .{ .width = 400, .height = 200 },
+        .cell = .{ .width = 10, .height = 20 },
+        .padding = .{},
+    };
+    try io.resizeVisual(full_size, true);
+    io.has_uncommitted_visual_resize = false;
+    try io.resizeVisual(docked_size, false);
+    try testing.expect(io.has_uncommitted_visual_resize);
+    try testing.expect(!io.requiresCommittedDockResizeLocked());
+
+    io.processOutput("\x1b]3008;start=omg-ssh-inline-1;type=remote;targethost=dev\x07");
+    try testing.expect(io.requiresCommittedDockResizeLocked());
+    try testing.expect(!io.has_uncommitted_visual_resize);
+    try testing.expect(io.visual_dock_auto_committed);
+
+    var saw_ssh_commit = false;
+    while (io.mailbox.spsc.queue.pop(global.io())) |msg| {
+        defer msg.deinit();
+        switch (msg) {
+            .resize_commit => |committed| {
+                saw_ssh_commit = true;
+                try testing.expectEqual(docked_size, committed);
+            },
+            else => {},
+        }
+    }
+    try testing.expect(saw_ssh_commit);
+
+    io.processOutput("\x1b]3008;end=omg-ssh-inline-1;status=0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+    while (io.mailbox.spsc.queue.pop(global.io())) |msg| msg.deinit();
+    io.visual_dock_auto_committed = false;
+    try testing.expect(!io.requiresCommittedDockResizeLocked());
 }

@@ -725,6 +725,18 @@ struct AgentQuickInputDockContainerTests {
         )
         state.setVisualDockContext(outerSize: outer, dockedHeight: 0)
         #expect(state.request(outer, allowsVisualOnlyDock: true) == .normal(outer))
+
+        // Visually docking first and then transitioning to committed-dock mode at the same size
+        // promotes the uncommitted live size via .commit.
+        state.setVisualDockContext(outerSize: outer, dockedHeight: 165)
+        #expect(
+            state.request(CGSize(width: 800, height: 435), allowsVisualOnlyDock: true)
+                == .visualOnly(CGSize(width: 800, height: 435))
+        )
+        #expect(
+            state.request(CGSize(width: 800, height: 435), allowsVisualOnlyDock: false)
+                == .commit
+        )
     }
 
     @Test func tabOverlayFrameProbeConvertsNestedRightSplitCoordinatesToOutermostContainer() async throws {

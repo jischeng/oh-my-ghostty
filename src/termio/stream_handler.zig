@@ -2203,7 +2203,7 @@ pub const StreamHandler = struct {
         self.surfaceMessageWriter(.{ .progress_report = report });
     }
 
-    fn isRemoteSshSession(self: *const StreamHandler) bool {
+    pub fn isRemoteSshSession(self: *const StreamHandler) bool {
         return self.remote_ssh_session or self.in_remote_ssh_context;
     }
 

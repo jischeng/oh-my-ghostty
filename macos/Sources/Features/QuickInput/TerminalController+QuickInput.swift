@@ -281,20 +281,49 @@ extension TerminalController {
         return false
     }
 
+    private static func findComposerTextView(in root: NSView?, for surfaceID: UUID) -> ComposerTextView? {
+        guard let root, !root.isHidden else { return nil }
+        if let composer = root as? ComposerTextView,
+           composer.companionSurfaceID == surfaceID {
+            return composer
+        }
+        for subview in root.subviews {
+            if let found = findComposerTextView(in: subview, for: surfaceID) {
+                return found
+            }
+        }
+        return nil
+    }
+
+    private func commitActiveQuickInputComposition(for surfaceID: UUID) -> ComposerTextView? {
+        let composer: ComposerTextView?
+        if let active = window?.firstResponder as? ComposerTextView,
+           active.companionSurfaceID == surfaceID {
+            composer = active
+        } else {
+            composer = Self.findComposerTextView(in: window?.contentView, for: surfaceID)
+        }
+        composer?.commitMarkedTextForSubmission()
+        return composer
+    }
+
     func sendQuickInputDraft() {
         guard let surfaceID = quickInputModel.targetSurfaceID else { return }
+        let composer = commitActiveQuickInputComposition(for: surfaceID)
         if quickInputModel.isEditingQueuedItem {
             guard quickInputModel.confirmQueuedItemEdit(moveToEnd: false) else {
                 return
             }
+            composer?.syncWithBoundDraftIfNeeded()
             hideCoveringEditorWorkspace(surfaceID: surfaceID)
             if !quickInputModel.isPinned { restoreTerminalFocus(surfaceID: surfaceID) }
             dispatchNextQuickInput(for: surfaceID)
             return
         }
         let text = quickInputModel.draft
-        let submitted = submitQuickInputText(text, to: surfaceID, restoreFocus: !quickInputModel.isPinned) { [weak self] in
+        let submitted = submitQuickInputText(text, to: surfaceID, restoreFocus: !quickInputModel.isPinned) { [weak self, weak composer] in
             self?.quickInputModel.completeSubmittedDraft(text, for: surfaceID)
+            composer?.syncWithBoundDraftIfNeeded()
         }
         if submitted {
             hideCoveringEditorWorkspace(surfaceID: surfaceID)
@@ -303,10 +332,12 @@ extension TerminalController {
 
     func queueQuickInputDraft() {
         guard let surfaceID = quickInputModel.targetSurfaceID else { return }
+        let composer = commitActiveQuickInputComposition(for: surfaceID)
         if quickInputModel.isEditingQueuedItem {
             guard quickInputModel.confirmQueuedItemEdit(moveToEnd: true) else {
                 return
             }
+            composer?.syncWithBoundDraftIfNeeded()
             hideCoveringEditorWorkspace(surfaceID: surfaceID)
             if !quickInputModel.isPinned { restoreTerminalFocus(surfaceID: surfaceID) }
             dispatchNextQuickInput(for: surfaceID)
@@ -314,6 +345,7 @@ extension TerminalController {
         }
         guard quickInputModel.enqueueDraft() != nil else { return }
         quickInputModel.completeSubmission(clearDraft: false)
+        composer?.syncWithBoundDraftIfNeeded()
         hideCoveringEditorWorkspace(surfaceID: surfaceID)
         if agentActivities[surfaceID]?.state == .done {
             dispatchNextQuickInput(for: surfaceID)
@@ -478,8 +510,40 @@ extension TerminalController {
         text: String,
         usesEditorReplacement: Bool
     ) -> Bool {
-        guard !usesEditorReplacement else { return false }
-        return text.contains(where: \.isNewline)
+        quickInputPreEnterSettleDelay(
+            text: text,
+            usesEditorReplacement: usesEditorReplacement
+        ) > .zero
+    }
+
+    static func quickInputPreEnterSettleDelay(
+        text: String,
+        usesEditorReplacement: Bool
+    ) -> Duration {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .zero
+        }
+        // `sendText` wraps single-line text in `\e[200~...\e[201~` whenever DEC
+        // `?2004h` is enabled, and `$EDITOR` helpers write `.response` before
+        // exiting and before the parent Agent CLI finishes `tcsetattr` to
+        // re-enter raw TUI mode.
+        if usesEditorReplacement || text.contains(where: \.isNewline) {
+            return .milliseconds(250)
+        }
+        return .milliseconds(200)
+    }
+
+    static func quickInputPostEnterDismissDelay(
+        restoreFocus: Bool,
+        isPresented: Bool,
+        isPinned: Bool,
+        isTargetSurface: Bool,
+        requiresCommittedResize: Bool
+    ) -> Duration {
+        guard restoreFocus, isPresented, !isPinned, isTargetSurface, requiresCommittedResize else {
+            return .zero
+        }
+        return .milliseconds(60)
     }
 
     @discardableResult
@@ -560,6 +624,20 @@ extension TerminalController {
                 return
             }
             do {
+                let postImportDelay = self.quickInputModel.remainingPostImportSettleDelay(for: surfaceID)
+                if postImportDelay > .zero {
+                    try await Task.sleep(for: postImportDelay)
+                    guard !Task.isCancelled, !surface.blocksProgrammaticInput,
+                          self.surfaceTree.contains(where: { $0 === surface }), !surface.processExited,
+                          !surface.readonly,
+                          surface.runtimeDescriptor == nil || surface.runtimeConnectionState == .ready else {
+                        if surface.blocksProgrammaticInput {
+                            let currentStrings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
+                            self.quickInputModel.setStatusMessage(currentStrings.quickInputPasswordLockedMessage)
+                        }
+                        return
+                    }
+                }
                 let usesEditorReplacement: Bool
                 if let shortcut = self.quickInputModel.agentDraftShortcut(
                     for: surfaceID, foregroundPID: terminal.foregroundPID) {
@@ -569,11 +647,12 @@ extension TerminalController {
                     usesEditorReplacement = false
                     terminal.sendText(text)
                 }
-                if Self.quickInputRequiresSettleDelay(
+                let preEnterDelay = Self.quickInputPreEnterSettleDelay(
                     text: text,
                     usesEditorReplacement: usesEditorReplacement
-                ) {
-                    try await Task.sleep(for: .milliseconds(250))
+                )
+                if preEnterDelay > .zero {
+                    try await Task.sleep(for: preEnterDelay)
                 }
             } catch {
                 let currentStrings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
@@ -613,6 +692,16 @@ extension TerminalController {
             )
             self.quickInputModel.recordSentText(text, for: surfaceID, historyID: historyID)
             self.quickInputModel.setStatusMessage(nil)
+            let postEnterDelay = Self.quickInputPostEnterDismissDelay(
+                restoreFocus: restoreFocus,
+                isPresented: self.quickInputModel.isPresented,
+                isPinned: self.quickInputModel.isPinned,
+                isTargetSurface: self.quickInputModel.targetSurfaceID == surfaceID,
+                requiresCommittedResize: surface.requiresCommittedDockResize
+            )
+            if postEnterDelay > .zero {
+                try? await Task.sleep(for: postEnterDelay)
+            }
             completion()
             if restoreFocus, self.quickInputModel.targetSurfaceID == surfaceID, !self.quickInputModel.isPresented {
                 self.hideCoveringEditorWorkspace(surfaceID: surfaceID)

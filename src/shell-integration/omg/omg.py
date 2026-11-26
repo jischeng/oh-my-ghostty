@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """OMG's remote command entry point. Protocol v1; no background process."""
+import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -12,6 +14,7 @@ import time
 import uuid
 
 LIMIT = 1048576
+_ACTIVE_LOCK = None
 
 
 def private_directory(path):
@@ -109,7 +112,8 @@ def main(arguments):
             "created": time.time(), "tty": os.ttyname(0),
         }).encode())
         editor = directory / "editor"
-        script = "#!/bin/sh\nexec python3 " + shlex.quote(str(root() / "omg"))
+        python_bin = sys.executable or "python3"
+        script = "#!/bin/sh\nexec " + shlex.quote(python_bin) + " " + shlex.quote(str(root() / "omg"))
         script += " editor " + shlex.quote(session) + ' "$@"\n'
         write_private(editor, script.encode())
         editor.chmod(0o700)
@@ -149,9 +153,25 @@ def main(arguments):
         if request.get("generation") != metadata.get("runtime_generation"):
             raise ValueError("Remote session generation changed")
         response = directory / (identifier + ".response")
+        lock_path = directory / (identifier + ".lock")
         deadline = time.monotonic() + 5
         while not response.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
+        while response.exists() and lock_path.exists() and time.monotonic() < deadline:
+            try:
+                with lock_path.open("rb") as lock_stream:
+                    try:
+                        fcntl.flock(lock_stream.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+                        fcntl.flock(lock_stream.fileno(), fcntl.LOCK_UN)
+                        break
+                    except BlockingIOError:
+                        pass
+                    except OSError as err:
+                        if err.errno not in (errno.EACCES, errno.EAGAIN):
+                            break
+            except FileNotFoundError:
+                break
+            time.sleep(0.02)
         if request.get("generation") != read_json(directory / "session.json").get("runtime_generation"):
             raise ValueError("Remote session generation changed")
         with response.open("rb") as stream:
@@ -170,6 +190,7 @@ def main(arguments):
             pass
         (directory / (identifier + ".response")).unlink(missing_ok=True)
         (directory / (identifier + ".replacement")).unlink(missing_ok=True)
+        (directory / (identifier + ".lock")).unlink(missing_ok=True)
     elif command == "editor":
         try:
             request = read_json(directory / "request.json")
@@ -178,7 +199,10 @@ def main(arguments):
         except (OSError, ValueError, KeyError, TypeError):
             active = False
         if not active:
-            os.execv("/bin/sh", ["sh", "-c", "exec " + metadata["editor"] + ' "$@"',
+            self_editor = str(directory / "editor")
+            override = os.environ.get("OMG_REMOTE_ORIGINAL_EDITOR", "").strip()
+            fallback_editor = override if override and override != self_editor else metadata["editor"]
+            os.execv("/bin/sh", ["sh", "-c", "exec " + fallback_editor + ' "$@"',
                                  "omg-editor", *rest])
         if len(rest) != 1:
             raise ValueError("Expected one editor file")
@@ -187,6 +211,13 @@ def main(arguments):
         with source.open("rb") as stream:
             data = stream.read(LIMIT + 1)
         validate(data)
+        global _ACTIVE_LOCK
+        try:
+            lock_fd = os.open(directory / (identifier + ".lock"), os.O_WRONLY | os.O_CREAT, 0o600)
+            _ACTIVE_LOCK = os.fdopen(lock_fd, "wb")
+            fcntl.flock(_ACTIVE_LOCK.fileno(), fcntl.LOCK_EX)
+        except OSError:
+            _ACTIVE_LOCK = None
         if replacing:
             write_private(Path(rest[0]), data)
         write_private(directory / (identifier + ".response"), data)

@@ -1523,23 +1523,113 @@ struct AgentQuickInputTests {
         #expect(editor.undoManager?.canUndo == false)
     }
 
-    @Test func settleDelayAppliesOnlyToMultilineNonEditorSends() {
+    @Test @MainActor
+    func quickInputSubmissionTimingCoversSingleLineEditorAndUnpinnedDismiss() {
         #expect(!TerminalController.quickInputRequiresSettleDelay(
+            text: "   \n  ",
+            usesEditorReplacement: false
+        ))
+        #expect(TerminalController.quickInputPreEnterSettleDelay(
+            text: "   ",
+            usesEditorReplacement: true
+        ) == .zero)
+
+        // Single-line `sendText` still emits `\e[200~...\e[201~` under DEC `?2004h`
+        // and must clear TUI paste-burst suppression before sending Enter.
+        #expect(TerminalController.quickInputRequiresSettleDelay(
             text: "single line prompt",
             usesEditorReplacement: false
         ))
-        #expect(!TerminalController.quickInputRequiresSettleDelay(
-            text: "line1\nline2",
+        #expect(TerminalController.quickInputPreEnterSettleDelay(
+            text: "single line prompt",
+            usesEditorReplacement: false
+        ) == .milliseconds(200))
+
+        // Multiline pastes and `$EDITOR` replacements (where `.response` is written
+        // before `$VISUAL` exits and before the CLI finishes `tcsetattr(TCSAFLUSH)`)
+        // both wait 250ms before sending Enter.
+        #expect(TerminalController.quickInputRequiresSettleDelay(
+            text: "single line via editor",
             usesEditorReplacement: true
         ))
-        #expect(TerminalController.quickInputRequiresSettleDelay(
+        #expect(TerminalController.quickInputPreEnterSettleDelay(
+            text: "single line via editor",
+            usesEditorReplacement: true
+        ) == .milliseconds(250))
+        #expect(TerminalController.quickInputPreEnterSettleDelay(
             text: "line1\nline2",
             usesEditorReplacement: false
-        ))
-        #expect(TerminalController.quickInputRequiresSettleDelay(
+        ) == .milliseconds(250))
+        #expect(TerminalController.quickInputPreEnterSettleDelay(
             text: "line1\rline2",
             usesEditorReplacement: false
-        ))
+        ) == .milliseconds(250))
+
+        // Unpinned interactive sends hold dock dismissal briefly after Enter when
+        // undocking commits a PTY resize (inline TUI / alt-screen / SSH) so
+        // TIOCSWINSZ/SIGWINCH does not race TUI submission; plain visual-only shells,
+        // pinned composer, and queued sends do not delay.
+        #expect(TerminalController.quickInputPostEnterDismissDelay(
+            restoreFocus: true,
+            isPresented: true,
+            isPinned: false,
+            isTargetSurface: true,
+            requiresCommittedResize: true
+        ) == .milliseconds(60))
+        #expect(TerminalController.quickInputPostEnterDismissDelay(
+            restoreFocus: true,
+            isPresented: true,
+            isPinned: false,
+            isTargetSurface: true,
+            requiresCommittedResize: false
+        ) == .zero)
+        #expect(TerminalController.quickInputPostEnterDismissDelay(
+            restoreFocus: true,
+            isPresented: true,
+            isPinned: true,
+            isTargetSurface: true,
+            requiresCommittedResize: true
+        ) == .zero)
+        #expect(TerminalController.quickInputPostEnterDismissDelay(
+            restoreFocus: false,
+            isPresented: true,
+            isPinned: false,
+            isTargetSurface: true,
+            requiresCommittedResize: true
+        ) == .zero)
+        #expect(TerminalController.quickInputPostEnterDismissDelay(
+            restoreFocus: true,
+            isPresented: false,
+            isPinned: false,
+            isTargetSurface: true,
+            requiresCommittedResize: true
+        ) == .zero)
+
+        let model = AgentQuickInputModel()
+        let pane = UUID()
+        model.present(for: pane)
+        let importedAt = ContinuousClock.now
+        model.importAgentDraft("draft", importedAt: importedAt)
+        #expect(model.remainingPostImportSettleDelay(
+            for: pane,
+            now: importedAt.advanced(by: .milliseconds(40))
+        ) == .milliseconds(210))
+        #expect(model.remainingPostImportSettleDelay(
+            for: pane,
+            now: importedAt.advanced(by: .milliseconds(260))
+        ) == .zero)
+        model.didSubmitAgentDraft(for: pane)
+        #expect(model.remainingPostImportSettleDelay(
+            for: pane,
+            now: importedAt.advanced(by: .milliseconds(40))
+        ) == .zero)
+        #expect(TerminalController.quickInputPostEnterDismissDelay(
+            restoreFocus: true,
+            isPresented: true,
+            isPinned: false,
+            isTargetSurface: false,
+            requiresCommittedResize: true
+        ) == .zero)
     }
 
     @Test func surfaceScrollViewClampsPaddingNonNegativeAndSynchronizesOnShrink() throws {
@@ -1810,5 +1900,317 @@ struct AgentQuickInputTests {
         #expect(standaloneEmphasized.tintOpacity > standalone.tintOpacity)
         #expect(elevatedEmphasized.backdropOpacity >= elevated.backdropOpacity)
         #expect(elevatedEmphasized.tintOpacity > elevated.tintOpacity)
+    }
+
+    @Test @MainActor
+    func submittingOrQueueingCommitsActiveIMEMarkedTextAndClearsComposer() async throws {
+        let model = AgentQuickInputModel()
+        let pane = UUID()
+        model.present(for: pane)
+        if !model.isPinned { model.togglePinned() }
+
+        var sentTexts: [String] = []
+        var queuedTexts: [String] = []
+
+        struct Harness: View {
+            @ObservedObject var model: AgentQuickInputModel
+            let pane: UUID
+            let onSend: () -> Void
+            let onQueue: () -> Void
+
+            var body: some View {
+                AgentQuickInputTextEditor(
+                    text: $model.draft,
+                    placeholder: "Message",
+                    isPresented: model.isPresented,
+                    focusRequestID: model.focusRequestID,
+                    font: .monospacedSystemFont(ofSize: 13, weight: .regular),
+                    onPasteImage: nil,
+                    onSend: onSend,
+                    onQueue: onQueue,
+                    onCancel: {},
+                    companionSurfaceID: pane
+                )
+                .frame(width: 360, height: 100)
+            }
+        }
+
+        let host = NSHostingView(rootView: Harness(
+            model: model,
+            pane: pane,
+            onSend: {
+                let text = model.draft
+                sentTexts.append(text)
+                model.completeSubmittedDraft(text, for: pane)
+            },
+            onQueue: {
+                if let item = model.enqueueDraft() {
+                    queuedTexts.append(item.text)
+                }
+            }
+        ))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 380, height: 120),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer {
+            window.contentView = nil
+            window.close()
+        }
+        host.layoutSubtreeIfNeeded()
+        func find(_ view: NSView) -> ComposerTextView? {
+            (view as? ComposerTextView) ?? view.subviews.lazy.compactMap(find).first
+        }
+        let editor = try #require(find(host))
+        _ = window.makeFirstResponder(editor)
+
+        // 1. Committed prefix + uncommitted CJK IME marked text via ⌘↩ sends complete text and clears editor.
+        editor.insertText("请帮我", replacementRange: editor.selectedRange())
+        #expect(model.draft == "请帮我")
+        editor.setMarkedText(
+            "检查配置",
+            selectedRange: NSRange(location: 4, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        #expect(editor.hasMarkedText())
+        let cmdReturn = try #require(keyEvent(keyCode: 36, modifiers: [.command]))
+        #expect(editor.performKeyEquivalent(with: cmdReturn))
+        #expect(sentTexts == ["请帮我检查配置"])
+        #expect(!editor.hasMarkedText())
+        try await waitForAppKit {
+            host.layoutSubtreeIfNeeded()
+            return editor.string.isEmpty && model.draft.isEmpty
+        }
+
+        // 2. Pure uncommitted CJK IME marked text (no prior committed prefix) via ⌥⌘↩ queues full text cleanly.
+        editor.setMarkedText(
+            "第二条短句",
+            selectedRange: NSRange(location: 5, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        #expect(editor.hasMarkedText())
+        let optCmdReturn = try #require(keyEvent(keyCode: 36, modifiers: [.command, .option]))
+        #expect(editor.performKeyEquivalent(with: optCmdReturn))
+        #expect(queuedTexts == ["第二条短句"])
+        #expect(!editor.hasMarkedText())
+        try await waitForAppKit {
+            host.layoutSubtreeIfNeeded()
+            return editor.string.isEmpty && model.draft.isEmpty
+        }
+
+        // 3. Resigning first responder (e.g. clicking footer Send/Queue button or Full Keyboard Access)
+        //    while IME marked text is active commits the composition into `model.draft` instead of stranding it.
+        editor.setMarkedText(
+            "按钮点击发送",
+            selectedRange: NSRange(location: 6, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        #expect(editor.hasMarkedText())
+        _ = window.makeFirstResponder(nil)
+        #expect(!editor.hasMarkedText())
+        #expect(model.draft == "按钮点击发送")
+        sentTexts.append(model.draft)
+        model.completeSubmittedDraft(model.draft, for: pane)
+        editor.syncWithBoundDraftIfNeeded()
+        #expect(sentTexts.last == "按钮点击发送")
+        #expect(editor.string.isEmpty)
+        #expect(model.draft.isEmpty)
+    }
+
+    @Test @MainActor
+    func singleLineAndEditorSubmissionsSurvivePasteBurstTcsaflushAndUnpinnedDismissResize() async throws {
+        let app = try #require(NSApp.delegate as? AppDelegate)
+        let settings = OhMyGhosttySettings.shared
+        let prevShortcut = settings.quickInputImportShortcut
+        settings.quickInputImportShortcut = "control+g"
+        defer {
+            settings.quickInputImportShortcut = prevShortcut
+        }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let script = root.appendingPathComponent("agy")
+        let draftFile = root.appendingPathComponent("draft.txt")
+        let eventsFile = root.appendingPathComponent("events.jsonl")
+        try "初始草稿".write(to: draftFile, atomically: true, encoding: .utf8)
+        try #"""
+        import fcntl, json, os, pathlib, select, signal, struct, subprocess, termios, time, tty
+        root = pathlib.Path(__file__).parent
+        events_path = root / "events.jsonl"
+        draft_path = root / "draft.txt"
+        orig_attrs = termios.tcgetattr(0)
+        tty.setraw(0)
+        raw_attrs = termios.tcgetattr(0)
+
+        def winsize():
+            packed = fcntl.ioctl(0, termios.TIOCGWINSZ, b"\x00" * 8)
+            rows, cols, _, _ = struct.unpack("HHHH", packed)
+            return rows, cols
+
+        def record(kind, **extra):
+            rows, cols = winsize()
+            entry = {"t": time.monotonic(), "kind": kind, "rows": rows, "cols": cols, **extra}
+            with events_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+        def on_winch(_sig, _frame):
+            record("winch")
+
+        signal.signal(signal.SIGWINCH, on_winch)
+        # Mirror inline TUI modes (`?2004h` bracketed paste + `?25l` hidden cursor).
+        os.write(1, b"\x1b[?2004h\x1b[?25l\x1b[?2026h> \x1b[?2026l")
+        (root / "ready").touch()
+
+        buf = b""
+        composer = ""
+        last_paste_end = 0.0
+        while True:
+            try:
+                r, _, _ = select.select([0], [], [], 0.2)
+            except InterruptedError:
+                continue
+            if not r:
+                continue
+            try:
+                chunk = os.read(0, 4096)
+            except InterruptedError:
+                continue
+            if not chunk:
+                break
+            buf += chunk
+            while buf:
+                if buf.startswith(b"\x1b[200~"):
+                    end = buf.find(b"\x1b[201~")
+                    if end == -1:
+                        break
+                    pasted = buf[6:end].decode("utf-8", errors="replace")
+                    composer += pasted
+                    last_paste_end = time.monotonic()
+                    record("paste", text=pasted)
+                    buf = buf[end + 6:]
+                    continue
+                ch = buf[:1]
+                buf = buf[1:]
+                if ch == b"\x07":
+                    termios.tcsetattr(0, termios.TCSANOW, orig_attrs)
+                    subprocess.run([os.environ["VISUAL"], str(draft_path)], check=True)
+                    # Simulate CLI reaping $VISUAL, reading temp file, and restoring raw mode with TCSAFLUSH.
+                    time.sleep(0.05)
+                    composer = draft_path.read_text(encoding="utf-8")
+                    termios.tcsetattr(0, termios.TCSAFLUSH, raw_attrs)
+                    record("editor_returned", text=composer)
+                elif ch == b"\r":
+                    now = time.monotonic()
+                    # Simulate 120ms TUI paste-burst Enter suppression window (e.g. Ratatui/Codex).
+                    if last_paste_end and (now - last_paste_end) < 0.12:
+                        composer += "\n"
+                        record("enter_suppressed_as_newline", gap_ms=(now - last_paste_end) * 1000.0)
+                    else:
+                        record("submitted", text=composer)
+                        composer = ""
+        """#.write(to: script, atomically: true, encoding: .utf8)
+
+        // Inject a 320ms `atexit` teardown delay into `$VISUAL` (`editor.py`) AFTER `.response`
+        // is written so any host implementation that wakes on `.response` creation alone (without
+        // waiting for helper kernel exit) sends `Enter` right into `tcsetattr(TCSAFLUSH)` and drops it.
+        let siteDir = root.appendingPathComponent("site")
+        try FileManager.default.createDirectory(at: siteDir, withIntermediateDirectories: true)
+        try #"""
+        import atexit, os, sys, time
+        if os.environ.get("OMG_QUICK_INPUT_BRIDGE") and sys.argv and sys.argv[0].endswith("editor.py"):
+            atexit.register(lambda: time.sleep(0.32))
+        """#.write(to: siteDir.appendingPathComponent("sitecustomize.py"), atomically: true, encoding: .utf8)
+
+        let python = try #require(LocalPythonInterpreter.cached())
+        var config = Ghostty.SurfaceConfiguration()
+        config.environmentVariables["PYTHONPATH"] = siteDir.path
+        config.command = Ghostty.Shell.quote(python.executablePath) + " " + Ghostty.Shell.quote(script.path)
+        let controller = TerminalController(app.ghostty, withBaseConfig: config, tabLayout: .vertical)
+        controller.showWindow(nil)
+        controller.window?.setContentSize(NSSize(width: 820, height: 620))
+        controller.window?.contentView?.layoutSubtreeIfNeeded()
+        let wasPinned = controller.quickInputModel.isPinned
+        defer {
+            if controller.quickInputModel.isPinned != wasPinned {
+                controller.quickInputModel.togglePinned()
+            }
+            controller.dismissQuickInput()
+            controller.window?.delegate = nil
+            controller.window?.close()
+        }
+
+        let surface = try #require(controller.focusedSurface)
+        try await waitForAppKit { FileManager.default.fileExists(atPath: root.appendingPathComponent("ready").path) }
+
+        func loadEvents() -> [[String: Any]] {
+            guard let raw = try? String(contentsOf: eventsFile, encoding: .utf8) else { return [] }
+            return raw.split(separator: "\n").compactMap { line in
+                (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any]
+            }
+        }
+
+        // 1. Single-line unpinned send with DEC ?2004h active:
+        //    must NOT hit 120ms paste-burst suppression, `submitted` must run at docked height
+        //    with zero intervening `winch` between `paste` and `submitted`, and the unpinned
+        //    dismiss `SIGWINCH` restoring full height must arrive strictly AFTER `submitted`.
+        try "".write(to: eventsFile, atomically: true, encoding: .utf8)
+        controller.presentQuickInput(for: surface, requestFocus: false)
+        if controller.quickInputModel.isPinned { controller.quickInputModel.togglePinned() }
+        controller.window?.contentView?.layoutSubtreeIfNeeded()
+        try await waitForAppKit(timeout: .seconds(2)) {
+            loadEvents().contains { ($0["kind"] as? String) == "winch" }
+        }
+        let dockedRows = try #require(loadEvents().last?["rows"] as? Int)
+        try "".write(to: eventsFile, atomically: true, encoding: .utf8)
+
+        controller.quickInputModel.draft = "单行中文快捷输入不丢字"
+        controller.sendQuickInputDraft()
+
+        try await waitForAppKit(timeout: .seconds(4)) {
+            !controller.quickInputModel.isPresented &&
+                loadEvents().contains { ($0["kind"] as? String) == "submitted" } &&
+                loadEvents().contains { ($0["kind"] as? String) == "winch" }
+        }
+
+        let firstEvents = loadEvents()
+        #expect(!firstEvents.contains { ($0["kind"] as? String) == "enter_suppressed_as_newline" })
+        let firstPasteIndex = try #require(firstEvents.firstIndex { ($0["kind"] as? String) == "paste" })
+        let firstSubmitIndex = try #require(firstEvents.firstIndex { ($0["kind"] as? String) == "submitted" })
+        #expect(firstPasteIndex < firstSubmitIndex)
+        #expect(!firstEvents[firstPasteIndex...firstSubmitIndex].contains { ($0["kind"] as? String) == "winch" })
+        #expect(firstEvents[firstSubmitIndex]["text"] as? String == "单行中文快捷输入不丢字")
+        #expect(firstEvents[firstSubmitIndex]["rows"] as? Int == dockedRows)
+        let postSubmitWinch = try #require(firstEvents[(firstSubmitIndex + 1)...].last {
+            ($0["kind"] as? String) == "winch"
+        })
+        let restoredRows = try #require(postSubmitWinch["rows"] as? Int)
+        #expect(restoredRows > dockedRows)
+
+        // 2. Imported `$EDITOR` draft replacement followed by immediate unpinned send:
+        //    Even when `$VISUAL` stalls 320ms (> 250ms!) after writing `.response` before exiting
+        //    and the CLI runs `tcsetattr(TCSAFLUSH)` 50ms later, `Enter` must wait for helper exit
+        //    and submit cleanly without being flushed.
+        try "".write(to: eventsFile, atomically: true, encoding: .utf8)
+        controller.presentQuickInput(for: surface, requestFocus: false)
+        controller.importQuickInputDraftFromTerminal(for: surface.id)
+        try await waitForAppKit(timeout: .seconds(5)) {
+            controller.quickInputDraftImportTask == nil && controller.quickInputModel.draft == "初始草稿"
+        }
+        controller.quickInputModel.draft = "编辑器替换后的单行草稿"
+        controller.sendQuickInputDraft()
+
+        try await waitForAppKit(timeout: .seconds(6)) {
+            !controller.quickInputModel.isPresented &&
+                loadEvents().contains { ($0["kind"] as? String) == "submitted" }
+        }
+        let secondEvents = loadEvents()
+        let secondSubmit = try #require(secondEvents.first { ($0["kind"] as? String) == "submitted" })
+        #expect(secondSubmit["text"] as? String == "编辑器替换后的单行草稿")
     }
 }

@@ -7,6 +7,71 @@ enum AgentStatusPlugin {
 }
 
 enum LocalAgentProcessDetector {
+    private static let valueOptions: Set<String> = [
+        "-r", "--require", "--import", "--loader", "--conditions", "--rcfile", "--init-file",
+    ]
+
+    private static func isScriptRuntime(_ basename: String) -> Bool {
+        ["node", "bun", "deno", "python", "python3"].contains(basename)
+            || basename.hasPrefix("python3.")
+    }
+
+    private static func detectRuntimeInvocation(
+        basename: String,
+        arguments: ArraySlice<String>
+    ) -> SupportedAgent? {
+        var skipNext = false
+        var moduleNext = false
+        var scriptToken: String?
+        for token in arguments.prefix(8) {
+            if skipNext {
+                skipNext = false
+                continue
+            }
+            if moduleNext {
+                if let agent = exactAgent(token) { return agent }
+                scriptToken = token
+                break
+            }
+            if token.hasPrefix("-") {
+                let lower = token.lowercased()
+                if valueOptions.contains(lower) {
+                    skipNext = true
+                } else if lower == "-m" {
+                    moduleNext = true
+                }
+                continue
+            }
+            scriptToken = token
+            break
+        }
+        if let scriptToken, let agent = exactAgent(scriptToken) {
+            return agent
+        }
+        if ["node", "bun", "deno"].contains(basename) {
+            let runtimeArguments = arguments.prefix(4)
+                .map { $0.lowercased() }
+                .joined(separator: " ")
+            if let agent = SupportedAgent.allCases.first(where: { candidate in
+                candidate.definition.process.runtimeMarkers.contains {
+                    runtimeArguments.contains($0.lowercased())
+                }
+            }) { return agent }
+        } else if let scriptToken, scriptToken.contains("/") {
+            let lowerPath = scriptToken.lowercased()
+            let segments = Set(lowerPath.split(separator: "/").map(String.init))
+            if let agent = SupportedAgent.allCases.first(where: { candidate in
+                candidate.definition.process.runtimeMarkers.contains { marker in
+                    let lowerMarker = marker.lowercased()
+                    return lowerMarker.contains("/")
+                        ? lowerPath.contains(lowerMarker)
+                        : segments.contains(lowerMarker)
+                }
+            }) { return agent }
+        }
+        return nil
+    }
+
     static func detect(in commandLines: String) -> SupportedAgent? {
         for line in commandLines.split(separator: "\n") {
             let tokens = line.split(whereSeparator: \.isWhitespace).map(String.init)
@@ -19,19 +84,28 @@ enum LocalAgentProcessDetector {
             }
             if let agent = exactAgent(normalizedExec) { return agent }
             let basename = URL(fileURLWithPath: normalizedExec).lastPathComponent.lowercased()
-            if ["login", "env", "sh", "bash", "zsh", "fish", "python", "python3"].contains(basename),
-               let agent = tokens.dropFirst().compactMap(exactAgent).last {
-                return agent
+            if isScriptRuntime(basename) {
+                if let agent = detectRuntimeInvocation(basename: basename, arguments: tokens.dropFirst()) {
+                    return agent
+                }
+                continue
             }
-            if ["node", "bun", "deno"].contains(basename) {
-                let runtimeArguments = tokens.dropFirst().prefix(4)
-                    .map { $0.lowercased() }
-                    .joined(separator: " ")
-                if let agent = SupportedAgent.allCases.first(where: { candidate in
-                    candidate.definition.process.runtimeMarkers.contains {
-                        runtimeArguments.contains($0.lowercased())
+            if ["login", "env", "sh", "bash", "zsh", "fish"].contains(basename) {
+                if let runtimeIdx = tokens.indices.dropFirst().first(where: { idx in
+                    let subBase = URL(fileURLWithPath: tokens[idx]).lastPathComponent.lowercased()
+                    return isScriptRuntime(subBase)
+                }) {
+                    let subBase = URL(fileURLWithPath: tokens[runtimeIdx]).lastPathComponent.lowercased()
+                    if let agent = detectRuntimeInvocation(
+                        basename: subBase,
+                        arguments: tokens[(runtimeIdx + 1)...]
+                    ) {
+                        return agent
                     }
-                }) { return agent }
+                }
+                if let agent = tokens.dropFirst().compactMap(exactAgent).last {
+                    return agent
+                }
             }
         }
         return nil

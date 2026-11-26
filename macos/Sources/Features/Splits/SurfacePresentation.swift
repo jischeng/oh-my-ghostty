@@ -34,7 +34,19 @@ struct SurfaceCoreResizeState {
         _ size: CGSize,
         allowsVisualOnlyDock: Bool = true
     ) -> SurfaceCoreResizeAction? {
-        guard requestedSize != size else { return nil }
+        if requestedSize == size {
+            if !allowsVisualOnlyDock,
+               interactionDepth == 0,
+               appliedSize == size,
+               let committedSize,
+               committedSize != size {
+                self.committedSize = size
+                committedOuterSize = dockOuterSize ?? size
+                hasUncommittedLiveSize = false
+                return .commit
+            }
+            return nil
+        }
         requestedSize = size
 
         if allowsVisualOnlyDock, isPureVisualDockChange(for: size) {
@@ -70,6 +82,19 @@ struct SurfaceCoreResizeState {
         guard interactionMode == .duringDrag,
               hasUncommittedLiveSize else { return nil }
         committedSize = appliedSize
+        committedOuterSize = dockOuterSize ?? appliedSize
+        hasUncommittedLiveSize = false
+        return .commit
+    }
+
+    mutating func commitVisualDockIfNeeded() -> SurfaceCoreResizeAction? {
+        guard interactionDepth == 0,
+              let appliedSize,
+              let committedSize,
+              committedSize != appliedSize else {
+            return nil
+        }
+        self.committedSize = appliedSize
         committedOuterSize = dockOuterSize ?? appliedSize
         hasUncommittedLiveSize = false
         return .commit
@@ -177,10 +202,15 @@ final class SurfacePresentationLease {}
     }
 
     func requestSize(_ size: CGSize) {
-        // Alternate-screen TUIs have no Ghostty scrollback: shrinking without
-        // SIGWINCH discards rows and leaves blank rows at the bottom on close.
-        let allowsVisualOnlyDock = !(surface?.isAlternateScreen ?? false)
+        let allowsVisualOnlyDock = !(surface?.requiresCommittedDockResize ?? false)
         if let action = resizeState.request(size, allowsVisualOnlyDock: allowsVisualOnlyDock) {
+            apply(action)
+        }
+    }
+
+    func commitVisualDockIfNeeded() {
+        guard surface?.requiresCommittedDockResize == true else { return }
+        if let action = resizeState.commitVisualDockIfNeeded() {
             apply(action)
         }
     }

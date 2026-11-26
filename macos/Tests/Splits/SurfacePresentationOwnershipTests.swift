@@ -464,4 +464,97 @@ struct SurfacePresentationOwnershipTests {
         }
         #expect(actual.ws_row == initial.rows)
     }
+
+    @Test func visuallyDockedLocalShellEnteringSSHContextPromotesPTYResizeImmediately() async throws {
+        var state = SurfaceCoreResizeState()
+        let outer = CGSize(width: 800, height: 600)
+        let docked = CGSize(width: 800, height: 420)
+        #expect(state.request(outer, allowsVisualOnlyDock: true) == .normal(outer))
+        state.setVisualDockContext(outerSize: outer, dockedHeight: 180)
+        #expect(state.request(docked, allowsVisualOnlyDock: true) == .visualOnly(docked))
+        #expect(state.commitVisualDockIfNeeded() == .commit)
+        #expect(state.commitVisualDockIfNeeded() == nil)
+
+        let native = try #require((NSApp.delegate as? AppDelegate)?.ghostty.app)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let enterSSH = root.appendingPathComponent("enter-ssh")
+        let exitSSH = root.appendingPathComponent("exit-ssh")
+        let script = root.appendingPathComponent("ssh-transition.py")
+        try #"""
+        import pathlib, time, sys
+        root = pathlib.Path(__file__).parent
+        sys.stdout.write("$ ")
+        sys.stdout.flush()
+        while not (root / "enter-ssh").exists():
+            time.sleep(0.02)
+        sys.stdout.write("\x1b]3008;start=omg-ssh-inline-test;type=remote;targethost=dev\x07remote$ ")
+        sys.stdout.flush()
+        while not (root / "exit-ssh").exists():
+            time.sleep(0.02)
+        sys.stdout.write("\x1b]3008;end=omg-ssh-inline-test;status=0\x07\x1b]133;A\x07$ \x1b]133;B\x07")
+        sys.stdout.flush()
+        time.sleep(60)
+        """#.write(to: script, atomically: true, encoding: .utf8)
+
+        let python = try #require(LocalPythonInterpreter.cached())
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = Ghostty.Shell.quote(python.executablePath) + " " + Ghostty.Shell.quote(script.path)
+        let surface = Ghostty.SurfaceView(native, baseConfig: config)
+        let lease = SurfacePresentationLease()
+        surface.presentation.authorize(lease)
+        let wrapper = SurfaceScrollView(contentSize: outer, surfaceView: surface, lease: lease)
+        wrapper.frame.size = outer
+        wrapper.layoutSubtreeIfNeeded()
+
+        for _ in 0..<100 where surface.surfaceModel?.ttyName == nil {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let tty = try #require(surface.surfaceModel?.ttyName)
+        let fd = open(tty, O_RDONLY | O_NOCTTY)
+        try #require(fd >= 0)
+        defer { close(fd) }
+
+        let initial = ghostty_surface_size(try #require(surface.surface))
+        var actual = winsize()
+        for _ in 0..<100 {
+            try #require(ioctl(fd, TIOCGWINSZ, &actual) == 0)
+            if actual.ws_row == initial.rows { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try #require(actual.ws_row == initial.rows)
+
+        // Open Quick Input on plain local shell: stays visual-only.
+        surface.presentation.setVisualDockContext(outerSize: outer, dockedHeight: 180)
+        wrapper.frame.size = docked
+        wrapper.layoutSubtreeIfNeeded()
+        let shrunk = ghostty_surface_size(try #require(surface.surface))
+        #expect(shrunk.rows < initial.rows)
+        try await Task.sleep(for: .milliseconds(80))
+        try #require(ioctl(fd, TIOCGWINSZ, &actual) == 0)
+        #expect(actual.ws_row == initial.rows)
+
+        // Enter OSC 3008 `type=remote` SSH session without any TUI mode: promotes PTY resize immediately.
+        FileManager.default.createFile(atPath: enterSSH.path, contents: Data())
+        for _ in 0..<100 {
+            try #require(ioctl(fd, TIOCGWINSZ, &actual) == 0)
+            if actual.ws_row == shrunk.rows { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(actual.ws_row == shrunk.rows)
+
+        // Exit SSH and close dock: restores full rows.
+        FileManager.default.createFile(atPath: exitSSH.path, contents: Data())
+        try await Task.sleep(for: .milliseconds(80))
+        surface.presentation.setVisualDockContext(outerSize: outer, dockedHeight: 0)
+        wrapper.frame.size = outer
+        wrapper.layoutSubtreeIfNeeded()
+        for _ in 0..<100 {
+            try #require(ioctl(fd, TIOCGWINSZ, &actual) == 0)
+            if actual.ws_row == initial.rows { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(actual.ws_row == initial.rows)
+    }
 }

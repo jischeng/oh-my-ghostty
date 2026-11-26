@@ -278,11 +278,19 @@ final class SessionRuntimeHandoff {
                                target: connection.destination.split(separator: "@").last.map(String.init) ?? connection.destination,
                                localWorkingDirectory: request.cwd, activeRecord: active.path,
                                ownerRecord: ownerRecord?.path))
-            try SessionRuntimeBridgeStorage.writePrivateFile(
-                at: requestDirectory.appendingPathComponent(name + ".accepted"),
-                data: JSONEncoder().encode(approval), permissions: 0o600)
+            let previousInline = source.runtimeInlineSession
+            let previousReplay = source.pendingSSHLaunchReplay
             source.runtimeInlineSession = remote
             source.pendingSSHLaunchReplay = remote.replay
+            do {
+                try SessionRuntimeBridgeStorage.writePrivateFile(
+                    at: requestDirectory.appendingPathComponent(name + ".accepted"),
+                    data: JSONEncoder().encode(approval), permissions: 0o600)
+            } catch {
+                source.runtimeInlineSession = previousInline
+                source.pendingSSHLaunchReplay = previousReplay
+                throw error
+            }
             SessionRuntimeCatalog.shared.remember(descriptor)
         } catch {
             if authenticated {

@@ -97,6 +97,17 @@ _entrypoint() {
 _ghostty_deferred_init() {
     builtin emulate -L zsh -o no_warn_create_global -o no_aliases
 
+    # Preserve Quick Input draft bridge if user .zshrc overrode VISUAL/EDITOR.
+    if [[ -n ${OMG_QUICK_INPUT_BRIDGE:-} && -x "$OMG_QUICK_INPUT_BRIDGE/editor" ]]; then
+        builtin local _omg_bridge_editor="$OMG_QUICK_INPUT_BRIDGE/editor"
+        if [[ -n ${VISUAL:-} && $VISUAL != $_omg_bridge_editor ]]; then
+            builtin export OMG_QUICK_INPUT_ORIGINAL_EDITOR="$VISUAL"
+        elif [[ -n ${EDITOR:-} && $EDITOR != $_omg_bridge_editor ]]; then
+            builtin export OMG_QUICK_INPUT_ORIGINAL_EDITOR="$EDITOR"
+        fi
+        builtin export VISUAL="$_omg_bridge_editor" EDITOR="$_omg_bridge_editor"
+    fi
+
     # Enable semantic markup with OSC 133.
     _ghostty_precmd() {
         builtin local -i cmd_status=$?

@@ -25,6 +25,9 @@ extension Ghostty {
             didSet {
                 if oldValue != runtimeDescriptor {
                     notifyOwningControllerCheckpointDirty()
+                    if requiresCommittedDockResize {
+                        presentation.commitVisualDockIfNeeded()
+                    }
                 }
             }
         }
@@ -45,6 +48,9 @@ extension Ghostty {
         var runtimeInlineSession: SessionRuntimeInlineSession? {
             didSet {
                 SessionRuntimeConnections.syncInlineRelaySession(old: oldValue, new: runtimeInlineSession)
+                if runtimeInlineSession != nil {
+                    presentation.commitVisualDockIfNeeded()
+                }
             }
         }
         @Published var runtimeConnectionError: String?

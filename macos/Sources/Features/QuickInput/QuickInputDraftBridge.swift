@@ -280,7 +280,9 @@ final class QuickInputDraftBridge {
         except (OSError, ValueError, KeyError, TypeError):
             active = False
         if not active:
-            editor = os.environ.get("OMG_QUICK_INPUT_ORIGINAL_EDITOR", "nano")
+            self_editor = str(root / "editor")
+            override = os.environ.get("OMG_QUICK_INPUT_ORIGINAL_EDITOR", "").strip()
+            editor = override if override and override != self_editor else "nano"
             os.execv("/bin/sh", ["sh", "-c", 'exec ' + editor + ' "$@"', "omg-editor", *sys.argv[1:]])
         if len(sys.argv) != 2:
             raise ValueError("Expected one editor file")

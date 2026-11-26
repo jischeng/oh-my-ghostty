@@ -1911,5 +1911,23 @@ struct AgentQuickInputTests {
             host.layoutSubtreeIfNeeded()
             return editor.string.isEmpty && model.draft.isEmpty
         }
+
+        // 3. Resigning first responder (e.g. clicking footer Send/Queue button or Full Keyboard Access)
+        //    while IME marked text is active commits the composition into `model.draft` instead of stranding it.
+        editor.setMarkedText(
+            "按钮点击发送",
+            selectedRange: NSRange(location: 6, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        #expect(editor.hasMarkedText())
+        _ = window.makeFirstResponder(nil)
+        #expect(!editor.hasMarkedText())
+        #expect(model.draft == "按钮点击发送")
+        sentTexts.append(model.draft)
+        model.completeSubmittedDraft(model.draft, for: pane)
+        editor.syncWithBoundDraftIfNeeded()
+        #expect(sentTexts.last == "按钮点击发送")
+        #expect(editor.string.isEmpty)
+        #expect(model.draft.isEmpty)
     }
 }

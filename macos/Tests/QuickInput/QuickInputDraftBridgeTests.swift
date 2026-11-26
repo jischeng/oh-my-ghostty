@@ -756,6 +756,14 @@ struct QuickInputDraftBridgeTests {
     @Test func versionedPythonWrapperResolvesAgentIdentityWithoutPromptLeakage() throws {
         #expect(LocalAgentProcessDetector.detect(in: "python3.12 /home/user/.local/bin/hermes") == .hermes)
         #expect(LocalAgentProcessDetector.detect(in: "/usr/bin/env python3.13 /opt/tools/bin/agy") == .antigravity)
+        #expect(LocalAgentProcessDetector.detect(in: "/usr/bin/env agy") == .antigravity)
+        #expect(LocalAgentProcessDetector.detect(in: "/bin/bash /home/user/.local/bin/agy") == .antigravity)
+        #expect(LocalAgentProcessDetector.detect(
+            in: "/usr/bin/env node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+        ) == .claude)
+        #expect(LocalAgentProcessDetector.detect(
+            in: "/usr/bin/env -S bun --smol /usr/local/lib/node_modules/@mariozechner/pi-coding-agent/dist/cli.js"
+        ) == .pi)
         let command = QuickInputRemoteDraftBridge.command(
             "draft-begin",
             session: "omg-runtime-test",

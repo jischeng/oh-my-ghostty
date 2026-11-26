@@ -21,9 +21,23 @@ enum LocalAgentProcessDetector {
             let basename = URL(fileURLWithPath: normalizedExec).lastPathComponent.lowercased()
             let isWrapperOrPython = ["login", "env", "sh", "bash", "zsh", "fish", "python", "python3"]
                 .contains(basename) || basename.hasPrefix("python3.")
-            if isWrapperOrPython,
-               let agent = tokens.dropFirst().compactMap(exactAgent).last {
-                return agent
+            if isWrapperOrPython {
+                if let agent = tokens.dropFirst().compactMap(exactAgent).last {
+                    return agent
+                }
+                if let runtimeIdx = tokens.indices.dropFirst().first(where: { idx in
+                    let subBase = URL(fileURLWithPath: tokens[idx]).lastPathComponent.lowercased()
+                    return ["node", "bun", "deno"].contains(subBase)
+                }) {
+                    let runtimeArguments = tokens[(runtimeIdx + 1)...].prefix(4)
+                        .map { $0.lowercased() }
+                        .joined(separator: " ")
+                    if let agent = SupportedAgent.allCases.first(where: { candidate in
+                        candidate.definition.process.runtimeMarkers.contains {
+                            runtimeArguments.contains($0.lowercased())
+                        }
+                    }) { return agent }
+                }
             }
             if ["node", "bun", "deno"].contains(basename) {
                 let runtimeArguments = tokens.dropFirst().prefix(4)

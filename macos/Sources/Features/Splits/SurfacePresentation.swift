@@ -87,6 +87,19 @@ struct SurfaceCoreResizeState {
         return .commit
     }
 
+    mutating func commitVisualDockIfNeeded() -> SurfaceCoreResizeAction? {
+        guard interactionDepth == 0,
+              let appliedSize,
+              let committedSize,
+              committedSize != appliedSize else {
+            return nil
+        }
+        self.committedSize = appliedSize
+        committedOuterSize = dockOuterSize ?? appliedSize
+        hasUncommittedLiveSize = false
+        return .commit
+    }
+
     mutating func endInteraction() -> SurfaceCoreResizeAction? {
         guard interactionDepth > 0 else { return nil }
         interactionDepth -= 1
@@ -191,6 +204,13 @@ final class SurfacePresentationLease {}
     func requestSize(_ size: CGSize) {
         let allowsVisualOnlyDock = !(surface?.requiresCommittedDockResize ?? false)
         if let action = resizeState.request(size, allowsVisualOnlyDock: allowsVisualOnlyDock) {
+            apply(action)
+        }
+    }
+
+    func commitVisualDockIfNeeded() {
+        guard surface?.requiresCommittedDockResize == true else { return }
+        if let action = resizeState.commitVisualDockIfNeeded() {
             apply(action)
         }
     }

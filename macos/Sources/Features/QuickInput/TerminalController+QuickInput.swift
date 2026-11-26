@@ -280,10 +280,29 @@ extension TerminalController {
         return false
     }
 
+    private static func findComposerTextView(in root: NSView?, for surfaceID: UUID) -> ComposerTextView? {
+        guard let root, !root.isHidden else { return nil }
+        if let composer = root as? ComposerTextView,
+           composer.companionSurfaceID == surfaceID {
+            return composer
+        }
+        for subview in root.subviews {
+            if let found = findComposerTextView(in: subview, for: surfaceID) {
+                return found
+            }
+        }
+        return nil
+    }
+
     private func commitActiveQuickInputComposition(for surfaceID: UUID) -> ComposerTextView? {
-        guard let composer = window?.firstResponder as? ComposerTextView,
-              composer.companionSurfaceID == surfaceID else { return nil }
-        composer.commitMarkedTextForSubmission()
+        let composer: ComposerTextView?
+        if let active = window?.firstResponder as? ComposerTextView,
+           active.companionSurfaceID == surfaceID {
+            composer = active
+        } else {
+            composer = Self.findComposerTextView(in: window?.contentView, for: surfaceID)
+        }
+        composer?.commitMarkedTextForSubmission()
         return composer
     }
 

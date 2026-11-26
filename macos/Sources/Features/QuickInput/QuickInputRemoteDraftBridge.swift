@@ -47,17 +47,44 @@ enum QuickInputRemoteDraftBridge {
         if len(data) > 65536: raise ValueError('Invalid runtime metadata')
         return json.loads(data)
     def safe_identity(tokens):
-        executable = os.path.basename(tokens[0]).lower()
-        if executable in ('node', 'bun', 'deno'):
-            return tokens[:5]
-        if executable in ('python', 'python3', 'env') or executable.startswith('python3.'):
-            return [tokens[0]] + [
-                t for t in tokens[1:5]
-                if t.startswith('-') or '/' in t
-                or t in ('python', 'python3', 'node', 'bun', 'deno')
-                or t.startswith('python3.')
-            ]
-        return tokens[:1]
+        known = {
+            'agy', 'antigravity', 'antigravity-cli', 'jetski', 'jetski-cli',
+            'claude', 'claude-code', 'codex', 'openai-codex', 'gemini',
+            'opencode', 'pi', 'pi-coding-agent', 'omp', 'oh-my-pi', 'aider',
+            'goose', 'amp', 'crush', 'droid', 'kimi', 'kimi-code', 'qwen',
+            'qwen-code', 'qoder', 'copilot', 'gh-copilot', 'github-copilot-cli',
+            'cline', 'cursor', 'hermes', 'grok', 'reasonix',
+        }
+        def is_wrapper(name):
+            return (
+                name in ('env', 'login', 'sh', 'bash', 'zsh', 'fish', 'node', 'bun', 'deno', 'python', 'python3')
+                or name.startswith('python3.')
+            )
+        first = os.path.basename(tokens[0]).lstrip('-').lower()
+        if not is_wrapper(first):
+            return tokens[:1]
+        out = [tokens[0]]
+        takes_value = False
+        for t in tokens[1:7]:
+            if takes_value:
+                takes_value = False
+                out.append(t)
+                continue
+            if '=' in t and not t.startswith('-'):
+                continue
+            if t.startswith('-'):
+                out.append(t)
+                if t in ('-r', '--require', '--import', '--loader', '--conditions'):
+                    takes_value = True
+                continue
+            base = os.path.basename(t).lower()
+            if is_wrapper(base):
+                out.append(t)
+                continue
+            if '/' in t or base in known:
+                out.append(t)
+            break
+        return out
     def probe_tty_and_foreground(pid, expected_tty):
         try:
             tty = subprocess.run(['ps', '-o', 'tty=', '-p', str(pid)],
@@ -115,9 +142,17 @@ enum QuickInputRemoteDraftBridge {
         candidates.append(legacy_state)
     try:
         if run_root.is_dir() and not run_root.is_symlink():
-            for entry in sorted(run_root.iterdir()):
+            epochs = []
+            for entry in run_root.iterdir():
                 if entry not in candidates and re.fullmatch(r's-[0-9a-f]{12}', entry.name):
-                    candidates.append(entry)
+                    try:
+                        st = entry.lstat()
+                        if stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid():
+                            epochs.append((st.st_mtime, entry.name, entry))
+                    except OSError:
+                        continue
+            for _, _, entry in sorted(epochs, reverse=True):
+                candidates.append(entry)
     except OSError:
         pass
     state = None
@@ -192,17 +227,44 @@ enum QuickInputRemoteDraftBridge {
     if metadata.get('protocol') != 1 or metadata.get('tty') != tty:
         raise ValueError('Remote session mismatch')
     def safe_identity(tokens):
-        executable = os.path.basename(tokens[0]).lower()
-        if executable in ('node', 'bun', 'deno'):
-            return tokens[:5]
-        if executable in ('python', 'python3', 'env') or executable.startswith('python3.'):
-            return [tokens[0]] + [
-                t for t in tokens[1:5]
-                if t.startswith('-') or '/' in t
-                or t in ('python', 'python3', 'node', 'bun', 'deno')
-                or t.startswith('python3.')
-            ]
-        return tokens[:1]
+        known = {
+            'agy', 'antigravity', 'antigravity-cli', 'jetski', 'jetski-cli',
+            'claude', 'claude-code', 'codex', 'openai-codex', 'gemini',
+            'opencode', 'pi', 'pi-coding-agent', 'omp', 'oh-my-pi', 'aider',
+            'goose', 'amp', 'crush', 'droid', 'kimi', 'kimi-code', 'qwen',
+            'qwen-code', 'qoder', 'copilot', 'gh-copilot', 'github-copilot-cli',
+            'cline', 'cursor', 'hermes', 'grok', 'reasonix',
+        }
+        def is_wrapper(name):
+            return (
+                name in ('env', 'login', 'sh', 'bash', 'zsh', 'fish', 'node', 'bun', 'deno', 'python', 'python3')
+                or name.startswith('python3.')
+            )
+        first = os.path.basename(tokens[0]).lstrip('-').lower()
+        if not is_wrapper(first):
+            return tokens[:1]
+        out = [tokens[0]]
+        takes_value = False
+        for t in tokens[1:7]:
+            if takes_value:
+                takes_value = False
+                out.append(t)
+                continue
+            if '=' in t and not t.startswith('-'):
+                continue
+            if t.startswith('-'):
+                out.append(t)
+                if t in ('-r', '--require', '--import', '--loader', '--conditions'):
+                    takes_value = True
+                continue
+            base = os.path.basename(t).lower()
+            if is_wrapper(base):
+                out.append(t)
+                continue
+            if '/' in t or base in known:
+                out.append(t)
+            break
+        return out
     try:
         result = subprocess.run(['ps', '-t', tty[5:] if tty.startswith('/dev/') else tty, '-o', 'pgid=,tpgid=,args='],
                                 capture_output=True, text=True, check=True, timeout=3)

@@ -656,6 +656,7 @@ fn activeHasContentBelowCursor(screen: *const terminalpkg.Screen) bool {
 /// Caller must hold `renderer_state.mutex`.
 pub fn requiresCommittedDockResizeLocked(self: *const Termio) bool {
     if (self.visual_dock_auto_committed) return true;
+    if (self.terminal_stream.handler.isRemoteSshSession()) return true;
     const t = &self.terminal;
     if (t.screens.active_key == .alternate) return true;
     if (self.terminal_stream.handler.seen_synchronized_output) return true;
@@ -1426,6 +1427,43 @@ test "Termio: requiresCommittedDockResizeLocked distinguishes plain shell from i
     io.processOutput("\x1b[2J\x1b[H\x1b[?25h\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
     while (io.mailbox.spsc.queue.pop(global.io())) |msg| msg.deinit();
     try testing.expect(io.requiresCommittedDockResizeLocked());
+    io.visual_dock_auto_committed = false;
+    try testing.expect(!io.requiresCommittedDockResizeLocked());
+
+    // 4. Entering an OSC 3008 `type=remote` SSH session inside an already visually docked local
+    // shell immediately promotes `.resize_commit` even before any remote TUI starts, then returns
+    // to visual-only once SSH exits and the host restores outer size.
+    const full_size: renderer.Size = .{
+        .screen = .{ .width = 400, .height = 200 },
+        .cell = .{ .width = 10, .height = 20 },
+        .padding = .{},
+    };
+    try io.resizeVisual(full_size, true);
+    io.has_uncommitted_visual_resize = false;
+    try io.resizeVisual(docked_size, false);
+    try testing.expect(io.has_uncommitted_visual_resize);
+    try testing.expect(!io.requiresCommittedDockResizeLocked());
+
+    io.processOutput("\x1b]3008;start=omg-ssh-inline-1;type=remote;targethost=dev\x07");
+    try testing.expect(io.requiresCommittedDockResizeLocked());
+    try testing.expect(!io.has_uncommitted_visual_resize);
+    try testing.expect(io.visual_dock_auto_committed);
+
+    var saw_ssh_commit = false;
+    while (io.mailbox.spsc.queue.pop(global.io())) |msg| {
+        defer msg.deinit();
+        switch (msg) {
+            .resize_commit => |committed| {
+                saw_ssh_commit = true;
+                try testing.expectEqual(docked_size, committed);
+            },
+            else => {},
+        }
+    }
+    try testing.expect(saw_ssh_commit);
+
+    io.processOutput("\x1b]3008;end=omg-ssh-inline-1;status=0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+    while (io.mailbox.spsc.queue.pop(global.io())) |msg| msg.deinit();
     io.visual_dock_auto_committed = false;
     try testing.expect(!io.requiresCommittedDockResizeLocked());
 }

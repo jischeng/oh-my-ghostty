@@ -579,6 +579,12 @@ fn view_loop(
         } else {
             sync_hold_started.get_or_insert_with(Instant::now);
         }
+        if raw.is_some() {
+            if let Some(code) = drain_ready_stdin(socket, generation, ready, writer)? {
+                flush_out_buf(&mut *raw_stdout, &mut out_buf)?;
+                return Ok(code);
+            }
+        }
         if ready && writer {
             let current = dimensions();
             if size != current {
@@ -613,20 +619,9 @@ fn view_loop(
                 let _ = wake.read(&mut [0; 256]);
             }
             if fds[0].revents & libc::POLLIN != 0 {
-                let mut bytes = [0; 8192];
-                let len = io::stdin().read(&mut bytes)?;
-                if len == 0 {
+                if let Some(code) = drain_ready_stdin(socket, generation, ready, writer)? {
                     flush_out_buf(&mut *raw_stdout, &mut out_buf)?;
-                    return Ok(0);
-                }
-                if ready {
-                    if !writer {
-                        Frame::new(b'W', generation, b"inline-takeover/1").send(socket)?;
-                    }
-                    Frame::new(b'I', generation, &bytes[..len]).send(socket)?;
-                } else if bytes[..len].contains(&3) {
-                    flush_out_buf(&mut *raw_stdout, &mut out_buf)?;
-                    return Ok(130);
+                    return Ok(code);
                 }
             }
             if fds[0].revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
@@ -635,6 +630,72 @@ fn view_loop(
             }
         }
     }
+}
+
+fn drain_ready_stdin(
+    socket: &mut UnixStream,
+    generation: u64,
+    ready: bool,
+    writer: bool,
+) -> io::Result<Option<i32>> {
+    let mut sent_takeover = false;
+    drain_ready_stdin_with(
+        || {
+            let mut pfd = libc::pollfd {
+                fd: 0,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            if unsafe { libc::poll(&mut pfd, 1, 0) } > 0 {
+                pfd.revents
+            } else {
+                0
+            }
+        },
+        |buf| io::stdin().read(buf),
+        |chunk| {
+            if !writer && !sent_takeover {
+                sent_takeover = true;
+                Frame::new(b'W', generation, b"inline-takeover/1").send(socket)?;
+            }
+            Frame::new(b'I', generation, chunk).send(socket)
+        },
+        ready,
+    )
+}
+
+fn drain_ready_stdin_with(
+    mut poll_stdin: impl FnMut() -> libc::c_short,
+    mut read_stdin: impl FnMut(&mut [u8]) -> io::Result<usize>,
+    mut on_chunk: impl FnMut(&[u8]) -> io::Result<()>,
+    ready: bool,
+) -> io::Result<Option<i32>> {
+    let mut bytes = [0u8; 8192];
+    for _ in 0..64 {
+        let revents = poll_stdin();
+        if revents & libc::POLLIN != 0 {
+            let len = match read_stdin(&mut bytes) {
+                Ok(n) => n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) => return Err(e),
+            };
+            if len == 0 {
+                return Ok(Some(0));
+            }
+            if ready {
+                on_chunk(&bytes[..len])?;
+            } else if bytes[..len].contains(&3) {
+                return Ok(Some(130));
+            }
+            continue;
+        }
+        if revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            return Ok(Some(0));
+        }
+        break;
+    }
+    Ok(None)
 }
 
 fn flush_out_buf(out: &mut impl Write, buf: &mut Vec<u8>) -> io::Result<()> {
@@ -852,5 +913,75 @@ mod tests {
         // Calling again on empty buffer must be a clean no-op.
         flush_out_buf(&mut out, &mut buf).unwrap();
         assert_eq!(out, b"\x1b[?2026h\x1b[2Jpartial");
+    }
+
+    #[test]
+    fn drain_ready_stdin_flushes_multi_chunk_burst_before_resize_and_handles_ctrl_c() {
+        #[derive(Debug, PartialEq, Eq)]
+        enum Sent {
+            Takeover,
+            Input(usize),
+            Resize,
+        }
+        let mut remaining = vec![b'x'; 20_000];
+        remaining.extend_from_slice(b"\r");
+        let cursor = std::cell::Cell::new(0usize);
+        let mut events = Vec::new();
+        let mut sent_takeover = false;
+        let writer = false;
+
+        let exit = drain_ready_stdin_with(
+            || {
+                if cursor.get() < remaining.len() {
+                    libc::POLLIN
+                } else {
+                    0
+                }
+            },
+            |buf| {
+                let at = cursor.get();
+                let n = (remaining.len() - at).min(buf.len());
+                buf[..n].copy_from_slice(&remaining[at..at + n]);
+                cursor.set(at + n);
+                Ok(n)
+            },
+            |chunk| {
+                if !writer && !sent_takeover {
+                    sent_takeover = true;
+                    events.push(Sent::Takeover);
+                }
+                events.push(Sent::Input(chunk.len()));
+                Ok(())
+            },
+            true,
+        )
+        .unwrap();
+        events.push(Sent::Resize);
+
+        assert_eq!(exit, None);
+        assert_eq!(cursor.get(), 20_001);
+        assert_eq!(
+            events,
+            vec![
+                Sent::Takeover,
+                Sent::Input(8192),
+                Sent::Input(8192),
+                Sent::Input(3617),
+                Sent::Resize,
+            ]
+        );
+
+        // Unready Ctrl+C exits with 130 without forwarding input.
+        let unready_exit = drain_ready_stdin_with(
+            || libc::POLLIN,
+            |buf| {
+                buf[0] = 3;
+                Ok(1)
+            },
+            |_| panic!("unready input must not forward"),
+            false,
+        )
+        .unwrap();
+        assert_eq!(unready_exit, Some(130));
     }
 }

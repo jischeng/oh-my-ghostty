@@ -322,6 +322,9 @@ final class ComposerTextView: NSTextView, TerminalCompanionResponder {
     }
 
     override func resignFirstResponder() -> Bool {
+        if hasMarkedText() {
+            commitMarkedTextForSubmission()
+        }
         let result = super.resignFirstResponder()
         if result {
             let window = self.window

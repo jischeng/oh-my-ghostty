@@ -1273,7 +1273,10 @@ OMG SSH bootstrap provisions one versioned remote OMG command (`~/.local/share/o
 Quick Input presentation and focus remain Host-owned. The built-in composer participates in macOS `Option-Command` directional focus navigation, but this does not grant a plugin focus control. When the user enables `agents.openQuickInputOnStart`, the Host may expand Quick Input on the focused Pane's first Agent activity without changing first responder. `agents.openQuickInputOnComplete` applies the same Host-owned presentation policy to a newly completed focused Agent session. Plugin lifecycle messages cannot force focus or override either preference.
 
 Managed omgd SSH sessions provision the same editor protocol under their private
-runtime state's `draft` directory before launching a new remote PTY. The helper
+runtime state's `draft` directory before launching a new remote PTY, and preserve
+its `VISUAL`/`EDITOR` entry point across interactive `zsh -l`, `bash -l` and
+`fish -l` startup files while delegating non-Quick-Input edits to any RC-configured
+`VISUAL`/`EDITOR`. The helper
 uses `OMG_REMOTE_ROOT`, a stable runtime pane UUID, the PTY name and the session
 generation. The Host resolves both unified snapshot-epoch (`s-<hash12>`) and
 legacy revision-keyed runtime state directories, and verifies the live runtime

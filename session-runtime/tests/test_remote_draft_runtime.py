@@ -195,8 +195,22 @@ class RemoteRuntimeDraftTests(unittest.TestCase):
                 self.assertEqual(original.read_text(), replacement)
 
                 # 3. After compatible in-place upgrade where gc-remote removed old versions/<old_revision>,
-                #    scanning ~/.omg/run/s-* still resolves the live session while skipping ended records.
+                #    scanning ~/.omg/run/s-* sorted by mtime descending picks the newest live epoch
+                #    even when an older epoch has a lexicographically larger directory name (s-ffff...).
                 (vdir / "remote-state-dir").unlink()
+                older_lex_later = home / ".omg/run/s-ffffffffffff"
+                (older_lex_later / "sessions").mkdir(parents=True, mode=0o700)
+                older_lex_later.chmod(0o700)
+                (older_lex_later / "sessions" / f"{identity}.json").write_text(json.dumps({
+                    "id": identity,
+                    "generation": "stale-live-gen",
+                    "ended": None,
+                    "pid": 999999,
+                }))
+                old_ts = time.time() - 3600
+                os.utime(older_lex_later, (old_ts, old_ts))
+                now_ts = time.time()
+                os.utime(state, (now_ts, now_ts))
                 fallback = subprocess.run([sys.executable, "-", "gc-removed-old-rev", identity],
                                           input=probe, env=environment, capture_output=True,
                                           text=True, check=True, timeout=8)
@@ -228,17 +242,119 @@ class RemoteRuntimeDraftTests(unittest.TestCase):
 
         self.assertEqual(safe_identity(["agy", "secret prompt text"]), ["agy"])
         self.assertEqual(
-            safe_identity(["python3.12", "-u", "/home/user/.local/bin/aider", "my secret prompt"]),
+            safe_identity(["python3.12", "-u", "/home/user/.local/bin/aider", "my secret/prompt"]),
             ["python3.12", "-u", "/home/user/.local/bin/aider"],
         )
         self.assertEqual(
-            safe_identity(["/usr/bin/env", "python3", "/opt/tools/bin/kimi", "confidential"]),
+            safe_identity(["/usr/bin/env", "HTTPS_PROXY=http://u:p@proxy/secret", "python3", "/opt/tools/bin/kimi", "confidential"]),
             ["/usr/bin/env", "python3", "/opt/tools/bin/kimi"],
         )
         self.assertEqual(
-            safe_identity(["node", "--no-warnings", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"]),
-            ["node", "--no-warnings", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"],
+            safe_identity(["/usr/bin/env", "AGY_CLI_OSC7501=on", "agy", "fix src/secret.py"]),
+            ["/usr/bin/env", "agy"],
         )
+        self.assertEqual(
+            safe_identity(["/bin/bash", "/home/user/.local/bin/agy", "secret"]),
+            ["/bin/bash", "/home/user/.local/bin/agy"],
+        )
+        self.assertEqual(
+            safe_identity(["node", "-r", "/opt/preload.js", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js", "secret/arg"]),
+            ["node", "-r", "/opt/preload.js", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"],
+        )
+
+    def test_login_shell_rc_editor_override_preserves_draft_bridge_and_delegates_fallback(self):
+        shells = [s for s in ("/bin/bash", "/bin/zsh") if Path(s).is_file()]
+        self.assertTrue(shells)
+        for shell_path in shells:
+            with self.subTest(shell=shell_path), tempfile.TemporaryDirectory(prefix="omg-rc-editor-", dir="/tmp") as directory:
+                home = Path(directory)
+                state = home / ".omg/run/s-abcdef012345"
+                state.mkdir(parents=True, mode=0o700)
+                rc_marker = home / "rc_editor_ran.txt"
+                rc_editor = home / "user_rc_editor.py"
+                rc_editor.write_text(textwrap.dedent(f"""\
+                    #!{sys.executable}
+                    import pathlib, sys
+                    pathlib.Path({str(rc_marker)!r}).write_text(sys.argv[1])
+                """))
+                rc_editor.chmod(0o700)
+                rc_line = f'export EDITOR="{rc_editor}"\nexport VISUAL="{rc_editor}"\n'
+                for rc_name in (".bash_profile", ".bashrc", ".zshrc"):
+                    (home / rc_name).write_text(rc_line)
+
+                draft_file = home / "shell-draft.txt"
+                draft_file.write_text("RC 覆盖后仍可导入草稿")
+                ordinary_file = home / "ordinary.txt"
+                ordinary_file.write_text("ordinary edit")
+
+                environment = dict(os.environ, HOME=directory, SHELL=shell_path, TERM="xterm-256color")
+                environment.pop("ZDOTDIR", None)
+                environment.pop("PROMPT_COMMAND", None)
+                daemon = subprocess.Popen([str(BINARY), "host", str(state), "--", shell_path, "-l"],
+                                          env=environment)
+                identity = str(uuid.uuid4()).upper()
+                stream = socket.socket(socket.AF_UNIX)
+                stream.settimeout(8)
+                try:
+                    wait_socket(state / "host.sock", daemon)
+                    stream.connect(str(state / "host.sock"))
+                    stream.sendall(encode(b"H", 1, identity.encode()))
+                    inner_event(stream, 1, b"J")
+                    offset, _ = inner_event(stream, 1, b"S")
+                    stream.sendall(encode(b"D", 1, encode(b"A", offset)))
+                    stream.sendall(encode(b"D", 1, encode(b"W")))
+                    inner_event(stream, 1, b"W")
+
+                    # Wait for the interactive login shell to finish RC + first prompt hook.
+                    ready_sentinel = home / "prompt.ready"
+                    stream.sendall(encode(b"D", 1, encode(b"I", 0, f'touch "{ready_sentinel}"\r'.encode())))
+                    for _ in range(100):
+                        if ready_sentinel.exists():
+                            break
+                        time.sleep(0.03)
+                    self.assertTrue(ready_sentinel.exists())
+
+                    session = "omg-runtime-" + identity.lower()
+                    root = state / "draft"
+                    scope = root / "sessions" / hashlib.sha256(session.encode()).hexdigest()
+                    metadata = json.loads((scope / "session.json").read_text())
+                    env = dict(environment, OMG_REMOTE_ROOT=str(root))
+                    command = [sys.executable, str(root / "omg")]
+                    req = str(uuid.uuid4())
+                    subprocess.run(command + ["draft-begin", session, req, metadata["tty"], metadata["runtime_generation"]],
+                                   env=env, capture_output=True, check=True, timeout=5)
+                    stream.sendall(encode(b"D", 1, encode(b"I", 0, f'"$EDITOR" "{draft_file}"\r'.encode())))
+                    imported = subprocess.run(command + ["draft-read", session, req], env=env,
+                                              capture_output=True, check=True, timeout=8)
+                    self.assertEqual(imported.stdout, "OMG_REMOTE_DRAFT_V1\nRC 覆盖后仍可导入草稿".encode())
+                    self.assertFalse(rc_marker.exists(), "Active draft import must not open user RC editor")
+                    subprocess.run(command + ["draft-finish", session, req], env=env,
+                                   capture_output=True, check=True, timeout=5)
+
+                    # Without an active draft request, $EDITOR delegates to the user's RC editor.
+                    stream.sendall(encode(b"D", 1, encode(b"I", 0, f'"$EDITOR" "{ordinary_file}"\r'.encode())))
+                    for _ in range(100):
+                        if rc_marker.exists():
+                            break
+                        time.sleep(0.03)
+                    self.assertTrue(rc_marker.exists())
+                    self.assertEqual(rc_marker.read_text(), str(ordinary_file))
+                finally:
+                    stream.close()
+                    try:
+                        deadline = time.monotonic() + 8
+                        while True:
+                            with socket.socket(socket.AF_UNIX) as control:
+                                control.settimeout(3)
+                                control.connect(str(state / "host.sock"))
+                                control.sendall(encode(b"K", 1, identity.encode()))
+                                _, _, data = frame(control)
+                            if data[13:] == b"closed" or time.monotonic() > deadline:
+                                break
+                            time.sleep(0.05)
+                    finally:
+                        daemon.terminate()
+                        daemon.wait(timeout=5)
 
 
 if __name__ == "__main__":

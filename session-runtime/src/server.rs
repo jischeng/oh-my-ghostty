@@ -1155,9 +1155,7 @@ pub fn serve_managed(
             if let Ok(bridge) =
                 crate::remote_draft::prepare(parent, &managed.record, tty, &original)
             {
-                command
-                    .env("VISUAL", &bridge.editor)
-                    .env("EDITOR", &bridge.editor);
+                bridge.configure_command(&mut command, &argv, &original);
                 _draft_bridge = Some(bridge);
             }
         }

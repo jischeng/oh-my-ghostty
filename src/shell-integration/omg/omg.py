@@ -178,7 +178,10 @@ def main(arguments):
         except (OSError, ValueError, KeyError, TypeError):
             active = False
         if not active:
-            os.execv("/bin/sh", ["sh", "-c", "exec " + metadata["editor"] + ' "$@"',
+            self_editor = str(directory / "editor")
+            override = os.environ.get("OMG_REMOTE_ORIGINAL_EDITOR", "").strip()
+            fallback_editor = override if override and override != self_editor else metadata["editor"]
+            os.execv("/bin/sh", ["sh", "-c", "exec " + fallback_editor + ' "$@"',
                                  "omg-editor", *rest])
         if len(rest) != 1:
             raise ValueError("Expected one editor file")

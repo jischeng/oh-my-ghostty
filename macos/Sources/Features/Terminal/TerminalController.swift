@@ -1030,8 +1030,19 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                     descriptor: runtime
                 )
             }
+            let initialLocalWorkingDirectory: String? = if surface.runtimeDescriptor?.isLocal == false {
+                surface.runtimeDescriptor?.connection?.localWorkingDirectory
+            } else if let inline = surface.runtimeInlineSession {
+                inline.descriptor.launchWorkingDirectory
+            } else if surface.sshResumeDescriptor?.isAwaitingReconnect == false {
+                surface.sshResumeDescriptor?.localWorkingDirectory ?? surface.pwd
+            } else if surface.agentResumeDescriptor?.scope == .remote {
+                surface.agentResumeDescriptor?.sshReplay?.localWorkingDirectory ?? surface.pwd
+            } else {
+                surface.pwd
+            }
             paneSessionContexts[surface.id] = .init(
-                workingDirectory: surface.pwd,
+                workingDirectory: initialLocalWorkingDirectory,
                 terminalTitle: surface.title
             )
             if let runtime = surface.runtimeDescriptor {
@@ -1046,6 +1057,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                     signal, currentWorkingDirectory: surface.pwd, currentTerminalTitle: surface.title,
                     sshReplay: inline.replay
                 )
+            }
+            if let context = paneSessionContexts[surface.id] {
+                if let localCwd = context.local.workingDirectory, !localCwd.isEmpty {
+                    surface.knownLocalWorkingDirectory = localCwd
+                }
+                surface.isShowingRemoteSession = context.isSSHSession
             }
             // Establish the local epoch before any SSH transition, even if
             // Info has never been opened and no title/PWD event was emitted.
@@ -1072,25 +1089,53 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                         workingDirectory: pwd,
                         terminalTitle: title
                     )
+                    if let inline = surface.runtimeInlineSession,
+                       !context.isSSHSession,
+                       let signal = inline.restorationSignal {
+                        context.apply(
+                            signal,
+                            currentWorkingDirectory: pwd,
+                            currentTerminalTitle: title,
+                            sshReplay: inline.replay
+                        )
+                    }
+                    let isRemoteSurface = context.isSSHSession
+                        || surface.runtimeInlineSession != nil
+                        || surface.isShowingRemoteSession
+                        || surface.sshResumeDescriptor?.isAwaitingReconnect == false
+                        || surface.agentResumeDescriptor?.scope == .remote
+                    let effectiveLocalPwd = isRemoteSurface ? nil : pwd
                     if let runtime = surface.runtimeDescriptor {
                         if runtime.isLocal {
-                            context.updateLocalMetadata(workingDirectory: pwd, terminalTitle: title)
-                        }
-                        context.applyRuntimeConnection(
-                            runtime,
-                            workingDirectory: pwd,
-                            state: surface.runtimeConnectionState
-                        )
-                        if !OMGApplicationEnvironment.isRunningTests, pwd != nil {
-                            _ = SessionRuntimeHistoryStore.save(
-                                commands: TerminalHistoryService.shared.commands(for: surface.id),
+                            context.updateLocalMetadata(workingDirectory: effectiveLocalPwd, terminalTitle: title)
+                            if !OMGApplicationEnvironment.isRunningTests {
+                                let historyCwd = isRemoteSurface ? context.local.workingDirectory : pwd
+                                if historyCwd != nil {
+                                    _ = SessionRuntimeHistoryStore.save(
+                                        commands: TerminalHistoryService.shared.commands(for: surface.id),
+                                        workingDirectory: historyCwd,
+                                        for: runtime,
+                                        paneID: surface.id
+                                    )
+                                }
+                            }
+                        } else {
+                            context.applyRuntimeConnection(
+                                runtime,
                                 workingDirectory: pwd,
-                                for: runtime,
-                                paneID: surface.id
+                                state: surface.runtimeConnectionState
                             )
+                            if !OMGApplicationEnvironment.isRunningTests, pwd != nil {
+                                _ = SessionRuntimeHistoryStore.save(
+                                    commands: TerminalHistoryService.shared.commands(for: surface.id),
+                                    workingDirectory: pwd,
+                                    for: runtime,
+                                    paneID: surface.id
+                                )
+                            }
                         }
                     } else {
-                        context.updateLocalMetadata(workingDirectory: pwd, terminalTitle: title)
+                        context.updateLocalMetadata(workingDirectory: effectiveLocalPwd, terminalTitle: title)
                     }
                     updatePaneSessionContext(context, for: surface.id)
                     updateAgentTitleActivity(title, for: surface.id)
@@ -1242,6 +1287,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         registerTypedAgentHookSignal(signal, for: surface.id)
         updateAgentActivity(signal, for: surface.id)
         if didEndSSHSession {
+            surface.pendingSSHLaunchReplay = nil
             clearRemoteAgentState(for: surface.id)
         }
     }
@@ -2672,6 +2718,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             !context.hasSameLocation(as: $0)
         } ?? true
         if let view = surfaceTree.first(where: { $0.id == surfaceID }) {
+            if let localCwd = context.local.workingDirectory, !localCwd.isEmpty {
+                view.knownLocalWorkingDirectory = localCwd
+            }
+            view.isShowingRemoteSession = context.isSSHSession
             TerminalHistoryService.shared.synchronizeSession(context, in: view)
         }
         var next = paneSessionContexts
@@ -2719,63 +2769,283 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             ?? paneSessionContext(for: surface)?.presentationTitle ?? terminalTitle
     }
 
+    struct RemoteSessionSource {
+        let replay: SSHReplayDescriptor?
+        let remoteWorkingDirectory: String?
+        let localWorkingDirectory: String?
+        let requiresValidReplayForSplit: Bool
+    }
+
+    func remoteSessionSource(for source: Ghostty.SurfaceView) -> RemoteSessionSource? {
+        if let inline = source.runtimeInlineSession, let connection = inline.descriptor.connection {
+            let context = paneSessionContext(for: source)
+            let localDir = SessionRuntimeDescriptor.validWorkingDirectory(connection.localWorkingDirectory)
+                ?? context?.local.workingDirectory
+                ?? source.knownLocalWorkingDirectory
+                ?? (source.runtimeDescriptor?.isLocal == true ? source.runtimeDescriptor?.localWorkingDirectory : nil)
+            var remoteDir = inline.workingDirectory ?? inline.descriptor.initialWorkingDirectory
+            if let context, case .sshReady(_, let dir) = context.state {
+                remoteDir = dir
+            }
+            var replay = inline.replay
+            if replay?.localWorkingDirectory == nil {
+                replay?.localWorkingDirectory = localDir
+            }
+            return .init(
+                replay: replay,
+                remoteWorkingDirectory: remoteDir,
+                localWorkingDirectory: localDir,
+                requiresValidReplayForSplit: true
+            )
+        }
+        if let runtime = source.runtimeDescriptor, let connection = runtime.connection {
+            let context = paneSessionContext(for: source)
+            let localDir = SessionRuntimeDescriptor.validWorkingDirectory(connection.localWorkingDirectory)
+                ?? context?.local.workingDirectory
+                ?? source.knownLocalWorkingDirectory
+            let remoteDir: String? = if let context, case .sshReady(_, let dir) = context.state {
+                dir
+            } else {
+                SessionRuntimeDescriptor.validWorkingDirectory(source.pwd) ?? runtime.initialWorkingDirectory
+            }
+            let replay = SSHReplayDescriptor(
+                version: 1,
+                ssh: connection.executablePath,
+                forwardEnv: true,
+                terminfo: true,
+                cache: true,
+                args: connection.options + [connection.destination],
+                localWorkingDirectory: localDir
+            )
+            return .init(
+                replay: replay,
+                remoteWorkingDirectory: remoteDir,
+                localWorkingDirectory: localDir,
+                requiresValidReplayForSplit: true
+            )
+        }
+        if let context = paneSessionContext(for: source), context.isSSHSession {
+            let ssh: PaneSessionContext.SSH
+            let contextRemoteDir: String?
+            switch context.state {
+            case .local:
+                return nil
+            case .sshConnecting(let active):
+                ssh = active
+                contextRemoteDir = nil
+            case .sshReady(let active, let dir):
+                ssh = active
+                contextRemoteDir = dir
+            }
+            let fallbackAgentReplay = agentResumeDescriptor(for: source)?.scope == .remote
+                ? agentResumeDescriptor(for: source)?.sshReplay
+                : nil
+            var replay = ssh.replay
+                ?? SSHReplayStore.load(connectionID: ssh.connectionID)
+                ?? source.pendingSSHLaunchReplay
+                ?? fallbackAgentReplay
+                ?? (source.sshResumeDescriptor?.isAwaitingReconnect == false ? source.sshResumeDescriptor?.sshReplay : nil)
+            let localDir = context.local.workingDirectory
+                ?? source.knownLocalWorkingDirectory
+                ?? replay?.localWorkingDirectory
+                ?? source.sshResumeDescriptor?.localWorkingDirectory
+                ?? (source.runtimeDescriptor?.isLocal == true ? source.runtimeDescriptor?.localWorkingDirectory : nil)
+            if replay != nil, replay?.localWorkingDirectory == nil {
+                replay?.localWorkingDirectory = localDir
+            }
+            let remoteDir = contextRemoteDir
+                ?? (source.sshResumeDescriptor?.isAwaitingReconnect == false ? source.sshResumeDescriptor?.remoteWorkingDirectory : nil)
+            return .init(
+                replay: replay,
+                remoteWorkingDirectory: remoteDir,
+                localWorkingDirectory: localDir,
+                requiresValidReplayForSplit: false
+            )
+        }
+        if let resumed = agentResumeDescriptor(for: source), resumed.scope == .remote {
+            var replay = resumed.sshReplay ?? source.pendingSSHLaunchReplay
+            let localDir = replay?.localWorkingDirectory
+                ?? paneSessionContext(for: source)?.local.workingDirectory
+                ?? source.knownLocalWorkingDirectory
+                ?? source.sshResumeDescriptor?.localWorkingDirectory
+                ?? (source.runtimeDescriptor?.isLocal == true ? source.runtimeDescriptor?.localWorkingDirectory : nil)
+            if replay != nil, replay?.localWorkingDirectory == nil {
+                replay?.localWorkingDirectory = localDir
+            }
+            return .init(
+                replay: replay,
+                remoteWorkingDirectory: resumed.workingDirectory,
+                localWorkingDirectory: localDir,
+                requiresValidReplayForSplit: true
+            )
+        }
+        if let sshResume = source.sshResumeDescriptor, !sshResume.isAwaitingReconnect {
+            var replay: SSHReplayDescriptor? = sshResume.sshReplay
+            let localDir = sshResume.localWorkingDirectory
+                ?? replay?.localWorkingDirectory
+                ?? paneSessionContext(for: source)?.local.workingDirectory
+                ?? source.knownLocalWorkingDirectory
+                ?? (source.runtimeDescriptor?.isLocal == true ? source.runtimeDescriptor?.localWorkingDirectory : nil)
+            if replay?.localWorkingDirectory == nil {
+                replay?.localWorkingDirectory = localDir
+            }
+            return .init(
+                replay: replay,
+                remoteWorkingDirectory: sshResume.remoteWorkingDirectory,
+                localWorkingDirectory: localDir,
+                requiresValidReplayForSplit: true
+            )
+        }
+        return nil
+    }
+
+    private static func stripTransientRuntimeEnvironment(_ config: inout Ghostty.SurfaceConfiguration) {
+        for key in [
+            SessionRuntimeDescriptor.environmentKey,
+            SessionRuntimeDescriptor.localRuntimeEnvironmentKey,
+            SessionRuntimeDescriptor.attachExistingEnvironmentKey,
+            SessionRuntimeDescriptor.resurrectWorkingDirectoryEnvironmentKey,
+            SessionRuntimeDescriptor.recreateIfGoneEnvironmentKey,
+            SessionRuntimeDescriptor.handoffResumeEnvironmentKey,
+            Ghostty.SurfaceConfiguration.suppressInheritCwdEnvironmentKey,
+            "OMG_RUNTIME_SOCKET",
+            "OMG_RUNTIME_PANE_ID",
+        ] {
+            config.environmentVariables.removeValue(forKey: key)
+        }
+    }
+
+    private func configureLocalRuntimeForNewPane(
+        _ config: inout Ghostty.SurfaceConfiguration,
+        from source: Ghostty.SurfaceView,
+        inheritsWorkingDirectory: Bool,
+        runtimeRevision: String?,
+        runtimePolicy: SessionRuntimePolicy,
+        localRuntimeEnabled: Bool
+    ) -> Bool {
+        guard localRuntimeEnabled else { return true }
+        let fallbackLocalDir = inheritsWorkingDirectory && source.runtimeDescriptor?.isLocal == true
+            ? source.runtimeDescriptor?.launchWorkingDirectory
+            : nil
+        if let runtimeRevision {
+            var next = SessionRuntimeDescriptor(
+                connection: nil,
+                revision: runtimeRevision,
+                policy: runtimePolicy,
+                localWorkingDirectory: SessionRuntimeDescriptor.validWorkingDirectory(
+                    config.workingDirectory ?? fallbackLocalDir
+                )
+            )
+            next.initialWorkingDirectory = SessionRuntimeDescriptor.validWorkingDirectory(config.workingDirectory)
+            do { try next.configure(&config) } catch { return false }
+        } else if source.runtimeDescriptor?.isLocal == true,
+                  !OMGApplicationEnvironment.isRunningTests,
+                  let current = try? SessionRuntimeConnections.localDescriptor(
+                    workingDirectory: SessionRuntimeDescriptor.validWorkingDirectory(
+                        config.workingDirectory ?? fallbackLocalDir
+                    ),
+                    policy: runtimePolicy
+                  ) {
+            var next = current
+            next.initialWorkingDirectory = SessionRuntimeDescriptor.validWorkingDirectory(config.workingDirectory)
+            do { try next.configure(&config) } catch { return false }
+        } else {
+            _ = SessionRuntimeConnections.automaticallyConfigureLocalRuntime(
+                &config,
+                policy: runtimePolicy,
+                enabled: localRuntimeEnabled
+            )
+        }
+        config.environmentVariables.removeValue(forKey: "OMG_RUNTIME_SOCKET")
+        config.environmentVariables.removeValue(forKey: "OMG_RUNTIME_PANE_ID")
+        return true
+    }
+
     func tabConfiguration(
         inherited config: Ghostty.SurfaceConfiguration?,
         from source: Ghostty.SurfaceView,
         runtimeRevision: String? = nil,
         runtimePolicy: SessionRuntimePolicy? = nil,
-        localRuntimeEnabled: Bool? = nil
+        localRuntimeEnabled: Bool? = nil,
+        inheritsWorkingDirectory: Bool? = nil
     ) -> Ghostty.SurfaceConfiguration? {
-        if let runtime = source.runtimeDescriptor {
-            if runtime.isLocal {
-                guard localRuntimeEnabled ?? OhMyGhosttySettings.shared.localRuntimeEnabled else {
-                    var result = config ?? .init()
-                    result.environmentVariables.removeValue(forKey: SessionRuntimeDescriptor.environmentKey)
-                    result.environmentVariables.removeValue(forKey: SessionRuntimeDescriptor.localRuntimeEnvironmentKey)
-                    result.environmentVariables.removeValue(forKey: SessionRuntimeDescriptor.attachExistingEnvironmentKey)
-                    result.environmentVariables.removeValue(
-                        forKey: SessionRuntimeDescriptor.resurrectWorkingDirectoryEnvironmentKey
-                    )
-                    result.environmentVariables.removeValue(forKey: "OMG_RUNTIME_SOCKET")
-                    result.environmentVariables.removeValue(forKey: "OMG_RUNTIME_PANE_ID")
-                    return result
-                }
-                let policy = runtimePolicy ?? OhMyGhosttySettings.shared.runtimePolicy
-                var next: SessionRuntimeDescriptor
-                if let runtimeRevision {
-                    next = SessionRuntimeDescriptor(
-                        connection: nil,
-                        revision: runtimeRevision,
-                        policy: policy,
-                        localWorkingDirectory: runtime.launchWorkingDirectory
-                    )
-                } else if let current = try? SessionRuntimeConnections.localDescriptor(
-                    workingDirectory: runtime.launchWorkingDirectory,
-                    policy: policy
-                ) {
-                    next = current
-                } else {
+        let settings = OhMyGhosttySettings.shared
+        let effectivePolicy = runtimePolicy ?? settings.runtimePolicy
+        let effectiveLocalEnabled = localRuntimeEnabled ?? settings.localRuntimeEnabled
+        let shouldInherit = inheritsWorkingDirectory ?? ghostty.config.tabInheritWorkingDirectory
+
+        if let remote = remoteSessionSource(for: source) {
+            var result = config ?? .init()
+            Self.stripTransientRuntimeEnvironment(&result)
+            result.clearSurvivalCommand()
+            if shouldInherit {
+                result.workingDirectory = remote.localWorkingDirectory
+                    ?? FileManager.default.homeDirectoryForCurrentUser.path
+            } else {
+                result.workingDirectory = nil
+                result.environmentVariables[Ghostty.SurfaceConfiguration.suppressInheritCwdEnvironmentKey] = "1"
+            }
+            guard configureLocalRuntimeForNewPane(
+                &result,
+                from: source,
+                inheritsWorkingDirectory: shouldInherit,
+                runtimeRevision: runtimeRevision,
+                runtimePolicy: effectivePolicy,
+                localRuntimeEnabled: effectiveLocalEnabled
+            ) else { return nil }
+            return result
+        }
+
+        if let runtime = source.runtimeDescriptor, runtime.isLocal {
+            var result = config ?? .init()
+            Self.stripTransientRuntimeEnvironment(&result)
+            if !shouldInherit {
+                result.workingDirectory = nil
+                result.environmentVariables[Ghostty.SurfaceConfiguration.suppressInheritCwdEnvironmentKey] = "1"
+            }
+            guard effectiveLocalEnabled else {
+                return result
+            }
+            if runtimeRevision == nil {
+                guard var next = try? SessionRuntimeConnections.localDescriptor(
+                    workingDirectory: shouldInherit ? runtime.launchWorkingDirectory : nil,
+                    policy: effectivePolicy
+                ) else {
                     return nil
                 }
-                next.initialWorkingDirectory = SessionRuntimeDescriptor.validWorkingDirectory(
-                    source.runtimeInlineSession?.descriptor.launchWorkingDirectory ?? config?.workingDirectory
-                )
-                var result = config ?? .init()
-                if let inline = source.runtimeInlineSession { result.workingDirectory = inline.descriptor.launchWorkingDirectory }
+                next.initialWorkingDirectory = SessionRuntimeDescriptor.validWorkingDirectory(result.workingDirectory)
                 do { try next.configure(&result) } catch { return nil }
                 result.environmentVariables.removeValue(forKey: "OMG_RUNTIME_SOCKET")
                 result.environmentVariables.removeValue(forKey: "OMG_RUNTIME_PANE_ID")
                 return result
             }
-            guard let connection = runtime.connection else { return config }
-            var result = config ?? .init()
-            result.environmentVariables.removeValue(forKey: SessionRuntimeDescriptor.environmentKey)
-            result.environmentVariables.removeValue(forKey: "OMG_RUNTIME_SOCKET")
-            result.environmentVariables.removeValue(forKey: "OMG_RUNTIME_PANE_ID")
-            result.workingDirectory = connection.localWorkingDirectory
-            result.command = nil
+            guard configureLocalRuntimeForNewPane(
+                &result,
+                from: source,
+                inheritsWorkingDirectory: shouldInherit,
+                runtimeRevision: runtimeRevision,
+                runtimePolicy: effectivePolicy,
+                localRuntimeEnabled: effectiveLocalEnabled
+            ) else { return nil }
             return result
         }
+
+        if !shouldInherit {
+            var result = config ?? .init()
+            Self.stripTransientRuntimeEnvironment(&result)
+            result.workingDirectory = nil
+            result.environmentVariables[Ghostty.SurfaceConfiguration.suppressInheritCwdEnvironmentKey] = "1"
+            guard configureLocalRuntimeForNewPane(
+                &result,
+                from: source,
+                inheritsWorkingDirectory: false,
+                runtimeRevision: runtimeRevision,
+                runtimePolicy: effectivePolicy,
+                localRuntimeEnabled: effectiveLocalEnabled
+            ) else { return nil }
+            return result
+        }
+
         guard let session = paneSessionContext(for: source) else { return config }
         return Self.tabConfiguration(
             inherited: config,
@@ -2813,8 +3083,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         do {
             let launch = try newSplitLaunch(inherited: config, from: oldView)
             let surface = super.newSplit(at: oldView, direction: direction, baseConfig: launch.configuration)
-            if let surface, let descriptor = launch.agentDescriptor {
-                adoptAgentResumeDescriptor(descriptor, for: surface)
+            if let surface {
+                adoptInheritedLaunch(launch, for: surface)
             }
             return surface
         } catch {
@@ -2830,87 +3100,91 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         from source: Ghostty.SurfaceView,
         runtimeRevision: String? = nil,
         runtimePolicy: SessionRuntimePolicy? = nil,
-        localRuntimeEnabled: Bool? = nil
+        localRuntimeEnabled: Bool? = nil,
+        inheritsWorkingDirectory: Bool? = nil,
+        injectTabSessionID: Bool = true
     ) throws -> Ghostty.SurfaceConfiguration? {
         let settings = OhMyGhosttySettings.shared
         let effectiveRuntimePolicy = runtimePolicy ?? settings.runtimePolicy
         let effectiveLocalRuntimeEnabled = localRuntimeEnabled ?? settings.localRuntimeEnabled
-        if let inline = source.runtimeInlineSession, let connection = inline.descriptor.connection {
-            var next = try runtimeRevision.map {
-                SessionRuntimeDescriptor(connection: connection, revision: $0, policy: effectiveRuntimePolicy)
-            } ?? SessionRuntimeConnections.descriptor(connection: connection, policy: effectiveRuntimePolicy)
-            var directory = inline.workingDirectory ?? inline.descriptor.initialWorkingDirectory
-            if let context = paneSessionContext(for: source),
-               case .sshReady(_, let remoteDirectory) = context.state {
-                directory = remoteDirectory
+        let shouldInherit = inheritsWorkingDirectory ?? ghostty.config.splitInheritWorkingDirectory
+
+        // All remote pane forms (Inline SSH, direct remote runtime, passthrough
+        // +ssh, bare foreground ssh, or pending remote Agent/SSH resume) launch
+        // an outer local pane in the inherited local directory running survival
+        // +ssh, so exiting SSH returns cleanly to the local shell.
+        if let remote = remoteSessionSource(for: source) {
+            var activeReplay = remote.replay
+            let localDir: String? = shouldInherit
+                ? (remote.localWorkingDirectory ?? FileManager.default.homeDirectoryForCurrentUser.path)
+                : nil
+            let remoteDir: String? = shouldInherit ? remote.remoteWorkingDirectory : nil
+            if activeReplay != nil, activeReplay?.localWorkingDirectory == nil {
+                activeReplay?.localWorkingDirectory = remote.localWorkingDirectory
             }
-            next.initialWorkingDirectory = SessionRuntimeDescriptor.validWorkingDirectory(directory)
             var result = config ?? .init()
-            try next.configure(&result)
-            result.command = nil
+            Self.stripTransientRuntimeEnvironment(&result)
+            result.workingDirectory = localDir
+            if !shouldInherit {
+                result.environmentVariables[Ghostty.SurfaceConfiguration.suppressInheritCwdEnvironmentKey] = "1"
+            }
             result.initialInput = nil
-            result.workingDirectory = nil
             result.waitAfterCommand = false
-            return Self.injectingSessionID(tabSessionID, into: result)
-        }
-        if let resumed = agentResumeDescriptor(for: source), resumed.scope == .remote,
-           source.runtimeDescriptor?.isLocal != false {
-            guard let replay = resumed.sshReplay, replay.transferTarget != nil,
-                  let executable = Bundle.main.executablePath,
-                  let command = replay.command(executablePath: executable, remoteWorkingDirectory: resumed.workingDirectory) else {
+            if let replay = activeReplay,
+               replay.transferTarget != nil,
+               let executable = Bundle.main.executablePath,
+               let command = replay.command(
+                executablePath: executable,
+                remoteWorkingDirectory: remoteDir,
+                includeLocalWorkingDirectory: !shouldInherit
+               ) {
+                result.setSurvivalCommand(command)
+            } else if remote.requiresValidReplayForSplit {
                 throw WorkspaceFilesystemError.operationFailed(
                     "The restored SSH connection is unavailable. Reconnect this pane before splitting it."
                 )
-            }
-            // History starts with a local host PTY. Before inline handoff has
-            // arrived, its validated replay still identifies the remote host.
-            var result = config ?? .init()
-            for key in [SessionRuntimeDescriptor.environmentKey, SessionRuntimeDescriptor.localRuntimeEnvironmentKey,
-                        SessionRuntimeDescriptor.attachExistingEnvironmentKey,
-                        SessionRuntimeDescriptor.resurrectWorkingDirectoryEnvironmentKey,
-                        "OMG_RUNTIME_SOCKET", "OMG_RUNTIME_PANE_ID"] {
-                result.environmentVariables.removeValue(forKey: key)
-            }
-            result.workingDirectory = replay.localWorkingDirectory ?? paneSessionContext(for: source)?.local.workingDirectory
-            result.command = Self.replaySurvivalCommand(command)
-            result.initialInput = nil
-            result.waitAfterCommand = false
-            return Self.injectingSessionID(tabSessionID, into: result)
-        }
-        if let runtime = source.runtimeDescriptor {
-            if runtime.isLocal, !effectiveLocalRuntimeEnabled {
-                var result = config ?? .init()
-                result.environmentVariables.removeValue(forKey: SessionRuntimeDescriptor.environmentKey)
-                result.environmentVariables.removeValue(forKey: SessionRuntimeDescriptor.localRuntimeEnvironmentKey)
-                result.environmentVariables.removeValue(forKey: SessionRuntimeDescriptor.attachExistingEnvironmentKey)
-                result.environmentVariables.removeValue(
-                    forKey: SessionRuntimeDescriptor.resurrectWorkingDirectoryEnvironmentKey
-                )
-                result.environmentVariables.removeValue(forKey: "OMG_RUNTIME_SOCKET")
-                result.environmentVariables.removeValue(forKey: "OMG_RUNTIME_PANE_ID")
-                return Self.injectingSessionID(tabSessionID, into: result)
-            }
-            // A split creates a new PTY on this host. Use the current bundled
-            // protocol; the existing pane remains pinned to its own revision.
-            var next: SessionRuntimeDescriptor
-            if let connection = runtime.connection {
-                next = try runtimeRevision.map {
-                    SessionRuntimeDescriptor(connection: connection, revision: $0, policy: effectiveRuntimePolicy)
-                } ?? SessionRuntimeConnections.descriptor(connection: connection, policy: effectiveRuntimePolicy)
             } else {
-                next = try runtimeRevision.map {
-                    SessionRuntimeDescriptor(connection: nil, revision: $0, policy: effectiveRuntimePolicy,
-                                             localWorkingDirectory: runtime.launchWorkingDirectory)
-                } ?? SessionRuntimeConnections.localDescriptor(
-                    workingDirectory: runtime.launchWorkingDirectory,
+                result.clearSurvivalCommand()
+            }
+            _ = configureLocalRuntimeForNewPane(
+                &result,
+                from: source,
+                inheritsWorkingDirectory: shouldInherit,
+                runtimeRevision: runtimeRevision,
+                runtimePolicy: effectiveRuntimePolicy,
+                localRuntimeEnabled: effectiveLocalRuntimeEnabled
+            )
+            return injectTabSessionID ? Self.injectingSessionID(tabSessionID, into: result) : result
+        }
+
+        if let runtime = source.runtimeDescriptor, runtime.isLocal {
+            var result = config ?? .init()
+            Self.stripTransientRuntimeEnvironment(&result)
+            if !shouldInherit {
+                result.workingDirectory = nil
+                result.environmentVariables[Ghostty.SurfaceConfiguration.suppressInheritCwdEnvironmentKey] = "1"
+            }
+            if !effectiveLocalRuntimeEnabled {
+                return injectTabSessionID ? Self.injectingSessionID(tabSessionID, into: result) : result
+            }
+            let next: SessionRuntimeDescriptor
+            if let runtimeRevision {
+                var built = SessionRuntimeDescriptor(
+                    connection: nil,
+                    revision: runtimeRevision,
+                    policy: effectiveRuntimePolicy,
+                    localWorkingDirectory: shouldInherit ? runtime.launchWorkingDirectory : nil
+                )
+                built.initialWorkingDirectory = SessionRuntimeDescriptor.validWorkingDirectory(result.workingDirectory)
+                next = built
+            } else {
+                var built = try SessionRuntimeConnections.localDescriptor(
+                    workingDirectory: shouldInherit ? runtime.launchWorkingDirectory : nil,
                     policy: effectiveRuntimePolicy
                 )
+                built.initialWorkingDirectory = SessionRuntimeDescriptor.validWorkingDirectory(result.workingDirectory)
+                next = built
             }
-            let inheritedWorkingDirectory = SessionRuntimeDescriptor.validWorkingDirectory(
-                runtime.isLocal ? config?.workingDirectory : source.pwd
-            )
-            next.initialWorkingDirectory = inheritedWorkingDirectory
-            var result = config ?? .init()
             try next.configure(&result)
             result.environmentVariables[SessionRuntimeDescriptor.attachExistingEnvironmentKey] = ""
             result.environmentVariables.removeValue(
@@ -2918,26 +3192,34 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             )
             result.environmentVariables.removeValue(forKey: "OMG_RUNTIME_SOCKET")
             result.environmentVariables.removeValue(forKey: "OMG_RUNTIME_PANE_ID")
-            if !runtime.isLocal {
-                result.workingDirectory = nil
-                result.command = nil
-                result.initialInput = nil
-                result.waitAfterCommand = false
-            }
-            return Self.injectingSessionID(tabSessionID, into: result)
+            return injectTabSessionID ? Self.injectingSessionID(tabSessionID, into: result) : result
         }
-        guard let session = paneSessionContext(for: source) else { return config }
-        let replay: SSHReplayDescriptor? = switch session.state {
-        case .local:
-            nil
-        case .sshConnecting(let ssh), .sshReady(let ssh, _):
-            ssh.replay ?? SSHReplayStore.load(connectionID: ssh.connectionID)
+
+        if !shouldInherit {
+            var split = config ?? .init()
+            Self.stripTransientRuntimeEnvironment(&split)
+            split.workingDirectory = nil
+            split.environmentVariables[Ghostty.SurfaceConfiguration.suppressInheritCwdEnvironmentKey] = "1"
+            _ = configureLocalRuntimeForNewPane(
+                &split,
+                from: source,
+                inheritsWorkingDirectory: false,
+                runtimeRevision: runtimeRevision,
+                runtimePolicy: effectiveRuntimePolicy,
+                localRuntimeEnabled: effectiveLocalRuntimeEnabled
+            )
+            return injectTabSessionID ? Self.injectingSessionID(tabSessionID, into: split) : split
+        }
+
+        guard let session = paneSessionContext(for: source) else {
+            return injectTabSessionID ? Self.injectingSessionID(tabSessionID, into: config) : config
         }
         var split = Self.splitConfiguration(
             inherited: config,
             session: session,
-            replay: replay,
-            executablePath: Bundle.main.executableURL?.path
+            replay: nil,
+            executablePath: Bundle.main.executableURL?.path,
+            inheritsWorkingDirectory: shouldInherit
         )
         if split == nil,
            case .local = session.state,
@@ -2953,7 +3235,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
            ) {
             split = localConfiguration
         }
-        return Self.injectingSessionID(tabSessionID, into: split)
+        return injectTabSessionID ? Self.injectingSessionID(tabSessionID, into: split) : split
     }
 
     static func splitConfiguration(
@@ -2961,10 +3243,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         session: PaneSessionContext,
         replay: SSHReplayDescriptor?,
         executablePath: String?,
-        fallbackWorkingDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
+        fallbackWorkingDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path,
+        inheritsWorkingDirectory: Bool = true
     ) -> Ghostty.SurfaceConfiguration? {
         let remoteWorkingDirectory: String?
-        let activeReplay: SSHReplayDescriptor?
+        var activeReplay: SSHReplayDescriptor?
         switch session.state {
         case .local:
             return config
@@ -2972,25 +3255,38 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             remoteWorkingDirectory = nil
             activeReplay = replay ?? ssh.replay
         case .sshReady(let ssh, let workingDirectory):
-            remoteWorkingDirectory = workingDirectory
+            remoteWorkingDirectory = inheritsWorkingDirectory ? workingDirectory : nil
             activeReplay = replay ?? ssh.replay
         }
 
         var result = config ?? Ghostty.SurfaceConfiguration()
-        result.workingDirectory = session.local.workingDirectory
-            ?? fallbackWorkingDirectory
-        result.command = nil
+        Self.stripTransientRuntimeEnvironment(&result)
+        if inheritsWorkingDirectory {
+            result.workingDirectory = session.local.workingDirectory
+                ?? activeReplay?.localWorkingDirectory
+                ?? fallbackWorkingDirectory
+        } else {
+            result.workingDirectory = nil
+            result.environmentVariables[Ghostty.SurfaceConfiguration.suppressInheritCwdEnvironmentKey] = "1"
+            if activeReplay != nil, activeReplay?.localWorkingDirectory == nil {
+                activeReplay?.localWorkingDirectory = session.local.workingDirectory
+            }
+        }
+        result.clearSurvivalCommand()
         guard let executablePath,
               let command = activeReplay?.command(
                 executablePath: executablePath,
-                remoteWorkingDirectory: remoteWorkingDirectory
+                remoteWorkingDirectory: remoteWorkingDirectory,
+                includeLocalWorkingDirectory: !inheritsWorkingDirectory
               ) else {
             return result
         }
-        result.command = replaySurvivalCommand(
+        let survival = replaySurvivalCommand(
             command,
             survivalShell: Self.survivalShell
         )
+        result.command = survival
+        result.environmentVariables[Ghostty.SurfaceConfiguration.survivalPreludeEnvironmentKey] = command
         return result
     }
 
@@ -3000,10 +3296,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     ) -> String {
         // macOS wraps SurfaceConfiguration.command as `exec -l <command>`.
         // Put the sequence inside its own shell so that replacing the outer
-        // bash process does not discard the post-SSH survival command. Start
-        // the replacement as a login shell, matching a normal Ghostty pane;
-        // otherwise login-only fish/zsh setup (including prompts) is skipped.
-        let script = "\(command); exec -l \(Ghostty.Shell.quote(survivalShell))"
+        // bash process does not discard the post-SSH survival command, and
+        // ignore INT/QUIT in the outer wrapper so Ctrl+C during SSH still
+        // drops into the replacement login shell.
+        let script = "trap '' INT QUIT; (trap - INT QUIT; \(command)); trap - INT QUIT; exec -l \(Ghostty.Shell.quote(survivalShell))"
         return "/bin/sh -c \(Ghostty.Shell.quote(script))"
     }
 
@@ -4313,8 +4609,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
         controller.isBackgroundOpaque = parentController.isBackgroundOpaque
         controller.tabLayoutState = parentController.tabLayoutState
-        if let descriptor = inheritedLaunch?.agentDescriptor, let surface = controller.surfaceTree.first {
-            controller.adoptAgentResumeDescriptor(descriptor, for: surface)
+        if let inheritedLaunch, let surface = controller.surfaceTree.first {
+            controller.adoptInheritedLaunch(inheritedLaunch, for: surface)
         }
         guard let window = controller.window else { return nil }
 

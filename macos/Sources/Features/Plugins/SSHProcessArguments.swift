@@ -20,8 +20,42 @@ struct OpenSSHArguments: Equatable, Sendable {
 
     var interactiveDestination: String? {
         let noninteractive = "GNOQTVWfns"
-        guard command.isEmpty, !options.contains(where: { noninteractive.contains($0.name) }) else { return nil }
+        guard command.isEmpty,
+              !options.contains(where: { noninteractive.contains($0.name) || Self.isNonInteractiveOption($0) }) else {
+            return nil
+        }
         return destination
+    }
+
+    private static func isNonInteractiveOption(_ option: Option) -> Bool {
+        guard option.name == "o", let raw = option.value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else { return false }
+        guard let sepIndex = raw.firstIndex(where: { $0 == "=" || $0.isWhitespace }) else { return true }
+        let key = raw[..<sepIndex].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var rest = raw[sepIndex...].drop(while: { $0.isWhitespace })
+        if rest.first == "=" {
+            rest = rest.dropFirst().drop(while: { $0.isWhitespace })
+        }
+        var value = String(rest).trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.count >= 2, (value.hasPrefix("\"") && value.hasSuffix("\"")) || (value.hasPrefix("'") && value.hasSuffix("'")) {
+            value = String(value.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let lowerValue = value.lowercased()
+        guard !key.isEmpty, !lowerValue.isEmpty else { return true }
+        switch key {
+        case "remotecommand":
+            return lowerValue != "none"
+        case "requesttty":
+            return lowerValue == "no" || lowerValue == "false"
+        case "sessiontype":
+            return lowerValue == "none" || lowerValue == "subsystem"
+        case "forkafterauthentication", "stdinnull", "batchmode":
+            return lowerValue == "yes" || lowerValue == "true"
+        case "controlmaster":
+            return lowerValue == "check"
+        default:
+            return false
+        }
     }
 
     init?(_ arguments: [String]) {

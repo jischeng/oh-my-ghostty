@@ -644,6 +644,7 @@ pub const ThreadData = struct {
 
 pub const Config = struct {
     command: ?configpkg.Command = null,
+    survival_prelude: ?[]const u8 = null,
 
     /// The environment for the subprocess. init takes ownership of this
     /// whether or not it succeeds, so the caller must not free it after
@@ -906,11 +907,14 @@ const Subprocess = struct {
                 entry.value_ptr.*,
             );
         }
+        _ = env.orderedRemove("OMG_SURVIVAL_PRELUDE");
+        _ = env.orderedRemove("OMG_SUPPRESS_INHERIT_WORKING_DIRECTORY");
 
         // Build our args list
-        const args: []const [:0]const u8 = execCommand(
+        const args: []const [:0]const u8 = execCommandWithPrelude(
             alloc,
             shell_command,
+            cfg.survival_prelude,
             internal_os.passwd,
         ) catch |err| switch (err) {
             // If we fail to allocate space for the command we want to
@@ -1927,6 +1931,41 @@ fn execCommand(
     command: configpkg.Command,
     comptime passwdpkg: type,
 ) (Allocator.Error || error{SystemError})![]const [:0]const u8 {
+    return execCommandWithPrelude(alloc, command, null, passwdpkg);
+}
+
+fn quotePosixShellArgs(
+    alloc: Allocator,
+    argv: []const [:0]const u8,
+) Allocator.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    for (argv, 0..) |arg, idx| {
+        if (idx > 0) try out.append(alloc, ' ');
+        try out.append(alloc, '\'');
+        for (arg) |ch| {
+            if (ch == '\'') {
+                try out.appendSlice(alloc, "'\\''");
+            } else {
+                try out.append(alloc, ch);
+            }
+        }
+        try out.append(alloc, '\'');
+    }
+    return try out.toOwnedSlice(alloc);
+}
+
+fn execCommandWithPrelude(
+    alloc: Allocator,
+    command: configpkg.Command,
+    survival_prelude: ?[]const u8,
+    comptime passwdpkg: type,
+) (Allocator.Error || error{SystemError})![]const [:0]const u8 {
+    const prelude: ?[]const u8 = if (survival_prelude) |value|
+        (if (value.len > 0) value else null)
+    else
+        null;
+
     // If we're on macOS, we have to use `login(1)` to get all of
     // the proper environment variables set, a login shell, and proper
     // hushlogin behavior.
@@ -1966,55 +2005,28 @@ fn execCommand(
         );
         defer args.deinit(alloc);
 
-        // The reason for executing login this way is unclear. This
-        // comment will attempt to explain but prepare for a truly
-        // unhinged reality.
-        //
-        // The first major issue is that on macOS, a lot of users
-        // put shell configurations in ~/.bash_profile instead of
-        // ~/.bashrc (or equivalent for another shell). This file is only
-        // loaded for a login shell so macOS users expect all their terminals
-        // to be login shells. No other platform behaves this way and its
-        // totally braindead but somehow the entire dev community on
-        // macOS has cargo culted their way to this reality so we have to
-        // do it...
-        //
-        // To get a login shell, you COULD just prepend argv0 with a `-`
-        // but that doesn't fully work because `getlogin()` C API will
-        // return the wrong value, SHELL won't be set, and various
-        // other login behaviors that macOS users expect.
-        //
-        // The proper way is to use `login(1)`. But login(1) forces
-        // the working directory to change to the home directory,
-        // which we may not want. If we specify "-l" then we can avoid
-        // this behavior but now the shell isn't a login shell.
-        //
-        // There is another issue: `login(1)` on macOS 14.3 and earlier
-        // checked for ".hushlogin" in the working directory. This means
-        // that if we specify "-l" then we won't get hushlogin honored
-        // if its in the home directory (which is standard). To get
-        // around this, we check for hushlogin ourselves and if present
-        // specify the "-q" flag to login(1).
-        //
-        // So to get all the behaviors we want, we specify "-l" but
-        // execute "bash" (which is built-in to macOS). We then use
-        // the bash builtin "exec" to replace the process with a login
-        // shell ("-l" on exec) with the command we really want.
-        //
-        // We use "bash" instead of other shells that ship with macOS
-        // because as of macOS Sonoma, we found with a microbenchmark
-        // that bash can `exec` into the desired command ~2x faster
-        // than zsh.
-        //
-        // To figure out a lot of this logic I read the login.c
-        // source code in the OSS distribution Apple provides for
-        // macOS.
-        //
-        // Awesome.
         try args.append(alloc, "/usr/bin/login");
         if (hush) try args.append(alloc, "-q");
         try args.append(alloc, "-flp");
         try args.append(alloc, username);
+
+        if (prelude) |pre| {
+            const shell_target = switch (command) {
+                .shell => |v| v,
+                .direct => |v| try quotePosixShellArgs(alloc, v),
+            };
+            const cmd = try alloc.printSentinel(
+                "trap '' INT QUIT; (trap - INT QUIT; {s}); trap - INT QUIT; exec -l {s}",
+                .{ pre, shell_target },
+                0,
+            );
+            try args.append(alloc, "/bin/bash");
+            try args.append(alloc, "--noprofile");
+            try args.append(alloc, "--norc");
+            try args.append(alloc, "-c");
+            try args.append(alloc, cmd);
+            return try args.toOwnedSlice(alloc);
+        }
 
         switch (command) {
             // Direct args can be passed directly to login, since
@@ -2045,6 +2057,29 @@ fn execCommand(
         }
 
         return try args.toOwnedSlice(alloc);
+    }
+
+    if (comptime builtin.target.os.tag != .windows) {
+        if (prelude) |pre| {
+            const shell_target = switch (command) {
+                .shell => |v| v,
+                .direct => |v| try quotePosixShellArgs(alloc, v),
+            };
+            var args: std.ArrayList([:0]const u8) = try .initCapacity(alloc, 4);
+            defer args.deinit(alloc);
+            try args.append(alloc, "/bin/sh");
+            if (internal_os.isFlatpak()) try args.append(alloc, "-l");
+            try args.append(alloc, "-c");
+            try args.append(
+                alloc,
+                try alloc.printSentinel(
+                    "trap '' INT QUIT; (trap - INT QUIT; {s}); trap - INT QUIT; exec {s}",
+                    .{ pre, shell_target },
+                    0,
+                ),
+            );
+            return try args.toOwnedSlice(alloc);
+        }
     }
 
     return switch (command) {
@@ -2568,4 +2603,130 @@ test "Exec: resize defers TIOCSWINSZ behind pending async PTY writes and preserv
     const exited_ws = try exec.subprocess.pty.?.getSize();
     try testing.expectEqual(@as(u16, 132), exited_ws.ws_col);
     try testing.expectEqual(@as(usize, 0), td.backend.exec.pending_resizes.items.len);
+}
+
+test "Exec: survival_prelude preserves shell integration across zsh, bash, fish, nushell, and direct commands" {
+    if (comptime builtin.target.os.tag == .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var config = try configpkg.Config.default(alloc);
+    defer config.deinit();
+
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    try tmp_dir.dir.createDirPath(testing.io, "shell-integration/zsh");
+    try tmp_dir.dir.createDirPath(testing.io, "shell-integration/fish");
+    try tmp_dir.dir.createDirPath(testing.io, "shell-integration/bash");
+    try tmp_dir.dir.createDirPath(testing.io, "shell-integration/nushell");
+    try tmp_dir.dir.writeFile(testing.io, .{
+        .sub_path = "shell-integration/bash/ghostty.bash",
+        .data = "",
+    });
+    const resources_dir = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", alloc);
+    defer alloc.free(resources_dir);
+
+    // 1. Zsh: ZDOTDIR injected, OMG_SURVIVAL_PRELUDE stripped, prelude runs before exec -l zsh
+    {
+        var env: EnvMap = .init(alloc);
+        try env.put("ZDOTDIR", "/custom/zdot");
+        var override: configpkg.RepeatableStringMap = .{};
+        var arena = ArenaAllocator.init(alloc);
+        defer arena.deinit();
+        try override.map.put(arena.allocator(), "OMG_SURVIVAL_PRELUDE", "'/app/omg' '+ssh' -- 'host'");
+        try override.map.put(arena.allocator(), "OMG_SUPPRESS_INHERIT_WORKING_DIRECTORY", "1");
+
+        var exec = try init(alloc, .{
+            .command = .{ .shell = "/bin/zsh" },
+            .survival_prelude = "'/app/omg' '+ssh' -- 'host'",
+            .env = env,
+            .env_override = override,
+            .resources_dir = resources_dir,
+            .term = "xterm-ghostty",
+            .rt_pre_exec_info = .init(&config),
+            .rt_post_fork_info = .init(&config),
+        });
+        defer exec.deinit();
+
+        const child_env = &exec.subprocess.env.?;
+        try testing.expect(std.mem.endsWith(u8, child_env.get("ZDOTDIR").?, "/shell-integration/zsh"));
+        try testing.expectEqualStrings("/custom/zdot", child_env.get("GHOSTTY_ZSH_ZDOTDIR").?);
+        try testing.expect(!child_env.contains("OMG_SURVIVAL_PRELUDE"));
+        try testing.expect(!child_env.contains("OMG_SUPPRESS_INHERIT_WORKING_DIRECTORY"));
+        const last_arg = exec.subprocess.args[exec.subprocess.args.len - 1];
+        try testing.expect(std.mem.indexOf(u8, last_arg, "'/app/omg' '+ssh' -- 'host'") != null);
+        try testing.expect(std.mem.endsWith(u8, last_arg, "; trap - INT QUIT; exec -l /bin/zsh") or
+            std.mem.endsWith(u8, last_arg, "; trap - INT QUIT; exec /bin/zsh"));
+    }
+
+    // 2. Bash: ENV + GHOSTTY_BASH_INJECT + `bash --posix`
+    {
+        const env: EnvMap = .init(alloc);
+        var exec = try init(alloc, .{
+            .command = .{ .shell = "bash" },
+            .survival_prelude = "'/app/omg' '+ssh' -- 'host'",
+            .env = env,
+            .resources_dir = resources_dir,
+            .term = "xterm-ghostty",
+            .rt_pre_exec_info = .init(&config),
+            .rt_post_fork_info = .init(&config),
+        });
+        defer exec.deinit();
+
+        const child_env = &exec.subprocess.env.?;
+        try testing.expect(std.mem.endsWith(u8, child_env.get("ENV").?, "/shell-integration/bash/ghostty.bash"));
+        try testing.expectEqualStrings("1", child_env.get("GHOSTTY_BASH_INJECT").?);
+        const last_arg = exec.subprocess.args[exec.subprocess.args.len - 1];
+        try testing.expect(std.mem.indexOf(u8, last_arg, "bash --posix") != null);
+    }
+
+    // 3. Fish & Nushell: XDG_DATA_DIRS injected + Nushell `--execute 'use ghostty *'`
+    {
+        const fish_env: EnvMap = .init(alloc);
+        var fish_exec = try init(alloc, .{
+            .command = .{ .shell = "/opt/homebrew/bin/fish" },
+            .survival_prelude = "'/app/omg' '+ssh' -- 'host'",
+            .env = fish_env,
+            .resources_dir = resources_dir,
+            .term = "xterm-ghostty",
+            .rt_pre_exec_info = .init(&config),
+            .rt_post_fork_info = .init(&config),
+        });
+        defer fish_exec.deinit();
+        try testing.expect(fish_exec.subprocess.env.?.get("GHOSTTY_SHELL_INTEGRATION_XDG_DIR") != null);
+        try testing.expect(std.mem.indexOf(u8, fish_exec.subprocess.env.?.get("XDG_DATA_DIRS").?, "/shell-integration") != null);
+
+        const nu_env: EnvMap = .init(alloc);
+        var nu_exec = try init(alloc, .{
+            .command = .{ .shell = "nu" },
+            .survival_prelude = "'/app/omg' '+ssh' -- 'host'",
+            .env = nu_env,
+            .resources_dir = resources_dir,
+            .term = "xterm-ghostty",
+            .rt_pre_exec_info = .init(&config),
+            .rt_post_fork_info = .init(&config),
+        });
+        defer nu_exec.deinit();
+        const nu_last = nu_exec.subprocess.args[nu_exec.subprocess.args.len - 1];
+        try testing.expect(std.mem.indexOf(u8, nu_last, "nu --execute 'use ghostty *'") != null);
+    }
+
+    // 4. Direct command with single quotes is safely quoted after prelude
+    {
+        var arena = ArenaAllocator.init(alloc);
+        defer arena.deinit();
+        const result = try execCommandWithPrelude(
+            arena.allocator(),
+            .{ .direct = &.{ "/opt/custom/my'sh", "--login" } },
+            "/usr/bin/true",
+            struct {
+                fn get(_: Allocator) !PasswdEntry {
+                    return .{ .name = "testuser" };
+                }
+            },
+        );
+        const last = result[result.len - 1];
+        try testing.expect(std.mem.indexOf(u8, last, "'/opt/custom/my'\\''sh' '--login'") != null);
+    }
 }

@@ -38,9 +38,13 @@ struct SessionRuntimeInlineSession: Codable, Equatable, Sendable {
     var restorationSignal: Ghostty.ContextSignal? {
         guard let connection = descriptor.connection else { return nil }
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "/-_.~"))
+        let localCwd = SessionRuntimeDescriptor.validWorkingDirectory(connection.localWorkingDirectory)
+            .flatMap { $0.addingPercentEncoding(withAllowedCharacters: allowed) }
         let cwd = workingDirectory.flatMap { $0.addingPercentEncoding(withAllowedCharacters: allowed) }
         let alias = connection.destination.split(separator: "@").last.map(String.init) ?? connection.destination
         return .init(action: .start, id: connectionID,
-                     metadata: "type=remote;targethost=\(alias)" + (cwd.map { ";cwd=\($0)" } ?? ""))
+                     metadata: "type=remote;targethost=\(alias)"
+                        + (localCwd.map { ";localcwd=\($0)" } ?? "")
+                        + (cwd.map { ";cwd=\($0)" } ?? ""))
     }
 }

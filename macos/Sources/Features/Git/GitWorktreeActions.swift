@@ -57,7 +57,7 @@ enum GitWorktreeActions {
                 throw GitDiffServiceError.gitFailed(GitL10n.text("This SSH session cannot be opened in another tab."))
             }
             configuration.workingDirectory = context.session.local.workingDirectory
-            configuration.command = TerminalController.replaySurvivalCommand(command)
+            configuration.setSurvivalCommand(command)
         case .sshConnecting:
             throw GitDiffServiceError.gitFailed(GitL10n.text("Wait for the SSH session to connect."))
         }

@@ -625,6 +625,9 @@ extension Ghostty {
     /// The configuration for a surface. For any configuration not set, defaults will be chosen from
     /// libghostty, usually from the Ghostty configuration.
     struct SurfaceConfiguration {
+        static let survivalPreludeEnvironmentKey = "OMG_SURVIVAL_PRELUDE"
+        static let suppressInheritCwdEnvironmentKey = "OMG_SUPPRESS_INHERIT_WORKING_DIRECTORY"
+
         /// Explicit font size to use in points
         var fontSize: Float32?
 
@@ -652,6 +655,16 @@ extension Ghostty {
         var context: ghostty_surface_context_e = GHOSTTY_SURFACE_CONTEXT_WINDOW
 
         init() {}
+
+        mutating func setSurvivalCommand(_ prelude: String) {
+            command = TerminalController.replaySurvivalCommand(prelude)
+            environmentVariables[Self.survivalPreludeEnvironmentKey] = prelude
+        }
+
+        mutating func clearSurvivalCommand() {
+            command = nil
+            environmentVariables.removeValue(forKey: Self.survivalPreludeEnvironmentKey)
+        }
 
         init(from config: ghostty_surface_config_s) {
             self.fontSize = config.font_size

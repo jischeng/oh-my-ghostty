@@ -89,6 +89,12 @@ extension Ghostty {
         // before its queued start signal reaches AppKit after a fast failure.
         var pendingSSHLaunchReplay: SSHReplayDescriptor?
 
+        // Last known local working directory before entering an SSH session, so
+        // non-inline SSH panes never persist or inherit a remote OSC 7 path as
+        // a local directory.
+        var knownLocalWorkingDirectory: String?
+        var isShowingRemoteSession: Bool = false
+
         // The cell size of this surface. This is set by the core when the
         // surface is first created and any time the cell size changes (i.e.
         // when the font size changes). This is used to allow windows to be

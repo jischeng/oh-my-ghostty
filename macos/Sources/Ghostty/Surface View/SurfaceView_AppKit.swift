@@ -10,6 +10,19 @@ extension Ghostty {
     class SurfaceView: OSSurfaceView, Codable, Identifiable {
         lazy var presentation = SurfacePresentation(surface: self)
 
+        var persistedLocalWorkingDirectory: String? {
+            if let inline = runtimeInlineSession {
+                return inline.descriptor.launchWorkingDirectory
+            }
+            if runtimeDescriptor?.isLocal != false, isShowingRemoteSession {
+                return knownLocalWorkingDirectory
+                    ?? sshResumeDescriptor?.localWorkingDirectory
+                    ?? (agentResumeDescriptor?.scope == .remote ? agentResumeDescriptor?.sshReplay?.localWorkingDirectory : nil)
+                    ?? runtimeDescriptor?.localWorkingDirectory
+            }
+            return pwd
+        }
+
         // The current title of the surface as defined by the pty. This can be
         // changed with escape codes.
         @SurfaceTitle private(set) var title: String = "" {
@@ -691,6 +704,13 @@ extension Ghostty {
             // reports OSC 7. Seed the known launch directory for all consumers.
             if let directory = surface_cfg.workingDirectory, directory.hasPrefix("/") {
                 self.pwd = directory
+                if runtimeDescriptor?.isLocal != false {
+                    self.knownLocalWorkingDirectory = directory
+                }
+            } else if runtimeDescriptor?.isLocal == true,
+                      let localDir = runtimeDescriptor?.localWorkingDirectory,
+                      localDir.hasPrefix("/") {
+                self.knownLocalWorkingDirectory = localDir
             }
             let surface = surface_cfg.withCValue(view: self) { surface_cfg_c in
                 ghostty_surface_new(app, &surface_cfg_c)
@@ -2594,7 +2614,7 @@ extension Ghostty {
                     config.workingDirectory = runtime.isLocal
                         ? config.workingDirectory ?? runtime.localWorkingDirectory
                         : runtime.connection?.localWorkingDirectory
-                    config.command = nil
+                    config.clearSurvivalCommand()
                     config.initialInput = nil
                     config.waitAfterCommand = false
                     _ = SessionRuntimeConnections.automaticallyConfigureLocalRuntime(
@@ -2658,15 +2678,15 @@ extension Ghostty {
                        ) {
                         config.workingDirectory = resume.scope == .local
                             ? resume.workingDirectory ?? config.workingDirectory
-                            : nil
-                        config.command = TerminalController.replaySurvivalCommand(command)
+                            : resume.sshReplay?.localWorkingDirectory ?? sshResume?.localWorkingDirectory
+                        config.setSurvivalCommand(command)
                     } else if let sshResume, !sshResume.isAwaitingReconnect,
                        let command = sshResume.command(executablePath: executablePath) {
                         config.workingDirectory = sshResume.localWorkingDirectory
                         let replay = ShellScrollbackRestoreStore.sshReplayCommand(
                             command, snapshot: shellSnapshot
                         )
-                        config.command = TerminalController.replaySurvivalCommand(replay)
+                        config.setSurvivalCommand(replay)
                     }
                 }
             }
@@ -2698,7 +2718,7 @@ extension Ghostty {
 
         func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
-            try container.encode(runtimeInlineSession?.descriptor.launchWorkingDirectory ?? pwd, forKey: .pwd)
+            try container.encode(persistedLocalWorkingDirectory, forKey: .pwd)
             try container.encode(id.uuidString, forKey: .uuid)
             try container.encodeIfPresent(runtimeDescriptor, forKey: .runtimeDescriptor)
             try container.encodeIfPresent(runtimeNeedsCreationOnRestore ? true : nil, forKey: .runtimeCreateOnRestore)

@@ -533,16 +533,20 @@ struct SessionRuntimeConnectionTests {
         #expect(tab.environmentVariables["OMG_RUNTIME_SOCKET"] == nil)
         #expect(tab.environmentVariables["OMG_RUNTIME_PANE_ID"] == nil)
         view.pwd = "/srv/project with spaces/中文"
-        let split = try #require(try controller.splitConfiguration(inherited: config, from: view, runtimeRevision: "current"))
+        let split = try #require(try controller.splitConfiguration(
+            inherited: config, from: view, runtimeRevision: "current", localRuntimeEnabled: true
+        ))
         let encoded = try #require(split.environmentVariables[SessionRuntimeDescriptor.environmentKey])
         let next = try JSONDecoder().decode(SessionRuntimeDescriptor.self, from: Data(encoded.utf8))
-        #expect(next.connection == descriptor.connection)
+        #expect(next.isLocal)
         #expect(next.revision == "current")
-        #expect(next.policy == descriptor.policy)
-        #expect(next.initialWorkingDirectory == view.pwd)
+        #expect(next.localWorkingDirectory == "/tmp")
+        #expect(next.initialWorkingDirectory == "/tmp")
         #expect(view.runtimeDescriptor == descriptor)
-        #expect(split.workingDirectory == nil)
-        #expect(split.command == nil)
+        #expect(split.workingDirectory == "/tmp")
+        #expect(split.command?.contains("'+ssh'") == true)
+        #expect(split.command?.contains("'--remote-working-directory=/srv/project with spaces/中文'") == true)
+        #expect(split.command?.contains("'host'") == true)
         #expect(split.environmentVariables["OMG_RUNTIME_SOCKET"] == nil)
         #expect(split.environmentVariables["OMG_RUNTIME_PANE_ID"] == nil)
     }

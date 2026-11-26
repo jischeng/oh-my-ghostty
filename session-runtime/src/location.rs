@@ -332,8 +332,8 @@ fn extract_cd_prefix(command: &str) -> Option<String> {
 pub fn parse_ssh_args(args: &[String]) -> Option<SshTarget> {
     const FLAGS: &str = "46AaCfGgKkMNnqsTtVvXxYy";
     const VALUES: &str = "BbcDEeFIiJLlmOoPpQRSWw";
-    const NON_INTERACTIVE: &str = "GNOQTVWfns";
-    const FORWARD_OPTS: &str = "pFiJlo";
+    const NON_INTERACTIVE: &str = "DGLNOQRTVWfnsw";
+    const FORWARD_OPTS: &str = "BbcEeFIiJlmopPS";
 
     let mut i = 0;
     let mut forced_tty = false;
@@ -366,8 +366,31 @@ pub fn parse_ssh_args(args: &[String]) -> Option<SshTarget> {
                 if c == 'o' {
                     let lower = value.trim().to_ascii_lowercase();
                     if lower.starts_with("batchmode=yes")
+                        || lower.starts_with("batchmode yes")
                         || lower.starts_with("controlmaster=check")
-                        || (lower.starts_with("remotecommand=") && lower != "remotecommand=none")
+                        || lower.starts_with("controlmaster check")
+                        || lower.starts_with("sessiontype=none")
+                        || lower.starts_with("sessiontype none")
+                        || lower.starts_with("sessiontype=subsystem")
+                        || lower.starts_with("sessiontype subsystem")
+                        || lower.starts_with("requesttty=no")
+                        || lower.starts_with("requesttty no")
+                        || lower.starts_with("requesttty=false")
+                        || lower.starts_with("requesttty false")
+                        || lower.starts_with("forkafterauthentication=yes")
+                        || lower.starts_with("forkafterauthentication yes")
+                        || lower.starts_with("stdinnull=yes")
+                        || lower.starts_with("stdinnull yes")
+                        || lower.starts_with("localforward=")
+                        || lower.starts_with("localforward ")
+                        || lower.starts_with("remoteforward=")
+                        || lower.starts_with("remoteforward ")
+                        || lower.starts_with("dynamicforward=")
+                        || lower.starts_with("dynamicforward ")
+                        || ((lower.starts_with("remotecommand=")
+                            || lower.starts_with("remotecommand "))
+                            && lower != "remotecommand=none"
+                            && lower != "remotecommand none")
                     {
                         return None;
                     }
@@ -381,7 +404,7 @@ pub fn parse_ssh_args(args: &[String]) -> Option<SshTarget> {
             if !FLAGS.contains(c) {
                 return None;
             }
-            if c == '4' || c == '6' {
+            if matches!(c, '4' | '6' | 'A' | 'a' | 'C' | 'K' | 'k' | 'q' | 'x') {
                 options.push(format!("-{c}"));
             }
         }

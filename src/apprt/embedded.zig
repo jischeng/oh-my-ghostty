@@ -519,13 +519,44 @@ pub const Surface = struct {
         errdefer app.core_app.deleteSurface(self);
 
         // Shallow copy the config so that we can modify it.
+        const default_working_directory = app.config.@"working-directory";
+        const default_command = app.config.command;
         var config = try apprt.surface.newConfig(app.core_app, &app.config, opts.context);
         defer config.deinit();
+
+        // Apply any environment variables that were requested before resolving
+        // survival preludes or working-directory inheritance overrides.
+        if (opts.env_var_count > 0) {
+            const alloc = config.arenaAlloc();
+            for (opts.env_vars.?[0..opts.env_var_count]) |env_var| {
+                const key = std.mem.sliceTo(env_var.key, 0);
+                const value = std.mem.sliceTo(env_var.value, 0);
+                try config.env.map.put(
+                    alloc,
+                    try alloc.dupeSentinel(u8, key, 0),
+                    try alloc.dupeSentinel(u8, value, 0),
+                );
+            }
+        }
+
+        const suppress_inherit_wd = std.mem.eql(
+            u8,
+            config.env.map.get("OMG_SUPPRESS_INHERIT_WORKING_DIRECTORY") orelse "",
+            "1",
+        );
+        _ = config.env.map.orderedRemove("OMG_SUPPRESS_INHERIT_WORKING_DIRECTORY");
+        if (suppress_inherit_wd) {
+            config.@"working-directory" = default_working_directory;
+        }
 
         // If we have a working directory from the options then we set it.
         if (opts.working_directory) |c_wd| {
             const wd = std.mem.sliceTo(c_wd, 0);
             if (wd.len > 0) wd: {
+                // An explicit working directory replaces any inherited surface
+                // pwd; if the local path was removed, fall back to the default
+                // config directory rather than a focused SSH pane's remote pwd.
+                config.@"working-directory" = default_working_directory;
                 var dir = std.Io.Dir.openDirAbsolute(global.io(), wd, .{}) catch |err| {
                     log.warn(
                         "error opening requested working directory dir={s} err={}",
@@ -563,26 +594,28 @@ pub const Surface = struct {
             }
         }
 
-        // If we have a command from the options then we set it.
+        // If we have a command from the options then we set it unless a
+        // survival prelude requests running before the configured default shell
+        // with full Ghostty shell integration.
+        var has_explicit_command = false;
         if (opts.command) |c_command| {
             const cmd = std.mem.sliceTo(c_command, 0);
             if (cmd.len > 0) {
-                config.command = .{ .shell = cmd };
+                has_explicit_command = true;
+                if (config.env.map.get("OMG_SURVIVAL_PRELUDE")) |prelude| {
+                    if (prelude.len > 0) {
+                        config.command = default_command;
+                    } else {
+                        _ = config.env.map.orderedRemove("OMG_SURVIVAL_PRELUDE");
+                        config.command = .{ .shell = cmd };
+                    }
+                } else {
+                    config.command = .{ .shell = cmd };
+                }
             }
         }
-
-        // Apply any environment variables that were requested.
-        if (opts.env_var_count > 0) {
-            const alloc = config.arenaAlloc();
-            for (opts.env_vars.?[0..opts.env_var_count]) |env_var| {
-                const key = std.mem.sliceTo(env_var.key, 0);
-                const value = std.mem.sliceTo(env_var.value, 0);
-                try config.env.map.put(
-                    alloc,
-                    try alloc.dupeSentinel(u8, key, 0),
-                    try alloc.dupeSentinel(u8, value, 0),
-                );
-            }
+        if (!has_explicit_command) {
+            _ = config.env.map.orderedRemove("OMG_SURVIVAL_PRELUDE");
         }
 
         // If we have an initial input then we set it.

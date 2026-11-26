@@ -1811,4 +1811,105 @@ struct AgentQuickInputTests {
         #expect(elevatedEmphasized.backdropOpacity >= elevated.backdropOpacity)
         #expect(elevatedEmphasized.tintOpacity > elevated.tintOpacity)
     }
+
+    @Test @MainActor
+    func submittingOrQueueingCommitsActiveIMEMarkedTextAndClearsComposer() async throws {
+        let model = AgentQuickInputModel()
+        let pane = UUID()
+        model.present(for: pane)
+        if !model.isPinned { model.togglePinned() }
+
+        var sentTexts: [String] = []
+        var queuedTexts: [String] = []
+
+        struct Harness: View {
+            @ObservedObject var model: AgentQuickInputModel
+            let pane: UUID
+            let onSend: () -> Void
+            let onQueue: () -> Void
+
+            var body: some View {
+                AgentQuickInputTextEditor(
+                    text: $model.draft,
+                    placeholder: "Message",
+                    isPresented: model.isPresented,
+                    focusRequestID: model.focusRequestID,
+                    font: .monospacedSystemFont(ofSize: 13, weight: .regular),
+                    onPasteImage: nil,
+                    onSend: onSend,
+                    onQueue: onQueue,
+                    onCancel: {},
+                    companionSurfaceID: pane
+                )
+                .frame(width: 360, height: 100)
+            }
+        }
+
+        let host = NSHostingView(rootView: Harness(
+            model: model,
+            pane: pane,
+            onSend: {
+                let text = model.draft
+                sentTexts.append(text)
+                model.completeSubmittedDraft(text, for: pane)
+            },
+            onQueue: {
+                if let item = model.enqueueDraft() {
+                    queuedTexts.append(item.text)
+                }
+            }
+        ))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 380, height: 120),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer {
+            window.contentView = nil
+            window.close()
+        }
+        host.layoutSubtreeIfNeeded()
+        func find(_ view: NSView) -> ComposerTextView? {
+            (view as? ComposerTextView) ?? view.subviews.lazy.compactMap(find).first
+        }
+        let editor = try #require(find(host))
+        _ = window.makeFirstResponder(editor)
+
+        // 1. Committed prefix + uncommitted CJK IME marked text via ⌘↩ sends complete text and clears editor.
+        editor.insertText("请帮我", replacementRange: editor.selectedRange())
+        #expect(model.draft == "请帮我")
+        editor.setMarkedText(
+            "检查配置",
+            selectedRange: NSRange(location: 4, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        #expect(editor.hasMarkedText())
+        let cmdReturn = try #require(keyEvent(keyCode: 36, modifiers: [.command]))
+        #expect(editor.performKeyEquivalent(with: cmdReturn))
+        #expect(sentTexts == ["请帮我检查配置"])
+        #expect(!editor.hasMarkedText())
+        try await waitForAppKit {
+            host.layoutSubtreeIfNeeded()
+            return editor.string.isEmpty && model.draft.isEmpty
+        }
+
+        // 2. Pure uncommitted CJK IME marked text (no prior committed prefix) via ⌥⌘↩ queues full text cleanly.
+        editor.setMarkedText(
+            "第二条短句",
+            selectedRange: NSRange(location: 5, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        #expect(editor.hasMarkedText())
+        let optCmdReturn = try #require(keyEvent(keyCode: 36, modifiers: [.command, .option]))
+        #expect(editor.performKeyEquivalent(with: optCmdReturn))
+        #expect(queuedTexts == ["第二条短句"])
+        #expect(!editor.hasMarkedText())
+        try await waitForAppKit {
+            host.layoutSubtreeIfNeeded()
+            return editor.string.isEmpty && model.draft.isEmpty
+        }
+    }
 }

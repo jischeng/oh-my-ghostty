@@ -752,4 +752,18 @@ struct QuickInputDraftBridgeTests {
             hasPendingSSHRecovery: false
         ))
     }
+
+    @Test func versionedPythonWrapperResolvesAgentIdentityWithoutPromptLeakage() throws {
+        #expect(LocalAgentProcessDetector.detect(in: "python3.12 /home/user/.local/bin/hermes") == .hermes)
+        #expect(LocalAgentProcessDetector.detect(in: "/usr/bin/env python3.13 /opt/tools/bin/agy") == .antigravity)
+        let command = QuickInputRemoteDraftBridge.command(
+            "draft-begin",
+            session: "omg-runtime-test",
+            request: UUID().uuidString,
+            tty: "/dev/pts/2",
+            root: "/home/user/.omg/run/s-0123456789ab/draft",
+            generation: "gen-1"
+        )
+        #expect(command.contains("base64 -d"))
+    }
 }

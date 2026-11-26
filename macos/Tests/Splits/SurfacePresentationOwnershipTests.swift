@@ -318,4 +318,150 @@ struct SurfacePresentationOwnershipTests {
         }
         #expect(actual.ws_row == initial.rows)
     }
+
+    @Test func primaryScreenInlineTUICommitsDockResizeToPTYWithoutRowMismatch() async throws {
+        let native = try #require((NSApp.delegate as? AppDelegate)?.ghostty.app)
+        var config = Ghostty.SurfaceConfiguration()
+        // Primary-screen inline TUI (no ?1049h), matching agy/claude/codex (?25l + ?2026h + status line below cursor).
+        config.command = "/bin/sh -c 'printf \"\\033[?25l\\033[?2026h>  \\r\\n--------\\033[1A\\033[?2026l\"; exec /bin/sleep 60'"
+        let surface = Ghostty.SurfaceView(native, baseConfig: config)
+        let lease = SurfacePresentationLease()
+        surface.presentation.authorize(lease)
+        let outer = CGSize(width: 800, height: 600)
+        let wrapper = SurfaceScrollView(contentSize: outer, surfaceView: surface, lease: lease)
+        wrapper.frame.size = outer
+        wrapper.layoutSubtreeIfNeeded()
+
+        for _ in 0..<100 where !(surface.requiresCommittedDockResize && surface.surfaceModel?.ttyName != nil) {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(!surface.isAlternateScreen)
+        #expect(surface.requiresCommittedDockResize)
+        let tty = try #require(surface.surfaceModel?.ttyName)
+        let fd = open(tty, O_RDONLY | O_NOCTTY)
+        try #require(fd >= 0)
+        defer { close(fd) }
+
+        let initial = ghostty_surface_size(try #require(surface.surface))
+        var actual = winsize()
+        for _ in 0..<100 {
+            try #require(ioctl(fd, TIOCGWINSZ, &actual) == 0)
+            if actual.ws_row == initial.rows { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try #require(actual.ws_row == initial.rows)
+
+        // Dock open on primary-screen inline TUI commits the shrunk row count to the PTY so
+        // cursed/diff renderers never address clamped rows beyond the visible grid.
+        let docked = CGSize(width: 800, height: 420)
+        surface.presentation.setVisualDockContext(outerSize: outer, dockedHeight: 180)
+        wrapper.frame.size = docked
+        wrapper.layoutSubtreeIfNeeded()
+        let shrunk = ghostty_surface_size(try #require(surface.surface))
+        #expect(shrunk.rows < initial.rows)
+        for _ in 0..<100 {
+            try #require(ioctl(fd, TIOCGWINSZ, &actual) == 0)
+            if actual.ws_row == shrunk.rows { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(actual.ws_row == shrunk.rows)
+
+        // Dock close restores the full row count to the PTY.
+        surface.presentation.setVisualDockContext(outerSize: outer, dockedHeight: 0)
+        wrapper.frame.size = outer
+        wrapper.layoutSubtreeIfNeeded()
+        for _ in 0..<100 {
+            try #require(ioctl(fd, TIOCGWINSZ, &actual) == 0)
+            if actual.ws_row == initial.rows { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(actual.ws_row == initial.rows)
+    }
+
+    @Test func launchingInlineTUIWhileVisuallyDockedPromotesPTYResizeAndRestoresOnClose() async throws {
+        let native = try #require((NSApp.delegate as? AppDelegate)?.ghostty.app)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let enterTUI = root.appendingPathComponent("enter")
+        let exitTUI = root.appendingPathComponent("exit")
+        let script = root.appendingPathComponent("transition.py")
+        try #"""
+        import pathlib, time, sys
+        root = pathlib.Path(__file__).parent
+        sys.stdout.write("\x1b[?1004h$ ")
+        sys.stdout.flush()
+        while not (root / "enter").exists():
+            time.sleep(0.02)
+        sys.stdout.write("\x1b[?25l\x1b[?2026h>  \r\n--------\x1b[1A\x1b[?2026l")
+        sys.stdout.flush()
+        while not (root / "exit").exists():
+            time.sleep(0.02)
+        sys.stdout.write("\x1b[2J\x1b[H\x1b[?25h\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07")
+        sys.stdout.flush()
+        time.sleep(60)
+        """#.write(to: script, atomically: true, encoding: .utf8)
+
+        let python = try #require(LocalPythonInterpreter.cached())
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = Ghostty.Shell.quote(python.executablePath) + " " + Ghostty.Shell.quote(script.path)
+        let surface = Ghostty.SurfaceView(native, baseConfig: config)
+        let lease = SurfacePresentationLease()
+        surface.presentation.authorize(lease)
+        let outer = CGSize(width: 800, height: 600)
+        let wrapper = SurfaceScrollView(contentSize: outer, surfaceView: surface, lease: lease)
+        wrapper.frame.size = outer
+        wrapper.layoutSubtreeIfNeeded()
+
+        for _ in 0..<100 where surface.surfaceModel?.ttyName == nil {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let tty = try #require(surface.surfaceModel?.ttyName)
+        let fd = open(tty, O_RDONLY | O_NOCTTY)
+        try #require(fd >= 0)
+        defer { close(fd) }
+
+        let initial = ghostty_surface_size(try #require(surface.surface))
+        var actual = winsize()
+        for _ in 0..<100 {
+            try #require(ioctl(fd, TIOCGWINSZ, &actual) == 0)
+            if actual.ws_row == initial.rows { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try #require(actual.ws_row == initial.rows)
+        #expect(!surface.requiresCommittedDockResize)
+
+        // 1. Open dock on plain shell: visual-only (PTY stays at initial.rows).
+        let docked = CGSize(width: 800, height: 420)
+        surface.presentation.setVisualDockContext(outerSize: outer, dockedHeight: 180)
+        wrapper.frame.size = docked
+        wrapper.layoutSubtreeIfNeeded()
+        let shrunk = ghostty_surface_size(try #require(surface.surface))
+        #expect(shrunk.rows < initial.rows)
+        try await Task.sleep(for: .milliseconds(80))
+        try #require(ioctl(fd, TIOCGWINSZ, &actual) == 0)
+        #expect(actual.ws_row == initial.rows)
+
+        // 2. Launch inline TUI inside already-docked pane: PTY promotes to shrunk.rows automatically.
+        FileManager.default.createFile(atPath: enterTUI.path, contents: Data())
+        for _ in 0..<100 {
+            try #require(ioctl(fd, TIOCGWINSZ, &actual) == 0)
+            if actual.ws_row == shrunk.rows { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(actual.ws_row == shrunk.rows)
+
+        // 3. Exit TUI back to plain prompt while still docked, then close dock: PTY restores initial.rows.
+        FileManager.default.createFile(atPath: exitTUI.path, contents: Data())
+        try await Task.sleep(for: .milliseconds(80))
+        surface.presentation.setVisualDockContext(outerSize: outer, dockedHeight: 0)
+        wrapper.frame.size = outer
+        wrapper.layoutSubtreeIfNeeded()
+        for _ in 0..<100 {
+            try #require(ioctl(fd, TIOCGWINSZ, &actual) == 0)
+            if actual.ws_row == initial.rows { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(actual.ws_row == initial.rows)
+    }
 }

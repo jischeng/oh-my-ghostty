@@ -214,6 +214,25 @@ struct AgentQuickInputTextEditor: NSViewRepresentable {
             text = editor.string
         }
 
+        func syncFromBindingIfNeeded() {
+            guard let editor, !editor.hasMarkedText(), editor.string != text else { return }
+            editor.restoreHistorySnapshot(
+                .init(
+                    text: text,
+                    selection: NSRange(location: (text as NSString).length, length: 0)
+                ),
+                resetUndo: text.isEmpty
+            )
+            if let appliedFont, let appliedTextColor {
+                applyTypography(
+                    to: editor,
+                    font: appliedFont,
+                    textColor: appliedTextColor,
+                    force: true
+                )
+            }
+        }
+
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let editor else { return }
             let previous = lastSelection
@@ -448,6 +467,17 @@ final class ComposerTextView: NSTextView, TerminalCompanionResponder {
         needsDisplay = true
     }
 
+    func commitMarkedTextForSubmission() {
+        guard hasMarkedText() else { return }
+        unmarkText()
+        inputContext?.discardMarkedText()
+        didChangeText()
+    }
+
+    func syncWithBoundDraftIfNeeded() {
+        (delegate as? AgentQuickInputTextEditor.Coordinator)?.syncFromBindingIfNeeded()
+    }
+
     override func keyDown(with event: NSEvent) {
         if controlJNewlineEnabled(), !hasMarkedText(),
            event.keyCode == 38,
@@ -520,11 +550,15 @@ final class ComposerTextView: NSTextView, TerminalCompanionResponder {
         ])
         if event.keyCode == 36 || event.keyCode == 76 {
             if modifiers == [.command] {
+                commitMarkedTextForSubmission()
                 onSend?()
+                syncWithBoundDraftIfNeeded()
                 return true
             }
             if modifiers == [.command, .option] {
+                commitMarkedTextForSubmission()
                 onQueue?()
+                syncWithBoundDraftIfNeeded()
                 return true
             }
             return false

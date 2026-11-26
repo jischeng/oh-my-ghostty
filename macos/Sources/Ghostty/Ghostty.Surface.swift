@@ -125,6 +125,11 @@ extension Ghostty {
             ghostty_surface_omg_is_alternate_screen(surface)
         }
 
+        /// Whether dock/layout resizes must be committed to the child PTY immediately.
+        var requiresCommittedResize: Bool {
+            ghostty_surface_omg_requires_committed_resize(surface)
+        }
+
         /// The PID of the foreground process group attached to the PTY.
         var foregroundPID: Int? {
             let pid = ghostty_surface_foreground_pid(surface)

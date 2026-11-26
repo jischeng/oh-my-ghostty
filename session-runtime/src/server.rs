@@ -349,6 +349,27 @@ struct ReplyBuffer {
     unclaimed: VecDeque<u8>,
     awaiting_writer: bool,
 }
+
+fn drain_pending_pty_input(pty: &mut impl Write, input: &mut ReplyBuffer, eof: bool) {
+    while !input.is_empty() && !eof {
+        let bytes = input.make_contiguous();
+        let n = bytes.len().min(65536);
+        match pty.write(&bytes[..n]) {
+            Ok(0) => break,
+            Ok(n) => {
+                bytes[..n].fill(0);
+                input.drain(..n);
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(_) => {
+                input.make_contiguous().fill(0);
+                input.clear();
+                break;
+            }
+        }
+    }
+}
 impl ReplyBuffer {
     fn new(bytes: VecDeque<u8>, delegated: bool) -> Self {
         Self {
@@ -1788,6 +1809,7 @@ pub fn serve_managed(
                             || size.ws_xpixel != pixel_width
                             || size.ws_ypixel != pixel_height;
                         if changed {
+                            drain_pending_pty_input(&mut pty, &mut input, eof);
                             size.ws_col = cols;
                             size.ws_row = rows;
                             size.ws_xpixel = pixel_width;
@@ -3150,5 +3172,194 @@ time.sleep(0.05)'"#;
         assert!(light_text.contains("?997;2n"), "{light_text:?}");
         assert!(light_text.contains("rgb:fafa/fafa/fafa"), "{light_text:?}");
         assert!(!light_output.windows(7).any(|w| w == b"\x1b[?996n"));
+    }
+
+    #[test]
+    fn drain_pending_pty_input_flushes_chunks_handles_would_block_and_preserves_burst_delivery() {
+        #[derive(Debug, PartialEq, Eq)]
+        enum Op {
+            Write(Vec<u8>),
+            Resize(u16, u16),
+        }
+        struct RecordingPty {
+            ops: Vec<Op>,
+            max_chunk: usize,
+            block_after_bytes: Option<usize>,
+            written: usize,
+        }
+        impl Write for RecordingPty {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                if let Some(limit) = self.block_after_bytes {
+                    if self.written >= limit {
+                        return Err(io::Error::new(io::ErrorKind::WouldBlock, "full"));
+                    }
+                }
+                let n = buf.len().min(self.max_chunk);
+                self.written += n;
+                self.ops.push(Op::Write(buf[..n].to_vec()));
+                Ok(n)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        // 1. Deterministic causal ordering: multi-write INPUT drains completely before RESIZE.
+        let mut pty = RecordingPty {
+            ops: Vec::new(),
+            max_chunk: 6,
+            block_after_bytes: None,
+            written: 0,
+        };
+        let mut input = ReplyBuffer::new(VecDeque::new(), false);
+        input.extend(b"PROMPT-DONE\r".iter().copied());
+        drain_pending_pty_input(&mut pty, &mut input, false);
+        pty.ops.push(Op::Resize(80, 40));
+        assert!(input.is_empty());
+        assert_eq!(
+            pty.ops,
+            vec![
+                Op::Write(b"PROMPT".to_vec()),
+                Op::Write(b"-DONE\r".to_vec()),
+                Op::Resize(80, 40),
+            ]
+        );
+
+        // 2. Backpressured PTY stops cleanly on WouldBlock and retains unread tail.
+        let mut blocked = RecordingPty {
+            ops: Vec::new(),
+            max_chunk: 5,
+            block_after_bytes: Some(5),
+            written: 0,
+        };
+        input.extend(b"ABCDEFGHIJ".iter().copied());
+        drain_pending_pty_input(&mut blocked, &mut input, false);
+        assert_eq!(blocked.ops, vec![Op::Write(b"ABCDE".to_vec())]);
+        assert_eq!(input.make_contiguous(), b"FGHIJ");
+
+        // 3. End-to-end managed PTY receives both INPUT and RESIZE from a single burst.
+        let dir = PathBuf::from(format!(
+            "/tmp/omg-srv-order-{}",
+            &crate::record::nonce().unwrap()[..8]
+        ));
+        let sessions = dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&sessions, fs::Permissions::from_mode(0o700)).unwrap();
+        let id = "66666666-6666-6666-6666-666666666666";
+        let sock_path = dir.join("order.sock");
+        let rec_path = sessions.join(format!("{id}.json"));
+        let log_path = dir.join("events.txt");
+        let mut rec = Record::new(id, crate::lifecycle::Policy::default()).unwrap();
+        rec.save(&rec_path).unwrap();
+
+        let sock_clone = sock_path.clone();
+        let rec_clone = rec_path.clone();
+        let log_clone = log_path.clone();
+        let handle = thread::spawn(move || {
+            let script = format!(
+                r#"python3 -c 'import fcntl, os, pathlib, select, signal, struct, sys, termios, tty
+sys.stdin.readline()
+log = pathlib.Path({log:?})
+tty.setraw(0)
+saw_winch = []
+def on_winch(signum, frame):
+    rows, cols, _, _ = struct.unpack("HHHH", fcntl.ioctl(0, termios.TIOCGWINSZ, b"\0" * 8))
+    saw_winch.append(f"{{cols}}x{{rows}}")
+signal.signal(signal.SIGWINCH, on_winch)
+os.write(1, b"READY\n")
+buf = bytearray()
+while b"PROMPT-DONE\r" not in buf or not saw_winch:
+    try:
+        r, _, _ = select.select([0], [], [], 2.0)
+    except InterruptedError:
+        continue
+    if not r:
+        break
+    chunk = os.read(0, 4096)
+    if not chunk:
+        break
+    buf.extend(chunk)
+log.write_text(buf.decode("utf-8", "replace") + "|" + ",".join(saw_winch))
+'"#,
+                log = log_clone.to_string_lossy()
+            );
+            serve_managed(
+                &sock_clone,
+                vec!["/bin/sh".into(), "-c".into(), script],
+                Some(ManagedSession {
+                    path: rec_clone,
+                    record: rec,
+                    containment_root: None,
+                    initial_cwd: None,
+                    local_launch: None,
+                    remote_launch: Some(RemoteSessionLaunch {
+                        cols: Some(80),
+                        rows: Some(24),
+                        pixel_width: None,
+                        pixel_height: None,
+                        term: Some("xterm-256color".into()),
+                        colorterm: None,
+                        term_program: None,
+                        term_program_version: None,
+                        color_scheme: None,
+                        foreground: None,
+                        background: None,
+                        cursor: None,
+                        state_dir: None,
+                    }),
+                    presentation: None,
+                    resurrect: false,
+                    shutdown_wake: None,
+                }),
+            )
+        });
+
+        let mut client = None;
+        for _ in 0..100 {
+            if sock_path.exists() {
+                if let Ok(s) = UnixStream::connect(&sock_path) {
+                    client = Some(s);
+                    break;
+                }
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let mut client = client.expect("order socket ready");
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut sent_burst = false;
+        let mut collected = Vec::new();
+        loop {
+            let f = Frame::read(&mut client).unwrap();
+            match f.kind {
+                SNAPSHOT => {
+                    Frame::new(ACK, f.seq, &0u64.to_be_bytes())
+                        .send(&mut client)
+                        .unwrap();
+                    Frame::new(b'W', 0, &[]).send(&mut client).unwrap();
+                    Frame::new(INPUT, 0, b"GO\n").send(&mut client).unwrap();
+                }
+                OUTPUT => {
+                    collected.extend_from_slice(&f.data);
+                    if !sent_burst && collected.windows(5).any(|w| w == b"READY") {
+                        sent_burst = true;
+                        let mut burst = Frame::new(INPUT, 0, b"PROMPT-DONE\r").encode();
+                        burst.extend_from_slice(
+                            &Frame::new(RESIZE, 0, &[0, 80, 0, 40, 2, 128, 2, 128]).encode(),
+                        );
+                        client.write_all(&burst).unwrap();
+                    }
+                }
+                EXIT => break,
+                _ => {}
+            }
+        }
+        drop(client);
+        handle.join().unwrap().unwrap();
+        let events = fs::read_to_string(&log_path).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(events.contains("PROMPT-DONE\r|80x40"), "{events:?}");
     }
 }

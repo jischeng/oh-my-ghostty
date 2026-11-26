@@ -67,6 +67,11 @@ pub fn prepare(state: &Path, record: &Record, tty: &str, original: &str) -> io::
     let python = std::env::var_os("PATH")
         .into_iter()
         .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .chain(
+            ["/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"]
+                .into_iter()
+                .map(PathBuf::from),
+        )
         .map(|directory| directory.join("python3"))
         .find(|path| {
             fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)

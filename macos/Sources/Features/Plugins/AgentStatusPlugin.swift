@@ -19,7 +19,9 @@ enum LocalAgentProcessDetector {
             }
             if let agent = exactAgent(normalizedExec) { return agent }
             let basename = URL(fileURLWithPath: normalizedExec).lastPathComponent.lowercased()
-            if ["login", "env", "sh", "bash", "zsh", "fish", "python", "python3"].contains(basename),
+            let isWrapperOrPython = ["login", "env", "sh", "bash", "zsh", "fish", "python", "python3"]
+                .contains(basename) || basename.hasPrefix("python3.")
+            if isWrapperOrPython,
                let agent = tokens.dropFirst().compactMap(exactAgent).last {
                 return agent
             }

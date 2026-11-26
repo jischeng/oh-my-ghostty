@@ -795,6 +795,16 @@ extension Ghostty {
             surfaceModel?.isAlternateScreen ?? false
         }
 
+        /// Whether dock/layout resizes must be committed immediately to the child PTY
+        /// (alternate screen, primary-screen inline TUIs, remote SSH runtime sessions,
+        /// or a visual resize promoted when a TUI started while docked).
+        var requiresCommittedDockResize: Bool {
+            if runtimeInlineSession != nil || runtimeDescriptor?.isLocal == false {
+                return true
+            }
+            return surfaceModel?.requiresCommittedResize ?? false
+        }
+
         override func sizeDidChange(_ size: CGSize) {
             setSurfaceSize(size, live: false)
         }

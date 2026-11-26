@@ -1498,7 +1498,7 @@ private struct AgentQuickInputResizeHandle: View {
                 )
             },
             accessibilityLabel: "Resize Agent Quick Input",
-            defersTerminalResize: false
+            defersTerminalResize: true
         )
     }
 }

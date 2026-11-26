@@ -1275,8 +1275,10 @@ Quick Input presentation and focus remain Host-owned. The built-in composer part
 Managed omgd SSH sessions provision the same editor protocol under their private
 runtime state's `draft` directory before launching a new remote PTY. The helper
 uses `OMG_REMOTE_ROOT`, a stable runtime pane UUID, the PTY name and the session
-generation. The Host verifies the live runtime record and foreground TTY before
-requesting import; begin/read reject generation changes. Session teardown only
+generation. The Host resolves both unified snapshot-epoch (`s-<hash12>`) and
+legacy revision-keyed runtime state directories, and verifies the live runtime
+record and foreground TTY before requesting import; begin/read reject generation
+changes. Session teardown only
 removes draft state still owned by that generation. Python 3 and a CLI honoring
 `VISUAL`/`EDITOR` remain prerequisites. Old pinned daemons and already-running
 Agent environments cannot acquire this integration through a GUI-only update:

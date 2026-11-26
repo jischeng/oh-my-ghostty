@@ -280,20 +280,30 @@ extension TerminalController {
         return false
     }
 
+    private func commitActiveQuickInputComposition(for surfaceID: UUID) -> ComposerTextView? {
+        guard let composer = window?.firstResponder as? ComposerTextView,
+              composer.companionSurfaceID == surfaceID else { return nil }
+        composer.commitMarkedTextForSubmission()
+        return composer
+    }
+
     func sendQuickInputDraft() {
         guard let surfaceID = quickInputModel.targetSurfaceID else { return }
+        let composer = commitActiveQuickInputComposition(for: surfaceID)
         if quickInputModel.isEditingQueuedItem {
             guard quickInputModel.confirmQueuedItemEdit(moveToEnd: false) else {
                 return
             }
+            composer?.syncWithBoundDraftIfNeeded()
             hideCoveringEditorWorkspace(surfaceID: surfaceID)
             if !quickInputModel.isPinned { restoreTerminalFocus(surfaceID: surfaceID) }
             dispatchNextQuickInput(for: surfaceID)
             return
         }
         let text = quickInputModel.draft
-        let submitted = submitQuickInputText(text, to: surfaceID, restoreFocus: !quickInputModel.isPinned) { [weak self] in
+        let submitted = submitQuickInputText(text, to: surfaceID, restoreFocus: !quickInputModel.isPinned) { [weak self, weak composer] in
             self?.quickInputModel.completeSubmittedDraft(text, for: surfaceID)
+            composer?.syncWithBoundDraftIfNeeded()
         }
         if submitted {
             hideCoveringEditorWorkspace(surfaceID: surfaceID)
@@ -302,10 +312,12 @@ extension TerminalController {
 
     func queueQuickInputDraft() {
         guard let surfaceID = quickInputModel.targetSurfaceID else { return }
+        let composer = commitActiveQuickInputComposition(for: surfaceID)
         if quickInputModel.isEditingQueuedItem {
             guard quickInputModel.confirmQueuedItemEdit(moveToEnd: true) else {
                 return
             }
+            composer?.syncWithBoundDraftIfNeeded()
             hideCoveringEditorWorkspace(surfaceID: surfaceID)
             if !quickInputModel.isPinned { restoreTerminalFocus(surfaceID: surfaceID) }
             dispatchNextQuickInput(for: surfaceID)
@@ -313,6 +325,7 @@ extension TerminalController {
         }
         guard quickInputModel.enqueueDraft() != nil else { return }
         quickInputModel.completeSubmission(clearDraft: false)
+        composer?.syncWithBoundDraftIfNeeded()
         hideCoveringEditorWorkspace(surfaceID: surfaceID)
         if agentActivities[surfaceID]?.state == .done {
             dispatchNextQuickInput(for: surfaceID)

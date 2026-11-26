@@ -103,7 +103,7 @@ extension TerminalController: TerminalHostProviding {
                 throw WorkspaceFilesystemError.operationFailed("This SSH session cannot be opened in another pane.")
             }
             configuration.workingDirectory = session.local.workingDirectory
-            configuration.command = TerminalController.replaySurvivalCommand(command)
+            configuration.setSurvivalCommand(command)
         case .sshConnecting:
             return
         }

@@ -455,7 +455,7 @@ final class BuiltInAgentHistoryInspectorProvider {
 
             var configuration = Ghostty.SurfaceConfiguration()
             configuration.workingDirectory = context.session.local.workingDirectory
-            configuration.command = TerminalController.replaySurvivalCommand(command)
+            configuration.setSurvivalCommand(command)
             let parent = TerminalController.all.first(where: {
                 $0.tabSessionID == context.tabID
             })?.window ?? TerminalController.preferredParent?.window
@@ -483,7 +483,7 @@ final class BuiltInAgentHistoryInspectorProvider {
 
         var configuration = Ghostty.SurfaceConfiguration()
         configuration.workingDirectory = workingDirectory
-        configuration.command = TerminalController.replaySurvivalCommand(command)
+        configuration.setSurvivalCommand(command)
         let parent = TerminalController.all.first(where: {
             $0.tabSessionID == context.tabID
         })?.window ?? TerminalController.preferredParent?.window
@@ -539,12 +539,12 @@ final class BuiltInAgentHistoryInspectorProvider {
                       fallbackWorkingDirectory: context.workingDirectory
                   ) else { return }
             configuration.workingDirectory = context.session.local.workingDirectory
-            configuration.command = TerminalController.replaySurvivalCommand(command)
+            configuration.setSurvivalCommand(command)
         } else {
             guard FileManager.default.fileExists(atPath: session.sourcePath),
                   let command = forkCommand(for: session) else { return }
             configuration.workingDirectory = session.workingDirectory ?? context.workingDirectory
-            configuration.command = TerminalController.replaySurvivalCommand(command)
+            configuration.setSurvivalCommand(command)
         }
 
         let host = TerminalController.all.first(where: { $0.tabSessionID == context.tabID })

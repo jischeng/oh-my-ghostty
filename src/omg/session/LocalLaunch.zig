@@ -86,6 +86,8 @@ pub fn hasResurrectLaunch(alloc: std.mem.Allocator, request: ?[]const u8) bool {
 fn childEnvironmentKey(key: []const u8) bool {
     return !std.mem.startsWith(u8, key, "OMG_RUNTIME_") and
         !std.mem.eql(u8, key, "OMG_SESSION_RUNTIME_DESCRIPTOR") and
+        !std.mem.eql(u8, key, "OMG_SURVIVAL_PRELUDE") and
+        !std.mem.eql(u8, key, "OMG_SUPPRESS_INHERIT_WORKING_DIRECTORY") and
         !std.mem.eql(u8, key, "GHOSTTY_SURFACE_ID");
 }
 
@@ -332,6 +334,8 @@ test "local session launch preserves prepared shell environment without app rout
     try env.put("OMG_RUNTIME_SOCKET", "/old-app/socket");
     try env.put("OMG_RUNTIME_LOCAL", "1");
     try env.put("OMG_SESSION_RUNTIME_DESCRIPTOR", "private-routing");
+    try env.put("OMG_SURVIVAL_PRELUDE", "/app/omg +ssh -- host");
+    try env.put("OMG_SUPPRESS_INHERIT_WORKING_DIRECTORY", "1");
     try env.put("GHOSTTY_SURFACE_ID", "old-process-pointer");
     const request = try prepare(
         alloc,
@@ -361,6 +365,8 @@ test "local session launch preserves prepared shell environment without app rout
     try std.testing.expect(!child.contains("OMG_RUNTIME_SOCKET"));
     try std.testing.expect(!child.contains("OMG_RUNTIME_LOCAL"));
     try std.testing.expect(!child.contains("OMG_SESSION_RUNTIME_DESCRIPTOR"));
+    try std.testing.expect(!child.contains("OMG_SURVIVAL_PRELUDE"));
+    try std.testing.expect(!child.contains("OMG_SUPPRESS_INHERIT_WORKING_DIRECTORY"));
     try std.testing.expect(!child.contains("GHOSTTY_SURFACE_ID"));
 }
 

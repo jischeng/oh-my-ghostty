@@ -1033,8 +1033,8 @@ class AppDelegate: NSObject,
         )
 
         let tab = TerminalController.newTab(ghostty, from: window, withBaseConfig: launch.configuration)
-        if let tab, let descriptor = launch.agentDescriptor, let surface = tab.surfaceTree.first {
-            tab.adoptAgentResumeDescriptor(descriptor, for: surface)
+        if let tab, let surface = tab.surfaceTree.first {
+            tab.adoptInheritedLaunch(launch, for: surface)
         }
     }
 

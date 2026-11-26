@@ -699,8 +699,13 @@ pub fn init(
 
         // Initialize our IO backend
         const session_socket = config.env.map.get("OMG_RUNTIME_SOCKET");
+        const survival_prelude: ?[]const u8 = if (config.env.map.get("OMG_SURVIVAL_PRELUDE")) |prelude|
+            (if (prelude.len > 0) prelude else null)
+        else
+            null;
         const exec_config: termio.Exec.Config = .{
             .command = command,
+            .survival_prelude = survival_prelude,
             .env = env,
             .env_override = config.env,
             .shell_integration = config.@"shell-integration",
@@ -720,7 +725,10 @@ pub fn init(
                 const creates = launch.createsSession(alloc, request);
                 var launch_exec_config = exec_config;
                 if (!creates) {
-                    launch_exec_config.command = null;
+                    launch_exec_config.survival_prelude = null;
+                    if (survival_prelude == null) {
+                        launch_exec_config.command = null;
+                    }
                     launch_exec_config.working_directory = null;
                 }
                 // Reuse Ghostty's shell/config preparation without starting a

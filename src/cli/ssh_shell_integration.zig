@@ -76,17 +76,59 @@ pub const bash = @embedFile("../shell-integration/bash/ghostty.bash");
 pub const bash_preexec = @embedFile("../shell-integration/bash/bash-preexec.sh");
 pub const zsh = @embedFile("../shell-integration/zsh/ghostty-integration");
 
+/// Emit an embedded shell integration script without blank or comment-only
+/// lines outside quoted multiline literals so the base64-encoded SSH bootstrap
+/// stays comfortably within Linux's single-argument limit (`MAX_ARG_STRLEN`).
+fn writeCompactShellSource(writer: *std.Io.Writer, source: []const u8) !void {
+    var in_single_quote = false;
+    var in_double_quote = false;
+    var line_index: usize = 0;
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    var wrote_any = false;
+    while (lines.next()) |line| : (line_index += 1) {
+        if (!in_single_quote and !in_double_quote) {
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            if (trimmed.len == 0) continue;
+            if (trimmed[0] == '#' and !(line_index == 0 and std.mem.startsWith(u8, trimmed, "#!"))) {
+                continue;
+            }
+        }
+        if (wrote_any) try writer.writeByte('\n');
+        try writer.writeAll(line);
+        wrote_any = true;
+
+        var i: usize = 0;
+        while (i < line.len) {
+            const ch = line[i];
+            if (ch == '\\' and !in_single_quote) {
+                i += @min(@as(usize, 2), line.len - i);
+                continue;
+            }
+            if (ch == '\'' and !in_double_quote) {
+                in_single_quote = !in_single_quote;
+            } else if (ch == '"' and !in_single_quote) {
+                in_double_quote = !in_double_quote;
+            } else if (ch == '#' and !in_single_quote and !in_double_quote and
+                (i == 0 or line[i - 1] == ' ' or line[i - 1] == '\t'))
+            {
+                break;
+            }
+            i += 1;
+        }
+    }
+}
+
 pub fn writeBashFiles(writer: *std.Io.Writer) !void {
     try writer.writeAll("cat > \"$__omg_dir/ghostty.bash\" <<'__OMG_BASH_INTEGRATION__'\n");
-    try writer.writeAll(bash);
+    try writeCompactShellSource(writer, bash);
     try writer.writeAll("\n__OMG_BASH_INTEGRATION__\ncat > \"$__omg_dir/bash-preexec.sh\" <<'__OMG_BASH_PREEXEC__'\n");
-    try writer.writeAll(bash_preexec);
+    try writeCompactShellSource(writer, bash_preexec);
     try writer.writeAll("\n__OMG_BASH_PREEXEC__\n");
 }
 
 pub fn writeZshFile(writer: *std.Io.Writer) !void {
     try writer.writeAll("cat > \"$__omg_dir/ghostty-integration\" <<'__OMG_ZSH_INTEGRATION__'\n");
-    try writer.writeAll(zsh);
+    try writeCompactShellSource(writer, zsh);
     try writer.writeAll("\n__OMG_ZSH_INTEGRATION__\n");
 }
 
@@ -97,4 +139,31 @@ test "SSH shared shell integration uses the local sources" {
     try testing.expect(std.mem.indexOf(u8, bash, "PS0") != null);
     try testing.expect(std.mem.indexOf(u8, zsh, "k=s") != null);
     try testing.expect(std.mem.indexOf(u8, bash_preexec, "preexec_functions") != null);
+}
+
+test "compact shell emitter strips comments while preserving multiline quotes" {
+    const testing = std.testing;
+    var output: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer output.deinit();
+    try writeCompactShellSource(
+        &output.writer,
+        "#!/bin/bash\n" ++
+            "# License comment\n" ++
+            "\n" ++
+            "foo=\"line1\n" ++
+            "# kept inside double quotes\n" ++
+            "\n" ++
+            "line2\"\n" ++
+            "  # stripped indented comment\n" ++
+            "bar=1 # inline comment stays on code line\n",
+    );
+    try testing.expectEqualStrings(
+        "#!/bin/bash\n" ++
+            "foo=\"line1\n" ++
+            "# kept inside double quotes\n" ++
+            "\n" ++
+            "line2\"\n" ++
+            "bar=1 # inline comment stays on code line",
+        output.written(),
+    );
 }

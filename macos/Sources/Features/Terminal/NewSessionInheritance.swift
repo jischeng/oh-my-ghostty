@@ -62,7 +62,8 @@ enum NewSessionInheritance: String, CaseIterable, Identifiable, Sendable {
         conversationID: AgentConversationID?,
         remote: Remote?,
         localWorkingDirectory: String?,
-        executablePath: String
+        executablePath: String,
+        includeLocalWorkingDirectoryInCommand: Bool = true
     ) -> AgentLaunch? {
         guard level.inheritsAgent else { return nil }
         let canResume = level == .agentResume && !agent.definition.resume.resumeArguments.isEmpty
@@ -77,7 +78,8 @@ enum NewSessionInheritance: String, CaseIterable, Identifiable, Sendable {
                     executablePath: executablePath,
                     remoteWorkingDirectory: remote.workingDirectory,
                     remoteAgent: agent,
-                    conversationID: resumedID
+                    conversationID: resumedID,
+                    includeLocalWorkingDirectory: includeLocalWorkingDirectoryInCommand
                   ) else { return nil }
             return .init(descriptor: descriptor, command: command)
         }
@@ -97,55 +99,120 @@ enum NewSessionInheritance: String, CaseIterable, Identifiable, Sendable {
     static func configuration(
         for launch: AgentLaunch,
         inherited config: Ghostty.SurfaceConfiguration?,
-        localWorkingDirectory: String?
+        localWorkingDirectory: String?,
+        suppressInheritWorkingDirectory: Bool = false
     ) -> Ghostty.SurfaceConfiguration {
         var result = config ?? .init()
         for key in [SessionRuntimeDescriptor.environmentKey, SessionRuntimeDescriptor.localRuntimeEnvironmentKey,
                     SessionRuntimeDescriptor.attachExistingEnvironmentKey,
                     SessionRuntimeDescriptor.resurrectWorkingDirectoryEnvironmentKey,
+                    SessionRuntimeDescriptor.recreateIfGoneEnvironmentKey,
+                    SessionRuntimeDescriptor.handoffResumeEnvironmentKey,
+                    Ghostty.SurfaceConfiguration.suppressInheritCwdEnvironmentKey,
                     "OMG_RUNTIME_SOCKET", "OMG_RUNTIME_PANE_ID"] {
             result.environmentVariables.removeValue(forKey: key)
         }
         result.workingDirectory = localWorkingDirectory
-        result.command = TerminalController.replaySurvivalCommand(launch.command)
+        if suppressInheritWorkingDirectory {
+            result.environmentVariables[Ghostty.SurfaceConfiguration.suppressInheritCwdEnvironmentKey] = "1"
+        }
+        result.setSurvivalCommand(launch.command)
         result.initialInput = nil
         result.waitAfterCommand = false
         return result
     }
 }
 
-/// A resolved new-pane configuration plus the Agent descriptor to adopt once
-/// the Surface exists, so status and restoration know the launched Agent.
+/// A resolved new-pane configuration plus the Agent or SSH descriptor to adopt
+/// once the Surface exists, so status, chained splits/tabs, and restoration
+/// know the launched session immediately.
 struct InheritedSessionLaunch {
     var configuration: Ghostty.SurfaceConfiguration?
     var agentDescriptor: AgentResumeDescriptor?
+    var sshDescriptor: SSHResumeDescriptor?
 }
 
 extension TerminalController {
+    func adoptInheritedLaunch(_ launch: InheritedSessionLaunch, for surface: Ghostty.SurfaceView) {
+        if let sshDescriptor = launch.sshDescriptor {
+            surface.pendingSSHLaunchReplay = sshDescriptor.sshReplay
+            if let localDir = sshDescriptor.localWorkingDirectory, localDir.hasPrefix("/") {
+                surface.knownLocalWorkingDirectory = localDir
+            }
+            adoptSSHRecoveryDescriptor(sshDescriptor, for: surface)
+        }
+        if let descriptor = launch.agentDescriptor {
+            if descriptor.scope == .remote, let replay = descriptor.sshReplay {
+                surface.pendingSSHLaunchReplay = replay
+                if let localDir = replay.localWorkingDirectory, localDir.hasPrefix("/") {
+                    surface.knownLocalWorkingDirectory = localDir
+                }
+            }
+            adoptAgentResumeDescriptor(descriptor, for: surface)
+        }
+    }
+
     /// Applies the configured new-tab inheritance on top of Ghostty's
     /// inherited configuration for `source`.
     func newTabLaunch(
         inherited config: Ghostty.SurfaceConfiguration?,
         from source: Ghostty.SurfaceView,
-        level requested: NewSessionInheritance? = nil
+        level requested: NewSessionInheritance? = nil,
+        ghosttyConfig: Ghostty.Config? = nil
     ) -> InheritedSessionLaunch {
         let level = requested ?? .current(for: .tab)
-        if let launch = inheritedAgentLaunch(level: level, inherited: config, from: source) {
+        if let launch = inheritedAgentLaunch(
+            entry: .tab,
+            level: level,
+            inherited: config,
+            from: source,
+            ghosttyConfig: ghosttyConfig
+        ) {
             return launch
         }
+        let inheritsDirectory = shouldInheritWorkingDirectory(
+            entry: .tab,
+            level: level,
+            ghosttyConfig: ghosttyConfig
+        )
         switch level {
         case .defaultDirectory:
-            var result = tabConfiguration(inherited: withoutWorkingDirectory(config), from: source)
-            result?.workingDirectory = nil
+            var result = tabConfiguration(
+                inherited: withoutWorkingDirectory(config),
+                from: source,
+                inheritsWorkingDirectory: false
+            ) ?? .init()
+            result.workingDirectory = nil
+            result.environmentVariables[Ghostty.SurfaceConfiguration.suppressInheritCwdEnvironmentKey] = "1"
             return .init(configuration: result)
         case .workingDirectory:
-            return .init(configuration: tabConfiguration(inherited: config, from: source))
+            return .init(configuration: tabConfiguration(
+                inherited: config,
+                from: source,
+                inheritsWorkingDirectory: inheritsDirectory
+            ))
         case .ssh, .agentNewSession, .agentResume:
-            guard sourceIsRemote(source),
-                  let remote = try? splitConfiguration(inherited: config, from: source) else {
-                return .init(configuration: tabConfiguration(inherited: config, from: source))
+            guard let remoteSource = remoteSessionSource(for: source),
+                  let remote = try? splitConfiguration(
+                    inherited: config,
+                    from: source,
+                    inheritsWorkingDirectory: inheritsDirectory,
+                    injectTabSessionID: false
+                  ) else {
+                return .init(configuration: tabConfiguration(
+                    inherited: config,
+                    from: source,
+                    inheritsWorkingDirectory: inheritsDirectory
+                ))
             }
-            return .init(configuration: remote)
+            return .init(
+                configuration: remote,
+                sshDescriptor: inheritedSSHLaunchDescriptor(
+                    from: remoteSource,
+                    inheritsWorkingDirectory: inheritsDirectory,
+                    configuration: remote
+                )
+            )
         }
     }
 
@@ -154,31 +221,113 @@ extension TerminalController {
     func newSplitLaunch(
         inherited config: Ghostty.SurfaceConfiguration?,
         from source: Ghostty.SurfaceView,
-        level requested: NewSessionInheritance? = nil
+        level requested: NewSessionInheritance? = nil,
+        ghosttyConfig: Ghostty.Config? = nil
     ) throws -> InheritedSessionLaunch {
         let level = requested ?? .current(for: .split)
-        if let launch = inheritedAgentLaunch(level: level, inherited: config, from: source) {
-            return .init(configuration: Self.injectingSessionID(tabSessionID, into: launch.configuration),
-                         agentDescriptor: launch.agentDescriptor)
+        if let launch = inheritedAgentLaunch(
+            entry: .split,
+            level: level,
+            inherited: config,
+            from: source,
+            ghosttyConfig: ghosttyConfig
+        ) {
+            var configured = launch.configuration ?? .init()
+            let settings = OhMyGhosttySettings.shared
+            _ = SessionRuntimeConnections.automaticallyConfigureLocalRuntime(
+                &configured,
+                policy: settings.runtimePolicy,
+                enabled: settings.localRuntimeEnabled
+            )
+            return .init(
+                configuration: Self.injectingSessionID(tabSessionID, into: configured),
+                agentDescriptor: launch.agentDescriptor
+            )
         }
+        let inheritsDirectory = shouldInheritWorkingDirectory(
+            entry: .split,
+            level: level,
+            ghosttyConfig: ghosttyConfig
+        )
         switch level {
         case .defaultDirectory, .workingDirectory:
-            let base = level == .defaultDirectory ? withoutWorkingDirectory(config) : config
+            let base = inheritsDirectory ? config : withoutWorkingDirectory(config)
             guard sourceIsRemote(source) else {
-                return .init(configuration: try splitConfiguration(inherited: base, from: source))
+                return .init(configuration: try splitConfiguration(
+                    inherited: base,
+                    from: source,
+                    inheritsWorkingDirectory: inheritsDirectory
+                ))
             }
             // Same local result as a new tab from an SSH pane: a fresh local
             // shell, never the remote path on this Mac.
-            var result = tabConfiguration(inherited: base, from: source) ?? .init()
-            if level == .defaultDirectory { result.workingDirectory = nil }
+            var result = tabConfiguration(
+                inherited: base,
+                from: source,
+                inheritsWorkingDirectory: inheritsDirectory
+            ) ?? .init()
+            if !inheritsDirectory {
+                result.workingDirectory = nil
+                result.environmentVariables[Ghostty.SurfaceConfiguration.suppressInheritCwdEnvironmentKey] = "1"
+            }
             let settings = OhMyGhosttySettings.shared
             _ = SessionRuntimeConnections.automaticallyConfigureLocalRuntime(
                 &result, policy: settings.runtimePolicy, enabled: settings.localRuntimeEnabled
             )
             return .init(configuration: Self.injectingSessionID(tabSessionID, into: result))
         case .ssh, .agentNewSession, .agentResume:
-            return .init(configuration: try splitConfiguration(inherited: config, from: source))
+            let remoteSource = remoteSessionSource(for: source)
+            let split = try splitConfiguration(
+                inherited: config,
+                from: source,
+                inheritsWorkingDirectory: inheritsDirectory
+            )
+            return .init(
+                configuration: split,
+                sshDescriptor: remoteSource.flatMap {
+                    inheritedSSHLaunchDescriptor(
+                        from: $0,
+                        inheritsWorkingDirectory: inheritsDirectory,
+                        configuration: split
+                    )
+                }
+            )
         }
+    }
+
+    func shouldInheritWorkingDirectory(
+        entry: NewSessionInheritance.Entry,
+        level: NewSessionInheritance,
+        ghosttyConfig: Ghostty.Config? = nil
+    ) -> Bool {
+        if level == .defaultDirectory { return false }
+        let activeConfig = ghosttyConfig ?? ghostty.config
+        return switch entry {
+        case .tab: activeConfig.tabInheritWorkingDirectory
+        case .split: activeConfig.splitInheritWorkingDirectory
+        }
+    }
+
+    private func inheritedSSHLaunchDescriptor(
+        from remote: RemoteSessionSource,
+        inheritsWorkingDirectory: Bool,
+        configuration: Ghostty.SurfaceConfiguration?
+    ) -> SSHResumeDescriptor? {
+        guard configuration?.command != nil,
+              var replay = remote.replay,
+              replay.transferTarget != nil else { return nil }
+        let localDir = inheritsWorkingDirectory
+            ? (configuration?.workingDirectory ?? remote.localWorkingDirectory)
+            : nil
+        if replay.localWorkingDirectory == nil {
+            replay.localWorkingDirectory = remote.localWorkingDirectory
+        }
+        return .init(
+            sshReplay: replay,
+            remoteWorkingDirectory: inheritsWorkingDirectory ? remote.remoteWorkingDirectory : nil,
+            localWorkingDirectory: localDir,
+            awaitingReconnect: false
+        )
     }
 
     private func withoutWorkingDirectory(_ config: Ghostty.SurfaceConfiguration?) -> Ghostty.SurfaceConfiguration? {
@@ -187,60 +336,64 @@ extension TerminalController {
         return config
     }
 
-    private func sourceIsRemote(_ source: Ghostty.SurfaceView) -> Bool {
-        if let runtime = source.runtimeDescriptor, !runtime.isLocal { return true }
-        if source.runtimeInlineSession?.descriptor.connection != nil { return true }
-        if agentResumeDescriptor(for: source)?.scope == .remote { return true }
-        guard let context = paneSessionContext(for: source) else { return false }
-        if case .local = context.state { return false }
-        return true
+    func sourceIsRemote(_ source: Ghostty.SurfaceView) -> Bool {
+        remoteSessionSource(for: source) != nil
     }
 
     /// nil when the level does not inherit an Agent, the pane runs none, or
     /// its SSH connection cannot be replayed; callers then fall back to the
     /// SSH/directory behavior.
     private func inheritedAgentLaunch(
+        entry: NewSessionInheritance.Entry,
         level: NewSessionInheritance,
         inherited config: Ghostty.SurfaceConfiguration?,
-        from source: Ghostty.SurfaceView
+        from source: Ghostty.SurfaceView,
+        ghosttyConfig: Ghostty.Config? = nil
     ) -> InheritedSessionLaunch? {
         guard level.inheritsAgent, let executablePath = Bundle.main.executablePath else { return nil }
         let resume = agentResumeDescriptor(for: source)
         guard let agent = resume?.agent
                 ?? agentActivity(for: source).flatMap({ SupportedAgent(rawValue: $0.source) }) else { return nil }
-        let context = paneSessionContext(for: source)
-        var replay: SSHReplayDescriptor?
-        var remoteDirectory: String?
-        switch context?.state {
-        case .sshConnecting(let ssh)?:
-            replay = ssh.replay ?? SSHReplayStore.load(connectionID: ssh.connectionID)
-        case .sshReady(let ssh, let directory)?:
-            replay = ssh.replay ?? SSHReplayStore.load(connectionID: ssh.connectionID)
-            remoteDirectory = directory
-        case .local?, nil:
-            if resume?.scope == .remote {
-                replay = resume?.sshReplay
-                remoteDirectory = resume?.workingDirectory
-            }
+        let inheritsDirectory = shouldInheritWorkingDirectory(
+            entry: entry,
+            level: level,
+            ghosttyConfig: ghosttyConfig
+        )
+        let remoteSource = remoteSessionSource(for: source)
+        var replay = remoteSource?.replay
+        if replay == nil, resume?.scope == .remote {
+            replay = resume?.sshReplay
         }
-        if replay == nil, sourceIsRemote(source) { return nil }
-        let localDirectory: String? = if replay != nil {
-            context?.local.workingDirectory ?? replay?.localWorkingDirectory
+        if replay == nil, remoteSource != nil { return nil }
+        let remoteDirectory: String? = inheritsDirectory
+            ? (remoteSource?.remoteWorkingDirectory ?? resume?.workingDirectory)
+            : nil
+        let rawLocalDirectory: String? = if replay != nil {
+            remoteSource?.localWorkingDirectory ?? replay?.localWorkingDirectory
         } else {
             source.pwd ?? resume?.workingDirectory ?? config?.workingDirectory
         }
+        if replay != nil, replay?.localWorkingDirectory == nil {
+            replay?.localWorkingDirectory = rawLocalDirectory
+        }
+        let effectiveLocalDirectory: String? = inheritsDirectory
+            ? (rawLocalDirectory ?? FileManager.default.homeDirectoryForCurrentUser.path)
+            : nil
         guard let launch = NewSessionInheritance.agentLaunch(
             level: level,
             agent: agent,
             conversationID: resume?.agent == agent ? resume?.conversationID : nil,
-            remote: replay.map { .init(replay: $0, workingDirectory: remoteDirectory ?? resume?.workingDirectory) },
-            localWorkingDirectory: localDirectory,
-            executablePath: executablePath
+            remote: replay.map { .init(replay: $0, workingDirectory: remoteDirectory) },
+            localWorkingDirectory: effectiveLocalDirectory,
+            executablePath: executablePath,
+            includeLocalWorkingDirectoryInCommand: !inheritsDirectory
         ) else { return nil }
         return .init(
             configuration: NewSessionInheritance.configuration(
-                for: launch, inherited: config,
-                localWorkingDirectory: localDirectory ?? FileManager.default.homeDirectoryForCurrentUser.path
+                for: launch,
+                inherited: config,
+                localWorkingDirectory: effectiveLocalDirectory,
+                suppressInheritWorkingDirectory: !inheritsDirectory
             ),
             agentDescriptor: launch.descriptor
         )

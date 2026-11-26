@@ -66,6 +66,11 @@ struct PaneSessionContext: Equatable, Sendable {
             )
             return
         }
+        if let validLocal = SessionRuntimeDescriptor.validWorkingDirectory(connection.localWorkingDirectory),
+           local.workingDirectory != validLocal {
+            local.workingDirectory = validLocal
+            revision &+= 1
+        }
         let ssh = SSH(connectionID: "omg-runtime-" + descriptor.identity,
                       alias: connection.destination, serverID: nil,
                       replay: .init(version: 1, ssh: connection.executablePath, forwardEnv: true,
@@ -338,13 +343,36 @@ struct PaneSessionContext: Equatable, Sendable {
             case .local:
                 nil
             }
+            let metadataLocalCwd = metadata["localcwd"]?.removingPercentEncoding
+                .flatMap { $0.isEmpty ? nil : $0 }
+            let isCurrentConnection = activeSSH != nil
+            if !isCurrentConnection {
+                if case .local = state {
+                    local = .init(
+                        workingDirectory: metadataLocalCwd
+                            ?? currentWorkingDirectory
+                            ?? local.workingDirectory,
+                        terminalTitle: currentTerminalTitle.isEmpty
+                            ? local.terminalTitle
+                            : currentTerminalTitle
+                    )
+                } else if let metadataLocalCwd {
+                    local.workingDirectory = metadataLocalCwd
+                }
+            } else if local.workingDirectory == nil, let metadataLocalCwd {
+                local.workingDirectory = metadataLocalCwd
+            }
+            var resolvedReplay = sshReplay ?? activeSSH?.replay
+            if resolvedReplay != nil, resolvedReplay?.localWorkingDirectory == nil {
+                resolvedReplay?.localWorkingDirectory = metadataLocalCwd ?? local.workingDirectory
+            }
             let ssh = SSH(
                 connectionID: signal.id,
                 alias: alias,
                 serverID: metadata["serverid"].flatMap(Self.validServerID)
                     ?? activeSSH?.serverID,
-                replay: sshReplay ?? activeSSH?.replay,
-                transferTarget: sshReplay?.transferTarget
+                replay: resolvedReplay,
+                transferTarget: resolvedReplay?.transferTarget
                     ?? activeSSH?.transferTarget
                     ?? alias,
                 localProcessGroupID: nil,
@@ -353,18 +381,6 @@ struct PaneSessionContext: Equatable, Sendable {
                                 options: .regularExpression) != nil ? value : nil
                 } ?? activeSSH?.remoteTTY
             )
-            let isCurrentConnection = activeSSH != nil
-            if !isCurrentConnection, case .local = state {
-                let localWorkingDirectory = metadata["localcwd"]?.removingPercentEncoding
-                local = .init(
-                    workingDirectory: localWorkingDirectory.flatMap { $0.isEmpty ? nil : $0 }
-                        ?? currentWorkingDirectory
-                        ?? local.workingDirectory,
-                    terminalTitle: currentTerminalTitle.isEmpty
-                        ? local.terminalTitle
-                        : currentTerminalTitle
-                )
-            }
             if let workingDirectory = Self.remoteWorkingDirectory(metadata) {
                 state = .sshReady(ssh, workingDirectory: workingDirectory)
             } else {
@@ -646,7 +662,8 @@ struct SSHReplayDescriptor: Codable, Equatable, Sendable {
         remoteWorkingDirectory: String? = nil,
         remoteAgent: SupportedAgent? = nil,
         conversationID: AgentConversationID? = nil,
-        forkConversation: Bool = false
+        forkConversation: Bool = false,
+        includeLocalWorkingDirectory: Bool = true
     ) -> String? {
         guard version == 1,
               !ssh.isEmpty,
@@ -686,10 +703,13 @@ struct SSHReplayDescriptor: Codable, Equatable, Sendable {
         argv.append("--")
         argv.append(contentsOf: args)
         let command = argv.map(Self.shellQuote).joined(separator: " ")
-        guard let localWorkingDirectory else { return command }
+        guard includeLocalWorkingDirectory, let localWorkingDirectory else { return command }
         guard localWorkingDirectory.hasPrefix("/"), localWorkingDirectory.utf8.count <= 4_096,
               !localWorkingDirectory.contains("\0") else { return nil }
-        return "(cd " + Self.shellQuote(localWorkingDirectory) + " && " + command + ")"
+        // Run inside a subshell so relative SSH flags (-F ./config) resolve
+        // against the original directory when it still exists, without skipping
+        // +ssh via `&&` if that local directory has been deleted.
+        return "(cd " + Self.shellQuote(localWorkingDirectory) + " 2>/dev/null; " + command + ")"
     }
 
     private static func shellQuote(_ value: String) -> String {

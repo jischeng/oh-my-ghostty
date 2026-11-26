@@ -35,7 +35,7 @@ struct TerminalWorkspaceSessionState: Codable, Equatable {
         }
 
         @MainActor init(_ view: Ghostty.SurfaceView) {
-            pwd = view.runtimeInlineSession?.descriptor.launchWorkingDirectory ?? view.pwd
+            pwd = view.persistedLocalWorkingDirectory
             uuid = view.id.uuidString
             title = view.title
             isUserSetTitle = view.hasUserSetTitle

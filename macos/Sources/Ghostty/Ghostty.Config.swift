@@ -221,6 +221,22 @@ extension Ghostty {
             return v
         }
 
+        var tabInheritWorkingDirectory: Bool {
+            guard let config = self.config else { return true }
+            var v = true
+            let key = "tab-inherit-working-directory"
+            _ = ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8)))
+            return v
+        }
+
+        var splitInheritWorkingDirectory: Bool {
+            guard let config = self.config else { return true }
+            var v = true
+            let key = "split-inherit-working-directory"
+            _ = ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8)))
+            return v
+        }
+
         var title: String? {
             guard let config = self.config else { return nil }
             var v: UnsafePointer<Int8>?

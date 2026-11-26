@@ -23,14 +23,21 @@ struct SessionRuntimeInlineSessionTests {
             bootID: try #require(SessionRuntimeInlineSession.currentBootID), workingDirectory: "/srv/current"
         )
         let result = try #require(try controller.splitConfiguration(
-            inherited: nil, from: surface, runtimeRevision: "current"
+            inherited: nil, from: surface, runtimeRevision: "current", localRuntimeEnabled: true
         ))
         let data = try #require(result.environmentVariables[SessionRuntimeDescriptor.environmentKey]?.data(using: .utf8))
         let descriptor = try JSONDecoder().decode(SessionRuntimeDescriptor.self, from: data)
-        #expect(descriptor.connection == remote.connection)
-        #expect(descriptor.initialWorkingDirectory == "/srv/current")
+        #expect(descriptor.isLocal)
+        #expect(descriptor.localWorkingDirectory == "/tmp")
+        #expect(descriptor.initialWorkingDirectory == "/tmp")
         #expect(descriptor.revision == "current")
-        #expect(result.command == nil)
+        #expect(result.workingDirectory == "/tmp")
+        #expect(result.command?.contains("'+ssh'") == true)
+        #expect(result.command?.contains("'--remote-working-directory=/srv/current'") == true)
+        #expect(result.command?.contains("'-J'") == true)
+        #expect(result.command?.contains("'jump'") == true)
+        #expect(result.command?.contains("'cloud'") == true)
+        #expect(result.environmentVariables[Ghostty.SurfaceConfiguration.survivalPreludeEnvironmentKey]?.contains("'+ssh'") == true)
     }
 
     @Test(arguments: [false, true])
@@ -257,13 +264,18 @@ struct SessionRuntimeInlineSessionTests {
         var inherited = Ghostty.SurfaceConfiguration()
         inherited.workingDirectory = "/srv/not-a-local-directory"
         let split = try #require(try controller.splitConfiguration(
-            inherited: inherited, from: surface, runtimeRevision: "current"))
+            inherited: inherited, from: surface, runtimeRevision: "current", localRuntimeEnabled: true))
         let data = try #require(split.environmentVariables[SessionRuntimeDescriptor.environmentKey]?.data(using: .utf8))
         let splitDescriptor = try JSONDecoder().decode(SessionRuntimeDescriptor.self, from: data)
-        #expect(splitDescriptor.connection == remote.connection)
-        #expect(splitDescriptor.initialWorkingDirectory == "/srv/project")
+        #expect(splitDescriptor.isLocal)
+        #expect(splitDescriptor.localWorkingDirectory == "/tmp/local")
+        #expect(splitDescriptor.initialWorkingDirectory == "/tmp/local")
         #expect(splitDescriptor.revision == "current")
-        #expect(split.command == nil)
+        #expect(split.workingDirectory == "/tmp/local")
+        #expect(split.command?.contains("'+ssh'") == true)
+        #expect(split.command?.contains("'--remote-working-directory=/srv/project'") == true)
+        #expect(split.command?.contains("'host'") == true)
+        #expect(split.command?.contains("(cd ") == false)
         #expect(split.waitAfterCommand == false)
         let tab = try #require(controller.tabConfiguration(
             inherited: inherited, from: surface, runtimeRevision: "current", localRuntimeEnabled: true))
@@ -288,10 +300,11 @@ struct SessionRuntimeInlineSessionTests {
             descriptor: descriptor, pane: UUID(), connectionID: "omg-ssh-inline-fixture",
             socket: URL(fileURLWithPath: "/tmp/not-used.sock"), helperPID: ProcessInfo.processInfo.processIdentifier,
             bootID: boot, workingDirectory: "/srv/space name")
-        var context = PaneSessionContext(workingDirectory: "/tmp/local", terminalTitle: "local")
+        var context = PaneSessionContext(workingDirectory: nil, terminalTitle: "local")
         context.apply(try #require(session.restorationSignal),
-                      currentWorkingDirectory: "/tmp/local", currentTerminalTitle: "local",
+                      currentWorkingDirectory: nil, currentTerminalTitle: "local",
                       sshReplay: session.replay)
+        #expect(context.local.workingDirectory == "/tmp/local")
         #expect(context.workingDirectory == "/srv/space name")
         #expect(context.remoteTabBreadcrumb?.host == "host")
         if case .sshReady(let ssh, _) = context.state { #expect(ssh.transferTarget == "user@host") }

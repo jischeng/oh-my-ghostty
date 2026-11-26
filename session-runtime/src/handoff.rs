@@ -5,7 +5,62 @@ use std::{
     io::{self, Write},
     time::Duration,
 };
+fn split_ssh_option(raw: &str) -> Option<(String, String)> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let sep = trimmed.find(|c: char| c == '=' || c.is_ascii_whitespace())?;
+    let key = trimmed[..sep].trim();
+    let mut rest = trimmed[sep..].trim_start();
+    if let Some(after_eq) = rest.strip_prefix('=') {
+        rest = after_eq.trim_start();
+    }
+    let val = rest.trim();
+    if key.is_empty() || val.is_empty() {
+        return None;
+    }
+    let unquoted = if (val.starts_with('"') && val.ends_with('"') && val.len() >= 2)
+        || (val.starts_with('\'') && val.ends_with('\'') && val.len() >= 2)
+    {
+        &val[1..val.len() - 1]
+    } else {
+        val
+    };
+    Some((
+        key.to_ascii_lowercase(),
+        unquoted.trim().to_ascii_lowercase(),
+    ))
+}
+
+fn valid_interactive_ssh_option(raw: &str) -> bool {
+    let Some((key, value)) = split_ssh_option(raw) else {
+        return false;
+    };
+    match key.as_str() {
+        "remotecommand" => value == "none",
+        "requesttty" => !matches!(value.as_str(), "no" | "false" | "force"),
+        "sessiontype" => !matches!(value.as_str(), "none" | "subsystem"),
+        "forkafterauthentication"
+        | "stdinnull"
+        | "batchmode"
+        | "forwardx11"
+        | "forwardx11trusted" => !matches!(value.as_str(), "yes" | "true"),
+        "localforward" | "remoteforward" | "dynamicforward" | "permitopen" => false,
+        "clearallforwardings" => !matches!(value.as_str(), "no" | "false"),
+        "tunnel" => matches!(value.as_str(), "no" | "false"),
+        "tunneldevice" => value == "none",
+        "controlmaster" => !matches!(value.as_str(), "yes" | "true" | "ask" | "autoask" | "check"),
+        _ => true,
+    }
+}
+
 pub fn interactive(args: &[String]) -> bool {
+    const FLAGS: &str = "46AaCKkqvxy";
+    const VALUES: &str = "BbcEeFIiJlmopPS";
+    if args.iter().any(|a| a.contains('\0')) {
+        return false;
+    }
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
@@ -13,21 +68,28 @@ pub fn interactive(args: &[String]) -> bool {
             i += 1;
             break;
         }
-        if !a.starts_with('-') {
+        if !a.starts_with('-') || a == "-" {
             break;
         }
         let mut chars = a[1..].chars();
         while let Some(c) = chars.next() {
-            if "p ilFJ".replace(' ', "").contains(c) {
-                if chars.as_str().is_empty() {
+            if VALUES.contains(c) {
+                let inline = chars.as_str();
+                let value = if inline.is_empty() {
                     i += 1;
-                    if i >= args.len() {
+                    let Some(next) = args.get(i) else {
                         return false;
-                    }
+                    };
+                    next.as_str()
+                } else {
+                    inline
+                };
+                if c == 'o' && !valid_interactive_ssh_option(value) {
+                    return false;
                 }
                 break;
             }
-            if !"46Avq".contains(c) {
+            if !FLAGS.contains(c) {
                 return false;
             }
         }
@@ -452,21 +514,74 @@ mod tests {
     use super::*;
     #[test]
     fn routes_only_interactive_shells() {
-        for args in [vec!["host"], vec!["-p", "2222", "-J", "jump", "user@host"]] {
-            assert!(interactive(
-                &args.into_iter().map(String::from).collect::<Vec<_>>()
-            ));
+        for args in [
+            vec!["host"],
+            vec!["-p", "2222", "-J", "jump", "user@host"],
+            vec![
+                "-4vCp2222",
+                "-Ai",
+                "/tmp/id_ed25519",
+                "-F",
+                "./ssh_config",
+                "user@host",
+            ],
+            vec![
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-o",
+                "ServerAliveInterval=30",
+                "-oProxyCommand=nc %h %p",
+                "-o",
+                "User ubuntu",
+                "-o",
+                "RemoteCommand=none",
+                "-o",
+                "RequestTTY=yes",
+                "-o",
+                "ControlMaster=auto",
+                "host",
+            ],
+            vec![
+                "-c",
+                "aes128-gcm@openssh.com",
+                "-E",
+                "/tmp/ssh.log",
+                "-b",
+                "127.0.0.1",
+                "host",
+            ],
+        ] {
+            assert!(
+                interactive(&args.into_iter().map(String::from).collect::<Vec<_>>()),
+                "expected interactive acceptance"
+            );
         }
         for args in [
             vec!["host", "ls"],
             vec!["-N", "host"],
             vec!["-L", "80:x:80", "host"],
+            vec!["-R", "8080:127.0.0.1:80", "host"],
+            vec!["-D", "1080", "host"],
             vec!["-T", "host"],
+            vec!["-t", "host"],
+            vec!["-f", "host"],
+            vec!["-n", "host"],
             vec!["-o", "RemoteCommand=ls", "host"],
+            vec!["-o", "RequestTTY=no", "host"],
+            vec!["-o", "RequestTTY=force", "host"],
+            vec!["-o", "SessionType=none", "host"],
+            vec!["-o", "BatchMode=yes", "host"],
+            vec!["-o", "LocalForward=8080:127.0.0.1:80", "host"],
+            vec!["-o", "DynamicForward=1080", "host"],
+            vec!["-o", "ForwardX11=yes", "host"],
+            vec!["-o", "ControlMaster=yes", "host"],
+            vec!["-o", "ControlMaster=check", "host"],
+            vec!["-o", "MalformedWithoutValue", "host"],
         ] {
-            assert!(!interactive(
-                &args.into_iter().map(String::from).collect::<Vec<_>>()
-            ));
+            assert!(
+                !interactive(&args.into_iter().map(String::from).collect::<Vec<_>>()),
+                "expected non-interactive rejection"
+            );
         }
     }
 }

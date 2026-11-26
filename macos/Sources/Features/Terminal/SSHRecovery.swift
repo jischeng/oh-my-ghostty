@@ -21,7 +21,12 @@ extension TerminalController {
         }
         var config = Ghostty.SurfaceConfiguration()
         config.workingDirectory = descriptor.localWorkingDirectory
-        config.command = Self.replaySurvivalCommand(command)
+        config.setSurvivalCommand(command)
+        _ = SessionRuntimeConnections.automaticallyConfigureLocalRuntime(
+            &config,
+            policy: OhMyGhosttySettings.shared.runtimePolicy,
+            enabled: OhMyGhosttySettings.shared.localRuntimeEnabled
+        )
         config = Self.injectingSessionID(tabSessionID, into: config)
         let replacement = Ghostty.SurfaceView(ghosttyApp, baseConfig: config)
         replacement.sshResumeDescriptor = descriptor
@@ -47,7 +52,7 @@ extension TerminalController {
               let appDelegate = NSApp.delegate as? AppDelegate else { return }
         var config = Ghostty.SurfaceConfiguration()
         config.workingDirectory = descriptor.localWorkingDirectory
-        config.command = Self.replaySurvivalCommand(command)
+        config.setSurvivalCommand(command)
         guard let controller = Self.newTab(
             appDelegate.ghostty, from: window, withBaseConfig: config
         ), let destination = controller.surfaceTree.first else { return }

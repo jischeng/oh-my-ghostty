@@ -515,7 +515,7 @@ fn runInner(
             .label = label,
             .local_cwd = local_cwd,
             .remote_command = remote_command,
-            .replay_path = writeReplayDescriptor(alloc, opts, id),
+            .replay_path = writeReplayDescriptor(alloc, opts, id, local_cwd),
         };
     } else null;
     const remote_command = if (lifecycle) |value| value.remote_command else null;
@@ -699,6 +699,7 @@ const ReplayDescriptor = struct {
     terminfo: bool,
     cache: bool,
     args: []const []const u8,
+    local_working_directory: []const u8,
 };
 
 fn replaySupportName(channel: ?[]const u8) []const u8 {
@@ -721,6 +722,7 @@ fn writeReplayDescriptor(
     alloc: Allocator,
     opts: *const Options,
     context_id: []const u8,
+    local_cwd: []const u8,
 ) ?[]const u8 {
     if (comptime builtin.target.os.tag != .macos) return null;
 
@@ -764,6 +766,7 @@ fn writeReplayDescriptor(
         .terminfo = opts.terminfo,
         .cache = opts.cache,
         .args = opts._ssh_args.items,
+        .local_working_directory = local_cwd,
     }, .{})}) catch return null;
     writer.interface.flush() catch return null;
     atomic_file.replace(global.io()) catch return null;
@@ -1560,6 +1563,7 @@ test remoteShellCommand {
     ).?;
     defer testing.allocator.free(encoded_command);
     try testing.expect(std.mem.startsWith(u8, encoded_command, "exec /bin/sh -c '"));
+    try testing.expect(encoded_command.len < 120 * 1024);
     try testing.expect(std.mem.indexOf(u8, encoded_command, "BASH_SOURCE") == null);
     const command = try decodeBootstrapForTest(testing.allocator, encoded_command);
     defer testing.allocator.free(command);

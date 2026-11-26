@@ -1087,7 +1087,39 @@ pub fn serve_managed(
         .filter(|s| !s.trim().is_empty())
         .map(str::to_owned)
         .or_else(Vt::build_version);
-    let mut command = Command::new(&argv[0]);
+    let mut _draft_bridge = None;
+    let remote_original_editor = if !local_mode {
+        Some(
+            std::env::var("VISUAL")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .or_else(|| std::env::var("EDITOR").ok().filter(|s| !s.is_empty()))
+                .unwrap_or_else(|| "nano".into()),
+        )
+    } else {
+        None
+    };
+    let effective_argv = if !local_mode {
+        if let (Some(managed), Some(tty), Some(original)) = (
+            managed.as_ref(),
+            tty_name.as_deref(),
+            remote_original_editor.as_deref(),
+        ) {
+            if let Ok(bridge) = crate::remote_draft::prepare(parent, &managed.record, tty, original)
+            {
+                let rewritten = bridge.configure_argv(&argv);
+                _draft_bridge = Some(bridge);
+                rewritten
+            } else {
+                argv.to_vec()
+            }
+        } else {
+            argv.to_vec()
+        }
+    } else {
+        argv.to_vec()
+    };
+    let mut command = Command::new(&effective_argv[0]);
     let has_explicit_osc7501 = if let Some(launch) = local_launch.as_ref() {
         command.env_clear().envs(launch.env.iter());
         if launch
@@ -1122,7 +1154,7 @@ pub fn serve_managed(
         command.env("AGY_CLI_OSC7501", "on");
     }
     command
-        .args(&argv[1..])
+        .args(&effective_argv[1..])
         .env("OMG_SESSION_ID", &id)
         .env("OMG_AGENT_SOCK", &event_path)
         .env("OMG_RUNTIME_EVENT_SOCKET", &event_path)
@@ -1132,7 +1164,6 @@ pub fn serve_managed(
         .stdin(Stdio::from(slave.try_clone()?))
         .stdout(Stdio::from(slave.try_clone()?))
         .stderr(Stdio::from(slave));
-    let mut _draft_bridge = None;
     if local_mode {
         command.env_remove("OMG_RUNTIME_REMOTE");
     } else {
@@ -1146,18 +1177,10 @@ pub fn serve_managed(
                 }
             }
         }
-        if let (Some(managed), Some(tty)) = (managed.as_ref(), tty_name.as_deref()) {
-            let original = std::env::var("VISUAL")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .or_else(|| std::env::var("EDITOR").ok().filter(|s| !s.is_empty()))
-                .unwrap_or_else(|| "nano".into());
-            if let Ok(bridge) =
-                crate::remote_draft::prepare(parent, &managed.record, tty, &original)
-            {
-                bridge.configure_command(&mut command, &argv, &original);
-                _draft_bridge = Some(bridge);
-            }
+        if let (Some(bridge), Some(original)) =
+            (_draft_bridge.as_ref(), remote_original_editor.as_deref())
+        {
+            bridge.configure_command(&mut command, &argv, original);
         }
     }
     if let Some(resume) = managed

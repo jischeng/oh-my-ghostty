@@ -1791,17 +1791,12 @@ impl Registry {
                     ));
                 }
                 let args = resume.arguments()?;
-                let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
-                let script = format!(
-                    "exec {}",
-                    args.iter().map(|s| quote(s)).collect::<Vec<_>>().join(" ")
-                );
                 let shell = self
                     .command
                     .first()
                     .ok_or_else(|| io::Error::other("missing shell"))?
                     .clone();
-                argv = vec![shell, "-l".into(), "-i".into(), "-c".into(), script];
+                argv = crate::remote_draft::build_resume_argv(&shell, &args, false);
                 record.generation = nonce()?;
                 record.ended = None;
                 record.pid = None;
@@ -1856,15 +1851,12 @@ impl Registry {
             Record::new(id, policy.unwrap_or_else(|| self.policy.clone()))?
         };
         if let Some((resume, args)) = validated_initial_resume {
-            let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
-            let cmd = args.iter().map(|s| quote(s)).collect::<Vec<_>>().join(" ");
             let shell = self
                 .command
                 .first()
                 .ok_or_else(|| io::Error::other("missing shell"))?
                 .clone();
-            let script = format!("{cmd}; exec {} -l", quote(&shell));
-            argv = vec![shell, "-l".into(), "-i".into(), "-c".into(), script];
+            argv = crate::remote_draft::build_resume_argv(&shell, &args, true);
             record.resume = Some(resume.clone());
             if working_directory.is_none()
                 && fs::metadata(&resume.cwd).is_ok_and(|meta| meta.is_dir())
@@ -2723,17 +2715,12 @@ impl Registry {
                     ));
                 }
                 let args = resume.arguments()?;
-                let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
-                let script = format!(
-                    "exec {}",
-                    args.iter().map(|s| quote(s)).collect::<Vec<_>>().join(" ")
-                );
                 let shell = self
                     .command
                     .first()
                     .ok_or_else(|| io::Error::other("missing shell"))?
                     .clone();
-                argv = vec![shell, "-l".into(), "-i".into(), "-c".into(), script];
+                argv = crate::remote_draft::build_resume_argv(&shell, &args, false);
                 record.generation = nonce()?;
                 record.ended = None;
                 record.pid = None;
@@ -2796,15 +2783,12 @@ impl Registry {
             Record::new(id, policy.unwrap_or_else(|| self.policy.clone()))?
         };
         if let Some((resume, args)) = validated_initial_resume {
-            let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
-            let cmd = args.iter().map(|s| quote(s)).collect::<Vec<_>>().join(" ");
             let shell = self
                 .command
                 .first()
                 .ok_or_else(|| io::Error::other("missing shell"))?
                 .clone();
-            let script = format!("{cmd}; exec {} -l", quote(&shell));
-            argv = vec![shell, "-l".into(), "-i".into(), "-c".into(), script];
+            argv = crate::remote_draft::build_resume_argv(&shell, &args, true);
             record.resume = Some(resume.clone());
             if working_directory.is_none()
                 && fs::metadata(&resume.cwd).is_ok_and(|meta| meta.is_dir())

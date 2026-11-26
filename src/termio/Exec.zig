@@ -74,7 +74,7 @@ pub fn initTerminal(self: *Exec, term: *terminal.Terminal) void {
 
     // Setup our initial grid/screen size from the terminal. This
     // can't fail because the pty should not exist at this point.
-    self.resize(.{
+    self.resize(null, .{
         .columns = term.cols,
         .rows = term.rows,
     }, .{
@@ -146,6 +146,8 @@ pub fn threadEnter(
 
     // Setup our threadata backend state to be our own
     td.backend = .{ .exec = .{
+        .subprocess = &self.subprocess,
+        .io = io,
         .start = process_start,
         .write_stream = stream,
         .process = process,
@@ -265,9 +267,25 @@ pub fn focusGained(
 
 pub fn resize(
     self: *Exec,
+    td: ?*termio.Termio.ThreadData,
     grid_size: renderer.GridSize,
     screen_size: renderer.ScreenSize,
 ) !void {
+    if (td) |thread_data| {
+        assert(thread_data.backend == .exec);
+        const exec = &thread_data.backend.exec;
+        if (!exec.exited and exec.pending_writes > 0) {
+            self.subprocess.grid_size = grid_size;
+            self.subprocess.screen_size = screen_size;
+            exec.pending_resize = .{
+                .after_write_seq = exec.next_write_seq,
+                .grid_size = grid_size,
+                .screen_size = screen_size,
+            };
+            return;
+        }
+        exec.pending_resize = null;
+    }
     return try self.subprocess.resize(grid_size, screen_size);
 }
 
@@ -456,6 +474,9 @@ pub fn queueWrite(
 
         //for (slice) |b| log.warn("write: {x}", .{b});
 
+        exec.next_write_seq += 1;
+        w.seq = exec.next_write_seq;
+        exec.pending_writes += 1;
         exec.write_stream.queueWrite(
             td.loop,
             &exec.write_queue,
@@ -477,14 +498,40 @@ fn ttyWrite(
     r: xev.WriteError!usize,
 ) xev.CallbackAction {
     const w = w_.?;
-    w.td.write_pool.destroy(w);
+    const exec = w.td;
+    const seq = w.seq;
+    exec.write_pool.destroy(w);
+    assert(exec.pending_writes > 0);
+    exec.pending_writes -= 1;
 
-    const d = r catch |err| {
+    _ = r catch |err| {
         log.err("write error: {}", .{err});
-        return .disarm;
     };
-    _ = d;
-    //log.info("WROTE: {d}", .{d});
+
+    if (exec.pending_resize) |pending| {
+        if (seq >= pending.after_write_seq or exec.pending_writes == 0) {
+            exec.pending_resize = null;
+            if (!exec.exited) {
+                if (exec.subprocess.resize(pending.grid_size, pending.screen_size)) |_| {
+                    if (exec.io) |io| {
+                        var wake_termio = false;
+                        {
+                            io.renderer_state.mutex.lockUncancelable(global.io());
+                            defer io.renderer_state.mutex.unlock(global.io());
+                            io.terminal_stream.handler.noteChildResizeCommitted();
+                            if (io.terminal_stream.handler.termio_messaged) {
+                                io.terminal_stream.handler.termio_messaged = false;
+                                wake_termio = true;
+                            }
+                        }
+                        if (wake_termio) io.mailbox.notify();
+                    }
+                } else |err| {
+                    log.warn("error during deferred pty resize err={}", .{err});
+                }
+            }
+        }
+    }
 
     return .disarm;
 }
@@ -500,12 +547,26 @@ pub const ThreadData = struct {
         /// callback can put this back into the pool.
         td: *ThreadData,
 
+        /// Monotonic sequence number of this queued write chunk.
+        seq: u64 = 0,
+
         /// The libxev write request.
         req: xev.WriteRequest,
 
         /// The buffer for the data being written.
         buf: [64]u8,
     };
+
+    /// A PTY winsize update deferred behind already-queued xev stream writes so
+    /// TIOCSWINSZ/SIGWINCH never overtakes preceding input bytes.
+    pub const PendingResize = struct {
+        after_write_seq: u64,
+        grid_size: renderer.GridSize,
+        screen_size: renderer.ScreenSize,
+    };
+
+    subprocess: *Subprocess,
+    io: ?*termio.Termio = null,
 
     /// Process start time and boolean of whether its already exited.
     start: std.Io.Timestamp,
@@ -523,6 +584,9 @@ pub const ThreadData = struct {
 
     /// The write queue for the data stream.
     write_queue: xev.WriteQueue = .{},
+    next_write_seq: u64 = 0,
+    pending_writes: usize = 0,
+    pending_resize: ?PendingResize = null,
 
     /// This is used for both waiting for the process to exit and then
     /// subsequently to wait for the data_stream to close.
@@ -2360,4 +2424,116 @@ test "init frees the env when it fails" {
         };
         try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
     }
+}
+
+test "Exec: resize defers TIOCSWINSZ behind pending async PTY writes and preserves Write-Resize-Write order" {
+    if (comptime builtin.target.os.tag == .windows or builtin.target.os.tag == .ios) {
+        return error.SkipZigTest;
+    }
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var config = try configpkg.Config.default(alloc);
+    defer config.deinit();
+
+    const env: EnvMap = .init(alloc);
+    var exec = try init(alloc, .{
+        .env = env,
+        .resources_dir = null,
+        .term = "xterm-256color",
+        .rt_pre_exec_info = .init(&config),
+        .rt_post_fork_info = .init(&config),
+    });
+    defer exec.deinit();
+
+    const pty = try Pty.open(.{
+        .ws_row = 24,
+        .ws_col = 80,
+        .ws_xpixel = 800,
+        .ws_ypixel = 480,
+    });
+    defer {
+        _ = posix.system.close(pty.slave);
+        if (exec.subprocess.pty) |*owned| {
+            owned.deinit();
+            exec.subprocess.pty = null;
+        }
+    }
+    try testing.expect(ReadThread.setNonblock(pty.slave));
+    exec.subprocess.pty = pty;
+    exec.subprocess.grid_size = .{ .columns = 80, .rows = 24 };
+    exec.subprocess.screen_size = .{ .width = 800, .height = 480 };
+
+    var loop = try xev.Loop.init(.{});
+    defer loop.deinit();
+    const stream = xev.Stream.initFd(pty.master);
+    const termios_timer = try xev.Timer.init();
+    const pipe = try internal_os.pipe();
+    defer _ = posix.system.close(pipe[0]);
+
+    var td: termio.Termio.ThreadData = .{
+        .alloc = alloc,
+        .loop = &loop,
+        .renderer_state = undefined,
+        .surface_mailbox = undefined,
+        .mailbox = undefined,
+        .backend = .{ .exec = .{
+            .subprocess = &exec.subprocess,
+            .start = .now(testing.io, .awake),
+            .write_stream = stream,
+            .process = null,
+            .read_thread = undefined,
+            .read_thread_pipe = pipe[1],
+            .read_thread_fd = pty.master,
+            .termios_timer = termios_timer,
+            .termios_timer_running = false,
+        } },
+    };
+    defer td.deinit();
+
+    // 1. Multi-chunk (> 64 bytes) write followed by resize must NOT apply TIOCSWINSZ
+    //    before all chunks have been written to the PTY master fd.
+    const repeated: [100]u8 = @splat('x');
+    const long_payload = "paste-start-" ++ repeated ++ "-paste-end\n";
+    try exec.queueWrite(alloc, &td, long_payload, false);
+    try testing.expect(td.backend.exec.pending_writes >= 2);
+    try exec.resize(&td, .{ .columns = 100, .rows = 30 }, .{ .width = 1000, .height = 600 });
+
+    const pre_flush_ws = try exec.subprocess.pty.?.getSize();
+    try testing.expectEqual(@as(u16, 80), pre_flush_ws.ws_col);
+    try testing.expectEqual(@as(u16, 24), pre_flush_ws.ws_row);
+
+    try loop.run(.until_done);
+    try testing.expectEqual(@as(usize, 0), td.backend.exec.pending_writes);
+    try testing.expect(td.backend.exec.pending_resize == null);
+
+    const post_flush_ws = try exec.subprocess.pty.?.getSize();
+    try testing.expectEqual(@as(u16, 100), post_flush_ws.ws_col);
+    try testing.expectEqual(@as(u16, 30), post_flush_ws.ws_row);
+
+    var slave_buf: [256]u8 = undefined;
+    const read_len = try posix.read(pty.slave, &slave_buf);
+    try testing.expectEqualStrings(long_payload, slave_buf[0..read_len]);
+
+    // 2. Write #1 -> Resize -> Write #2 applies TIOCSWINSZ right after Write #1
+    //    flushes and before Write #2 is written.
+    try exec.queueWrite(alloc, &td, "first-line\n", false);
+    try exec.resize(&td, .{ .columns = 120, .rows = 40 }, .{ .width = 1200, .height = 800 });
+    try exec.queueWrite(alloc, &td, "second-line\n", false);
+
+    const before_first_ws = try exec.subprocess.pty.?.getSize();
+    try testing.expectEqual(@as(u16, 100), before_first_ws.ws_col);
+
+    try loop.run(.once);
+    const mid_ws = try exec.subprocess.pty.?.getSize();
+    try testing.expectEqual(@as(u16, 120), mid_ws.ws_col);
+    try testing.expectEqual(@as(u16, 40), mid_ws.ws_row);
+    const first_read = try posix.read(pty.slave, &slave_buf);
+    try testing.expectEqualStrings("first-line\n", slave_buf[0..first_read]);
+
+    try loop.run(.until_done);
+    const second_read = try posix.read(pty.slave, &slave_buf);
+    try testing.expectEqualStrings("second-line\n", slave_buf[0..second_read]);
+    try testing.expectEqual(@as(usize, 0), td.backend.exec.pending_writes);
 }

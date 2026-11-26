@@ -74,7 +74,7 @@ enum QuickInputRemoteDraftBridge {
                 continue
             if t.startswith('-'):
                 out.append(t)
-                if t in ('-r', '--require', '--import', '--loader', '--conditions'):
+                if t in ('-r', '--require', '--import', '--loader', '--conditions', '--rcfile', '--init-file'):
                     takes_value = True
                 continue
             base = os.path.basename(t).lower()
@@ -254,7 +254,7 @@ enum QuickInputRemoteDraftBridge {
                 continue
             if t.startswith('-'):
                 out.append(t)
-                if t in ('-r', '--require', '--import', '--loader', '--conditions'):
+                if t in ('-r', '--require', '--import', '--loader', '--conditions', '--rcfile', '--init-file'):
                     takes_value = True
                 continue
             base = os.path.basename(t).lower()

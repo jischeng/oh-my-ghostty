@@ -261,9 +261,14 @@ class RemoteRuntimeDraftTests(unittest.TestCase):
             safe_identity(["node", "-r", "/opt/preload.js", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js", "secret/arg"]),
             ["node", "-r", "/opt/preload.js", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"],
         )
+        self.assertEqual(
+            safe_identity(["/bin/bash", "--rcfile", "/tmp/omg_rc", "/home/user/.local/bin/agy", "secret"]),
+            ["/bin/bash", "--rcfile", "/tmp/omg_rc", "/home/user/.local/bin/agy"],
+        )
 
     def test_login_shell_rc_editor_override_preserves_draft_bridge_and_delegates_fallback(self):
-        shells = [s for s in ("/bin/bash", "/bin/zsh") if Path(s).is_file()]
+        candidates = ["/bin/bash", "/opt/homebrew/bin/bash", "/bin/zsh", "/opt/homebrew/bin/fish"]
+        shells = [s for s in candidates if Path(s).is_file()]
         self.assertTrue(shells)
         for shell_path in shells:
             with self.subTest(shell=shell_path), tempfile.TemporaryDirectory(prefix="omg-rc-editor-", dir="/tmp") as directory:
@@ -278,18 +283,33 @@ class RemoteRuntimeDraftTests(unittest.TestCase):
                     pathlib.Path({str(rc_marker)!r}).write_text(sys.argv[1])
                 """))
                 rc_editor.chmod(0o700)
-                rc_line = f'export EDITOR="{rc_editor}"\nexport VISUAL="{rc_editor}"\n'
-                for rc_name in (".bash_profile", ".bashrc", ".zshrc"):
-                    (home / rc_name).write_text(rc_line)
+                bash_rc_line = f'PROMPT_COMMAND="true"\nexport EDITOR="{rc_editor}"\nexport VISUAL="{rc_editor}"\n'
+                for rc_name in (".bash_profile", ".bashrc"):
+                    (home / rc_name).write_text(bash_rc_line)
+                zsh_rc_line = f'precmd_functions=()\nexport EDITOR="{rc_editor}"\nexport VISUAL="{rc_editor}"\n'
+                for rc_name in (".zshrc", ".zlogin"):
+                    (home / rc_name).write_text(zsh_rc_line)
+                fish_cfg = home / ".config/fish"
+                fish_cfg.mkdir(parents=True, mode=0o700)
+                (fish_cfg / "config.fish").write_text(
+                    f'set -gx EDITOR "{rc_editor}"\nset -gx VISUAL "{rc_editor}"\n'
+                )
 
                 draft_file = home / "shell-draft.txt"
                 draft_file.write_text("RC 覆盖后仍可导入草稿")
                 ordinary_file = home / "ordinary.txt"
                 ordinary_file.write_text("ordinary edit")
 
-                environment = dict(os.environ, HOME=directory, SHELL=shell_path, TERM="xterm-256color")
+                environment = dict(
+                    os.environ,
+                    HOME=directory,
+                    XDG_CONFIG_HOME=str(home / ".config"),
+                    SHELL=shell_path,
+                    TERM="xterm-256color",
+                )
                 environment.pop("ZDOTDIR", None)
                 environment.pop("PROMPT_COMMAND", None)
+                environment.pop("ENV", None)
                 daemon = subprocess.Popen([str(BINARY), "host", str(state), "--", shell_path, "-l"],
                                           env=environment)
                 identity = str(uuid.uuid4()).upper()
@@ -308,7 +328,7 @@ class RemoteRuntimeDraftTests(unittest.TestCase):
                     # Wait for the interactive login shell to finish RC + first prompt hook.
                     ready_sentinel = home / "prompt.ready"
                     stream.sendall(encode(b"D", 1, encode(b"I", 0, f'touch "{ready_sentinel}"\r'.encode())))
-                    for _ in range(100):
+                    for _ in range(150):
                         if ready_sentinel.exists():
                             break
                         time.sleep(0.03)
@@ -333,7 +353,197 @@ class RemoteRuntimeDraftTests(unittest.TestCase):
 
                     # Without an active draft request, $EDITOR delegates to the user's RC editor.
                     stream.sendall(encode(b"D", 1, encode(b"I", 0, f'"$EDITOR" "{ordinary_file}"\r'.encode())))
-                    for _ in range(100):
+                    for _ in range(150):
+                        if rc_marker.exists():
+                            break
+                        time.sleep(0.03)
+                    self.assertTrue(rc_marker.exists())
+                    self.assertEqual(rc_marker.read_text(), str(ordinary_file))
+                finally:
+                    stream.close()
+                    try:
+                        deadline = time.monotonic() + 8
+                        while True:
+                            with socket.socket(socket.AF_UNIX) as control:
+                                control.settimeout(3)
+                                control.connect(str(state / "host.sock"))
+                                control.sendall(encode(b"K", 1, identity.encode()))
+                                _, _, data = frame(control)
+                            if data[13:] == b"closed" or time.monotonic() > deadline:
+                                break
+                            time.sleep(0.05)
+                    finally:
+                        daemon.terminate()
+                        daemon.wait(timeout=5)
+
+    def test_remote_initial_resume_preserves_draft_bridge_in_agent_and_fallback_shell(self):
+        candidates = ["/bin/bash", "/opt/homebrew/bin/bash", "/bin/zsh", "/opt/homebrew/bin/fish"]
+        shells = [s for s in candidates if Path(s).is_file()]
+        self.assertTrue(shells)
+        for shell_path in shells:
+            with self.subTest(shell=shell_path), tempfile.TemporaryDirectory(prefix="omg-resume-draft-", dir="/tmp") as directory:
+                home = Path(directory)
+                state = home / ".omg/run/s-9876543210ab"
+                state.mkdir(parents=True, mode=0o700)
+                conversation = "conv-resume-88"
+                store = home / ".claude/projects/proj"
+                store.mkdir(parents=True, mode=0o700)
+                (store / f"{conversation}.jsonl").write_text('{"type":"session"}\n')
+
+                rc_marker = home / "rc_editor_ran.txt"
+                rc_editor = home / "user_rc_editor.py"
+                rc_editor.write_text(textwrap.dedent(f"""\
+                    #!{sys.executable}
+                    import pathlib, sys
+                    pathlib.Path({str(rc_marker)!r}).write_text(sys.argv[1])
+                """))
+                rc_editor.chmod(0o700)
+
+                bin_dir = home / "bin"
+                bin_dir.mkdir(mode=0o700)
+                draft_file = home / "agent-draft.txt"
+                draft_file.write_text("恢复会话中的 Agent 草稿")
+                fallback_draft = home / "fallback-draft.txt"
+                fallback_draft.write_text("退出 Agent 后登录 Shell 草稿")
+                ordinary_file = home / "ordinary.txt"
+                ordinary_file.write_text("ordinary")
+                agent_ready = home / "claude.ready"
+
+                claude_bin = bin_dir / "claude"
+                claude_bin.write_text(textwrap.dedent(f"""\
+                    #!{sys.executable}
+                    import os, pathlib, subprocess, tty
+                    tty.setraw(0)
+                    pathlib.Path({str(agent_ready)!r}).write_text(",".join(os.sys.argv[1:]))
+                    while True:
+                        ch = os.read(0, 1)
+                        if not ch:
+                            break
+                        if ch == b"\\x07":
+                            subprocess.run([os.environ["VISUAL"], {str(draft_file)!r}], check=True)
+                        elif ch == b"q":
+                            break
+                """))
+                claude_bin.chmod(0o700)
+
+                bash_rc = (
+                    f'export PATH="{bin_dir}:$PATH"\n'
+                    f'PROMPT_COMMAND="true"\n'
+                    f'export EDITOR="{rc_editor}"\n'
+                    f'export VISUAL="{rc_editor}"\n'
+                )
+                for rc_name in (".bash_profile", ".bashrc"):
+                    (home / rc_name).write_text(bash_rc)
+                zsh_rc = (
+                    f'export PATH="{bin_dir}:$PATH"\n'
+                    f'precmd_functions=()\n'
+                    f'export EDITOR="{rc_editor}"\n'
+                    f'export VISUAL="{rc_editor}"\n'
+                )
+                for rc_name in (".zshrc", ".zlogin"):
+                    (home / rc_name).write_text(zsh_rc)
+                fish_cfg = home / ".config/fish"
+                fish_cfg.mkdir(parents=True, mode=0o700)
+                (fish_cfg / "config.fish").write_text(
+                    f'set -gx PATH "{bin_dir}" $PATH\n'
+                    f'set -gx EDITOR "{rc_editor}"\n'
+                    f'set -gx VISUAL "{rc_editor}"\n'
+                )
+
+                environment = dict(
+                    os.environ,
+                    HOME=directory,
+                    XDG_CONFIG_HOME=str(home / ".config"),
+                    SHELL=shell_path,
+                    TERM="xterm-256color",
+                )
+                environment.pop("ZDOTDIR", None)
+                environment.pop("PROMPT_COMMAND", None)
+                environment.pop("ENV", None)
+
+                daemon = subprocess.Popen([str(BINARY), "host", str(state), "--", shell_path, "-l"],
+                                          env=environment)
+                identity = str(uuid.uuid4()).upper()
+                stream = socket.socket(socket.AF_UNIX)
+                stream.settimeout(8)
+                try:
+                    wait_socket(state / "host.sock", daemon)
+                    stream.connect(str(state / "host.sock"))
+                    open_req = json.dumps({
+                        "id": identity,
+                        "policy": {
+                            "close_on_agent_done": False,
+                            "agent_done_grace_seconds": 1,
+                            "terminate_grace_seconds": 1,
+                            "detached_ttl_seconds": 60,
+                            "host_idle_seconds": 60,
+                        },
+                        "create": True,
+                        "cwd": str(home),
+                        "resume": {
+                            "agent": "claude",
+                            "conversation_id": conversation,
+                            "cwd": str(home),
+                        },
+                    }).encode()
+                    stream.sendall(encode(b"C", 1, open_req))
+                    inner_event(stream, 1, b"J")
+                    offset, _ = inner_event(stream, 1, b"S")
+                    stream.sendall(encode(b"D", 1, encode(b"A", offset)))
+                    stream.sendall(encode(b"D", 1, encode(b"W")))
+                    inner_event(stream, 1, b"W")
+
+                    for _ in range(150):
+                        if agent_ready.exists():
+                            break
+                        time.sleep(0.03)
+                    self.assertTrue(agent_ready.exists())
+                    self.assertIn(conversation, agent_ready.read_text())
+
+                    session = "omg-runtime-" + identity.lower()
+                    root = state / "draft"
+                    scope = root / "sessions" / hashlib.sha256(session.encode()).hexdigest()
+                    metadata = json.loads((scope / "session.json").read_text())
+                    env = dict(environment, OMG_REMOTE_ROOT=str(root))
+                    command = [sys.executable, str(root / "omg")]
+
+                    # 1. Draft import inside the `-l -i -c` resumed Agent succeeds despite RC overrides.
+                    req1 = str(uuid.uuid4())
+                    subprocess.run(command + ["draft-begin", session, req1, metadata["tty"], metadata["runtime_generation"]],
+                                   env=env, capture_output=True, check=True, timeout=5)
+                    stream.sendall(encode(b"D", 1, encode(b"I", 0, b"\x07")))
+                    imported1 = subprocess.run(command + ["draft-read", session, req1], env=env,
+                                               capture_output=True, check=True, timeout=8)
+                    self.assertEqual(imported1.stdout, "OMG_REMOTE_DRAFT_V1\n恢复会话中的 Agent 草稿".encode())
+                    self.assertFalse(rc_marker.exists())
+                    subprocess.run(command + ["draft-finish", session, req1], env=env,
+                                   capture_output=True, check=True, timeout=5)
+
+                    # 2. Exit the resumed Agent (`q`) so `-c` runs `exec <shell> -l`, and verify
+                    #    the fallback interactive login shell STILL preserves the draft bridge!
+                    stream.sendall(encode(b"D", 1, encode(b"I", 0, b"q")))
+                    shell_ready = home / "fallback_shell.ready"
+                    time.sleep(0.2)
+                    stream.sendall(encode(b"D", 1, encode(b"I", 0, f'touch "{shell_ready}"\r'.encode())))
+                    for _ in range(150):
+                        if shell_ready.exists():
+                            break
+                        time.sleep(0.03)
+                    self.assertTrue(shell_ready.exists())
+
+                    req2 = str(uuid.uuid4())
+                    subprocess.run(command + ["draft-begin", session, req2, metadata["tty"], metadata["runtime_generation"]],
+                                   env=env, capture_output=True, check=True, timeout=5)
+                    stream.sendall(encode(b"D", 1, encode(b"I", 0, f'"$EDITOR" "{fallback_draft}"\r'.encode())))
+                    imported2 = subprocess.run(command + ["draft-read", session, req2], env=env,
+                                               capture_output=True, check=True, timeout=8)
+                    self.assertEqual(imported2.stdout, "OMG_REMOTE_DRAFT_V1\n退出 Agent 后登录 Shell 草稿".encode())
+                    subprocess.run(command + ["draft-finish", session, req2], env=env,
+                                   capture_output=True, check=True, timeout=5)
+
+                    # 3. Ordinary `$EDITOR` in the fallback login shell delegates to user RC editor.
+                    stream.sendall(encode(b"D", 1, encode(b"I", 0, f'"$EDITOR" "{ordinary_file}"\r'.encode())))
+                    for _ in range(150):
                         if rc_marker.exists():
                             break
                         time.sleep(0.03)

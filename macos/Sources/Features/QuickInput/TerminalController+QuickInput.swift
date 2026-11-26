@@ -509,8 +509,40 @@ extension TerminalController {
         text: String,
         usesEditorReplacement: Bool
     ) -> Bool {
-        guard !usesEditorReplacement else { return false }
-        return text.contains(where: \.isNewline)
+        quickInputPreEnterSettleDelay(
+            text: text,
+            usesEditorReplacement: usesEditorReplacement
+        ) > .zero
+    }
+
+    static func quickInputPreEnterSettleDelay(
+        text: String,
+        usesEditorReplacement: Bool
+    ) -> Duration {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .zero
+        }
+        // `sendText` wraps single-line text in `\e[200~...\e[201~` whenever DEC
+        // `?2004h` is enabled, and `$EDITOR` helpers write `.response` before
+        // exiting and before the parent Agent CLI finishes `tcsetattr` to
+        // re-enter raw TUI mode.
+        if usesEditorReplacement || text.contains(where: \.isNewline) {
+            return .milliseconds(250)
+        }
+        return .milliseconds(200)
+    }
+
+    static func quickInputPostEnterDismissDelay(
+        restoreFocus: Bool,
+        isPresented: Bool,
+        isPinned: Bool,
+        isTargetSurface: Bool,
+        requiresCommittedResize: Bool
+    ) -> Duration {
+        guard restoreFocus, isPresented, !isPinned, isTargetSurface, requiresCommittedResize else {
+            return .zero
+        }
+        return .milliseconds(60)
     }
 
     @discardableResult
@@ -591,6 +623,20 @@ extension TerminalController {
                 return
             }
             do {
+                let postImportDelay = self.quickInputModel.remainingPostImportSettleDelay(for: surfaceID)
+                if postImportDelay > .zero {
+                    try await Task.sleep(for: postImportDelay)
+                    guard !Task.isCancelled, !surface.blocksProgrammaticInput,
+                          self.surfaceTree.contains(where: { $0 === surface }), !surface.processExited,
+                          !surface.readonly,
+                          surface.runtimeDescriptor == nil || surface.runtimeConnectionState == .ready else {
+                        if surface.blocksProgrammaticInput {
+                            let currentStrings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
+                            self.quickInputModel.setStatusMessage(currentStrings.quickInputPasswordLockedMessage)
+                        }
+                        return
+                    }
+                }
                 let usesEditorReplacement: Bool
                 if let shortcut = self.quickInputModel.agentDraftShortcut(
                     for: surfaceID, foregroundPID: terminal.foregroundPID) {
@@ -600,11 +646,12 @@ extension TerminalController {
                     usesEditorReplacement = false
                     terminal.sendText(text)
                 }
-                if Self.quickInputRequiresSettleDelay(
+                let preEnterDelay = Self.quickInputPreEnterSettleDelay(
                     text: text,
                     usesEditorReplacement: usesEditorReplacement
-                ) {
-                    try await Task.sleep(for: .milliseconds(250))
+                )
+                if preEnterDelay > .zero {
+                    try await Task.sleep(for: preEnterDelay)
                 }
             } catch {
                 let currentStrings = SettingsStrings(language: OhMyGhosttySettings.shared.language)
@@ -644,6 +691,16 @@ extension TerminalController {
             )
             self.quickInputModel.recordSentText(text, for: surfaceID, historyID: historyID)
             self.quickInputModel.setStatusMessage(nil)
+            let postEnterDelay = Self.quickInputPostEnterDismissDelay(
+                restoreFocus: restoreFocus,
+                isPresented: self.quickInputModel.isPresented,
+                isPinned: self.quickInputModel.isPinned,
+                isTargetSurface: self.quickInputModel.targetSurfaceID == surfaceID,
+                requiresCommittedResize: surface.requiresCommittedDockResize
+            )
+            if postEnterDelay > .zero {
+                try? await Task.sleep(for: postEnterDelay)
+            }
             completion()
             if restoreFocus, self.quickInputModel.targetSurfaceID == surfaceID, !self.quickInputModel.isPresented {
                 self.hideCoveringEditorWorkspace(surfaceID: surfaceID)

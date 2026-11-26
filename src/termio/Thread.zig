@@ -355,27 +355,38 @@ fn drainMailbox(
             .start_synchronized_output => self.startSynchronizedOutput(cb),
             .linefeed_mode => |v| self.flags.linefeed_mode = v,
             .focused => |v| try io.focusGained(data, v),
-            .write_small => |v| try io.queueWrite(
-                data,
-                v.data[0..v.len],
-                self.flags.linefeed_mode,
-            ),
-            .write_stable => |v| try io.queueWrite(
-                data,
-                v,
-                self.flags.linefeed_mode,
-            ),
+            .write_small => |v| {
+                self.flushCoalescedChildResizeBeforeWrite(cb);
+                try io.queueWrite(
+                    data,
+                    v.data[0..v.len],
+                    self.flags.linefeed_mode,
+                );
+            },
+            .write_stable => |v| {
+                self.flushCoalescedChildResizeBeforeWrite(cb);
+                try io.queueWrite(
+                    data,
+                    v,
+                    self.flags.linefeed_mode,
+                );
+            },
             .write_alloc => |v| {
                 defer v.alloc.free(v.data);
+                self.flushCoalescedChildResizeBeforeWrite(cb);
                 try io.queueWrite(
                     data,
                     v.data,
                     self.flags.linefeed_mode,
                 );
             },
-            .protocol_reply => |v| try io.queueProtocolReply(data, v),
+            .protocol_reply => |v| {
+                self.flushCoalescedChildResizeBeforeWrite(cb);
+                try io.queueProtocolReply(data, v);
+            },
             .omg_session_write => |v| {
                 defer v.data.deinit();
+                self.flushCoalescedChildResizeBeforeWrite(cb);
                 if (io.backend == .omg_session) {
                     io.backend.omg_session.queueWriteGeneration(
                         v.generation,
@@ -419,6 +430,28 @@ fn drainMailbox(
     if (redraw) {
         try io.renderer_wakeup.notify();
     }
+}
+
+fn flushCoalescedChildResizeBeforeWrite(
+    self: *Thread,
+    cb: *CallbackData,
+) void {
+    if (self.coalesce_c.state() == .active) return;
+    const v = self.coalesce_data.resize orelse return;
+    if (!v.notify_child) return;
+    self.coalesce_data.resize = null;
+    cb.io.resize(&cb.data, v.size) catch |err| {
+        log.warn("error during resize err={}", .{err});
+    };
+    self.coalesce.reset(
+        &self.loop,
+        &self.coalesce_c,
+        &self.coalesce_cancel_c,
+        Coalesce.resize_ms,
+        CallbackData,
+        cb,
+        coalesceCallback,
+    );
 }
 
 fn syncResetTimeoutMs(post_resize: *const termio.StreamHandler.PostResizeState) u64 {
@@ -782,4 +815,177 @@ test "Thread: syncResetTimeoutForHandler handles remote post_resize, tui_wipe_ho
 
     handler.sync_output_started_at = now.addDuration(.fromMilliseconds(-15_010));
     try testing.expectEqual(@as(u64, 1), syncResetTimeoutForHandler(&handler));
+}
+
+test "Thread: drainMailbox preserves Resize-then-Write and Write-then-Resize PTY ordering" {
+    if (comptime builtin.target.os.tag == .windows or builtin.target.os.tag == .ios) {
+        return error.SkipZigTest;
+    }
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const configpkg = @import("../config.zig");
+    const ptypkg = @import("../pty.zig");
+    const posix = std.posix;
+
+    var cfg = try configpkg.Config.default(alloc);
+    defer cfg.deinit();
+
+    const env: std.process.Environ.Map = .init(alloc);
+    var exec_backend = try termio.Exec.init(alloc, .{
+        .env = env,
+        .resources_dir = null,
+        .term = "xterm-256color",
+        .rt_pre_exec_info = .init(&cfg),
+        .rt_post_fork_info = .init(&cfg),
+    });
+
+    const pty = try ptypkg.Pty.open(.{
+        .ws_row = 20,
+        .ws_col = 40,
+        .ws_xpixel = 400,
+        .ws_ypixel = 400,
+    });
+    defer _ = posix.system.close(pty.slave);
+    exec_backend.subprocess.pty = pty;
+
+    var term = try @import("../terminal/main.zig").Terminal.init(testing.io, alloc, .{
+        .cols = 40,
+        .rows = 20,
+    });
+    var mutex: std.Io.Mutex = .init;
+    var renderer_state: renderer.State = .{
+        .mutex = &mutex,
+        .terminal = &term,
+    };
+    var renderer_mailbox: renderer.Thread.Mailbox = .{};
+    const wakeup = try xev.Async.init();
+    const mailbox = try termio.Mailbox.initSPSC(alloc);
+
+    var io: termio.Termio = .{
+        .alloc = alloc,
+        .backend = .{ .exec = exec_backend },
+        .config = undefined,
+        .terminal = term,
+        .renderer_state = &renderer_state,
+        .renderer_wakeup = wakeup,
+        .renderer_mailbox = &renderer_mailbox,
+        .surface_mailbox = undefined,
+        .size = .{
+            .screen = .{ .width = 400, .height = 400 },
+            .cell = .{ .width = 10, .height = 20 },
+            .padding = .{},
+        },
+        .mailbox = mailbox,
+        .terminal_stream = undefined,
+    };
+    io.renderer_state.terminal = &io.terminal;
+    io.terminal_stream = .init(.{
+        .allocator = alloc,
+        .handler = .{
+            .alloc = alloc,
+            .size = &io.size,
+            .terminal = &io.terminal,
+            .termio_mailbox = &io.mailbox,
+            .surface_mailbox = undefined,
+            .renderer_state = io.renderer_state,
+            .renderer_mailbox = io.renderer_mailbox,
+            .renderer_wakeup = io.renderer_wakeup,
+            .enquiry_response = "",
+            .osc_color_report_format = .none,
+            .clipboard_write = .deny,
+        },
+    });
+    defer {
+        if (io.backend.exec.subprocess.pty) |*owned| {
+            owned.deinit();
+            io.backend.exec.subprocess.pty = null;
+        }
+        io.backend.deinit();
+        io.terminal_stream.deinit();
+        io.renderer_wakeup.deinit();
+        io.terminal.deinit(alloc);
+        io.mailbox.deinit(alloc);
+    }
+
+    var thread = try Thread.init(alloc);
+    defer thread.deinit();
+
+    const stream = xev.Stream.initFd(pty.master);
+    const termios_timer = try xev.Timer.init();
+    const pipe = try internal_os.pipe();
+    defer _ = posix.system.close(pipe[0]);
+
+    var cb: CallbackData = .{
+        .self = &thread,
+        .io = &io,
+        .data = .{
+            .alloc = alloc,
+            .loop = &thread.loop,
+            .renderer_state = &renderer_state,
+            .surface_mailbox = undefined,
+            .mailbox = &io.mailbox,
+            .backend = .{ .exec = .{
+                .subprocess = &io.backend.exec.subprocess,
+                .io = &io,
+                .start = .now(testing.io, .awake),
+                .write_stream = stream,
+                .process = null,
+                .read_thread = undefined,
+                .read_thread_pipe = pipe[1],
+                .read_thread_fd = pty.master,
+                .termios_timer = termios_timer,
+                .termios_timer_running = false,
+            } },
+        },
+    };
+    defer cb.data.deinit();
+
+    // 1. Resize queued BEFORE write in the same mailbox batch applies TIOCSWINSZ
+    //    before the write is flushed.
+    const size_a: renderer.Size = .{
+        .screen = .{ .width = 500, .height = 480 },
+        .cell = .{ .width = 10, .height = 20 },
+        .padding = .{},
+    };
+    io.mailbox.send(.{ .resize = size_a }, null);
+    io.mailbox.send(try termio.Message.writeReq(alloc, @as([]const u8, "after-resize\n")), null);
+    try thread.drainMailbox(&cb);
+
+    const ws_after_first_drain = try io.backend.exec.subprocess.pty.?.getSize();
+    try testing.expectEqual(@as(u16, 50), ws_after_first_drain.ws_col);
+    try testing.expectEqual(@as(u16, 24), ws_after_first_drain.ws_row);
+
+    // Flush the queued write and let the coalesce timer finish.
+    try thread.loop.run(.until_done);
+    var read_buf: [128]u8 = undefined;
+    const n1 = try posix.read(pty.slave, &read_buf);
+    try testing.expectEqualStrings("after-resize\n", read_buf[0..n1]);
+
+    // 2. Write queued BEFORE resize in the same mailbox batch defers TIOCSWINSZ
+    //    until the write has been written to the PTY master fd.
+    const size_b: renderer.Size = .{
+        .screen = .{ .width = 600, .height = 600 },
+        .cell = .{ .width = 10, .height = 20 },
+        .padding = .{},
+    };
+    io.mailbox.send(try termio.Message.writeReq(alloc, @as([]const u8, "before-resize\n")), null);
+    io.mailbox.send(.{ .resize = size_b }, null);
+    try thread.drainMailbox(&cb);
+
+    // Immediately after drainMailbox (before xev flushes write_queue), PTY size is still size_a!
+    const ws_before_write_flush = try io.backend.exec.subprocess.pty.?.getSize();
+    try testing.expectEqual(@as(u16, 50), ws_before_write_flush.ws_col);
+    try testing.expectEqual(@as(u16, 24), ws_before_write_flush.ws_row);
+
+    // Once the write flushes on the next loop tick, TIOCSWINSZ updates to size_b!
+    try thread.loop.run(.once);
+    const ws_after_write_flush = try io.backend.exec.subprocess.pty.?.getSize();
+    try testing.expectEqual(@as(u16, 60), ws_after_write_flush.ws_col);
+    try testing.expectEqual(@as(u16, 30), ws_after_write_flush.ws_row);
+    const n2 = try posix.read(pty.slave, &read_buf);
+    try testing.expectEqualStrings("before-resize\n", read_buf[0..n2]);
+
+    // Let coalesce timer finish cleanly before teardown.
+    try thread.loop.run(.until_done);
 }

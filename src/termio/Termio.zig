@@ -751,7 +751,7 @@ pub fn commitResize(
         self.renderer_state.mutex.lockUncancelable(global.io());
         defer self.renderer_state.mutex.unlock(global.io());
         self.has_uncommitted_visual_resize = false;
-        try self.backend.resize(grid_size, size.terminal());
+        try self.backend.resize(td, grid_size, size.terminal());
         self.terminal_stream.handler.noteChildResizeCommitted();
         if (self.backend != .omg_session and self.terminal.modes.get(.in_band_size_reports)) {
             try self.sizeReportLocked(td, .mode_2048);

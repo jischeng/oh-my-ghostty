@@ -2116,8 +2116,20 @@ struct AgentQuickInputTests {
                         composer = ""
         """#.write(to: script, atomically: true, encoding: .utf8)
 
+        // Inject a 320ms `atexit` teardown delay into `$VISUAL` (`editor.py`) AFTER `.response`
+        // is written so any host implementation that wakes on `.response` creation alone (without
+        // waiting for helper kernel exit) sends `Enter` right into `tcsetattr(TCSAFLUSH)` and drops it.
+        let siteDir = root.appendingPathComponent("site")
+        try FileManager.default.createDirectory(at: siteDir, withIntermediateDirectories: true)
+        try #"""
+        import atexit, os, sys, time
+        if os.environ.get("OMG_QUICK_INPUT_BRIDGE") and sys.argv and sys.argv[0].endswith("editor.py"):
+            atexit.register(lambda: time.sleep(0.32))
+        """#.write(to: siteDir.appendingPathComponent("sitecustomize.py"), atomically: true, encoding: .utf8)
+
         let python = try #require(LocalPythonInterpreter.cached())
         var config = Ghostty.SurfaceConfiguration()
+        config.environmentVariables["PYTHONPATH"] = siteDir.path
         config.command = Ghostty.Shell.quote(python.executablePath) + " " + Ghostty.Shell.quote(script.path)
         let controller = TerminalController(app.ghostty, withBaseConfig: config, tabLayout: .vertical)
         controller.showWindow(nil)
@@ -2144,44 +2156,56 @@ struct AgentQuickInputTests {
         }
 
         // 1. Single-line unpinned send with DEC ?2004h active:
-        //    must NOT hit 120ms paste-burst suppression, and unpinned dismiss SIGWINCH
-        //    must arrive AFTER `submitted`.
+        //    must NOT hit 120ms paste-burst suppression, `submitted` must run at docked height
+        //    with zero intervening `winch` between `paste` and `submitted`, and the unpinned
+        //    dismiss `SIGWINCH` restoring full height must arrive strictly AFTER `submitted`.
+        try "".write(to: eventsFile, atomically: true, encoding: .utf8)
         controller.presentQuickInput(for: surface, requestFocus: false)
         if controller.quickInputModel.isPinned { controller.quickInputModel.togglePinned() }
         controller.window?.contentView?.layoutSubtreeIfNeeded()
-        try await Task.sleep(for: .milliseconds(80))
+        try await waitForAppKit(timeout: .seconds(2)) {
+            loadEvents().contains { ($0["kind"] as? String) == "winch" }
+        }
+        let dockedRows = try #require(loadEvents().last?["rows"] as? Int)
+        try "".write(to: eventsFile, atomically: true, encoding: .utf8)
 
         controller.quickInputModel.draft = "单行中文快捷输入不丢字"
         controller.sendQuickInputDraft()
 
         try await waitForAppKit(timeout: .seconds(4)) {
             !controller.quickInputModel.isPresented &&
-                loadEvents().contains { ($0["kind"] as? String) == "submitted" }
+                loadEvents().contains { ($0["kind"] as? String) == "submitted" } &&
+                loadEvents().contains { ($0["kind"] as? String) == "winch" }
         }
-        try await Task.sleep(for: .milliseconds(80))
 
         let firstEvents = loadEvents()
         #expect(!firstEvents.contains { ($0["kind"] as? String) == "enter_suppressed_as_newline" })
+        let firstPasteIndex = try #require(firstEvents.firstIndex { ($0["kind"] as? String) == "paste" })
         let firstSubmitIndex = try #require(firstEvents.firstIndex { ($0["kind"] as? String) == "submitted" })
+        #expect(firstPasteIndex < firstSubmitIndex)
+        #expect(!firstEvents[firstPasteIndex...firstSubmitIndex].contains { ($0["kind"] as? String) == "winch" })
         #expect(firstEvents[firstSubmitIndex]["text"] as? String == "单行中文快捷输入不丢字")
-        if let postSubmitWinch = firstEvents[(firstSubmitIndex + 1)...].first(where: { ($0["kind"] as? String) == "winch" }),
-           let submitTime = firstEvents[firstSubmitIndex]["t"] as? Double,
-           let winchTime = postSubmitWinch["t"] as? Double {
-            #expect(winchTime >= submitTime)
-        }
+        #expect(firstEvents[firstSubmitIndex]["rows"] as? Int == dockedRows)
+        let postSubmitWinch = try #require(firstEvents[(firstSubmitIndex + 1)...].last {
+            ($0["kind"] as? String) == "winch"
+        })
+        let restoredRows = try #require(postSubmitWinch["rows"] as? Int)
+        #expect(restoredRows > dockedRows)
 
-        // 2. Imported `$EDITOR` draft replacement followed by unpinned send:
-        //    Enter must survive the CLI's 50ms post-`$VISUAL` `tcsetattr(TCSAFLUSH)` and submit cleanly.
+        // 2. Imported `$EDITOR` draft replacement followed by immediate unpinned send:
+        //    Even when `$VISUAL` stalls 320ms (> 250ms!) after writing `.response` before exiting
+        //    and the CLI runs `tcsetattr(TCSAFLUSH)` 50ms later, `Enter` must wait for helper exit
+        //    and submit cleanly without being flushed.
         try "".write(to: eventsFile, atomically: true, encoding: .utf8)
         controller.presentQuickInput(for: surface, requestFocus: false)
         controller.importQuickInputDraftFromTerminal(for: surface.id)
-        try await waitForAppKit(timeout: .seconds(4)) {
+        try await waitForAppKit(timeout: .seconds(5)) {
             controller.quickInputDraftImportTask == nil && controller.quickInputModel.draft == "初始草稿"
         }
         controller.quickInputModel.draft = "编辑器替换后的单行草稿"
         controller.sendQuickInputDraft()
 
-        try await waitForAppKit(timeout: .seconds(4)) {
+        try await waitForAppKit(timeout: .seconds(6)) {
             !controller.quickInputModel.isPresented &&
                 loadEvents().contains { ($0["kind"] as? String) == "submitted" }
         }

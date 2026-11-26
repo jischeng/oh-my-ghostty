@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 
 /// The editor-file protocol is shared by built-in and user-defined agents.
@@ -174,6 +175,7 @@ final class QuickInputDraftBridge {
         let input: URL
         let output: URL
         let replacement: URL
+        let lock: URL
     }
 
     func begin(surfaceID: UUID, replacement: String? = nil) throws -> Request {
@@ -183,6 +185,7 @@ final class QuickInputDraftBridge {
         let input = directory.appendingPathComponent("\(surfaceID.uuidString).request")
         let output = directory.appendingPathComponent("\(id).response")
         let replacementURL = directory.appendingPathComponent("\(id).replacement")
+        let lockURL = directory.appendingPathComponent("\(id).lock")
         try? FileManager.default.removeItem(at: input)
         if let replacement {
             guard replacement.utf8.count <= 1_048_576, !replacement.contains("\0") else {
@@ -199,11 +202,23 @@ final class QuickInputDraftBridge {
             try? FileManager.default.removeItem(at: replacementURL)
             throw error
         }
-        return Request(id: id, input: input, output: output, replacement: replacementURL)
+        return Request(id: id, input: input, output: output, replacement: replacementURL, lock: lockURL)
     }
 
     func receive(_ request: Request) throws -> String? {
         guard FileManager.default.fileExists(atPath: request.output.path) else { return nil }
+        let lockFD = Darwin.open(request.lock.path, O_RDONLY)
+        if lockFD >= 0 {
+            defer { _ = Darwin.close(lockFD) }
+            let flockFn: (Int32, Int32) -> Int32 = flock
+            if flockFn(lockFD, LOCK_SH | LOCK_NB) != 0 {
+                if errno == EWOULDBLOCK || errno == EAGAIN {
+                    return nil
+                }
+            } else {
+                _ = flockFn(lockFD, LOCK_UN)
+            }
+        }
         let attributes = try FileManager.default.attributesOfItem(atPath: request.output.path)
         guard ((attributes[.size] as? NSNumber)?.intValue ?? Int.max) <= 1_048_576 else {
             throw CocoaError(.fileReadTooLarge)
@@ -223,6 +238,7 @@ final class QuickInputDraftBridge {
         }
         try? FileManager.default.removeItem(at: request.output)
         try? FileManager.default.removeItem(at: request.replacement)
+        try? FileManager.default.removeItem(at: request.lock)
     }
 
     func awaitResponse(
@@ -261,6 +277,7 @@ final class QuickInputDraftBridge {
 
     // Python is also used by the bundled agent integrations. No third-party module is required.
     static let helper = #"""
+    import fcntl
     import json
     import os
     import sys
@@ -269,7 +286,10 @@ final class QuickInputDraftBridge {
     import uuid
     from pathlib import Path
 
+    _ACTIVE_LOCK = None
+
     def main():
+        global _ACTIVE_LOCK
         root = Path(os.environ["OMG_QUICK_INPUT_BRIDGE"])
         surface = str(uuid.UUID(os.environ["OMG_QUICK_INPUT_SURFACE"])).upper()
         request = root / (surface + ".request")
@@ -295,6 +315,12 @@ final class QuickInputDraftBridge {
         content.decode("utf-8")
         if b"\0" in content:
             raise ValueError("Draft contains a NUL character")
+        try:
+            lock_fd = os.open(root / (identifier + ".lock"), os.O_WRONLY | os.O_CREAT, 0o600)
+            _ACTIVE_LOCK = os.fdopen(lock_fd, "wb")
+            fcntl.flock(_ACTIVE_LOCK.fileno(), fcntl.LOCK_EX)
+        except OSError:
+            _ACTIVE_LOCK = None
         if replacing:
             destination = Path(sys.argv[1])
             with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as edited:
@@ -309,7 +335,7 @@ final class QuickInputDraftBridge {
         with open(temporary, "xb") as destination:
             destination.write(content)
         os.replace(temporary, root / (identifier + ".response"))
-        # Publish only after replacement succeeds, so the host can send Enter.
+        # Hold _ACTIVE_LOCK until kernel exit so the host observes `.response` only after `$VISUAL` exits.
 
     try:
         main()

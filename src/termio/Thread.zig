@@ -436,7 +436,6 @@ fn flushCoalescedChildResizeBeforeWrite(
     self: *Thread,
     cb: *CallbackData,
 ) void {
-    if (self.coalesce_c.state() == .active) return;
     const v = self.coalesce_data.resize orelse return;
     if (!v.notify_child) return;
     self.coalesce_data.resize = null;
@@ -986,6 +985,24 @@ test "Thread: drainMailbox preserves Resize-then-Write and Write-then-Resize PTY
     const n2 = try posix.read(pty.slave, &read_buf);
     try testing.expectEqualStrings("before-resize\n", read_buf[0..n2]);
 
-    // Let coalesce timer finish cleanly before teardown.
+    // 3. Even while `coalesce_c` is ALREADY `.active` (from step 2's 25ms coalesce timer),
+    //    a new child resize followed by a write MUST still flush TIOCSWINSZ before the write!
+    try testing.expectEqual(.active, thread.coalesce_c.state());
+    const size_c: renderer.Size = .{
+        .screen = .{ .width = 720, .height = 560 },
+        .cell = .{ .width = 10, .height = 20 },
+        .padding = .{},
+    };
+    io.mailbox.send(.{ .resize = size_c }, null);
+    io.mailbox.send(try termio.Message.writeReq(alloc, @as([]const u8, "inside-active-coalesce\n")), null);
+    try thread.drainMailbox(&cb);
+
+    const ws_during_active_coalesce = try io.backend.exec.subprocess.pty.?.getSize();
+    try testing.expectEqual(@as(u16, 72), ws_during_active_coalesce.ws_col);
+    try testing.expectEqual(@as(u16, 28), ws_during_active_coalesce.ws_row);
+
+    // Let queued write and reset coalesce timer finish cleanly before teardown.
     try thread.loop.run(.until_done);
+    const n3 = try posix.read(pty.slave, &read_buf);
+    try testing.expectEqualStrings("inside-active-coalesce\n", read_buf[0..n3]);
 }

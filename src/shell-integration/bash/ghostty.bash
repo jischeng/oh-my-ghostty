@@ -50,10 +50,10 @@ if [ -n "$GHOSTTY_BASH_INJECT" ]; then
   # run_startup_files() in shell.c in the Bash source code.
   if builtin shopt -q login_shell; then
     if [[ $__ghostty_bash_flags != *"--noprofile"* ]]; then
-      [ -r /etc/profile ] && builtin source "/etc/profile"
+      if [ -r /etc/profile ]; then builtin source "/etc/profile" || builtin true; fi
       for __ghostty_rcfile in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
         [ -r "$__ghostty_rcfile" ] && {
-          builtin source "$__ghostty_rcfile"
+          builtin source "$__ghostty_rcfile" || builtin true
           break
         }
       done
@@ -68,12 +68,12 @@ if [ -n "$GHOSTTY_BASH_INJECT" ]; then
       #  Nixos uses /etc/bashrc
       for __ghostty_rcfile in /etc/bash.bashrc /etc/bash/bashrc /etc/bashrc; do
         [ -r "$__ghostty_rcfile" ] && {
-          builtin source "$__ghostty_rcfile"
+          builtin source "$__ghostty_rcfile" || builtin true
           break
         }
       done
       if [[ -z "$GHOSTTY_BASH_RCFILE" ]]; then GHOSTTY_BASH_RCFILE="$HOME/.bashrc"; fi
-      [ -r "$GHOSTTY_BASH_RCFILE" ] && builtin source "$GHOSTTY_BASH_RCFILE"
+      if [ -r "$GHOSTTY_BASH_RCFILE" ]; then builtin source "$GHOSTTY_BASH_RCFILE" || builtin true; fi
     fi
   fi
 

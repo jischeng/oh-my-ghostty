@@ -431,9 +431,13 @@ class RemoteRuntimeDraftTests(unittest.TestCase):
                     f'PROMPT_COMMAND="true"\n'
                     f'export EDITOR="{rc_editor}"\n'
                     f'export VISUAL="{rc_editor}"\n'
+                    f'set -e\n'
+                    f'[ -f "$HOME/.missing_optional_rc" ] && source "$HOME/.missing_optional_rc"\n'
                 )
                 for rc_name in (".bash_profile", ".bashrc"):
                     (home / rc_name).write_text(bash_rc)
+                custom_zdotdir = home / ".config/zsh"
+                custom_zdotdir.mkdir(parents=True, mode=0o700)
                 zsh_rc = (
                     f'export PATH="{bin_dir}:$PATH"\n'
                     f'precmd_functions=()\n'
@@ -441,7 +445,7 @@ class RemoteRuntimeDraftTests(unittest.TestCase):
                     f'export VISUAL="{rc_editor}"\n'
                 )
                 for rc_name in (".zshrc", ".zlogin"):
-                    (home / rc_name).write_text(zsh_rc)
+                    (custom_zdotdir / rc_name).write_text(zsh_rc)
                 fish_cfg = home / ".config/fish"
                 fish_cfg.mkdir(parents=True, mode=0o700)
                 (fish_cfg / "config.fish").write_text(
@@ -457,7 +461,11 @@ class RemoteRuntimeDraftTests(unittest.TestCase):
                     SHELL=shell_path,
                     TERM="xterm-256color",
                 )
-                environment.pop("ZDOTDIR", None)
+                if shell_path.endswith("zsh"):
+                    environment["ZDOTDIR"] = str(custom_zdotdir)
+                else:
+                    environment.pop("ZDOTDIR", None)
+                environment.pop("HISTFILE", None)
                 environment.pop("PROMPT_COMMAND", None)
                 environment.pop("ENV", None)
 
@@ -520,16 +528,27 @@ class RemoteRuntimeDraftTests(unittest.TestCase):
                                    capture_output=True, check=True, timeout=5)
 
                     # 2. Exit the resumed Agent (`q`) so `-c` runs `exec <shell> -l`, and verify
-                    #    the fallback interactive login shell STILL preserves the draft bridge!
+                    #    the fallback interactive login shell STILL preserves the draft bridge,
+                    #    custom `ZDOTDIR`, and GNU Bash `.bash_history`!
                     stream.sendall(encode(b"D", 1, encode(b"I", 0, b"q")))
                     shell_ready = home / "fallback_shell.ready"
                     time.sleep(0.2)
-                    stream.sendall(encode(b"D", 1, encode(b"I", 0, f'touch "{shell_ready}"\r'.encode())))
+                    if shell_path.endswith("fish"):
+                        probe_cmd = f'printf "%s" "$ZDOTDIR" > "{shell_ready}"\r'
+                    else:
+                        probe_cmd = f'set +e 2>/dev/null; printf "%s|%s" "${{ZDOTDIR:-}}" "${{HISTFILE:-}}" > "{shell_ready}"\r'
+                    stream.sendall(encode(b"D", 1, encode(b"I", 0, probe_cmd.encode())))
                     for _ in range(150):
                         if shell_ready.exists():
                             break
                         time.sleep(0.03)
                     self.assertTrue(shell_ready.exists())
+                    if shell_path.endswith("zsh"):
+                        zdot_val, _ = shell_ready.read_text().split("|", 1)
+                        self.assertEqual(zdot_val, str(custom_zdotdir))
+                    elif shell_path == "/opt/homebrew/bin/bash":
+                        _, hist_val = shell_ready.read_text().split("|", 1)
+                        self.assertEqual(hist_val, str(home / ".bash_history"))
 
                     req2 = str(uuid.uuid4())
                     subprocess.run(command + ["draft-begin", session, req2, metadata["tty"], metadata["runtime_generation"]],
@@ -565,6 +584,76 @@ class RemoteRuntimeDraftTests(unittest.TestCase):
                     finally:
                         daemon.terminate()
                         daemon.wait(timeout=5)
+
+    def test_draft_read_waits_for_editor_flock_release_on_slow_teardown(self):
+        with tempfile.TemporaryDirectory(prefix="omg-remote-flock-", dir="/tmp") as directory:
+            home = Path(directory)
+            root = home / "remote"
+            root.mkdir(mode=0o700)
+            omg_src = ROOT / "src/shell-integration/omg/omg.py"
+            omg_bin = root / "omg"
+            omg_bin.write_bytes(omg_src.read_bytes())
+            omg_bin.chmod(0o700)
+
+            site_dir = home / "site"
+            site_dir.mkdir(mode=0o700)
+            exited_stamp = home / "editor_exited_at.txt"
+            (site_dir / "sitecustomize.py").write_text(textwrap.dedent(f"""\
+                import atexit, pathlib, sys, time
+                if len(sys.argv) > 1 and sys.argv[1] == "editor":
+                    def _slow_exit():
+                        time.sleep(0.35)
+                        pathlib.Path({str(exited_stamp)!r}).write_text(str(time.monotonic()))
+                    atexit.register(_slow_exit)
+            """))
+
+            session = "omg-ssh-flock-test"
+            session_dir = root / "sessions" / hashlib.sha256(session.encode()).hexdigest()
+            session_dir.mkdir(parents=True, mode=0o700)
+            tty = "/dev/ttys999"
+            (session_dir / "session.json").write_text(json.dumps({
+                "protocol": 1, "editor": "nano", "created": time.time(), "tty": tty,
+            }))
+            env = dict(os.environ, HOME=directory, OMG_REMOTE_ROOT=str(root))
+            req = str(uuid.uuid4())
+            subprocess.run(
+                [sys.executable, str(omg_bin), "draft-replace", session, req, tty],
+                input=b"flock-synced-draft",
+                env=env,
+                capture_output=True,
+                check=True,
+                timeout=5,
+            )
+            draft_file = home / "draft.txt"
+            draft_file.write_text("before")
+            editor_env = dict(env, PYTHONPATH=str(site_dir))
+            editor_proc = subprocess.Popen(
+                [sys.executable, str(omg_bin), "editor", session, str(draft_file)],
+                env=editor_env,
+            )
+            try:
+                read_res = subprocess.run(
+                    [sys.executable, str(omg_bin), "draft-read", session, req],
+                    env=env,
+                    capture_output=True,
+                    check=True,
+                    timeout=5,
+                )
+                read_finished_at = time.monotonic()
+                self.assertEqual(read_res.stdout, b"OMG_REMOTE_DRAFT_V1\nflock-synced-draft")
+                self.assertTrue(exited_stamp.exists(), "draft-read returned before editor finished slow teardown")
+                editor_exited_at = float(exited_stamp.read_text())
+                self.assertGreaterEqual(read_finished_at, editor_exited_at)
+                subprocess.run(
+                    [sys.executable, str(omg_bin), "draft-finish", session, req],
+                    env=env,
+                    capture_output=True,
+                    check=True,
+                    timeout=5,
+                )
+                self.assertFalse((session_dir / (req.upper() + ".lock")).exists())
+            finally:
+                editor_proc.wait(timeout=5)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 import Testing
 @testable import Ghostty
@@ -764,6 +765,20 @@ struct QuickInputDraftBridgeTests {
         #expect(LocalAgentProcessDetector.detect(
             in: "/usr/bin/env -S bun --smol /usr/local/lib/node_modules/@mariozechner/pi-coding-agent/dist/cli.js"
         ) == .pi)
+        // Direct Node/Bun/Deno shebang execs where `argv[0]` is the runtime and the script basename
+        // (`agy`, `pi`, `omp`, `qoder`) differs from `runtimeMarkers` (`antigravity`, `pi-coding-agent`, etc.).
+        #expect(LocalAgentProcessDetector.detect(in: "node /home/user/.nvm/versions/node/v22.0.0/bin/agy") == .antigravity)
+        #expect(LocalAgentProcessDetector.detect(in: "bun /home/user/.bun/bin/agy") == .antigravity)
+        #expect(LocalAgentProcessDetector.detect(in: "node -r /opt/preload.js /usr/local/bin/agy") == .antigravity)
+        #expect(LocalAgentProcessDetector.detect(in: "node /usr/local/bin/pi") == .pi)
+        #expect(LocalAgentProcessDetector.detect(in: "node /usr/local/bin/omp") == .omp)
+        #expect(LocalAgentProcessDetector.detect(in: "node /usr/local/bin/qoder") == .qoder)
+        #expect(LocalAgentProcessDetector.detect(
+            in: "python3.12 -u /opt/venv/lib/python3.12/site-packages/hermes/cli.py"
+        ) == .hermes)
+        #expect(LocalAgentProcessDetector.detect(in: "python3 -m kimi") == .kimi)
+        #expect(LocalAgentProcessDetector.detect(in: "node /tmp/myscript.js agy") == nil)
+        #expect(LocalAgentProcessDetector.detect(in: "python3 /tmp/tool.py claude") == nil)
         let command = QuickInputRemoteDraftBridge.command(
             "draft-begin",
             session: "omg-runtime-test",
@@ -773,5 +788,35 @@ struct QuickInputDraftBridgeTests {
             generation: "gen-1"
         )
         #expect(command.contains("base64 -d"))
+    }
+
+    @Test func receiveWaitsForKernelFlockReleaseBeforePublishingResponse() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let python = try #require(LocalPythonInterpreter.cached())
+        let bridge = QuickInputDraftBridge(
+            temporaryDirectory: root,
+            pythonExecutable: { python.executablePath }
+        )
+        let surfaceID = UUID()
+        var config = Ghostty.SurfaceConfiguration()
+        bridge.configure(&config, surfaceID: surfaceID)
+
+        let request = try bridge.begin(surfaceID: surfaceID)
+        defer { bridge.finish(request) }
+
+        let flockFn: (Int32, Int32) -> Int32 = flock
+        let lockFD = Darwin.open(request.lock.path, O_WRONLY | O_CREAT, 0o600)
+        #expect(lockFD >= 0)
+        defer { if lockFD >= 0 { _ = Darwin.close(lockFD) } }
+        #expect(flockFn(lockFD, LOCK_EX | LOCK_NB) == 0)
+
+        try Data("held-until-exit".utf8).write(to: request.output, options: .atomic)
+        // While `$VISUAL` still holds LOCK_EX (before process exit), `receive` must return `nil`.
+        #expect(try bridge.receive(request) == nil)
+
+        // Once the helper releases LOCK_EX on process exit, `receive` returns the response immediately.
+        #expect(flockFn(lockFD, LOCK_UN) == 0)
+        #expect(try bridge.receive(request) == "held-until-exit")
     }
 }

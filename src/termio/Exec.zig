@@ -74,7 +74,7 @@ pub fn initTerminal(self: *Exec, term: *terminal.Terminal) void {
 
     // Setup our initial grid/screen size from the terminal. This
     // can't fail because the pty should not exist at this point.
-    self.resize(null, .{
+    _ = self.resize(null, .{
         .columns = term.cols,
         .rows = term.rows,
     }, .{
@@ -270,23 +270,34 @@ pub fn resize(
     td: ?*termio.Termio.ThreadData,
     grid_size: renderer.GridSize,
     screen_size: renderer.ScreenSize,
-) !void {
+) !bool {
     if (td) |thread_data| {
         assert(thread_data.backend == .exec);
         const exec = &thread_data.backend.exec;
         if (!exec.exited and exec.pending_writes > 0) {
             self.subprocess.grid_size = grid_size;
             self.subprocess.screen_size = screen_size;
-            exec.pending_resize = .{
-                .after_write_seq = exec.next_write_seq,
-                .grid_size = grid_size,
-                .screen_size = screen_size,
-            };
-            return;
+            if (exec.pending_resizes.items.len > 0 and
+                exec.pending_resizes.items[exec.pending_resizes.items.len - 1].after_write_seq == exec.next_write_seq)
+            {
+                exec.pending_resizes.items[exec.pending_resizes.items.len - 1] = .{
+                    .after_write_seq = exec.next_write_seq,
+                    .grid_size = grid_size,
+                    .screen_size = screen_size,
+                };
+            } else {
+                try exec.pending_resizes.append(thread_data.alloc, .{
+                    .after_write_seq = exec.next_write_seq,
+                    .grid_size = grid_size,
+                    .screen_size = screen_size,
+                });
+            }
+            return false;
         }
-        exec.pending_resize = null;
+        exec.pending_resizes.clearRetainingCapacity();
     }
-    return try self.subprocess.resize(grid_size, screen_size);
+    try self.subprocess.resize(grid_size, screen_size);
+    return true;
 }
 
 fn processExitCommon(td: *termio.Termio.ThreadData, exit_code: u32) void {
@@ -508,27 +519,27 @@ fn ttyWrite(
         log.err("write error: {}", .{err});
     };
 
-    if (exec.pending_resize) |pending| {
-        if (seq >= pending.after_write_seq or exec.pending_writes == 0) {
-            exec.pending_resize = null;
-            if (!exec.exited) {
-                if (exec.subprocess.resize(pending.grid_size, pending.screen_size)) |_| {
-                    if (exec.io) |io| {
-                        var wake_termio = false;
-                        {
-                            io.renderer_state.mutex.lockUncancelable(global.io());
-                            defer io.renderer_state.mutex.unlock(global.io());
-                            io.terminal_stream.handler.noteChildResizeCommitted();
-                            if (io.terminal_stream.handler.termio_messaged) {
-                                io.terminal_stream.handler.termio_messaged = false;
-                                wake_termio = true;
-                            }
+    while (exec.pending_resizes.items.len > 0 and
+        (seq >= exec.pending_resizes.items[0].after_write_seq or exec.pending_writes == 0))
+    {
+        const pending = exec.pending_resizes.orderedRemove(0);
+        if (!exec.exited) {
+            if (exec.subprocess.resize(pending.grid_size, pending.screen_size)) |_| {
+                if (exec.io) |io| {
+                    var wake_termio = false;
+                    {
+                        io.renderer_state.mutex.lockUncancelable(global.io());
+                        defer io.renderer_state.mutex.unlock(global.io());
+                        io.terminal_stream.handler.noteChildResizeCommitted();
+                        if (io.terminal_stream.handler.termio_messaged) {
+                            io.terminal_stream.handler.termio_messaged = false;
+                            wake_termio = true;
                         }
-                        if (wake_termio) io.mailbox.notify();
                     }
-                } else |err| {
-                    log.warn("error during deferred pty resize err={}", .{err});
+                    if (wake_termio) io.mailbox.notify();
                 }
+            } else |err| {
+                log.warn("error during deferred pty resize err={}", .{err});
             }
         }
     }
@@ -586,7 +597,7 @@ pub const ThreadData = struct {
     write_queue: xev.WriteQueue = .{},
     next_write_seq: u64 = 0,
     pending_writes: usize = 0,
-    pending_resize: ?PendingResize = null,
+    pending_resizes: std.ArrayList(PendingResize) = .empty,
 
     /// This is used for both waiting for the process to exit and then
     /// subsequently to wait for the data_stream to close.
@@ -612,6 +623,8 @@ pub const ThreadData = struct {
 
     pub fn deinit(self: *ThreadData, alloc: Allocator) void {
         _ = posix.system.close(self.read_thread_pipe);
+
+        self.pending_resizes.deinit(alloc);
 
         // Clear our write pool. We know we aren't ever going to do
         // any more IO since we stop our data stream below so we can just
@@ -2498,7 +2511,7 @@ test "Exec: resize defers TIOCSWINSZ behind pending async PTY writes and preserv
     const long_payload = "paste-start-" ++ repeated ++ "-paste-end\n";
     try exec.queueWrite(alloc, &td, long_payload, false);
     try testing.expect(td.backend.exec.pending_writes >= 2);
-    try exec.resize(&td, .{ .columns = 100, .rows = 30 }, .{ .width = 1000, .height = 600 });
+    try testing.expect(!try exec.resize(&td, .{ .columns = 100, .rows = 30 }, .{ .width = 1000, .height = 600 }));
 
     const pre_flush_ws = try exec.subprocess.pty.?.getSize();
     try testing.expectEqual(@as(u16, 80), pre_flush_ws.ws_col);
@@ -2506,7 +2519,7 @@ test "Exec: resize defers TIOCSWINSZ behind pending async PTY writes and preserv
 
     try loop.run(.until_done);
     try testing.expectEqual(@as(usize, 0), td.backend.exec.pending_writes);
-    try testing.expect(td.backend.exec.pending_resize == null);
+    try testing.expectEqual(@as(usize, 0), td.backend.exec.pending_resizes.items.len);
 
     const post_flush_ws = try exec.subprocess.pty.?.getSize();
     try testing.expectEqual(@as(u16, 100), post_flush_ws.ws_col);
@@ -2516,11 +2529,16 @@ test "Exec: resize defers TIOCSWINSZ behind pending async PTY writes and preserv
     const read_len = try posix.read(pty.slave, &slave_buf);
     try testing.expectEqualStrings(long_payload, slave_buf[0..read_len]);
 
-    // 2. Write #1 -> Resize -> Write #2 applies TIOCSWINSZ right after Write #1
-    //    flushes and before Write #2 is written.
+    // 2. Interleaved Write #1 -> Resize #1a/1b (coalesced) -> Write #2 -> Resize #2
+    //    applies Resize #1b right after Write #1 (before Write #2) and Resize #2
+    //    right after Write #2, rather than overwriting Resize #1b.
     try exec.queueWrite(alloc, &td, "first-line\n", false);
-    try exec.resize(&td, .{ .columns = 120, .rows = 40 }, .{ .width = 1200, .height = 800 });
+    try testing.expect(!try exec.resize(&td, .{ .columns = 110, .rows = 35 }, .{ .width = 1100, .height = 700 }));
+    try testing.expect(!try exec.resize(&td, .{ .columns = 120, .rows = 40 }, .{ .width = 1200, .height = 800 }));
+    try testing.expectEqual(@as(usize, 1), td.backend.exec.pending_resizes.items.len);
     try exec.queueWrite(alloc, &td, "second-line\n", false);
+    try testing.expect(!try exec.resize(&td, .{ .columns = 132, .rows = 45 }, .{ .width = 1320, .height = 900 }));
+    try testing.expectEqual(@as(usize, 2), td.backend.exec.pending_resizes.items.len);
 
     const before_first_ws = try exec.subprocess.pty.?.getSize();
     try testing.expectEqual(@as(u16, 100), before_first_ws.ws_col);
@@ -2533,7 +2551,21 @@ test "Exec: resize defers TIOCSWINSZ behind pending async PTY writes and preserv
     try testing.expectEqualStrings("first-line\n", slave_buf[0..first_read]);
 
     try loop.run(.until_done);
+    const final_ws = try exec.subprocess.pty.?.getSize();
+    try testing.expectEqual(@as(u16, 132), final_ws.ws_col);
+    try testing.expectEqual(@as(u16, 45), final_ws.ws_row);
     const second_read = try posix.read(pty.slave, &slave_buf);
     try testing.expectEqualStrings("second-line\n", slave_buf[0..second_read]);
     try testing.expectEqual(@as(usize, 0), td.backend.exec.pending_writes);
+    try testing.expectEqual(@as(usize, 0), td.backend.exec.pending_resizes.items.len);
+
+    // 3. Teardown / process exit while writes and deferred resizes are still queued
+    //    frees all queued memory cleanly without applying stale TIOCSWINSZ after exit.
+    try exec.queueWrite(alloc, &td, "teardown-pending\n", false);
+    try testing.expect(!try exec.resize(&td, .{ .columns = 90, .rows = 25 }, .{ .width = 900, .height = 500 }));
+    td.backend.exec.exited = true;
+    try loop.run(.until_done);
+    const exited_ws = try exec.subprocess.pty.?.getSize();
+    try testing.expectEqual(@as(u16, 132), exited_ws.ws_col);
+    try testing.expectEqual(@as(usize, 0), td.backend.exec.pending_resizes.items.len);
 }

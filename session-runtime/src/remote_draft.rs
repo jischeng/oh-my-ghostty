@@ -84,10 +84,12 @@ const BASH_ENV_SCRIPT: &str = r#"if [[ -n "${OMG_REMOTE_BASH_INJECT:-}" ]]; then
         builtin unset OMG_REMOTE_BASH_RESET_HISTFILE
     fi
     if builtin shopt -q login_shell; then
-        [ -r /etc/profile ] && builtin source "/etc/profile"
+        if [ -r /etc/profile ]; then
+            builtin source "/etc/profile" || builtin true
+        fi
         for __omg_rcfile in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
             if [ -r "$__omg_rcfile" ]; then
-                builtin source "$__omg_rcfile"
+                builtin source "$__omg_rcfile" || builtin true
                 break
             fi
         done
@@ -104,10 +106,12 @@ const BASH_ENV_SCRIPT: &str = r#"if [[ -n "${OMG_REMOTE_BASH_INJECT:-}" ]]; then
 fi
 "#;
 
-const BASH_RC_SCRIPT: &str = r#"[ -r /etc/profile ] && builtin source "/etc/profile"
+const BASH_RC_SCRIPT: &str = r#"if [ -r /etc/profile ]; then
+    builtin source "/etc/profile" || builtin true
+fi
 for __omg_rcfile in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
     if [ -r "$__omg_rcfile" ]; then
-        builtin source "$__omg_rcfile"
+        builtin source "$__omg_rcfile" || builtin true
         break
     fi
 done
@@ -179,7 +183,7 @@ fn write(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
 }
 
 fn is_apple_system_bash(shell_path: &str) -> bool {
-    cfg!(target_os = "macos") && shell_path == "/bin/bash"
+    cfg!(target_os = "macos") && matches!(shell_path, "/bin/bash" | "/private/bin/bash")
 }
 
 fn shell_basename(shell_path: &str) -> &str {
@@ -237,13 +241,13 @@ pub fn build_resume_argv(
     } else {
         match base {
             "zsh" => format!(
-                "{quoted_cmd}; if [[ -n \"${{OMG_REMOTE_ZDOTDIR:-}}\" && -d \"$OMG_REMOTE_ZDOTDIR\" ]]; then ZDOTDIR=\"$OMG_REMOTE_ZDOTDIR\" exec {quoted_shell} -l; fi; exec {quoted_shell} -l"
+                "{quoted_cmd}; if [[ -n \"${{OMG_REMOTE_ZDOTDIR:-}}\" && -d \"$OMG_REMOTE_ZDOTDIR\" ]]; then if [[ -n \"${{ZDOTDIR+X}}\" && \"$ZDOTDIR\" != \"$OMG_REMOTE_ZDOTDIR\" ]]; then export OMG_REMOTE_ORIG_ZDOTDIR=\"$ZDOTDIR\"; fi; ZDOTDIR=\"$OMG_REMOTE_ZDOTDIR\" exec {quoted_shell} -l; fi; exec {quoted_shell} -l"
             ),
             "bash" if is_apple_system_bash(shell) => format!(
                 "{quoted_cmd}; if [ -n \"${{OMG_REMOTE_BASH_RC_FILE:-}}\" ] && [ -r \"$OMG_REMOTE_BASH_RC_FILE\" ]; then exec {quoted_shell} --rcfile \"$OMG_REMOTE_BASH_RC_FILE\"; fi; exec {quoted_shell} -l"
             ),
             "bash" => format!(
-                "{quoted_cmd}; if [ -n \"${{OMG_REMOTE_BASH_ENV_FILE:-}}\" ] && [ -r \"$OMG_REMOTE_BASH_ENV_FILE\" ]; then ENV=\"$OMG_REMOTE_BASH_ENV_FILE\" OMG_REMOTE_BASH_INJECT=1 exec {quoted_shell} --posix -l; fi; exec {quoted_shell} -l"
+                "{quoted_cmd}; if [ -n \"${{OMG_REMOTE_BASH_ENV_FILE:-}}\" ] && [ -r \"$OMG_REMOTE_BASH_ENV_FILE\" ]; then if [ -n \"${{ENV+x}}\" ] && [ \"${{ENV:-}}\" != \"$OMG_REMOTE_BASH_ENV_FILE\" ]; then export OMG_REMOTE_ORIG_BASH_ENV=\"$ENV\"; fi; case $(export -p) in *' HISTFILE='*|*'declare -x HISTFILE='*) ;; *) export OMG_REMOTE_BASH_RESET_HISTFILE=1 ;; esac; ENV=\"$OMG_REMOTE_BASH_ENV_FILE\" OMG_REMOTE_BASH_INJECT=1 exec {quoted_shell} --posix -l; fi; exec {quoted_shell} -l"
             ),
             "fish" => format!(
                 "{quoted_cmd}; if set -q OMG_REMOTE_FISH_XDG_HOLD; and test -d \"$OMG_REMOTE_FISH_XDG_HOLD\"; set -gx OMG_REMOTE_FISH_XDG_DIR \"$OMG_REMOTE_FISH_XDG_HOLD\"; if set -q XDG_DATA_DIRS; set -gx XDG_DATA_DIRS \"$OMG_REMOTE_FISH_XDG_HOLD:$XDG_DATA_DIRS\"; else; set -gx XDG_DATA_DIRS \"$OMG_REMOTE_FISH_XDG_HOLD:/usr/local/share:/usr/share\"; end; end; exec {quoted_shell} -l"

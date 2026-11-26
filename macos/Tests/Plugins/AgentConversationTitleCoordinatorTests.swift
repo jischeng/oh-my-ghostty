@@ -1196,4 +1196,271 @@ struct AgentConversationTitleCoordinatorTests {
         #expect(store.record(agent: .codex, conversationID: firstID)?.title == "新模型中文标题")
         #expect(store.record(agent: .codex, conversationID: secondID)?.title == "新模型中文标题")
     }
+
+    // swiftlint:disable:next function_body_length
+    @Test func multiPaneAutoRenameRenamesAllBoundPanesDecouplesMenuAndHandlesSurfaceOverrides() async throws {
+        actor MappedGenerator: AITitleGenerating {
+            var prompts: [String] = []
+            func title(forFirstPrompt prompt: String) async -> String? {
+                prompts.append(prompt)
+                if prompt.contains("OKX") { return "OKX 集群系统实现" }
+                if prompt.contains("/boost") { return "交易模型分工优化" }
+                if prompt.contains("风控") { return "重构风控模块" }
+                return nil
+            }
+        }
+
+        let workspaceFixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { workspaceFixture.close() }
+
+        var splitConfig = Ghostty.SurfaceConfiguration()
+        splitConfig.command = "/bin/sleep 60"
+
+        // 1. Multi-pane manual `autoRenameTab(force: true)` renames ALL bound panes in focus order
+        //    (`[right, left]`), clearing both `controller.titleOverride` and `surface.titleOverride`
+        //    only once `.generated` succeeds.
+        let splitTab = try workspaceFixture.tab()
+        let left = try #require(splitTab.surfaceTree.first)
+        let right = try #require(splitTab.newSplit(at: left, direction: .right, baseConfig: splitConfig))
+        splitTab.focusedSurfaceDidChange(to: left)
+        splitTab.focusedSurfaceDidChange(to: right)
+
+        let leftConv = try #require(AgentConversationID("11111111-aaaa-4bbb-8ccc-111111111111"))
+        let rightConv = try #require(AgentConversationID("22222222-aaaa-4bbb-8ccc-222222222222"))
+        splitTab.adoptAgentResumeDescriptor(
+            .init(agent: .antigravity, conversationID: leftConv, scope: .local, workingDirectory: "/repo/trading"),
+            for: left
+        )
+        splitTab.adoptAgentResumeDescriptor(
+            .init(agent: .antigravity, conversationID: rightConv, scope: .local, workingDirectory: "/repo/trading"),
+            for: right
+        )
+
+        let store = AgentConversationTitleStore()
+        let mappedGenerator = MappedGenerator()
+        let coordinator = Coordinator(
+            store: store,
+            generator: mappedGenerator,
+            loadSeed: { target in
+                switch target.conversationID {
+                case leftConv:
+                    return Seed(native: nil, firstPrompt: "检查 OKX 模拟盘实单闭环")
+                case rightConv:
+                    return Seed(native: nil, firstPrompt: "/boost 优化 agent 与 sota 模型分工")
+                default:
+                    return nil
+                }
+            },
+            mode: { .generate },
+            language: { .simplifiedChinese },
+            sleep: { _ in }
+        )
+        splitTab.titleOverride = "Old Tab Override"
+        right.titleOverride = "Old Right Pane Title"
+        #expect(right.hasUserSetTitle)
+        splitTab.startAgentConversationTitleTracking(coordinator: coordinator)
+        await coordinator.waitUntilIdle()
+        // Manual overrides suppressed initial automatic generation.
+        #expect(await mappedGenerator.prompts.isEmpty)
+
+        splitTab.autoRenameTab(force: true)
+        await coordinator.waitUntilIdle()
+
+        #expect(splitTab.titleOverride == nil)
+        #expect(!right.hasUserSetTitle)
+        #expect(right.titleOverride == nil)
+        let prompts = await mappedGenerator.prompts
+        #expect(prompts.count == 2)
+        #expect(prompts.first?.contains("/boost") == true)
+        #expect(store.title(agent: .antigravity, conversationID: rightConv) == "交易模型分工优化")
+        #expect(store.title(agent: .antigravity, conversationID: leftConv) == "OKX 集群系统实现")
+
+        // When forced generation fails, `surface.titleOverride` (`hasUserSetTitle`) is preserved.
+        let failingCoordinator = Coordinator(
+            store: AgentConversationTitleStore(),
+            generator: Generator(nil),
+            loadSeed: { _ in Seed(native: nil, firstPrompt: "Unreachable") },
+            mode: { .generate },
+            sleep: { _ in }
+        )
+        let failTab = try workspaceFixture.tab()
+        let failSurface = try #require(failTab.surfaceTree.first)
+        failTab.adoptAgentResumeDescriptor(
+            .init(agent: .claude, conversationID: leftConv, scope: .local, workingDirectory: "/repo"),
+            for: failSurface
+        )
+        failSurface.titleOverride = "Pinned Surface Name"
+        failTab.startAgentConversationTitleTracking(coordinator: failingCoordinator)
+        failTab.autoRenameTab(force: true)
+        await failingCoordinator.waitUntilIdle()
+        #expect(failSurface.hasUserSetTitle)
+        #expect(failSurface.titleOverride == "Pinned Surface Name")
+
+        // 2. Focused right pane with empty/missing seed (or unbound) does NOT block renaming sibling left pane,
+        //    and Inbox presentation falls back to the newly generated left-pane title while right stays focused!
+        let seedlessRightTab = try workspaceFixture.tab()
+        let seedLeft = try #require(seedlessRightTab.surfaceTree.first)
+        let seedRight = try #require(
+            seedlessRightTab.newSplit(at: seedLeft, direction: .right, baseConfig: splitConfig)
+        )
+        seedlessRightTab.focusedSurfaceDidChange(to: seedLeft)
+        seedlessRightTab.focusedSurfaceDidChange(to: seedRight)
+        let seedLeftConv = try #require(AgentConversationID("33333333-aaaa-4bbb-8ccc-333333333333"))
+        let emptyRightConv = try #require(AgentConversationID("44444444-aaaa-4bbb-8ccc-444444444444"))
+        seedlessRightTab.adoptAgentResumeDescriptor(
+            .init(
+                agent: .antigravity,
+                conversationID: seedLeftConv,
+                scope: .local,
+                workingDirectory: "/repo/personal_trading"
+            ),
+            for: seedLeft
+        )
+        seedlessRightTab.adoptAgentResumeDescriptor(
+            .init(
+                agent: .antigravity,
+                conversationID: emptyRightConv,
+                scope: .local,
+                workingDirectory: "/repo/personal_trading"
+            ),
+            for: seedRight
+        )
+
+        let fallbackStore = AgentConversationTitleStore()
+        let fallbackCoordinator = Coordinator(
+            store: fallbackStore,
+            generator: MappedGenerator(),
+            loadSeed: { target in
+                target.conversationID == seedLeftConv
+                    ? Seed(native: nil, firstPrompt: "排查 OKX 集群系统实现")
+                    : nil
+            },
+            mode: { .off },
+            language: { .simplifiedChinese },
+            sleep: { _ in }
+        )
+        let savedMode = OhMyGhosttySettings.shared.agentSessionTitleMode
+        OhMyGhosttySettings.shared.agentSessionTitleMode = .off
+        defer { OhMyGhosttySettings.shared.agentSessionTitleMode = savedMode }
+
+        seedlessRightTab.startAgentConversationTitleTracking(coordinator: fallbackCoordinator)
+        seedlessRightTab.autoRenameTab(force: true)
+        await fallbackCoordinator.waitUntilIdle()
+
+        #expect(fallbackStore.title(agent: .antigravity, conversationID: seedLeftConv) == "OKX 集群系统实现")
+        #expect(seedlessRightTab.focusedSurface === seedRight)
+        #expect(seedlessRightTab.tabAgentConversationTitle == "OKX 集群系统实现")
+        let resolvedInbox = try #require(
+            TerminalTabPresentationResolver.resolve(
+                seedlessRightTab, index: 1, selected: true, activities: nil, style: .inbox
+            )
+        )
+        #expect(resolvedInbox.title == "OKX 集群系统实现")
+        #expect(resolvedInbox.subtitle == "/repo/personal_trading")
+
+        // 3. `autoRenameWorkspaceTabs` preserves `hasUserSetTitle` on a pinned split pane while still
+        //    renaming untitled sibling Agent panes in the same split tab.
+        let mixedSplitTab = try workspaceFixture.tab()
+        let pinnedPane = try #require(mixedSplitTab.surfaceTree.first)
+        let untitledPane = try #require(
+            mixedSplitTab.newSplit(at: pinnedPane, direction: .right, baseConfig: splitConfig)
+        )
+        mixedSplitTab.focusedSurfaceDidChange(to: pinnedPane)
+        let pinnedConv = try #require(AgentConversationID("55555555-aaaa-4bbb-8ccc-555555555555"))
+        let untitledConv = try #require(AgentConversationID("66666666-aaaa-4bbb-8ccc-666666666666"))
+        mixedSplitTab.adoptAgentResumeDescriptor(
+            .init(agent: .codex, conversationID: pinnedConv, scope: .local, workingDirectory: "/repo"),
+            for: pinnedPane
+        )
+        mixedSplitTab.adoptAgentResumeDescriptor(
+            .init(agent: .codex, conversationID: untitledConv, scope: .local, workingDirectory: "/repo"),
+            for: untitledPane
+        )
+        pinnedPane.titleOverride = "Pinned Split Pane"
+        let batchStore = AgentConversationTitleStore()
+        let batchCoordinator = Coordinator(
+            store: batchStore,
+            generator: MappedGenerator(),
+            loadSeed: { target in
+                target.conversationID == untitledConv
+                    ? Seed(native: nil, firstPrompt: "重构风控核心逻辑")
+                    : Seed(native: nil, firstPrompt: "OKX 不应生成")
+            },
+            mode: { .off },
+            language: { .simplifiedChinese },
+            sleep: { _ in }
+        )
+        mixedSplitTab.startAgentConversationTitleTracking(coordinator: batchCoordinator)
+        TerminalController.autoRenameWorkspaceTabs([mixedSplitTab])
+        await batchCoordinator.waitUntilIdle()
+
+        #expect(pinnedPane.hasUserSetTitle)
+        #expect(pinnedPane.titleOverride == "Pinned Split Pane")
+        #expect(batchStore.title(agent: .codex, conversationID: pinnedConv) == nil)
+        #expect(batchStore.title(agent: .codex, conversationID: untitledConv) == "重构风控模块")
+
+        // 4. Background automatic generation on an unfocused sibling pane does NOT disable right-click `自动重命名`.
+        actor HoldGate {
+            private var continuations: [CheckedContinuation<Void, Never>] = []
+            private var isOpen = false
+            private(set) var entered = 0
+            func wait() async {
+                entered += 1
+                guard !isOpen else { return }
+                await withCheckedContinuation { continuations.append($0) }
+            }
+            func open() {
+                isOpen = true
+                let all = continuations
+                continuations.removeAll()
+                for cont in all { cont.resume() }
+            }
+        }
+        let holdGate = HoldGate()
+        let bgStore = AgentConversationTitleStore()
+        let bgCoordinator = Coordinator(
+            store: bgStore,
+            generator: Generator("后台生成标题") { await holdGate.wait() },
+            loadSeed: { _ in Seed(native: "Long Native Title", firstPrompt: "Investigate split") },
+            mode: { .generate },
+            alwaysUseAI: { true },
+            language: { .simplifiedChinese },
+            sleep: { _ in },
+            retryDelays: [.zero]
+        )
+        let bgSplitTab = try workspaceFixture.tab()
+        let bgLeft = try #require(bgSplitTab.surfaceTree.first)
+        let bgRight = try #require(bgSplitTab.newSplit(at: bgLeft, direction: .right, baseConfig: splitConfig))
+        bgSplitTab.focusedSurfaceDidChange(to: bgRight)
+        let bgLeftConv = try #require(AgentConversationID("77777777-aaaa-4bbb-8ccc-777777777777"))
+        let bgRightConv = try #require(AgentConversationID("88888888-aaaa-4bbb-8ccc-888888888888"))
+        bgSplitTab.adoptAgentResumeDescriptor(
+            .init(agent: .claude, conversationID: bgLeftConv, scope: .local, workingDirectory: "/repo"),
+            for: bgLeft
+        )
+        bgSplitTab.startAgentConversationTitleTracking(coordinator: bgCoordinator)
+        for _ in 0..<50 where await holdGate.entered == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(bgSplitTab.isGeneratingTabTitle)
+        #expect(!bgSplitTab.isManualRenamingTab)
+
+        let strings = ChromeStrings.current
+        let menuDuringBg = NativeTabContextMenu.make(for: bgSplitTab, host: bgSplitTab, style: .inbox)
+        let autoItemDuringBg = try #require(menuDuringBg.items.first { $0.title == strings.autoRenameTab })
+        #expect(autoItemDuringBg.isEnabled)
+
+        bgSplitTab.adoptAgentResumeDescriptor(
+            .init(agent: .claude, conversationID: bgRightConv, scope: .local, workingDirectory: "/repo"),
+            for: bgRight
+        )
+        bgSplitTab.autoRenameTab(force: true)
+        #expect(bgSplitTab.isManualRenamingTab)
+        let menuDuringManual = NativeTabContextMenu.make(for: bgSplitTab, host: bgSplitTab, style: .inbox)
+        let renamingItem = try #require(menuDuringManual.items.first { $0.title == strings.renamingTab })
+        #expect(!renamingItem.isEnabled)
+
+        await holdGate.open()
+        await bgCoordinator.waitUntilIdle()
+    }
 }

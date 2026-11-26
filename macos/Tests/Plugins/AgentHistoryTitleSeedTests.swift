@@ -567,4 +567,173 @@ struct AgentHistoryTitleSeedTests {
             excluding: [claimedID], rootURL: root
         ) == nil)
     }
+
+    private enum AntigravityProto {
+        static func varint(_ value: UInt64) -> Data {
+            var remaining = value
+            var bytes = Data()
+            repeat {
+                var next = UInt8(remaining & 0x7F)
+                remaining >>= 7
+                if remaining != 0 { next |= 0x80 }
+                bytes.append(next)
+            } while remaining != 0
+            return bytes
+        }
+
+        static func field(_ number: Int, _ bytes: Data) -> Data {
+            varint(UInt64((number << 3) | 2)) + varint(UInt64(bytes.count)) + bytes
+        }
+
+        static func field(_ number: Int, _ text: String) -> Data { field(number, Data(text.utf8)) }
+        static func field(_ number: Int, _ value: UInt64) -> Data { varint(UInt64(number << 3)) + varint(value) }
+    }
+
+    @Test func antigravityLiveWALTurnOneAndMultiHopSubagentsResolveRootTitleSeed() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let conversations = root.appendingPathComponent("conversations")
+        try FileManager.default.createDirectory(at: conversations, withIntermediateDirectories: true)
+
+        let hex = { (data: Data) in data.map { String(format: "%02x", $0) }.joined() }
+        let fullPrompt = """
+        <terminal_viewport cols="120">layout budget</terminal_viewport>
+        /boost 你看看当前的做法；
+        我是希望能充分利用 agent + sota 模型的能力
+        """
+        let expectedCleanedPrompt = "/boost 你看看当前的做法；\n我是希望能充分利用 agent + sota 模型的能力"
+        let header = AntigravityProto.field(5, AntigravityProto.field(1, AntigravityProto.field(1, 1_795_662_000)))
+        let userStep = AntigravityProto.field(1, 14) + header + AntigravityProto.field(19, AntigravityProto.field(2, fullPrompt))
+        let systemOnlyStep = AntigravityProto.field(1, 101) + header
+
+        // Keep both `agy-root.db` and `conversation_summaries.db` open in WAL mode with uncheckpointed writes.
+        var rootTrajectoryDB: OpaquePointer?
+        #expect(sqlite3_open(conversations.appendingPathComponent("agy-root.db").path, &rootTrajectoryDB) == SQLITE_OK)
+        defer { sqlite3_close(rootTrajectoryDB) }
+        #expect(sqlite3_exec(rootTrajectoryDB, """
+        PRAGMA journal_mode = WAL;
+        PRAGMA wal_autocheckpoint = 0;
+        CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, step_payload BLOB);
+        INSERT INTO steps VALUES (0, 14, x'\(hex(userStep))');
+        """, nil, nil, nil) == SQLITE_OK)
+
+        try makeDatabase(conversations.appendingPathComponent("agy-swarm.db"), """
+        CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, step_payload BLOB);
+        INSERT INTO steps VALUES (0, 101, x'\(hex(systemOnlyStep))');
+        """)
+        try Data().write(to: conversations.appendingPathComponent("agy-sub-1.db"))
+        try Data().write(to: conversations.appendingPathComponent("agy-sub-2.db"))
+
+        let rootID = try #require(AgentConversationID("agy-root"))
+        let swarmID = try #require(AgentConversationID("agy-swarm"))
+        let sub2ID = try #require(AgentConversationID("agy-sub-2"))
+
+        // Stage A: Before `conversation_summaries.db` exists, a top-level session reads `step_type = 14` directly,
+        // while a worker trajectory with no `step_type = 14` yields nil.
+        #expect(await AgentHistoryStore.titleSeed(
+            agent: .antigravity, conversationID: rootID, rootURLs: [.antigravity: conversations]
+        ) == Seed(native: nil, firstPrompt: expectedCleanedPrompt))
+        #expect(await AgentHistoryStore.titleSeed(
+            agent: .antigravity, conversationID: swarmID, rootURLs: [.antigravity: conversations]
+        ) == nil)
+
+        // Stage B: Uncheckpointed WAL `conversation_summaries.db` during Turn 1 (`title == preview` single-line fragment)
+        // plus depth-1 `/swarm` worker and depth-2 nested `/boost` subagent.
+        var summaryDB: OpaquePointer?
+        #expect(sqlite3_open(root.appendingPathComponent("conversation_summaries.db").path, &summaryDB) == SQLITE_OK)
+        defer { sqlite3_close(summaryDB) }
+        #expect(sqlite3_exec(summaryDB, """
+        PRAGMA journal_mode = WAL;
+        PRAGMA wal_autocheckpoint = 0;
+        CREATE TABLE conversation_summaries (
+            conversation_id TEXT PRIMARY KEY,
+            title TEXT,
+            preview TEXT,
+            workspace_uris TEXT,
+            last_modified_time TEXT,
+            nesting_depth INTEGER,
+            parent_conversation_id TEXT
+        );
+        INSERT INTO conversation_summaries VALUES
+            ('agy-root', '/boost 你看看当前的做法；', '/boost 你看看当前的做法；', '["file:///repo"]', '2026-11-26 03:10:00+00:00', 0, ''),
+            ('agy-swarm', '', '', '["file:///repo"]', '2026-11-26 03:11:00+00:00', 1, 'agy-root'),
+            ('agy-sub-1', '', '', '["file:///repo"]', '2026-11-26 03:11:10+00:00', 1, 'agy-root'),
+            ('agy-sub-2', '', '', '["file:///repo"]', '2026-11-26 03:11:20+00:00', 2, 'agy-sub-1');
+        """, nil, nil, nil) == SQLITE_OK)
+
+        #expect(AgentHistoryStore.resolveAntigravityRootConversation(conversationID: rootID, rootURL: conversations)
+            == .init(rootID: rootID, isKnownTopLevel: true, isChild: false))
+        #expect(AgentHistoryStore.resolveAntigravityRootConversation(conversationID: swarmID, rootURL: conversations)
+            == .init(rootID: rootID, isKnownTopLevel: true, isChild: true))
+        #expect(AgentHistoryStore.resolveAntigravityRootConversation(conversationID: sub2ID, rootURL: conversations)
+            == .init(rootID: rootID, isKnownTopLevel: true, isChild: true))
+
+        for candidate in [rootID, swarmID, sub2ID] {
+            #expect(await AgentHistoryStore.titleSeed(
+                agent: .antigravity, conversationID: candidate, rootURLs: [.antigravity: conversations]
+            ) == Seed(native: nil, firstPrompt: expectedCleanedPrompt))
+        }
+
+        // Stage C: Once Antigravity writes a distinct native summary title in WAL, root and child lookups see it.
+        #expect(sqlite3_exec(summaryDB, """
+        UPDATE conversation_summaries SET title = '交易系统多Agent调研' WHERE conversation_id = 'agy-root';
+        """, nil, nil, nil) == SQLITE_OK)
+        for candidate in [rootID, swarmID, sub2ID] {
+            #expect(await AgentHistoryStore.titleSeed(
+                agent: .antigravity, conversationID: candidate, rootURLs: [.antigravity: conversations]
+            ) == Seed(native: "交易系统多Agent调研", firstPrompt: "/boost 你看看当前的做法；"))
+        }
+    }
+
+    @Test func antigravityConversationStoreDiscoversTopLevelAndExcludesChildrenAndClaimed() throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let conversations = root.appendingPathComponent("conversations")
+        try FileManager.default.createDirectory(at: conversations, withIntermediateDirectories: true)
+
+        let launch = Date()
+        let claimedID = try #require(AgentConversationID("agy-left-pane"))
+        let freshID = try #require(AgentConversationID("agy-right-pane"))
+        let workerID = try #require(AgentConversationID("agy-worker-pane"))
+
+        for id in [claimedID, freshID, workerID] {
+            let dbURL = conversations.appendingPathComponent("\(id.rawValue).db")
+            try Data().write(to: dbURL)
+            try FileManager.default.setAttributes(
+                [.creationDate: launch.addingTimeInterval(1), .modificationDate: launch.addingTimeInterval(1)],
+                ofItemAtPath: dbURL.path
+            )
+        }
+
+        let workspace = root.appendingPathComponent("personal_trading")
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        let workspaceURI = URL(fileURLWithPath: workspace.path).absoluteString
+
+        try makeDatabase(root.appendingPathComponent("conversation_summaries.db"), """
+        CREATE TABLE conversation_summaries (
+            conversation_id TEXT PRIMARY KEY,
+            title TEXT,
+            preview TEXT,
+            workspace_uris TEXT,
+            last_modified_time TEXT,
+            nesting_depth INTEGER,
+            parent_conversation_id TEXT
+        );
+        INSERT INTO conversation_summaries VALUES
+            ('agy-left-pane', 'OKX集群系统实现', 'OKX closed loop', '["\(workspaceURI)"]', '2026-11-26 03:00:00+00:00', 0, ''),
+            ('agy-right-pane', '', '/boost evaluate strategy', '["\(workspaceURI)"]', '2026-11-26 03:10:00+00:00', 0, ''),
+            ('agy-worker-pane', '', '', '["\(workspaceURI)"]', '2026-11-26 03:11:00+00:00', 1, 'agy-right-pane');
+        """)
+
+        #expect(AgentConversationStore.contains(agent: .antigravity, conversationID: freshID, rootURL: conversations))
+        // Without excluding the sibling pane's claimed ID, two fresh top-level sessions are ambiguous.
+        #expect(AgentConversationStore.discover(
+            agent: .antigravity, workingDirectory: workspace.path, launchedAfter: launch, rootURL: conversations
+        ) == nil)
+        // Excluding `claimedID` ignores `nesting_depth = 1` workers and isolates `agy-right-pane`.
+        #expect(AgentConversationStore.discover(
+            agent: .antigravity, workingDirectory: workspace.path, launchedAfter: launch,
+            excluding: [claimedID], rootURL: conversations
+        ) == freshID)
+    }
 }

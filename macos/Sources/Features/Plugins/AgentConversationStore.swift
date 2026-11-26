@@ -17,14 +17,20 @@ enum AgentConversationStore {
             fileURLWithPath: (rootValue as NSString).expandingTildeInPath
         )
         if let store = resume.store {
-            guard let buckets = try? FileManager.default.contentsOfDirectory(
-                at: root,
-                includingPropertiesForKeys: nil
-            ), buckets.count <= maximumFiles else { return false }
             let target = store.entryPattern.replacingOccurrences(
                 of: "{id}",
                 with: conversationID.rawValue
             )
+            if !target.contains("*"),
+               FileManager.default.fileExists(
+                   atPath: root.appendingPathComponent(target).path
+               ) {
+                return true
+            }
+            guard let buckets = try? FileManager.default.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: nil
+            ), buckets.count <= maximumFiles else { return false }
             for bucket in buckets {
                 if !target.contains("*") {
                     if FileManager.default.fileExists(
@@ -66,6 +72,14 @@ enum AgentConversationStore {
         excluding claimedConversationIDs: Set<AgentConversationID> = [],
         rootURL: URL? = nil
     ) -> AgentConversationID? {
+        if agent == .antigravity {
+            return discoverAntigravity(
+                workingDirectory: workingDirectory,
+                launchedAfter: launchedAfter,
+                excluding: claimedConversationIDs,
+                rootURL: rootURL
+            )
+        }
         let resume = agent.definition.resume
         if let command = resume.commandDiscovery {
             return discover(
@@ -138,6 +152,76 @@ enum AgentConversationStore {
         // Several resumed transcripts of one directory are common; the one the
         // Agent touched when it came back is the newest. Two touched within a
         // moment of each other cannot be told apart, so neither is adopted.
+        resumed.sort { $0.modified > $1.modified }
+        guard let newest = resumed.first else { return nil }
+        if resumed.count > 1, newest.modified.timeIntervalSince(resumed[1].modified) < creationTolerance {
+            return nil
+        }
+        return newest.id
+    }
+
+    private static func discoverAntigravity(
+        workingDirectory: String,
+        launchedAfter: Date,
+        excluding claimedConversationIDs: Set<AgentConversationID>,
+        rootURL: URL?
+    ) -> AgentConversationID? {
+        let root = rootURL ?? URL(
+            fileURLWithPath: ("~/.gemini/antigravity-cli/conversations" as NSString).expandingTildeInPath
+        )
+        let index = root.deletingLastPathComponent().appendingPathComponent("conversation_summaries.db")
+        guard let database = AgentHistoryDatabase(path: index.path) else { return nil }
+        let target = canonical(workingDirectory)
+        let threshold = launchedAfter.addingTimeInterval(-creationTolerance)
+        let resourceKeys: Set<URLResourceKey> = [.creationDateKey, .contentModificationDateKey, .isRegularFileKey]
+        var created = Set<AgentConversationID>()
+        var resumed: [(id: AgentConversationID, modified: Date)] = []
+        var ambiguousCreated = false
+
+        let visit: (AgentHistoryDatabase.Row) -> Bool = { row in
+            guard let id = row.text(0).flatMap(AgentConversationID.init),
+                  !claimedConversationIDs.contains(id) else { return true }
+            let uris = (row.text(1) ?? "").data(using: .utf8).flatMap {
+                try? JSONDecoder().decode([String].self, from: $0)
+            } ?? []
+            let matchesWorkspace = uris.compactMap(URL.init(string:))
+                .contains { $0.isFileURL && canonical($0.path) == target }
+            guard matchesWorkspace else { return true }
+            let trajectoryURL = root.appendingPathComponent(id.rawValue + ".db")
+            guard let values = try? trajectoryURL.resourceValues(forKeys: resourceKeys),
+                  values.isRegularFile == true else { return true }
+            let indexedModified = (row.text(2).flatMap(Double.init) ?? row.double(2))
+                .flatMap { $0 > 0 ? Date(timeIntervalSince1970: $0) : nil }
+            let modified = indexedModified ?? values.contentModificationDate ?? .distantPast
+            let createdAt = values.creationDate ?? modified
+            guard createdAt >= threshold || modified >= threshold else { return true }
+            if createdAt >= threshold {
+                created.insert(id)
+                if created.count > 1 {
+                    ambiguousCreated = true
+                    return false
+                }
+            } else {
+                resumed.removeAll { $0.id == id }
+                resumed.append((id, modified))
+            }
+            return true
+        }
+
+        let primary = """
+        SELECT conversation_id, workspace_uris, strftime('%s', last_modified_time)
+        FROM conversation_summaries WHERE nesting_depth = 0
+        ORDER BY last_modified_time DESC LIMIT 500
+        """
+        let fallback = """
+        SELECT conversation_id, workspace_uris, strftime('%s', last_modified_time)
+        FROM conversation_summaries ORDER BY last_modified_time DESC LIMIT 500
+        """
+        if !database.query(primary, visit: visit) {
+            database.query(fallback, visit: visit)
+        }
+        guard !ambiguousCreated else { return nil }
+        if let only = created.first { return only }
         resumed.sort { $0.modified > $1.modified }
         guard let newest = resumed.first else { return nil }
         if resumed.count > 1, newest.modified.timeIntervalSince(resumed[1].modified) < creationTolerance {

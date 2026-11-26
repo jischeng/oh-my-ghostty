@@ -180,6 +180,11 @@ enum TerminalTabPresentationResolver {
             }
 
             var name: String? = explicitUserTitle
+            var namingLocation = location
+            var namingSession = session
+            var namingAgent = agent
+            var namingPathTitle = pathTitle
+            var namingIsRemote = remotePane
             if name == nil {
                 let conversation = controller.agentConversationTitle(for: surface)
                 let terminal = (conversation == nil && settings.agentSessionTitleMode != .off)
@@ -194,6 +199,37 @@ enum TerminalTabPresentationResolver {
                     : nil
                 name = conversation ?? terminal
             }
+            if name == nil, controller.surfaceTree.isSplit {
+                for sibling in controller.focusOrderedSurfaces.dropFirst() where !sibling.hasUserSetTitle {
+                    guard let siblingConversation = controller.agentConversationTitle(for: sibling) else { continue }
+                    let siblingSession = controller.paneSessionContext(for: sibling)
+                        ?? .init(workingDirectory: sibling.pwd, terminalTitle: sibling.title)
+                    let siblingDescriptor = controller.agentResumeDescriptor(for: sibling)
+                    let siblingActivity = controller.agentActivity(for: sibling)
+                    let siblingResumed = siblingDescriptor?.conversationID != nil ? siblingDescriptor?.agent : nil
+                    let resolvedSiblingAgent = siblingActivity.flatMap { SupportedAgent(rawValue: $0.source) }
+                        ?? siblingResumed
+                    name = siblingConversation
+                    namingSession = siblingSession
+                    namingAgent = resolvedSiblingAgent
+                    namingLocation = place(
+                        session: siblingSession,
+                        descriptor: siblingDescriptor,
+                        includeHost: includeRemoteHost
+                    )
+                    namingPathTitle = resolvedSiblingAgent == nil
+                        ? siblingSession.presentationTitle(pathDisplay: settings.tabPathDisplay)
+                        : siblingSession.agentPathTitle(
+                            pathDisplay: settings.tabPathDisplay,
+                            resumeDescriptor: siblingDescriptor
+                        )
+                    namingIsRemote = switch siblingSession.state {
+                    case .sshReady, .sshConnecting: true
+                    case .local: siblingDescriptor?.scope == .remote
+                    }
+                    break
+                }
+            }
 
             let singleLineLocation = (localPane && !remotePane) || (remotePane && !includeRemoteHost)
             title = name ?? restoredTitle
@@ -201,8 +237,13 @@ enum TerminalTabPresentationResolver {
                 ?? (agent?.normalizedTitle(pathTitle) ?? pathTitle)
             subtitle = name == nil
                 ? nil
-                : namedSubtitle(location: location, session: session, agent: agent, pathTitle: pathTitle)
-            subtitleIsRemote = subtitle != nil && remotePane
+                : namedSubtitle(
+                    location: namingLocation,
+                    session: namingSession,
+                    agent: namingAgent,
+                    pathTitle: namingPathTitle
+                )
+            subtitleIsRemote = subtitle != nil && namingIsRemote
             breadcrumb = name == nil && restoredTitle == nil && !singleLineLocation
                 ? session.remoteTabBreadcrumb
                 : nil

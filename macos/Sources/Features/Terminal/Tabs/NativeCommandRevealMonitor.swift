@@ -12,19 +12,21 @@ enum NativeTabTrailingAccessory: Equatable, Sendable {
 
     static func resolve(
         isHovered: Bool,
+        isCloseHovered: Bool = false,
         canClose: Bool,
         isCommandHeld: Bool,
         hasShortcut: Bool,
         isRenaming: Bool = false,
+        isManualRenaming: Bool = false,
         hasStatus: Bool
     ) -> Self {
-        if isHovered && canClose {
+        if isHovered && canClose && (!isManualRenaming || isCloseHovered) {
             return .close
         }
         if isCommandHeld && hasShortcut {
             return .shortcut
         }
-        if isRenaming {
+        if isRenaming || isManualRenaming {
             return .renaming
         }
         if hasStatus {

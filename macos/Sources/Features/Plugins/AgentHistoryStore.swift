@@ -324,8 +324,7 @@ enum AgentHistoryStore {
         recentAfter: Date
     ) -> ConversationMatch {
         if agent == .antigravity {
-            let stored = antigravitySessions(rootURL: rootURLs[agent], conversationID: conversationID)
-                .first { $0.conversationID == conversationID }
+            let stored = antigravitySessions(rootURL: rootURLs[agent], conversationID: conversationID).first
             return .init(session: stored, lookup: stored == nil ? .missing : .database)
         }
         if usesDatabaseHistory(agent) {
@@ -958,67 +957,176 @@ enum AgentHistoryStore {
         }.prefix(maximumSessions))
     }
 
-    /// - Parameter conversationID: Reads that one conversation, whatever its age.
+    struct AntigravityRootResolution: Equatable, Sendable {
+        let rootID: AgentConversationID
+        let isKnownTopLevel: Bool
+        let isChild: Bool
+    }
+
+    /// Walks `parent_conversation_id` up to 8 hops in `conversation_summaries.db`
+    /// so subagent and `/swarm` worker conversations resolve to their top-level user conversation.
+    nonisolated static func resolveAntigravityRootConversation(
+        conversationID: AgentConversationID,
+        rootURL: URL? = nil
+    ) -> AntigravityRootResolution {
+        let root = rootURL ?? URL(fileURLWithPath:
+            ("~/.gemini/antigravity-cli/conversations" as NSString).expandingTildeInPath)
+        let index = root.deletingLastPathComponent().appendingPathComponent("conversation_summaries.db")
+        guard let database = AgentHistoryDatabase(path: index.path) else {
+            return .init(rootID: conversationID, isKnownTopLevel: false, isChild: false)
+        }
+        var current = conversationID
+        var visited: Set<String> = [current.rawValue]
+        for hop in 0..<8 {
+            var foundRow = false
+            var parentRaw = ""
+            var depth = 0
+            let prepared = database.query(
+                "SELECT parent_conversation_id, nesting_depth FROM conversation_summaries WHERE conversation_id = ?1 LIMIT 1",
+                [current.rawValue]
+            ) { row in
+                foundRow = true
+                parentRaw = (row.text(0) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                depth = Int(row.double(1) ?? 0)
+                return false
+            }
+            if !prepared {
+                var legacyFound = false
+                database.query(
+                    "SELECT conversation_id FROM conversation_summaries WHERE conversation_id = ?1 LIMIT 1",
+                    [current.rawValue]
+                ) { _ in
+                    legacyFound = true
+                    return false
+                }
+                return .init(rootID: conversationID, isKnownTopLevel: legacyFound, isChild: false)
+            }
+            guard foundRow else {
+                return .init(rootID: current, isKnownTopLevel: false, isChild: hop > 0)
+            }
+            if parentRaw.isEmpty && depth <= 0 {
+                return .init(rootID: current, isKnownTopLevel: true, isChild: hop > 0)
+            }
+            guard !parentRaw.isEmpty,
+                  let parentID = AgentConversationID(parentRaw),
+                  visited.insert(parentID.rawValue).inserted else {
+                return .init(rootID: current, isKnownTopLevel: false, isChild: true)
+            }
+            current = parentID
+        }
+        return .init(rootID: current, isKnownTopLevel: false, isChild: true)
+    }
+
+    /// - Parameter conversationID: Reads that one conversation (resolving child/worker IDs to root), whatever its age.
     nonisolated private static func antigravitySessions(
         rootURL: URL?, conversationID: AgentConversationID? = nil
     ) -> [AgentHistorySession] {
         let root = rootURL ?? URL(fileURLWithPath:
             ("~/.gemini/antigravity-cli/conversations" as NSString).expandingTildeInPath)
         let index = root.deletingLastPathComponent().appendingPathComponent("conversation_summaries.db")
-        // Antigravity keeps its index in WAL mode. A read-only handle cannot
-        // prepare statements against it (SQLITE_CANTOPEN), so read a private
-        // copy with a read-write handle and never touch the Agent's own files.
-        let staging = FileManager.default.temporaryDirectory
-            .appendingPathComponent("omg-agy-\(UUID().uuidString)", isDirectory: true)
-        guard (try? FileManager.default.createDirectory(
-            at: staging, withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )) != nil else { return [] }
-        defer { try? FileManager.default.removeItem(at: staging) }
-        let copy = staging.appendingPathComponent("summary.db")
-        guard (try? FileManager.default.copyItem(at: index, to: copy)) != nil else { return [] }
-        var database: OpaquePointer?
-        guard sqlite3_open_v2(copy.path, &database, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
-            if let database { sqlite3_close(database) }
-            return []
+        if let requestedID = conversationID {
+            let resolution = resolveAntigravityRootConversation(conversationID: requestedID, rootURL: root)
+            let targetID = resolution.rootID
+            let trajectoryPath = root.appendingPathComponent(targetID.rawValue + ".db").path
+            guard FileManager.default.fileExists(atPath: trajectoryPath) else { return [] }
+            if let database = AgentHistoryDatabase(path: index.path) {
+                var matched: AgentHistorySession?
+                let sql = """
+                SELECT conversation_id, title, preview, workspace_uris, strftime('%s', last_modified_time)
+                FROM conversation_summaries WHERE conversation_id = ?1 LIMIT 1
+                """
+                database.query(sql, [targetID.rawValue]) { row in
+                    guard let id = row.text(0).flatMap(AgentConversationID.init),
+                          let seconds = row.text(4).flatMap(Double.init) ?? row.double(4) else { return true }
+                    let uris = (row.text(3) ?? "").data(using: .utf8).flatMap {
+                        try? JSONDecoder().decode([String].self, from: $0)
+                    } ?? []
+                    let cwd = uris.compactMap(URL.init(string:)).first(where: \.isFileURL)?.path
+                    let modified = seconds > 0 ? Date(timeIntervalSince1970: seconds) :
+                        ((try? FileManager.default.attributesOfItem(atPath: trajectoryPath)[.modificationDate]) as? Date ?? Date())
+                    let name = row.text(1) ?? ""
+                    let preview = row.text(2) ?? ""
+                    let hasDistinctNative = !name.isEmpty && collapsedTitle(name) != collapsedTitle(preview)
+                    let trajectoryPrompt = hasDistinctNative ? nil :
+                        AgentHistoryDatabase(path: trajectoryPath).flatMap { antigravityFirstPrompt($0) }
+                    let resolvedPrompt = trajectoryPrompt ?? (preview.isEmpty ? nil : preview)
+                    let display = !name.isEmpty ? name : (resolvedPrompt ?? "")
+                    matched = .init(
+                        agent: .antigravity,
+                        conversationID: id,
+                        title: normalizedTitle(display, workingDirectory: cwd, conversationID: id),
+                        workingDirectory: cwd,
+                        updatedAt: modified,
+                        sourcePath: trajectoryPath,
+                        isActive: false,
+                        previewSnippet: preview.isEmpty ? trajectoryPrompt : preview,
+                        nativeTitle: hasDistinctNative ? name : nil,
+                        firstPrompt: resolvedPrompt.map { String($0.prefix(maximumFirstPromptCharacters)) }
+                    )
+                    return false
+                }
+                if let matched { return [matched] }
+            }
+            guard !resolution.isChild,
+                  let trajectoryDB = AgentHistoryDatabase(path: trajectoryPath),
+                  let trajectoryPrompt = antigravityFirstPrompt(trajectoryDB) else {
+                return []
+            }
+            let modified = ((try? FileManager.default.attributesOfItem(atPath: trajectoryPath)[.modificationDate]) as? Date) ?? Date()
+            return [
+                .init(
+                    agent: .antigravity,
+                    conversationID: targetID,
+                    title: normalizedTitle(trajectoryPrompt, workingDirectory: nil, conversationID: targetID),
+                    workingDirectory: nil,
+                    updatedAt: modified,
+                    sourcePath: trajectoryPath,
+                    isActive: false,
+                    previewSnippet: trajectoryPrompt,
+                    nativeTitle: nil,
+                    firstPrompt: String(trajectoryPrompt.prefix(maximumFirstPromptCharacters))
+                ),
+            ]
         }
-        defer { sqlite3_close(database) }
-        var statement: OpaquePointer?
+
+        guard let database = AgentHistoryDatabase(path: index.path) else { return [] }
         let columns = "SELECT conversation_id, title, preview, workspace_uris, strftime('%s', last_modified_time) FROM conversation_summaries"
         let order = " ORDER BY last_modified_time DESC LIMIT 10000"
         // A swarm's workers talk to each other, not to the user: they have a
         // parent, or no prompt to title or preview them by.
-        let only = conversationID == nil ? "" : " AND conversation_id = ?1"
-        let conversations = columns + " WHERE nesting_depth = 0 AND (title != '' OR preview != '')" + only + order
-        let fallback = columns + (conversationID == nil ? "" : " WHERE conversation_id = ?1") + order
-        guard sqlite3_prepare_v2(database, conversations, -1, &statement, nil) == SQLITE_OK ||
-            sqlite3_prepare_v2(database, fallback, -1, &statement, nil) == SQLITE_OK else { return [] }
-        defer { sqlite3_finalize(statement) }
-        if let conversationID {
-            let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-            sqlite3_bind_text(statement, 1, conversationID.rawValue, -1, transient)
-        }
-        func value(_ column: Int32) -> String {
-            sqlite3_column_text(statement, column).map { String(cString: $0) } ?? ""
-        }
+        let conversations = columns + " WHERE nesting_depth = 0 AND (title != '' OR preview != '')" + order
+        let fallback = columns + order
         var sessions: [AgentHistorySession] = []
-        while !Task.isCancelled, sqlite3_step(statement) == SQLITE_ROW {
-            guard let id = AgentConversationID(value(0)), let seconds = Double(value(4)) else { continue }
+        let visit: (AgentHistoryDatabase.Row) -> Bool = { row in
+            guard let id = row.text(0).flatMap(AgentConversationID.init),
+                  let seconds = row.text(4).flatMap(Double.init) ?? row.double(4) else { return true }
             let path = root.appendingPathComponent(id.rawValue + ".db").path
-            guard FileManager.default.fileExists(atPath: path) else { continue }
-            let uris = value(3).data(using: .utf8).flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
+            guard FileManager.default.fileExists(atPath: path) else { return true }
+            let uris = (row.text(3) ?? "").data(using: .utf8).flatMap {
+                try? JSONDecoder().decode([String].self, from: $0)
+            } ?? []
             let cwd = uris.compactMap(URL.init(string:)).first(where: \.isFileURL)?.path
             let modified = seconds > 0 ? Date(timeIntervalSince1970: seconds) :
                 ((try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date ?? Date())
-            let preview = value(2)
-            let name = value(1)
+            let preview = row.text(2) ?? ""
+            let name = row.text(1) ?? ""
             let title = name.isEmpty ? preview : name
-            sessions.append(.init(agent: .antigravity, conversationID: id,
+            sessions.append(.init(
+                agent: .antigravity,
+                conversationID: id,
                 title: normalizedTitle(title, workingDirectory: cwd, conversationID: id),
-                workingDirectory: cwd, updatedAt: modified,
-                sourcePath: path, isActive: false, previewSnippet: preview.isEmpty ? nil : preview,
+                workingDirectory: cwd,
+                updatedAt: modified,
+                sourcePath: path,
+                isActive: false,
+                previewSnippet: preview.isEmpty ? nil : preview,
                 nativeTitle: name.isEmpty ? nil : name,
-                firstPrompt: preview.isEmpty ? nil : String(preview.prefix(maximumFirstPromptCharacters))))
+                firstPrompt: preview.isEmpty ? nil : String(preview.prefix(maximumFirstPromptCharacters))
+            ))
+            return true
+        }
+        if !database.query(conversations, visit: visit) {
+            database.query(fallback, visit: visit)
         }
         return sessions
     }
@@ -2072,7 +2180,8 @@ enum AgentHistoryStore {
         "recommended_plugins", "environment_context", "instructions", "pasted_content",
         "skills_instructions", "model_switch", "codex_apps_client_time_context",
         "task-notification", "turn_aborted", "codex_internal_context", "user_instructions",
-        "subagent_notification", "user_shell_command", "skill",
+        "subagent_notification", "user_shell_command", "skill", "terminal_viewport",
+        "system_message",
     ]
 
     /// Wrapper families whose tag name carries a generated suffix.

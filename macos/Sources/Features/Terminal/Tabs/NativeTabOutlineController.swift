@@ -41,7 +41,7 @@ enum NativeTabContextMenu {
             .action(strings.renameTab, symbol: "pencil") { [weak tab] in tab?.promptTabTitle() },
         ]
         if style == .inbox {
-            let isRenaming = tab.isGeneratingTabTitle
+            let isRenaming = tab.isManualRenamingTab
             let canAutoRename = !isRenaming && tab.canAutoRenameTab
             entries.append(
                 .action(

@@ -1412,7 +1412,23 @@ struct VerticalTabInboxSidebarTests {
         #expect(row.shortcutLabel.isHidden)
         #expect(row.closeButton.isHidden)
 
-        // Priority check on Inbox row: `hover ✕ > ⌘-held shortcut > renaming spinner > status badge > empty`.
+        // Priority check on Inbox row:
+        // - Background AI rename (`!isManualRenaming`): `hover ✕ > ⌘-held shortcut > renaming spinner > status > empty`.
+        // - Manual AI rename (`isManualRenaming`): hovering the row body keeps `.renaming` visible so right-clicking
+        //   `自动重命名` immediately shows feedback under the pointer, while aiming at the trailing `✕` slot reveals `.close`!
+        #expect(NativeTabTrailingAccessory.resolve(
+            isHovered: true, canClose: true, isCommandHeld: false,
+            hasShortcut: true, isRenaming: true, isManualRenaming: false, hasStatus: true
+        ) == .close)
+        #expect(NativeTabTrailingAccessory.resolve(
+            isHovered: true, isCloseHovered: false, canClose: true, isCommandHeld: false,
+            hasShortcut: true, isRenaming: true, isManualRenaming: true, hasStatus: true
+        ) == .renaming)
+        #expect(NativeTabTrailingAccessory.resolve(
+            isHovered: true, isCloseHovered: true, canClose: true, isCommandHeld: false,
+            hasShortcut: true, isRenaming: true, isManualRenaming: true, hasStatus: true
+        ) == .close)
+
         sidebar.inbox.isCommandModifierHeldOverride = true
         defer { sidebar.inbox.isCommandModifierHeldOverride = nil }
         row.layoutSubtreeIfNeeded()
@@ -1421,15 +1437,32 @@ struct VerticalTabInboxSidebarTests {
         #expect(!row.renamingSpinner.animationRequested)
         #expect(!row.shortcutLabel.isHidden)
 
+        // Release `⌘` and hover the row body during manual rename: spinner stays visible!
+        sidebar.inbox.isCommandModifierHeldOverride = nil
         sidebar.inbox.updateHover(at: NSPoint(x: row.frame.midX, y: row.frame.midY))
         row.layoutSubtreeIfNeeded()
+        #expect(row.isHovered)
+        #expect(!row.isCloseHovered)
+        #expect(row.trailingAccessory == .renaming)
+        #expect(!row.renamingSpinner.isHidden)
+        #expect(row.renamingSpinner.animationRequested)
+        #expect(row.closeButton.isHidden)
+        #expect(row.shortcutLabel.isHidden)
+
+        // Hovering directly over the trailing `✕` slot reveals `.close` with its hover disc.
+        sidebar.inbox.updateHover(at: NSPoint(
+            x: row.frame.minX + row.closeButton.frame.midX,
+            y: row.frame.minY + row.closeButton.frame.midY
+        ))
+        row.layoutSubtreeIfNeeded()
+        #expect(row.isCloseHovered)
         #expect(row.trailingAccessory == .close)
         #expect(!row.closeButton.isHidden)
+        #expect(row.closeButton.showsHoverDisc)
         #expect(row.shortcutLabel.isHidden)
         #expect(row.renamingSpinner.isHidden)
 
         sidebar.inbox.clearHover()
-        sidebar.inbox.isCommandModifierHeldOverride = nil
         row.layoutSubtreeIfNeeded()
         #expect(row.trailingAccessory == .renaming)
         #expect(!row.renamingSpinner.isHidden)

@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import Testing
 @testable import Ghostty
@@ -524,5 +525,95 @@ struct SplitTabPresentationTests {
             identifier: nil
         )
         #expect(buttons[0].intrinsicContentSize.width > uncheckedSameText.intrinsicContentSize.width)
+    }
+
+    @Test func splitFocusSwitchNotifiesPresentationAndInboxFallsBackToRecentTitledSibling() throws {
+        let savedTitleMode = OhMyGhosttySettings.shared.agentSessionTitleMode
+        OhMyGhosttySettings.shared.agentSessionTitleMode = .native
+        defer { OhMyGhosttySettings.shared.agentSessionTitleMode = savedTitleMode }
+
+        let fixture = try TerminalWorkspaceRefactorTests.Fixture()
+        defer { fixture.close() }
+        let controller = try fixture.tab()
+        let left = try #require(controller.surfaceTree.first)
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let middle = try #require(controller.newSplit(at: left, direction: .right, baseConfig: config))
+        let right = try #require(controller.newSplit(at: middle, direction: .right, baseConfig: config))
+
+        left.pwd = "/tmp/repo-left"
+        middle.pwd = "/tmp/repo-middle"
+        right.pwd = "/tmp/repo-right"
+
+        let leftConv = try #require(AgentConversationID("split-fallback-left"))
+        let middleConv = try #require(AgentConversationID("split-fallback-middle"))
+        controller.adoptAgentResumeDescriptor(
+            .init(agent: .antigravity, conversationID: leftConv, scope: .local, workingDirectory: "/tmp/repo-left"),
+            for: left
+        )
+        controller.adoptAgentResumeDescriptor(
+            .init(agent: .claude, conversationID: middleConv, scope: .local, workingDirectory: "/tmp/repo-middle"),
+            for: middle
+        )
+        AgentConversationTitleStore.shared.set(
+            "OKX 集群系统实现", source: .native, agent: .antigravity, conversationID: leftConv
+        )
+        AgentConversationTitleStore.shared.set(
+            "重构风控模块", source: .native, agent: .claude, conversationID: middleConv
+        )
+
+        var presentationNotifications = 0
+        let cancellable = NotificationCenter.default.publisher(for: .ghosttyTabPresentationDidChange)
+            .filter { ($0.object as? BaseTerminalController) === controller }
+            .sink { _ in presentationNotifications += 1 }
+        defer { cancellable.cancel() }
+
+        // 1. Focusing `left` then `middle` notifies presentation on each split focus change and shows focused title.
+        controller.focusedSurfaceDidChange(to: left)
+        let onLeft = try #require(
+            TerminalTabPresentationResolver.resolve(controller, index: 1, selected: true, activities: nil, style: .inbox)
+        )
+        #expect(onLeft.title == "OKX 集群系统实现")
+        #expect(onLeft.subtitle == "/tmp/repo-left")
+
+        let beforeSwitch = presentationNotifications
+        controller.focusedSurfaceDidChange(to: middle)
+        #expect(presentationNotifications > beforeSwitch)
+        let onMiddle = try #require(
+            TerminalTabPresentationResolver.resolve(controller, index: 1, selected: true, activities: nil, style: .inbox)
+        )
+        #expect(onMiddle.title == "重构风控模块")
+        #expect(onMiddle.subtitle == "/tmp/repo-middle")
+
+        // 2. Focusing untitled `right` falls back to the most-recently-focused titled sibling (`middle`),
+        //    preserving both its conversation title and matching location subtitle.
+        let beforeUntitledFocus = presentationNotifications
+        controller.focusedSurfaceDidChange(to: right)
+        #expect(presentationNotifications > beforeUntitledFocus)
+        let onUntitledRight = try #require(
+            TerminalTabPresentationResolver.resolve(controller, index: 1, selected: true, activities: nil, style: .inbox)
+        )
+        #expect(onUntitledRight.title == "重构风控模块")
+        #expect(onUntitledRight.subtitle == "/tmp/repo-middle")
+        #expect(controller.tabAgentConversationTitle == "重构风控模块")
+
+        // 3. Explicit surface user title on `middle` removes `middle` from conversation fallback,
+        //    so untitled `right` falls back to `left` ("OKX 集群系统实现").
+        middle.titleOverride = "Pinned Middle"
+        let skipPinnedSibling = try #require(
+            TerminalTabPresentationResolver.resolve(controller, index: 1, selected: true, activities: nil, style: .inbox)
+        )
+        #expect(skipPinnedSibling.title == "OKX 集群系统实现")
+        #expect(skipPinnedSibling.subtitle == "/tmp/repo-left")
+        #expect(controller.tabAgentConversationTitle == "OKX 集群系统实现")
+
+        // 4. Explicit surface user title on focused `right` itself always wins over sibling fallback.
+        right.titleOverride = "Shell Watch"
+        let explicitFocused = try #require(
+            TerminalTabPresentationResolver.resolve(controller, index: 1, selected: true, activities: nil, style: .inbox)
+        )
+        #expect(explicitFocused.title == "Shell Watch")
+        #expect(explicitFocused.subtitle == "/tmp/repo-right")
+        #expect(controller.tabAgentConversationTitle == nil)
     }
 }

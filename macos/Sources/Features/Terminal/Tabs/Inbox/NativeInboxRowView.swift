@@ -146,6 +146,7 @@ final class NativeInboxRowView: NSView {
     private var presentationProvider: ((GhosttyOrganizedTab) -> GhosttyTabPresentation?)?
     private var refreshScheduled = false
     private var trackingClosePress = false
+    private var closeSlotHovered = false
 
     private(set) var showsSubtitle = false
     private(set) var subtitleIsRemote = false
@@ -153,6 +154,7 @@ final class NativeInboxRowView: NSView {
     private(set) var showsRemoteCloud = false
     private(set) var hasStatusBadge = false
     private(set) var isRenamingTitle = false
+    private(set) var isManualRenamingTitle = false
     private(set) var trailingAccessory: NativeTabTrailingAccessory = .none
 
     /// Returns `true` when the leading icon (single or split panes) already consists
@@ -200,7 +202,10 @@ final class NativeInboxRowView: NSView {
     var isHovered = false {
         didSet {
             guard oldValue != isHovered else { return }
-            if !isHovered { closeButton.isHovered = false }
+            if !isHovered {
+                closeSlotHovered = false
+                closeButton.isHovered = false
+            }
             updateTrailingVisibility()
             needsDisplay = true
         }
@@ -208,7 +213,14 @@ final class NativeInboxRowView: NSView {
 
     var isCloseHovered: Bool {
         get { closeButton.isHovered }
-        set { closeButton.isHovered = newValue }
+        set {
+            guard closeSlotHovered != newValue || closeButton.isHovered != newValue else { return }
+            closeSlotHovered = newValue
+            closeButton.isHovered = newValue
+            if isManualRenamingTitle {
+                updateTrailingVisibility()
+            }
+        }
     }
 
     var selectAction: (() -> Void)?
@@ -229,7 +241,8 @@ final class NativeInboxRowView: NSView {
     }
 
     var closeButtonHitRect: NSRect {
-        closeButton.isHidden ? .zero : closeButton.frame
+        guard canClose, !closeButton.isHidden || (isHovered && isManualRenamingTitle) else { return .zero }
+        return closeButton.frame
     }
 
     override init(frame frameRect: NSRect) {
@@ -422,18 +435,25 @@ final class NativeInboxRowView: NSView {
     }
 
     func updateTrailingVisibility() {
-        isRenamingTitle = configuredTab?.controller.isGeneratingTabTitle == true
+        let controller = configuredTab?.controller
+        isRenamingTitle = controller?.isGeneratingTabTitle == true
+        isManualRenamingTitle = controller?.isManualRenamingTab == true
         renamingSpinner.toolTip = ChromeStrings.current.renamingTab
         let next = NativeTabTrailingAccessory.resolve(
             isHovered: isHovered,
+            isCloseHovered: closeSlotHovered,
             canClose: canClose,
             isCommandHeld: isCommandHeld,
             hasShortcut: !shortcutLabel.stringValue.isEmpty,
             isRenaming: isRenamingTitle,
+            isManualRenaming: isManualRenamingTitle,
             hasStatus: hasStatusBadge
         )
         trailingAccessory = next
         closeButton.isHidden = next != .close
+        if next == .close {
+            closeButton.isHovered = closeSlotHovered
+        }
         shortcutLabel.isHidden = next != .shortcut
         renamingSpinner.isHidden = next != .renaming
         renamingSpinner.setAnimating(next == .renaming)

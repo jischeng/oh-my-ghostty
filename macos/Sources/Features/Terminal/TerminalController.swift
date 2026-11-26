@@ -517,6 +517,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     private var hermesPollTasks: [UUID: Task<Void, Never>] = [:]
     private var hermesPollDates: [UUID: Date] = [:]
     private var hermesPaneContexts: [UUID: String] = [:]
+    var antigravityRootURLForTesting: URL?
 
     var focusedPaneSessionContext: PaneSessionContext? {
         paneSessionContext(for: focusedSurface ?? surfaceTree.first)
@@ -2045,7 +2046,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         } else {
             previous = nil
         }
-        let conversationID = session.conversationID ?? previous?.conversationID
+        let conversationID = resolveResumeConversationID(
+            session: session,
+            previous: previous,
+            currentContextID: agentResumeContextIDs[surfaceID]
+        )
         // Prefer the session's own project directory (reported via `omg_cwd`)
         // over the pane's shell working directory: conversations are
         // directory-scoped for agents such as Pi, and `pi resume` can start
@@ -2102,6 +2107,38 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
         enableRestorationForResumableSession()
         invalidateRestorableState()
+    }
+
+    private func resolveResumeConversationID(
+        session: AgentSessionSignal,
+        previous: AgentResumeDescriptor?,
+        currentContextID: String?
+    ) -> AgentConversationID? {
+        if session.isBackgroundSubcontext, let existingID = previous?.conversationID {
+            return existingID
+        }
+        guard let incomingID = session.conversationID else {
+            return previous?.conversationID
+        }
+        guard session.agent == .antigravity, session.scope == .local else {
+            return incomingID
+        }
+        if incomingID == previous?.conversationID {
+            return incomingID
+        }
+        let resolution = AgentHistoryStore.resolveAntigravityRootConversation(
+            conversationID: incomingID,
+            rootURL: antigravityRootURLForTesting
+        )
+        if resolution.isChild {
+            return resolution.rootID != incomingID ? resolution.rootID : previous?.conversationID
+        }
+        if !resolution.isKnownTopLevel,
+           let existingID = previous?.conversationID,
+           currentContextID == session.contextID {
+            return existingID
+        }
+        return resolution.rootID
     }
 
     private func enableRestorationForResumableSession() {

@@ -264,8 +264,10 @@ final class AgentConversationTitleCoordinator: ObservableObject {
                     flights[key]?.onForcedGenerated.append(onForcedGenerated)
                 }
                 if force {
+                    if !existingFlight.forced {
+                        flights[key]?.pendingForcedRetry = true
+                    }
                     flights[key]?.forced = true
-                    flights[key]?.pendingForcedRetry = true
                     if !(flights[key]?.generatingOwners.isEmpty ?? true) {
                         flights[key]?.isGenerating = true
                     }
@@ -1019,17 +1021,14 @@ final class AgentConversationTitleTracker {
         states = nextStates
     }
 
-    func autoRename(force: Bool) {
+    func autoRename(force: Bool, clearUserSurfaceTitle: Bool = true) {
         guard let controller else { return }
         let allowsGeneration = Self.allowsGeneration(in: controller)
-        let orderedSurfaces: [Ghostty.SurfaceView]
-        if let focused = controller.focusedSurface,
-           controller.surfaceTree.contains(where: { $0.id == focused.id }) {
-            orderedSurfaces = [focused] + controller.surfaceTree.filter { $0.id != focused.id }
-        } else {
-            orderedSurfaces = Array(controller.surfaceTree)
-        }
+        let orderedSurfaces = controller.focusOrderedSurfaces
         for surface in orderedSurfaces {
+            if !clearUserSurfaceTitle, surface.hasUserSetTitle {
+                continue
+            }
             guard let descriptor = controller.agentResumeDescriptor(for: surface) else { continue }
             let session = controller.paneSessionContext(for: surface)
                 ?? .init(workingDirectory: surface.pwd, terminalTitle: surface.title)
@@ -1044,12 +1043,20 @@ final class AgentConversationTitleTracker {
                     ?? Self.projectName(from: surface.pwd)
             )
             targets[surface.id] = target
+            let surfaceAllowsGeneration: Bool = if force {
+                clearUserSurfaceTitle || !surface.hasUserSetTitle
+            } else {
+                allowsGeneration && !surface.hasUserSetTitle
+            }
             var clearManualOverrideOnSuccess: (@MainActor () -> Void)?
             if force {
-                clearManualOverrideOnSuccess = { [weak self, weak controller] in
+                clearManualOverrideOnSuccess = { [weak self, weak controller, weak surface] in
                     guard let controller else { return }
                     if controller.titleOverride != nil {
                         controller.titleOverride = nil
+                    }
+                    if clearUserSurfaceTitle, let surface, surface.hasUserSetTitle {
+                        surface.titleOverride = nil
                     }
                     self?.lastAllowsGeneration = true
                 }
@@ -1058,15 +1065,11 @@ final class AgentConversationTitleTracker {
                 target,
                 trigger: .done,
                 owner: owner,
-                allowsGeneration: (force || allowsGeneration) && !surface.hasUserSetTitle,
+                allowsGeneration: surfaceAllowsGeneration,
                 force: force,
                 manualTabID: force ? controller.tabSessionID : nil,
                 onForcedGenerated: clearManualOverrideOnSuccess
             )
-            if force {
-                // Only rename the primary conversation driving this tab's title on an explicit single-tab action.
-                break
-            }
         }
     }
 
@@ -1176,6 +1179,33 @@ extension TerminalController {
         }
     }
 
+    /// Surfaces ordered by focus priority: `focusedSurface` first (when live),
+    /// followed by `tabPaneFocusHistory.recent` siblings, then any remaining `surfaceTree` leaves.
+    @MainActor
+    var focusOrderedSurfaces: [Ghostty.SurfaceView] {
+        let all = Array(surfaceTree)
+        guard all.count > 1 else { return all }
+        var byID: [UUID: Ghostty.SurfaceView] = [:]
+        for surface in all {
+            byID[surface.id] = surface
+        }
+        var ordered: [Ghostty.SurfaceView] = []
+        ordered.reserveCapacity(all.count)
+        var seen = Set<UUID>()
+        if let focused = focusedSurface, let live = byID[focused.id], seen.insert(live.id).inserted {
+            ordered.append(live)
+        }
+        for recentID in tabPaneFocusHistory.recent {
+            if let live = byID[recentID], seen.insert(live.id).inserted {
+                ordered.append(live)
+            }
+        }
+        for surface in all where seen.insert(surface.id).inserted {
+            ordered.append(surface)
+        }
+        return ordered
+    }
+
     /// The conversation title `surface` shows in the Inbox, if any.
     func agentConversationTitle(for surface: Ghostty.SurfaceView?) -> String? {
         agentConversationTitleCoordinator.store.title(
@@ -1186,7 +1216,18 @@ extension TerminalController {
 
     /// The conversation title of the pane that names this tab in the Inbox.
     var tabAgentConversationTitle: String? {
-        agentConversationTitle(for: focusedSurface ?? surfaceTree.first)
+        guard let primary = focusedSurface ?? surfaceTree.first else { return nil }
+        if primary.hasUserSetTitle { return nil }
+        if let primaryTitle = agentConversationTitle(for: primary) {
+            return primaryTitle
+        }
+        guard surfaceTree.isSplit else { return nil }
+        for sibling in focusOrderedSurfaces.dropFirst() where !sibling.hasUserSetTitle {
+            if let siblingTitle = agentConversationTitle(for: sibling) {
+                return siblingTitle
+            }
+        }
+        return nil
     }
 
     /// Starts looking up conversation titles for this tab's panes. Calling it
@@ -1210,7 +1251,7 @@ extension TerminalController {
     /// Triggers immediate AI title regeneration on an eligible Agent tab, clearing any manual
     /// `titleOverride` only once a replacement title is actually generated.
     @MainActor
-    func autoRenameTab(force: Bool = true) {
+    func autoRenameTab(force: Bool = true, clearUserSurfaceTitle: Bool = true) {
         guard canAutoRenameTab else { return }
         if objc_getAssociatedObject(self, &agentConversationTitleTrackerKey) == nil {
             startAgentConversationTitleTracking()
@@ -1218,12 +1259,12 @@ extension TerminalController {
         if let tracker = objc_getAssociatedObject(
             self, &agentConversationTitleTrackerKey
         ) as? AgentConversationTitleTracker {
-            tracker.autoRename(force: force)
+            tracker.autoRename(force: force, clearUserSurfaceTitle: clearUserSurfaceTitle)
         }
     }
 
     /// Triggers forced auto-rename for all eligible Agent tabs in `controllers`,
-    /// skipping tabs with an explicit manual `titleOverride` or user-set pane title.
+    /// skipping tabs with an explicit manual `titleOverride` and preserving per-pane user titles.
     @MainActor
     static func autoRenameWorkspaceTabs(_ controllers: [TerminalController]) {
         for controller in controllers where controller.canAutoRenameTab {
@@ -1231,10 +1272,7 @@ extension TerminalController {
                !override.isEmpty {
                 continue
             }
-            if (controller.focusedSurface ?? controller.surfaceTree.first)?.hasUserSetTitle == true {
-                continue
-            }
-            controller.autoRenameTab(force: true)
+            controller.autoRenameTab(force: true, clearUserSurfaceTitle: false)
         }
     }
 }

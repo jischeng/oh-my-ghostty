@@ -585,7 +585,7 @@ extension AgentHistoryStore {
         static let plannerResponse: Int32 = 15
     }
 
-    nonisolated private static func antigravityMessages(_ database: AgentHistoryDatabase) -> [DatabaseMessage] {
+    nonisolated static func antigravityMessages(_ database: AgentHistoryDatabase) -> [DatabaseMessage] {
         var messages: [DatabaseMessage] = []
         let sql = """
         SELECT step_type, step_payload FROM steps
@@ -606,6 +606,23 @@ extension AgentHistoryStore {
             return true
         }
         return messages
+    }
+
+    nonisolated static func antigravityFirstPrompt(_ database: AgentHistoryDatabase) -> String? {
+        var prompt: String?
+        let sql = """
+        SELECT step_payload FROM steps WHERE step_type = \(AntigravityStep.userInput) ORDER BY idx
+        """
+        database.query(sql) { row in
+            guard let payload = row.data(0),
+                  let step = AgentHistoryProtobuf(payload),
+                  let raw = step.message(19)?.string(2) else { return true }
+            let cleaned = cleanMeaningfulText(raw)
+            guard !cleaned.isEmpty, cleaned != "[Image/Attachment]" else { return true }
+            prompt = cleaned
+            return false
+        }
+        return prompt
     }
 }
 

@@ -53,6 +53,9 @@ class BaseTerminalController: NSWindowController,
             syncFocusToSurfaceTree()
             observeFocusedSurfaceContext()
             if oldValue !== focusedSurface {
+                if surfaceTree.isSplit {
+                    NotificationCenter.default.post(name: .ghosttyTabPresentationDidChange, object: self)
+                }
                 sessionCheckpointStateDidChange()
             }
         }

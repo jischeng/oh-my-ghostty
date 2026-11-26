@@ -352,7 +352,7 @@ enum AgentHookRemoteAction: String {
 
 struct AgentHookInstaller {
     static let marker = "_omg_agent_status"
-    static let hookVersion = 15
+    static let hookVersion = 16
     static let detectorMarkerVersion = 1
     static let didChangeNotification = Notification.Name(
         "com.oh-my-ghostty.agentIntegrationDidChange"
@@ -2185,7 +2185,7 @@ else:
         isPromptEvent: Bool = false
     ) -> String {
         let script = #"""
-import json, os, re, subprocess, sys, urllib.parse
+import json, os, re, sqlite3, subprocess, sys, urllib.parse
 response = {"decision": "allow"} if sys.argv[1] == "done" else {}
 try:
     payload = json.loads(sys.stdin.read(1048576))
@@ -2215,8 +2215,43 @@ try:
     raw_conv = payload.get("conversationId", "")
     if not isinstance(raw_conv, str): raw_conv = ""
     raw_conv = raw_conv[:128]
-    report_conv = raw_conv if re.fullmatch(r"[A-Za-z0-9._][A-Za-z0-9._-]{0,127}", raw_conv) else "-"
-    conversation = urllib.parse.quote(raw_conv, safe="._~-")
+    valid_id = lambda value: bool(re.fullmatch(r"[A-Za-z0-9._][A-Za-z0-9._-]{0,127}", value))
+    root_conv = raw_conv
+    is_child = False
+    if valid_id(raw_conv):
+        app_dir = os.environ.get("ANTIGRAVITY_APP_DATA_DIR") or os.path.expanduser("~/.gemini/antigravity-cli")
+        if os.path.basename(app_dir.rstrip("/")) == "conversations":
+            app_dir = os.path.dirname(app_dir.rstrip("/"))
+        summary_db = os.path.join(app_dir, "conversation_summaries.db")
+        if os.path.isfile(summary_db):
+            for mode in ("ro", "ro&immutable=1"):
+                try:
+                    conn = sqlite3.connect("file:" + urllib.parse.quote(summary_db) + "?mode=" + mode, uri=True, timeout=0.2)
+                    try:
+                        cur_id = raw_conv
+                        seen = {cur_id}
+                        for _ in range(8):
+                            row = conn.execute("SELECT parent_conversation_id, nesting_depth FROM conversation_summaries WHERE conversation_id = ? LIMIT 1", (cur_id,)).fetchone()
+                            if not row: break
+                            parent_id = str(row[0] or "").strip()[:128]
+                            depth = int(row[1] or 0)
+                            if not parent_id and depth <= 0: break
+                            is_child = True
+                            if not valid_id(parent_id) or parent_id in seen: break
+                            seen.add(parent_id)
+                            cur_id = parent_id
+                            root_conv = cur_id
+                    finally:
+                        conn.close()
+                    break
+                except sqlite3.Error:
+                    pass
+    sub_id = raw_conv if (is_child and valid_id(raw_conv)) else ""
+    eff_conv = root_conv if (not is_child or root_conv != raw_conv) else ""
+    report_conv = eff_conv if valid_id(eff_conv) else "-"
+    conversation = urllib.parse.quote(eff_conv, safe="._~-")
+    if sub_id and sys.argv[1] == "done":
+        state = "end"
     reported = False
     runtime_bin = os.environ.get("OMG_RUNTIME_BIN")
     if runtime_bin:
@@ -2225,15 +2260,25 @@ try:
             try: cwd = os.getcwd()
             except OSError: cwd = "/"
         cmd = [runtime_bin, "report", "antigravity", state, report_conv, cwd, "--pid", str(owner)]
-        if attention_kind: cmd.extend(["--attention", attention_kind])
-        if is_prompt and state == "working": cmd.extend(["--event", "prompt"])
+        if sub_id:
+            cmd.extend(["--id", sub_id])
+            if state != "end":
+                cmd.extend(["--phase", "background"])
+        else:
+            if attention_kind: cmd.extend(["--attention", attention_kind])
+            if is_prompt and state == "working": cmd.extend(["--event", "prompt"])
         res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
         reported = res.returncode == 0
     if not reported:
         pgid = os.getpgid(owner)
         scope = "remote" if (os.environ.get("SSH_CONNECTION") or os.environ.get("OMG_RUNTIME_REMOTE")) else "local"
-        event_tag = ";omg_event=prompt" if (is_prompt and state == "working") else ""
-        sequence = "\033]3008;start=omg-agent-antigravity-%d;type=app;omg_agent=antigravity;omg_scope=%s;omg_liveness=pgid;omg_state=%s%s%s;omg_conversation=%s\007" % (pgid, scope, state, attention, event_tag, conversation)
+        if sub_id and state == "end":
+            sequence = "\033]3008;end=omg-agent-antigravity-%d;omg_context=%s\007" % (pgid, urllib.parse.quote(sub_id, safe="._~-"))
+        else:
+            event_tag = ";omg_event=prompt" if (is_prompt and state == "working" and not sub_id) else ""
+            sub_tag = (";omg_context=%s;omg_phase=background" % urllib.parse.quote(sub_id, safe="._~-")) if sub_id else ""
+            conv_tag = (";omg_conversation=%s" % conversation) if (not is_child or valid_id(eff_conv)) else ""
+            sequence = "\033]3008;start=omg-agent-antigravity-%d;type=app;omg_agent=antigravity;omg_scope=%s;omg_liveness=pgid;omg_state=%s%s%s%s%s\007" % (pgid, scope, state, attention, event_tag, sub_tag, conv_tag)
         try:
             fd = os.open("/dev/tty", os.O_WRONLY | os.O_NOCTTY)
         except OSError:
@@ -2907,6 +2952,24 @@ struct AgentSessionSignal: Equatable, Sendable {
     /// directory-scoped for agents such as Pi, so restoration must prefer
     /// this over the pane's shell working directory.
     let workingDirectory: String?
+    /// True when the signal represents a scoped subagent/background task (`omg_context` or `omg_phase=background`).
+    let isBackgroundSubcontext: Bool
+
+    init(
+        contextID: String,
+        agent: SupportedAgent,
+        scope: AgentExecutionScope,
+        conversationID: AgentConversationID?,
+        workingDirectory: String?,
+        isBackgroundSubcontext: Bool = false
+    ) {
+        self.contextID = contextID
+        self.agent = agent
+        self.scope = scope
+        self.conversationID = conversationID
+        self.workingDirectory = workingDirectory
+        self.isBackgroundSubcontext = isBackgroundSubcontext
+    }
 }
 
 struct AgentActivityCandidate: Sendable {
@@ -3033,12 +3096,14 @@ struct AgentContextSignalReducer: Sendable {
         let workingDirectory = metadata["omg_cwd"]?
             .removingPercentEncoding
             .flatMap(Self.validatedSessionWorkingDirectory)
+        let isBackgroundSubcontext = subContext(from: metadata) != nil || metadata["omg_phase"] == "background"
         return .init(
             contextID: signal.id,
             agent: agent,
             scope: scope,
             conversationID: conversationID,
-            workingDirectory: workingDirectory
+            workingDirectory: workingDirectory,
+            isBackgroundSubcontext: isBackgroundSubcontext
         )
     }
 

@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import JavaScriptCore
+import SQLite3
 import Testing
 @testable import Ghostty
 
@@ -2784,7 +2785,8 @@ struct AgentStatusPluginTests {
     }
 
     @Test func claudeHooksV15PassOwnerPIDHandleStopFailureAskUserQuestionSubagentStopAndUpgradeFromV14() async throws {
-        #expect(AgentHookInstaller.hookVersion == 15)
+        let currentVersion = AgentHookInstaller.hookVersion
+        #expect(currentVersion == 16)
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: home) }
         let claudeURL = home.appendingPathComponent(".claude/settings.json")
@@ -2811,8 +2813,8 @@ struct AgentStatusPluginTests {
         let installer = AgentHookInstaller(homeURL: home)
         #expect(installer.installationState(.claude) == .updateAvailable)
 
-        // Verify AgentIntegrationManager automatic stale-hook repair upgrades `_v13`/`_v14` -> `_v15`.
-        let suiteName = "omg.test.claude.v15.\(UUID().uuidString)"
+        // Verify AgentIntegrationManager automatic stale-hook repair upgrades `_v13`/`_v14` -> current hookVersion.
+        let suiteName = "omg.test.claude.v\(currentVersion).\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let manager = await MainActor.run {
@@ -2820,7 +2822,7 @@ struct AgentStatusPluginTests {
                 defaults: defaults,
                 homeURL: home,
                 connectionTargets: { [] },
-                integrationRevision: "test/hooks-15"
+                integrationRevision: "test/hooks-\(currentVersion)"
             )
         }
         await manager.refresh(target: "local", automatic: true, hooksOnly: true)
@@ -2831,9 +2833,9 @@ struct AgentStatusPluginTests {
         )
         let hooks = try #require(root["hooks"] as? [String: Any])
         let preToolEntries = try #require(hooks["PreToolUse"] as? [[String: Any]])
-        // Preserves user hook + installs BOTH `_v15` PreToolUse entries (working + AskUserQuestion|ExitPlanMode).
+        // Preserves user hook + installs BOTH current PreToolUse entries (working + AskUserQuestion|ExitPlanMode).
         #expect(preToolEntries.contains { $0["matcher"] as? String == "CustomTool" })
-        let omgPreTool = preToolEntries.filter { $0[AgentHookInstaller.marker] as? Int == 15 }
+        let omgPreTool = preToolEntries.filter { $0[AgentHookInstaller.marker] as? Int == currentVersion }
         #expect(omgPreTool.count == 2)
         #expect(omgPreTool.contains { $0["matcher"] == nil })
         #expect(omgPreTool.contains { $0["matcher"] as? String == "AskUserQuestion|ExitPlanMode" })
@@ -2842,12 +2844,12 @@ struct AgentStatusPluginTests {
         func hookCommand(event: String, matcher: String? = nil) throws -> String {
             let entries = try #require(hooks[event] as? [[String: Any]])
             let owned = try #require(entries.first {
-                $0[AgentHookInstaller.marker] as? Int == 15 &&
+                $0[AgentHookInstaller.marker] as? Int == currentVersion &&
                     ($0["matcher"] as? String) == matcher
             })
             let commands = try #require(owned["hooks"] as? [[String: Any]])
             let cmd = try #require(commands.first?["command"] as? String)
-            #expect(cmd.contains("_omg_agent_status_v15"))
+            #expect(cmd.contains("_omg_agent_status_v\(currentVersion)"))
             return cmd
         }
 
@@ -3062,6 +3064,178 @@ struct AgentStatusPluginTests {
         #expect(controller.agentActivities[surface.id]?.source == "claude")
         #expect(controller.agentActivities[surface.id]?.state == .idle)
         #expect(controller.agentResumeDescriptor(for: surface)?.conversationID?.rawValue == "conv-keep-1")
+    }
+
+    @Test func antigravityHookScopesSubagentsAndSwarmWorkersToRootConversation() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        try AgentHookInstaller(homeURL: home).install(.antigravity)
+
+        let agyDir = home.appendingPathComponent(".gemini/antigravity-cli")
+        try FileManager.default.createDirectory(at: agyDir, withIntermediateDirectories: true)
+        var summaryDB: OpaquePointer?
+        #expect(sqlite3_open(agyDir.appendingPathComponent("conversation_summaries.db").path, &summaryDB) == SQLITE_OK)
+        defer { sqlite3_close(summaryDB) }
+        #expect(sqlite3_exec(summaryDB, """
+        PRAGMA journal_mode = WAL;
+        PRAGMA wal_autocheckpoint = 0;
+        CREATE TABLE conversation_summaries (
+            conversation_id TEXT PRIMARY KEY,
+            parent_conversation_id TEXT,
+            nesting_depth INTEGER
+        );
+        INSERT INTO conversation_summaries VALUES
+            ('agy-root', '', 0),
+            ('agy-swarm-worker', 'agy-root', 1),
+            ('agy-sub-1', 'agy-root', 1),
+            ('agy-sub-2', 'agy-sub-1', 2);
+        """, nil, nil, nil) == SQLITE_OK)
+
+        let root = try #require(
+            JSONSerialization.jsonObject(
+                with: Data(contentsOf: home.appendingPathComponent(".gemini/config/hooks.json"))
+            ) as? [String: Any]
+        )
+        let hooks = try #require(root["omg-agent-status"] as? [String: Any])
+        let preInvCmd = try #require((hooks["PreInvocation"] as? [[String: Any]])?.first?["command"] as? String)
+        let postToolGroup = try #require((hooks["PostToolUse"] as? [[String: Any]])?.first)
+        let postToolCmd = try #require((postToolGroup["hooks"] as? [[String: Any]])?.first?["command"] as? String)
+        let stopCmd = try #require((hooks["Stop"] as? [[String: Any]])?.first?["command"] as? String)
+
+        let helper = home.appendingPathComponent("mock-omgd")
+        try "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$OMG_TEST_REPORT\"\n"
+            .write(to: helper, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+
+        func runHook(_ command: String, conversationID: String) throws -> (stdout: String, args: [String]) {
+            let capture = home.appendingPathComponent("args-\(UUID().uuidString)")
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/sh")
+            proc.arguments = ["-c", command]
+            proc.currentDirectoryURL = home
+            proc.environment = [
+                "HOME": home.path,
+                "ANTIGRAVITY_APP_DATA_DIR": agyDir.path,
+                "PATH": "/opt/homebrew/bin:/usr/bin:/bin",
+                "OMG_RUNTIME_BIN": helper.path,
+                "OMG_TEST_REPORT": capture.path,
+            ]
+            let inPipe = Pipe()
+            let outPipe = Pipe()
+            proc.standardInput = inPipe
+            proc.standardOutput = outPipe
+            proc.standardError = FileHandle.nullDevice
+            try proc.run()
+            let stdinJSON = "{\"conversationId\":\"\(conversationID)\",\"cwd\":\"/repo\",\"terminationReason\":\"NO_TOOL_CALL\"}"
+            try inPipe.fileHandleForWriting.write(contentsOf: Data(stdinJSON.utf8))
+            try inPipe.fileHandleForWriting.close()
+            let stdoutData = try outPipe.fileHandleForReading.readToEnd() ?? Data()
+            proc.waitUntilExit()
+            let stdoutText = (String(data: stdoutData, encoding: .utf8) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let args = try String(contentsOf: capture, encoding: .utf8)
+                .split(separator: "\n").map(String.init)
+            return (stdoutText, args)
+        }
+
+        // Top-level session reports its own ID with `--event prompt` and no background sub-context.
+        let rootStart = try runHook(preInvCmd, conversationID: "agy-root")
+        #expect(rootStart.args.prefix(4) == ["report", "antigravity", "working", "agy-root"])
+        #expect(rootStart.args.contains("--event") && rootStart.args.contains("prompt"))
+        #expect(!rootStart.args.contains("--id"))
+
+        // Depth-1 `/swarm` worker and depth-2 nested subagent report `agy-root` with `--id <worker> --phase background`.
+        let swarmStart = try runHook(preInvCmd, conversationID: "agy-swarm-worker")
+        #expect(swarmStart.args.prefix(4) == ["report", "antigravity", "working", "agy-root"])
+        #expect(swarmStart.args.contains("--id") && swarmStart.args.contains("agy-swarm-worker"))
+        #expect(swarmStart.args.contains("--phase") && swarmStart.args.contains("background"))
+        #expect(!swarmStart.args.contains("prompt"))
+
+        let nestedTool = try runHook(postToolCmd, conversationID: "agy-sub-2")
+        #expect(nestedTool.args.prefix(4) == ["report", "antigravity", "working", "agy-root"])
+        #expect(nestedTool.args.contains("--id") && nestedTool.args.contains("agy-sub-2"))
+        #expect(nestedTool.args.contains("--phase") && nestedTool.args.contains("background"))
+
+        // Worker Stop emits scoped `end --id agy-swarm-worker` (keeping `{"decision": "allow"}` stdout)
+        // instead of clobbering root conversationID or flipping the coordinator pane to `done`.
+        let swarmStop = try runHook(stopCmd, conversationID: "agy-swarm-worker")
+        #expect(swarmStop.stdout == "{\"decision\": \"allow\"}" || swarmStop.stdout == "{\"decision\":\"allow\"}")
+        #expect(swarmStop.args.prefix(4) == ["report", "antigravity", "end", "agy-root"])
+        #expect(swarmStop.args.contains("--id") && swarmStop.args.contains("agy-swarm-worker"))
+    }
+
+    @Test @MainActor func antigravityResumeDescriptorPreservesRootAcrossSubagentsAndAllowsTopLevelSwitch() throws {
+        let enabled = OhMyGhosttySettings.shared.agentStatusHooksEnabled
+        OhMyGhosttySettings.shared.agentStatusHooksEnabled = true
+        defer { OhMyGhosttySettings.shared.agentStatusHooksEnabled = enabled }
+
+        let tempRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+        let conversations = tempRoot.appendingPathComponent("conversations")
+        try FileManager.default.createDirectory(at: conversations, withIntermediateDirectories: true)
+
+        var summaryDB: OpaquePointer?
+        #expect(sqlite3_open(tempRoot.appendingPathComponent("conversation_summaries.db").path, &summaryDB) == SQLITE_OK)
+        defer { sqlite3_close(summaryDB) }
+        #expect(sqlite3_exec(summaryDB, """
+        CREATE TABLE conversation_summaries (
+            conversation_id TEXT PRIMARY KEY,
+            parent_conversation_id TEXT,
+            nesting_depth INTEGER
+        );
+        INSERT INTO conversation_summaries VALUES
+            ('agy-root', '', 0),
+            ('agy-swarm-worker', 'agy-root', 1),
+            ('agy-new-top', '', 0);
+        """, nil, nil, nil) == SQLITE_OK)
+
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let coordinator = TerminalWorkspaceCoordinator(store: TerminalWorkspaceStore(fileURL: nil))
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let controller = TerminalController(app, withBaseConfig: config, workspaceCoordinator: coordinator)
+        controller.antigravityRootURLForTesting = conversations
+        _ = controller.window
+        defer {
+            controller.window?.delegate = nil
+            controller.window?.close()
+        }
+
+        let surface = try #require(controller.surfaceTree.first)
+        let pgid = Int(getpgrp())
+        let contextID = "omg-agent-antigravity-\(pgid)"
+
+        // 1. Even if an unscoped legacy worker signal arrives FIRST on a cold pane, it resolves to `agy-root`.
+        surface.contextSignal = .init(
+            action: .start,
+            id: contextID,
+            metadata: "type=app;omg_agent=antigravity;omg_scope=local;omg_liveness=pgid;omg_state=working;omg_conversation=agy-swarm-worker"
+        )
+        #expect(controller.agentResumeDescriptor(for: surface)?.conversationID?.rawValue == "agy-root")
+
+        // 2. A scoped background sub-context signal never overwrites the bound root conversation ID.
+        surface.contextSignal = .init(
+            action: .start,
+            id: contextID,
+            metadata: "type=app;omg_agent=antigravity;omg_scope=local;omg_liveness=pgid;omg_state=working;omg_context=sub-99;omg_phase=background;omg_conversation=agy-other"
+        )
+        #expect(controller.agentResumeDescriptor(for: surface)?.conversationID?.rawValue == "agy-root")
+
+        // 3. An unindexed brand-new worker ID on the SAME live `agy` PGID never clobbers `agy-root`.
+        surface.contextSignal = .init(
+            action: .start,
+            id: contextID,
+            metadata: "type=app;omg_agent=antigravity;omg_scope=local;omg_liveness=pgid;omg_state=working;omg_conversation=agy-unflushed-worker"
+        )
+        #expect(controller.agentResumeDescriptor(for: surface)?.conversationID?.rawValue == "agy-root")
+
+        // 4. Switching to a genuine `nesting_depth = 0` top-level conversation (`/new` or `/resume`) updates cleanly.
+        surface.contextSignal = .init(
+            action: .start,
+            id: contextID,
+            metadata: "type=app;omg_agent=antigravity;omg_scope=local;omg_liveness=pgid;omg_state=working;omg_conversation=agy-new-top"
+        )
+        #expect(controller.agentResumeDescriptor(for: surface)?.conversationID?.rawValue == "agy-new-top")
     }
 
     private func assertUnrelatedHooksPreserved(at url: URL) throws {

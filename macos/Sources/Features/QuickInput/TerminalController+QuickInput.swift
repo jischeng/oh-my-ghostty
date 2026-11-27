@@ -441,6 +441,13 @@ extension TerminalController {
             return nil
         }
 
+        if !event.isARepeat,
+           event.keyCode == 36 || event.keyCode == 76,
+           let surface = window?.firstResponder as? Ghostty.SurfaceView,
+           surfaceTree.contains(where: { $0 === surface }) {
+            noteRemoteAgentDiscoveryAfterUserSubmit(on: surface)
+        }
+
         guard quickInputModel.isPresented,
               let direction = AgentQuickInputFocusDirection.resolve(
                 keyCode: event.keyCode,

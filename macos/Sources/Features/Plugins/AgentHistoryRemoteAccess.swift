@@ -34,12 +34,72 @@ struct AgentHistoryRemoteAccess: Sendable {
         }
     }
 
+    init(alias: String, connection: GitSSHConnection) {
+        self.alias = alias
+        self.runCommand = { command in
+            try await AgentHistoryRemoteAccess.executeTransport(
+                connection: connection,
+                command: command
+            )
+        }
+    }
+
     init(
         alias: String,
         runCommand: @escaping @Sendable (String) async throws -> String
     ) {
         self.alias = alias
         self.runCommand = runCommand
+    }
+
+    /// Resolves `alias` (or `transferTarget`) to an active multiplexed `GitSSHConnection`
+    /// (`omgd exec-local` relay or `ControlMaster` with exact SSH options) when one exists,
+    /// falling back to standalone OpenSSH batch execution otherwise.
+    static func resolved(alias: String) async -> Self {
+        if let connection = await liveConnection(for: alias) {
+            return .init(alias: alias, connection: connection)
+        }
+        return .init(alias: alias)
+    }
+
+    @MainActor
+    static func liveConnection(
+        for hostOrAlias: String,
+        controllersOverride: [TerminalController]? = nil
+    ) -> GitSSHConnection? {
+        var controllers = controllersOverride ?? TerminalWorkspaceCoordinator.shared.liveControllers
+        if controllersOverride == nil {
+            for controller in TerminalController.all
+            where !controllers.contains(where: { $0 === controller }) {
+                controllers.append(controller)
+            }
+        }
+        for controller in controllers {
+            for (surfaceID, context) in controller.paneSessionContexts {
+                switch context.state {
+                case .local:
+                    continue
+                case .sshConnecting(let ssh), .sshReady(let ssh, _):
+                    guard ssh.transferTarget == hostOrAlias || ssh.alias == hostOrAlias else {
+                        continue
+                    }
+                    if let surface = controller.surfaceTree.first(where: { $0.id == surfaceID }),
+                       let connection = controller.remoteDiscoveryConnection(for: surface, context: context) {
+                        return connection
+                    }
+                    if let connection = try? GitSSHConnection(session: context) {
+                        return connection
+                    }
+                }
+            }
+        }
+        let registry = SSHHostRegistry.shared
+        if let active = registry.connections.values.first(where: { $0.destination == hostOrAlias }) {
+            return active
+        }
+        return registry.hosts.first(where: {
+            $0.connection.destination == hostOrAlias || $0.name == hostOrAlias
+        })?.connection
     }
 
     func remoteHome() async throws -> String {
@@ -76,10 +136,129 @@ struct AgentHistoryRemoteAccess: Sendable {
         // An ID is letters, digits, `.`, `_` and `-`; quoted all the same.
         let conversation = Self.shellQuote(conversationID?.rawValue ?? "")
         let script = """
+        unset SDKROOT; PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"; export PATH
         python3 - \(Self.shellQuote(rootsJSON)) \(boundedLimit) \(minimumModified) \(conversation) <<'OMG_HISTORY_PY'
-        import json, os, sqlite3, sys
+        import json, os, sqlite3, sys, urllib.parse
         minimum_modified = float(sys.argv[3])
         conversation = sys.argv[4] if len(sys.argv) > 4 else ''
+
+        def open_ro_sqlite(db_path):
+            if not os.path.isfile(db_path) or os.path.islink(db_path):
+                return None
+            quoted = urllib.parse.quote(db_path)
+            for mode in ('ro', 'ro&immutable=1'):
+                try:
+                    conn = sqlite3.connect('file:' + quoted + '?mode=' + mode, uri=True, timeout=0.25)
+                    conn.execute('SELECT 1 FROM sqlite_master LIMIT 1').fetchone()
+                    return conn
+                except sqlite3.Error:
+                    pass
+            return None
+
+        def proto_fields(buf):
+            idx, n, out = 0, len(buf), []
+            def read_varint(pos):
+                res, shift = 0, 0
+                while pos < n and shift < 64:
+                    b = buf[pos]
+                    pos += 1
+                    res |= (b & 0x7F) << shift
+                    if (b & 0x80) == 0:
+                        return res, pos
+                    shift += 7
+                return None, pos
+            while idx < n:
+                key, idx = read_varint(idx)
+                if key is None or (key >> 3) == 0:
+                    return None
+                num, wire = key >> 3, key & 7
+                if wire == 0:
+                    val, idx = read_varint(idx)
+                    if val is None:
+                        return None
+                    out.append((num, val))
+                elif wire == 1:
+                    if n - idx < 8:
+                        return None
+                    idx += 8
+                elif wire == 2:
+                    ln, idx = read_varint(idx)
+                    if ln is None or ln > n - idx:
+                        return None
+                    out.append((num, buf[idx:idx + ln]))
+                    idx += ln
+                elif wire == 5:
+                    if n - idx < 4:
+                        return None
+                    idx += 4
+                else:
+                    return None
+            return out
+
+        def antigravity_first_prompt(db_path, brain_dir):
+            conn = open_ro_sqlite(db_path)
+            if conn is not None:
+                try:
+                    for (payload,) in conn.execute('SELECT step_payload FROM steps WHERE step_type = 14 ORDER BY idx LIMIT 24'):
+                        if not isinstance(payload, (bytes, bytearray, memoryview)):
+                            continue
+                        for num, val in (proto_fields(bytes(payload)) or []):
+                            if num == 19 and isinstance(val, bytes):
+                                for sub_num, sub_val in (proto_fields(val) or []):
+                                    if sub_num == 2 and isinstance(sub_val, bytes):
+                                        text = sub_val.decode('utf-8', 'replace').strip()
+                                        if text:
+                                            return text[:8192]
+                except sqlite3.Error:
+                    pass
+                finally:
+                    conn.close()
+            transcript = os.path.join(brain_dir, '.system_generated', 'logs', 'transcript.jsonl')
+            if os.path.isfile(transcript) and not os.path.islink(transcript):
+                try:
+                    with open(transcript, 'rb') as source:
+                        raw = source.read(256 * 1024)
+                    for line in raw.splitlines():
+                        try:
+                            rec = json.loads(line)
+                        except (ValueError, UnicodeDecodeError):
+                            continue
+                        if not isinstance(rec, dict):
+                            continue
+                        role = str(rec.get('role') or rec.get('type') or '').lower()
+                        if role in ('user', 'user_input'):
+                            msg = rec.get('message') if isinstance(rec.get('message'), dict) else {}
+                            txt = rec.get('content') or rec.get('text') or msg.get('content')
+                            if isinstance(txt, str) and txt.strip():
+                                return txt.strip()[:8192]
+                except OSError:
+                    pass
+            return ''
+
+        def resolve_antigravity_root(conn, ident):
+            if conn is None or not ident:
+                return ident, False
+            cur, seen, is_child = ident, {ident}, False
+            for _ in range(8):
+                try:
+                    row = conn.execute(
+                        'SELECT parent_conversation_id, nesting_depth FROM conversation_summaries WHERE conversation_id = ? LIMIT 1',
+                        (cur,)
+                    ).fetchone()
+                except sqlite3.Error:
+                    return ident, False
+                if not row:
+                    break
+                parent = str(row[0] or '').strip()
+                depth = int(row[1] or 0)
+                if not parent and depth <= 0:
+                    return cur, is_child
+                is_child = True
+                if not parent or parent in seen:
+                    break
+                seen.add(parent)
+                cur = parent
+            return cur, is_child
 
         def codex_thread_name(ident):
             # Codex keeps thread names beside its sessions, one line per naming.
@@ -140,35 +319,79 @@ struct AgentHistoryRemoteAccess: Sendable {
         for relative in json.loads(sys.argv[1]):
             root = os.path.join(os.path.expanduser('~'), relative)
             if relative == '.gemini/antigravity-cli/conversations':
-                index = os.path.join(os.path.dirname(root), 'conversation_summaries.db')
+                app_dir = os.path.dirname(root)
+                index = os.path.join(app_dir, 'conversation_summaries.db')
+                connection = open_ro_sqlite(index)
                 try:
-                    connection = sqlite3.connect('file:' + index + '?mode=ro', uri=True)
+                    from urllib.parse import urlparse, unquote
                     columns = "SELECT conversation_id, title, preview, workspace_uris, strftime('%s', last_modified_time) FROM conversation_summaries"
                     order = " ORDER BY last_modified_time DESC LIMIT ?"
                     if conversation:
-                        # The one conversation a pane shows, whatever its age.
-                        rows = connection.execute(columns + " WHERE conversation_id = ?" + order, (conversation, int(sys.argv[2])))
-                    else:
+                        target_id, is_child = resolve_antigravity_root(connection, conversation)
+                        path = os.path.join(root, target_id + '.db')
+                        brain_dir = os.path.join(app_dir, 'brain', target_id)
+                        has_path = os.path.isfile(path)
+                        has_brain = os.path.isdir(brain_dir)
+                        emitted = False
+                        if connection is not None and (has_path or has_brain):
+                            rows = connection.execute(columns + " WHERE conversation_id = ?" + order, (target_id, int(sys.argv[2]))).fetchall()
+                            for _, title, preview, uris, modified in rows:
+                                title = title or ''
+                                preview = preview or ''
+                                collapsed_title = ' '.join(title.split())
+                                collapsed_preview = ' '.join(preview.split())
+                                distinct_title = title if (collapsed_title and collapsed_title != collapsed_preview) else ''
+                                traj_prompt = '' if distinct_title else antigravity_first_prompt(path, brain_dir)
+                                resolved_prompt = traj_prompt or preview
+                                workspaces = json.loads(uris) if uris else []
+                                cwd = next((unquote(urlparse(uri).path) for uri in workspaces if isinstance(uri, str) and uri.startswith('file://')), '')
+                                fallback_stat_path = path if has_path else brain_dir
+                                mtime = float(modified) if (modified is not None and float(modified) > 0) else os.path.getmtime(fallback_stat_path)
+                                size = os.path.getsize(path) if has_path else 0
+                                records = [dict(type='session', id=conversation, title=distinct_title, cwd=cwd)]
+                                if resolved_prompt:
+                                    records.append(dict(type='user', content=resolved_prompt))
+                                print(json.dumps(dict(path=path, size=size, modified=mtime, records=records)))
+                                emitted = True
+                        if not emitted and not is_child and (has_path or has_brain):
+                            traj_prompt = antigravity_first_prompt(path, brain_dir)
+                            if traj_prompt:
+                                fallback_stat_path = path if has_path else brain_dir
+                                mtime = os.path.getmtime(fallback_stat_path)
+                                size = os.path.getsize(path) if has_path else 0
+                                records = [
+                                    dict(type='session', id=conversation, title='', cwd=''),
+                                    dict(type='user', content=traj_prompt),
+                                ]
+                                print(json.dumps(dict(path=path, size=size, modified=mtime, records=records)))
+                    elif connection is not None:
                         try:
                             rows = connection.execute(columns + " WHERE nesting_depth = 0 AND (title != '' OR preview != '')" + order, (int(sys.argv[2]),))
                         except sqlite3.OperationalError:
                             rows = connection.execute(columns + order, (int(sys.argv[2]),))
-                    from urllib.parse import urlparse, unquote
-                    for ident, title, preview, uris, modified in rows:
-                        path = os.path.join(root, ident + '.db')
-                        if not os.path.isfile(path) or modified is None:
-                            continue
-                        if not conversation and (float(modified) if float(modified) > 0 else os.path.getmtime(path)) < minimum_modified:
-                            continue
-                        workspaces = json.loads(uris) if uris else []
-                        cwd = next((unquote(urlparse(uri).path) for uri in workspaces if uri.startswith('file://')), '')
-                        records = [dict(type='session', id=ident, title=title or preview, cwd=cwd)]
-                        if preview:
-                            records.append(dict(type='user', content=preview))
-                        print(json.dumps(dict(path=path, size=os.path.getsize(path), modified=float(modified) if float(modified) > 0 else os.path.getmtime(path), records=records)))
-                    connection.close()
+                        for ident, title, preview, uris, modified in rows:
+                            path = os.path.join(root, ident + '.db')
+                            if not os.path.isfile(path):
+                                continue
+                            mtime = float(modified) if (modified is not None and float(modified) > 0) else os.path.getmtime(path)
+                            if mtime < minimum_modified:
+                                continue
+                            title = title or ''
+                            preview = preview or ''
+                            collapsed_title = ' '.join(title.split())
+                            collapsed_preview = ' '.join(preview.split())
+                            distinct_title = title if (collapsed_title and collapsed_title != collapsed_preview) else ''
+                            workspaces = json.loads(uris) if uris else []
+                            cwd = next((unquote(urlparse(uri).path) for uri in workspaces if isinstance(uri, str) and uri.startswith('file://')), '')
+                            records = [dict(type='session', id=ident, title=distinct_title, cwd=cwd)]
+                            if preview:
+                                records.append(dict(type='user', content=preview))
+                            print(json.dumps(dict(path=path, size=os.path.getsize(path), modified=mtime, records=records)))
                 except (sqlite3.Error, OSError, ValueError):
                     pass
+                finally:
+                    if connection is not None:
+                        connection.close()
                 continue
             for directory, dirs, files in os.walk(root):
                 dirs[:] = [d for d in dirs if not d.startswith('.')]
@@ -576,6 +799,31 @@ struct AgentHistoryRemoteAccess: Sendable {
 
     private static func shellQuote(_ value: String) -> String {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private static func executeTransport(
+        connection: GitSSHConnection,
+        command: String
+    ) async throws -> String {
+        let result = try await SSHSessionTransport.run(
+            connection: connection,
+            command: SSHSessionTransport.shellCommand(command),
+            posixScript: command,
+            limit: 16 * 1_024 * 1_024,
+            timeout: 60,
+            multiplexing: true,
+            idempotent: true
+        )
+        guard result.isSuccess else {
+            throw AgentHistoryRemoteError.unavailable
+        }
+        let data = result.stdout
+        for trailing in 0...3 {
+            if let text = String(bytes: data.dropLast(trailing), encoding: .utf8) {
+                return text
+            }
+        }
+        throw AgentHistoryRemoteError.unavailable
     }
 
     private static func executeSSH(

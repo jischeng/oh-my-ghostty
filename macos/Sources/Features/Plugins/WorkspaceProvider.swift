@@ -309,6 +309,24 @@ struct PaneSessionContext: Equatable, Sendable {
         }
     }
 
+    /// Promotes or updates an SSH session using a remote working directory
+    /// verified directly from a live remote Agent process (`/proc/<pid>/cwd` or `lsof`).
+    mutating func applyDiscoveredRemoteWorkingDirectory(_ workingDirectory: String) {
+        guard !workingDirectory.isEmpty,
+              !workingDirectory.contains("\0") else { return }
+        switch state {
+        case .sshConnecting(let ssh):
+            state = .sshReady(ssh, workingDirectory: workingDirectory)
+            revision &+= 1
+        case .sshReady(let ssh, let current) where ssh.localProcessGroupID != nil || current.isEmpty:
+            guard current != workingDirectory else { return }
+            state = .sshReady(ssh, workingDirectory: workingDirectory)
+            revision &+= 1
+        case .local, .sshReady:
+            return
+        }
+    }
+
     /// Ends only the foreground-inferred SSH connection for this process
     /// group. A stale observation can therefore never clear a newer SSH
     /// connection on the same Surface.

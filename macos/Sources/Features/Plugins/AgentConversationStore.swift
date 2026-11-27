@@ -70,9 +70,19 @@ enum AgentConversationStore {
         workingDirectory: String,
         launchedAfter: Date,
         excluding claimedConversationIDs: Set<AgentConversationID> = [],
-        rootURL: URL? = nil
+        rootURL: URL? = nil,
+        processGroupID: Int? = nil
     ) -> AgentConversationID? {
         if agent == .antigravity {
+            if let processGroupID,
+               let liveID = AgentRemoteConversationDiscovery.discoverLocalAntigravity(
+                   processGroupID: processGroupID,
+                   workingDirectory: workingDirectory,
+                   excluding: claimedConversationIDs,
+                   rootURL: rootURL
+               ) {
+                return liveID
+            }
             return discoverAntigravity(
                 workingDirectory: workingDirectory,
                 launchedAfter: launchedAfter,

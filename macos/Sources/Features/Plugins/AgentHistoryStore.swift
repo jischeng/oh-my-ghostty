@@ -209,7 +209,7 @@ enum AgentHistoryStore {
         maximumSessions: Int = AgentHistoryStore.maximumSessions
     ) async -> AgentHistorySession? {
         if let remoteHost {
-            let access = AgentHistoryRemoteAccess(alias: remoteHost)
+            let access = await AgentHistoryRemoteAccess.resolved(alias: remoteHost)
             return await loadRemote(
                 access: access,
                 agents: [agent],
@@ -288,7 +288,11 @@ enum AgentHistoryStore {
     ) async -> TitleSeed? {
         let lookupTask: Task<ConversationMatch, Never>
         if let remoteHost {
-            let access = remoteAccess ?? AgentHistoryRemoteAccess(alias: remoteHost)
+            let access: AgentHistoryRemoteAccess = if let remoteAccess {
+                remoteAccess
+            } else {
+                await AgentHistoryRemoteAccess.resolved(alias: remoteHost)
+            }
             lookupTask = Task.detached(priority: .utility) {
                 await remoteConversationSession(
                     access: access, agent: agent, conversationID: conversationID, recentAfter: updatedAfter
@@ -524,7 +528,11 @@ enum AgentHistoryStore {
             )
         }
         if let alias = session.remoteHost {
-            let access = remoteAccess ?? AgentHistoryRemoteAccess(alias: alias)
+            let access: AgentHistoryRemoteAccess = if let remoteAccess {
+                remoteAccess
+            } else {
+                await AgentHistoryRemoteAccess.resolved(alias: alias)
+            }
             guard let prefix = try? await access.readTranscript(
                 path: session.sourcePath,
                 maximumBytes: maximumRemoteTranscriptBytes

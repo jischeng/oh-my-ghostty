@@ -90,6 +90,7 @@ extension TerminalController {
         if let inline = surface.runtimeInlineSession,
            let inlineState = surface.inlineRuntimeConnectionState,
            inlineState.isSessionGone {
+            markPaneAwaitingRuntimeRecreate(for: surface.id)
             let request = buildRecreateRequest(
                 for: surface,
                 paneID: inline.pane,
@@ -124,6 +125,7 @@ extension TerminalController {
               !descriptor.isLocal,
               let currentState = surface.runtimeConnectionState,
               currentState.isSessionGone else { return }
+        markPaneAwaitingRuntimeRecreate(for: surface.id)
         let request = buildRecreateRequest(
             for: surface,
             paneID: surface.id,

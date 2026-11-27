@@ -228,7 +228,11 @@ final class BuiltInAgentHistoryInspectorProvider {
             guard let self else { return }
             let loaded: [AgentHistorySession]
             if let alias = isSSH {
-                let access = AgentHistoryRemoteAccess(alias: alias)
+                let access = if let connection = try? GitSSHConnection(session: context.session) {
+                    AgentHistoryRemoteAccess(alias: alias, connection: connection)
+                } else {
+                    await AgentHistoryRemoteAccess.resolved(alias: alias)
+                }
                 if let remoteSessionLoader { loaded = await remoteSessionLoader(access) } else {
                     loaded = await AgentHistoryStore.loadRemote(access: access, maximumSessions: limit, updatedAfter: cutoff)
                 }

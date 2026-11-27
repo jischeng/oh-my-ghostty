@@ -469,7 +469,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
     }
     @Published private(set) var tabPaneFocusHistory = TabPaneFocusHistory()
-    @Published private(set) var agentResumeDescriptors: [UUID: AgentResumeDescriptor] = [:]
+    @Published var agentResumeDescriptors: [UUID: AgentResumeDescriptor] = [:]
     let quickInputModel = AgentQuickInputModel(historyStore: .shared)
     var quickInputDraftImportTask: Task<Void, Never>? {
         didSet {
@@ -483,18 +483,18 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     private var quickInputEventMonitor: Any?
     private var quickInputSecureInputCancellable: AnyCancellable?
     var quickInputLastTerminalSurfaceID: UUID?
-    private var agentResumeContextIDs: [UUID: String] = [:]
+    var agentResumeContextIDs: [UUID: String] = [:]
     private var paneSessionObservers: [UUID: Set<AnyCancellable>] = [:]
     private var observedUserSurfaceTitles: [UUID: String] = [:]
     var agentReducers: [UUID: AgentContextSignalReducer] = [:]
-    private var agentProgramStatuses: [UUID: AgentProgramStatus] = [:]
+    var agentProgramStatuses: [UUID: AgentProgramStatus] = [:]
     private var agentRuntimeSnapshots: [UUID: [Ghostty.ContextSignal]] = [:]
     private var agentRuntimeSyncRestore: [UUID: Bool] = [:]
     private var agentCompletionArrivedUptime: [UUID: TimeInterval] = [:]
     /// Tier 3 title observations per surface (used only when neither OSC 7501
     /// nor a typed Hook context owns the pane).
     private var agentTitleWatchers: [UUID: AgentTitleIdleWatcher] = [:]
-    private var typedAgentHookContextIDs: [UUID: String] = [:]
+    var typedAgentHookContextIDs: [UUID: String] = [:]
     private var agentValidationWorkItems: [UUID: DispatchWorkItem] = [:]
     private var agentProcessExitSources: [UUID: (pid: Int, source: DispatchSourceProcess)] = [:]
     private var agentTier3TitleIdleWorkItems: [UUID: DispatchWorkItem] = [:]
@@ -509,6 +509,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     private var detectedSSHReconnectProcessIDs: [UUID: Int] = [:]
     var detectedAgentInstances: [UUID: PaneDetectedAgentState] = [:]
     private var conversationDiscoveryPending = Set<UUID>()
+    var remoteConversationDiscoveryTasks: [UUID: Task<Void, Never>] = [:]
+    var remoteConversationDiscoveryTokens: [UUID: UUID] = [:]
+    var recreatingAgentSurfaceIDs = Set<UUID>()
+    var remoteConversationDiscoverer: AgentRemoteConversationDiscovery.Discoverer? =
+        OMGApplicationEnvironment.isRunningTests ? nil : AgentRemoteConversationDiscovery.live
     private var agentScreenSignatures: [UUID: Int] = [:]
     private var agentScreenStableTicks: [UUID: Int] = [:]
     /// Last applied status-file signature per pane, so the one-second poll does not
@@ -558,6 +563,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             descriptor.restoredTitle = previous.restoredTitle
         }
         guard descriptor.isValid, surfaceTree.contains(surface) else { return }
+        if descriptor.scope == .remote {
+            backfillRemoteResumeDescriptorMetadata(&descriptor, for: surface.id)
+        }
+        agentResumeContextIDs.removeValue(forKey: surface.id)
+        recreatingAgentSurfaceIDs.remove(surface.id)
+        if descriptor.conversationID != nil {
+            cancelRemoteConversationDiscovery(for: surface.id)
+        }
         agentResumeDescriptors[surface.id] = descriptor
         surface.agentResumeDescriptor = descriptor
         if descriptor.scope == .local, let directory = descriptor.workingDirectory, !directory.isEmpty,
@@ -565,6 +578,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             // Direct Agent launches have no shell integration to publish an
             // initial PWD. The resume command already establishes this CWD.
             surface.pwd = directory
+        }
+        if descriptor.scope == .remote, descriptor.conversationID == nil {
+            scheduleRemoteConversationDiscovery(for: surface.id, preferredAgent: descriptor.agent)
         }
         refreshPresentedTerminalTitle()
         enableRestorationForResumableSession()
@@ -821,6 +837,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         quickInputDraftImportTask?.cancel()
         for task in quickInputSubmissionTasks.values { task.cancel() }
         for task in quickInputAutomaticTasks.values { task.cancel() }
+        for task in remoteConversationDiscoveryTasks.values { task.cancel() }
         if let quickInputEventMonitor {
             NSEvent.removeMonitor(quickInputEventMonitor)
         }
@@ -956,6 +973,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 processGroupID: detected.processGroupID,
                 launchedAt: detected.launchedAt
             )
+        } else if let descriptor = snapshot.resumeDescriptor,
+                  descriptor.scope == .remote,
+                  descriptor.conversationID == nil {
+            scheduleRemoteConversationDiscovery(for: surfaceID, preferredAgent: descriptor.agent)
         }
         objectWillChange.send()
         refreshPresentedTerminalTitle()
@@ -1004,6 +1025,16 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             activeIDs.contains($0.key)
         }
         conversationDiscoveryPending.formIntersection(activeIDs)
+        for (surfaceID, task) in remoteConversationDiscoveryTasks where !activeIDs.contains(surfaceID) {
+            task.cancel()
+        }
+        remoteConversationDiscoveryTasks = remoteConversationDiscoveryTasks.filter {
+            activeIDs.contains($0.key)
+        }
+        remoteConversationDiscoveryTokens = remoteConversationDiscoveryTokens.filter {
+            activeIDs.contains($0.key)
+        }
+        recreatingAgentSurfaceIDs.formIntersection(activeIDs)
         agentScreenSignatures = agentScreenSignatures.filter {
             activeIDs.contains($0.key)
         }
@@ -1222,11 +1253,15 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         surface.runtimeInlineSession = validated
         switch validated.phase {
         case "session_gone":
+            markPaneAwaitingRuntimeRecreate(for: surface.id)
             surface.inlineRuntimeConnectionState = .sessionGone(
                 message: SessionRuntimeConnectionState.sanitizeMessage(validated.message)
             )
         case "ready":
             surface.inlineRuntimeConnectionState = nil
+            if recreatingAgentSurfaceIDs.contains(surface.id) {
+                scheduleRecreatedRemoteAgentVerification(for: surface.id)
+            }
         default:
             break
         }
@@ -1267,6 +1302,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
         if signal.id == "omg-runtime-state", let runtime = surface.runtimeDescriptor {
             guard let state = SessionRuntimeConnectionState.decode(signal.metadata) else { return }
+            if state.isSessionGone {
+                markPaneAwaitingRuntimeRecreate(for: surface.id)
+            }
             surface.runtimeConnectionState = state
             if !OMGApplicationEnvironment.isRunningTests {
                 if state == .ready {
@@ -1297,7 +1335,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let wasSSHSession = context.isSSHSession
         let sshReplay: SSHReplayDescriptor? = if signal.action == .start,
            signal.id.hasPrefix("omg-ssh-") {
-            SSHReplayStore.load(connectionID: signal.id) ?? surface.pendingSSHLaunchReplay
+            SSHReplayStore.load(connectionID: signal.id)
+                ?? surface.pendingSSHLaunchReplay
+                ?? (surface.runtimeInlineSession?.connectionID == signal.id ? surface.runtimeInlineSession?.replay : nil)
         } else {
             nil
         }
@@ -1475,7 +1515,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
     }
 
-    private func applyObservedForegroundProcess(
+    func applyObservedForegroundProcess(
         agent: SupportedAgent?,
         ssh: ForegroundSSHProcessObservation,
         processGroupID: Int,
@@ -1484,6 +1524,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     ) {
         switch ssh {
         case .interactive(let alias, let transferTarget):
+            if var status = agentProgramStatuses[surfaceID], !status.isRemote,
+               status.foregroundProcessGroup == nil || status.foregroundProcessGroup == processGroupID {
+                status.isRemote = true
+                status.foregroundProcessGroup = nil
+                agentProgramStatuses[surfaceID] = status
+            }
             clearDetectedAgent(for: surfaceID, force: true)
             guard let surface = surfaceTree.first(where: { $0.id == surfaceID }) else {
                 return
@@ -1511,6 +1557,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             )
             updatePaneSessionContext(context, for: surfaceID)
             updateSSHResumeDescriptor(context, for: surfaceID)
+            if let status = agentProgramStatuses[surfaceID], status.isRemote {
+                synchronizeProgramStatusResumeDescriptor(status: status, for: surface)
+            }
 
         case .ambiguous:
             // An OpenSSH process exists but its argv does not prove an
@@ -1719,27 +1768,6 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         ), for: surface.id)
     }
 
-    private func claimedConversationIDs(
-        for agent: SupportedAgent,
-        excludingSurfaceID: UUID
-    ) -> Set<AgentConversationID> {
-        var controllers = workspaceCoordinator.liveControllers
-        for controller in NSApp.windows.compactMap({ $0.windowController as? TerminalController })
-        where !controllers.contains(where: { $0 === controller }) {
-            controllers.append(controller)
-        }
-        var claimed = Set<AgentConversationID>()
-        for controller in controllers {
-            for (paneID, descriptor) in controller.agentResumeDescriptors
-            where paneID != excludingSurfaceID && descriptor.agent == agent && descriptor.scope == .local {
-                if let conversationID = descriptor.conversationID {
-                    claimed.insert(conversationID)
-                }
-            }
-        }
-        return claimed
-    }
-
     private func scheduleConversationDiscovery(
         agent: SupportedAgent,
         surfaceID: UUID,
@@ -1757,7 +1785,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             conversationDiscoveryPending.remove(surfaceID)
             return
         }
-        let claimed = claimedConversationIDs(for: agent, excludingSurfaceID: surfaceID)
+        let claimed = claimedConversationIDs(for: agent, scope: .local, excludingSurfaceID: surfaceID)
         DispatchQueue.global(qos: .utility).asyncAfter(
             deadline: .now() + delays[attempt]
         ) { [weak self] in
@@ -1765,7 +1793,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 agent: agent,
                 workingDirectory: workingDirectory,
                 launchedAfter: launchedAt,
-                excluding: claimed
+                excluding: claimed,
+                processGroupID: processGroupID
             )
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
@@ -1775,7 +1804,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                       descriptor.agent == agent,
                       descriptor.scope == .local,
                       descriptor.conversationID == nil else { return }
-                let stillClaimed = self.claimedConversationIDs(for: agent, excludingSurfaceID: surfaceID)
+                let stillClaimed = self.claimedConversationIDs(for: agent, scope: .local, excludingSurfaceID: surfaceID)
                 guard let conversationID, !stillClaimed.contains(conversationID) else {
                     scheduleConversationDiscovery(
                         agent: agent,
@@ -2055,6 +2084,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
         if agentResumeDescriptors[surfaceID]?.scope == .remote {
             clearAgentResumeDescriptor(for: surfaceID)
+        } else {
+            cancelRemoteConversationDiscovery(for: surfaceID)
+            recreatingAgentSurfaceIDs.remove(surfaceID)
         }
     }
 
@@ -2169,6 +2201,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         )
         guard descriptor.isValid else { return }
         agentResumeContextIDs[surfaceID] = session.contextID
+        if descriptor.conversationID != nil {
+            recreatingAgentSurfaceIDs.remove(surfaceID)
+            cancelRemoteConversationDiscovery(for: surfaceID)
+        }
         guard agentResumeDescriptors[surfaceID] != descriptor else { return }
         agentResumeDescriptors[surfaceID] = descriptor
         surfaceTree.first(where: { $0.id == surfaceID })?
@@ -2187,6 +2223,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 processGroupID: detected.processGroupID,
                 launchedAt: detected.launchedAt
             )
+        } else if descriptor.scope == .remote,
+                  descriptor.conversationID == nil {
+            scheduleRemoteConversationDiscovery(for: surfaceID, preferredAgent: descriptor.agent)
         }
         enableRestorationForResumableSession()
         invalidateRestorableState()
@@ -2224,7 +2263,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         return resolution.rootID
     }
 
-    private func enableRestorationForResumableSession() {
+    func enableRestorationForResumableSession() {
         guard !restorable else { return }
         restorable = true
         guard let window else { return }
@@ -2233,9 +2272,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         window.identifier = .init(String(describing: TerminalWindowRestoration.self))
     }
 
-    private func clearAgentResumeDescriptor(for surfaceID: UUID) {
+    func clearAgentResumeDescriptor(for surfaceID: UUID) {
         agentResumeContextIDs.removeValue(forKey: surfaceID)
         conversationDiscoveryPending.remove(surfaceID)
+        cancelRemoteConversationDiscovery(for: surfaceID)
+        recreatingAgentSurfaceIDs.remove(surfaceID)
         guard agentResumeDescriptors.removeValue(forKey: surfaceID) != nil else {
             return
         }
@@ -2462,6 +2503,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 status.isRemote = paneSessionContexts[id]?.isSSHSession == true ||
                     surface.runtimeInlineSession != nil || surface.runtimeDescriptor?.isLocal == false
                 status.foregroundProcessGroup = status.isRemote ? nil : surface.surfaceModel?.foregroundPID
+                let previousDescriptor = agentResumeDescriptors[id]
+                let previousContextID = agentResumeContextIDs[id]
+                let wasRecreating = recreatingAgentSurfaceIDs.contains(id)
                 clearAgentResumeDescriptor(for: id)
                 typedAgentHookContextIDs.removeValue(forKey: id)
                 agentTitleWatchers.removeValue(forKey: id)
@@ -2507,6 +2551,14 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 }
                 agentReducers[id] = reducer
                 agentProgramStatuses[id] = (status.records.isEmpty || status.activity == nil) ? nil : status
+                reconcileRuntimeSnapshotResumeDescriptor(
+                    for: surface,
+                    status: status,
+                    reducer: reducer,
+                    previousDescriptor: previousDescriptor,
+                    previousContextID: previousContextID,
+                    wasRecreating: wasRecreating
+                )
                 let activity = AgentProgramStatus.preferredActivity(
                     program: status.activity,
                     fallback: reducer.currentActivity
@@ -2608,6 +2660,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             status.foregroundProcessGroup = currentFG
         }
         agentProgramStatuses[surface.id] = (status.records.isEmpty || status.activity == nil) ? nil : status
+        synchronizeProgramStatusResumeDescriptor(status: status, for: surface)
         updateAcknowledgedAgentStatus(for: surface.id) { ack in
             if let acknowledgedReducer { ack.reducer = acknowledgedReducer }
             if !status.hasAcknowledgedTerminalRecord ||
@@ -2746,12 +2799,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         return errno == EPERM
     }
 
-    private func updatePaneSessionContext(
+    func updatePaneSessionContext(
         _ context: PaneSessionContext,
         for surfaceID: UUID
     ) {
-        guard paneSessionContexts[surfaceID] != context else { return }
-        let locationChanged = paneSessionContexts[surfaceID].map {
+        let previousContext = paneSessionContexts[surfaceID]
+        guard previousContext != context else { return }
+        let locationChanged = previousContext.map {
             !context.hasSameLocation(as: $0)
         } ?? true
         if let view = surfaceTree.first(where: { $0.id == surfaceID }) {
@@ -2774,6 +2828,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 object: self
             )
         }
+        handlePaneSessionContextUpdateForAgentDiscovery(
+            previous: previousContext,
+            current: context,
+            surfaceID: surfaceID
+        )
         if (focusedSurface ?? surfaceTree.first)?.id == surfaceID {
             refreshPresentedTerminalTitle()
         }

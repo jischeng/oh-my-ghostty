@@ -364,14 +364,20 @@ discovery has a 60-second transport ceiling because compressed archives add
 decompression work.
 
 Antigravity CLI (`agy`) resumes with `--conversation {id}`. Local and SSH history
-read its `antigravity-cli/conversation_summaries.db` index. That index is a WAL
-database where a read-only SQLite handle cannot prepare statements, so OMG reads
-a private temporary copy with a read-write handle and never writes to the
-Agent's own files. OMG validates that the corresponding
-`conversations/{id}.db` exists. Titles fall back to the
-stored preview, workspace URIs provide directories, and index timestamps provide
-recency. Its protobuf conversation steps are not decoded: the transcript panel
-shows only the available summary preview and marks it truncated.
+read its `antigravity-cli/conversation_summaries.db` index via read-only or
+immutable SQLite handles without writing to the Agent's own files, validating
+that the corresponding `conversations/{id}.db` (or `brain/{id}` directory for
+active sessions) exists. Before a resumed `agy` session sends a new prompt,
+local and remote SSH panes resolve the foreground `agy` process on the pane's
+TTY through its per-conversation `presence/{id}.lock` handle, explicit CLI
+resume flags, and open `brain/{id}` handles so multiple tabs sharing one host
+and workspace directory bind their own top-level conversations without
+colliding. Remote SSH history and single-conversation title-seed reads reuse the
+active multiplexed `SSHSessionTransport` (`omgd` `exec/1` or `ControlMaster`),
+walk `parent_conversation_id` hops to the root conversation, and decode the
+opening user step (`step_type = 14`, with `brain/{id}` transcript fallback) for
+title generation when no distinct summary title exists yet; the full-history
+transcript panel still shows the bounded summary preview and marks it truncated.
 
 ## Native interactive SSH handoff (Experimental)
 

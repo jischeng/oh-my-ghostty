@@ -28,7 +28,11 @@ actor PanePromptReader {
         if let host = session.remoteHost {
             // No store rediscovery: read only this session's known file, and
             // transfer no body if its revision hasn't changed.
-            let access = remoteAccess ?? AgentHistoryRemoteAccess(alias: host)
+            let access: AgentHistoryRemoteAccess = if let remoteAccess {
+                remoteAccess
+            } else {
+                await AgentHistoryRemoteAccess.resolved(alias: host)
+            }
             let tail = try await access.promptTail(
                 path: session.sourcePath,
                 previousRevision: remoteRevision,

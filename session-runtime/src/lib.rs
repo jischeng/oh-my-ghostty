@@ -70,6 +70,7 @@ unsafe extern "C" {
     fn omg_vt_restore(vt: *mut c_void, data: *const u8, len: usize) -> i32;
     fn omg_vt_text(vt: *mut c_void, data: *mut *mut u8, len: *mut usize) -> i32;
     fn omg_vt_continuation(vt: *mut c_void, data: *mut *mut u8, len: *mut usize) -> i32;
+    #[cfg(test)]
     fn omg_vt_screen_only(vt: *mut c_void) -> i32;
     fn omg_vt_in_alt_screen(vt: *mut c_void) -> i32;
     fn omg_vt_in_sync_and_screen(vt: *mut c_void, in_sync: *mut bool, alt_screen: *mut bool)
@@ -103,12 +104,52 @@ unsafe extern "C" {
         cursor_rgb: *const u8,
     ) -> i32;
     fn omg_vt_dynamic_color(vt: *mut c_void, index: u32, rgb: *mut u8) -> i32;
+    fn omg_vt_set_scrollback_limits(
+        vt: *mut c_void,
+        scrollback_max_bytes: usize,
+        scrollback_max_lines: *const usize,
+    ) -> i32;
+    fn omg_vt_grid_metrics(
+        vt: *mut c_void,
+        cols: *mut u16,
+        rows: *mut u16,
+        scrollback_rows: *mut usize,
+        alternate: *mut bool,
+    ) -> i32;
+    fn omg_vt_region_plain(
+        vt: *mut c_void,
+        history: bool,
+        data: *mut *mut u8,
+        len: *mut usize,
+        row_count: *mut usize,
+    ) -> i32;
+    fn omg_vt_track_row(
+        vt: *mut c_void,
+        history: bool,
+        row: usize,
+        out_ref: *mut *mut c_void,
+    ) -> i32;
+    fn omg_vt_resolve_tracked_history_row(
+        vt: *mut c_void,
+        raw_ref: *mut c_void,
+        out_history_start_row: *mut usize,
+    ) -> i32;
+    fn omg_vt_tracked_ref_free(raw_ref: *mut c_void);
+    fn omg_vt_paint_with_history(
+        vt: *mut c_void,
+        history_start_row: usize,
+        data: *mut *mut u8,
+        len: *mut usize,
+        alternate: *mut bool,
+    ) -> i32;
+    #[allow(dead_code)]
     fn omg_vt_paint(
         vt: *mut c_void,
         data: *mut *mut u8,
         len: *mut usize,
         alternate: *mut bool,
     ) -> i32;
+    fn omg_vt_c_free(data: *mut u8);
     fn omg_vt_buffer_free(data: *mut u8, len: usize);
 }
 pub struct Vt(*mut c_void, Box<activity::State>);
@@ -363,6 +404,82 @@ impl Vt {
     pub fn text(&self) -> io::Result<String> {
         Ok(String::from_utf8_lossy(&self.bytes(true)?).into_owned())
     }
+    pub(crate) fn set_scrollback_limits(&mut self, scrollback: ScrollbackLimits) -> io::Result<()> {
+        let lines = scrollback.max_lines;
+        let lines_ptr = lines
+            .as_ref()
+            .map_or(std::ptr::null(), |value| value as *const usize);
+        check(unsafe { omg_vt_set_scrollback_limits(self.0, scrollback.max_bytes, lines_ptr) })
+    }
+    pub(crate) fn grid_metrics(&self) -> io::Result<(u16, u16, usize, bool)> {
+        let mut cols = 0u16;
+        let mut rows = 0u16;
+        let mut sb = 0usize;
+        let mut alt = false;
+        check(unsafe { omg_vt_grid_metrics(self.0, &mut cols, &mut rows, &mut sb, &mut alt) })?;
+        Ok((cols, rows, sb, alt))
+    }
+    pub(crate) fn region_lines(&self, history: bool) -> io::Result<Vec<String>> {
+        let mut p = std::ptr::null_mut();
+        let mut len = 0usize;
+        let mut row_count = 0usize;
+        check(unsafe { omg_vt_region_plain(self.0, history, &mut p, &mut len, &mut row_count) })?;
+        let text = if p.is_null() || len == 0 {
+            if !p.is_null() {
+                unsafe { omg_vt_buffer_free(p, len) };
+            }
+            String::new()
+        } else {
+            let slice = unsafe { std::slice::from_raw_parts(p, len) };
+            let owned = String::from_utf8_lossy(slice).into_owned();
+            unsafe { omg_vt_buffer_free(p, len) };
+            owned
+        };
+        if row_count == 0 {
+            return Ok(Vec::new());
+        }
+        let mut lines: Vec<String> = if text.is_empty() {
+            Vec::new()
+        } else {
+            text.split('\n').map(str::to_owned).collect()
+        };
+        lines.truncate(row_count);
+        if lines.len() < row_count {
+            lines.resize_with(row_count, String::new);
+        }
+        Ok(lines)
+    }
+    pub(crate) fn track_row(&self, history: bool, row: usize) -> io::Result<TrackedRow> {
+        let mut raw = std::ptr::null_mut();
+        check(unsafe { omg_vt_track_row(self.0, history, row, &mut raw) })?;
+        Ok(TrackedRow(raw))
+    }
+    pub(crate) fn paint_with_history(
+        &self,
+        history_start_row: usize,
+    ) -> io::Result<(Vec<u8>, bool)> {
+        let mut data = std::ptr::null_mut();
+        let mut len = 0usize;
+        let mut alternate = false;
+        check(unsafe {
+            omg_vt_paint_with_history(
+                self.0,
+                history_start_row,
+                &mut data,
+                &mut len,
+                &mut alternate,
+            )
+        })?;
+        let bytes = if data.is_null() || len == 0 {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(data, len).to_vec() }
+        };
+        if !data.is_null() {
+            unsafe { omg_vt_c_free(data) };
+        }
+        Ok((bytes, alternate))
+    }
 
     #[cfg(test)]
     fn scrollback_limits(&self) -> io::Result<(usize, Option<usize>)> {
@@ -380,6 +497,22 @@ impl Vt {
 impl Drop for Vt {
     fn drop(&mut self) {
         unsafe { omg_vt_free(self.0) }
+    }
+}
+
+pub(crate) struct TrackedRow(*mut c_void);
+
+impl TrackedRow {
+    pub(crate) fn resolve_history_start_row(&self, vt: &Vt) -> io::Result<usize> {
+        let mut start = 0usize;
+        check(unsafe { omg_vt_resolve_tracked_history_row(vt.0, self.0, &mut start) })?;
+        Ok(start)
+    }
+}
+
+impl Drop for TrackedRow {
+    fn drop(&mut self) {
+        unsafe { omg_vt_tracked_ref_free(self.0) };
     }
 }
 

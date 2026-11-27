@@ -88,6 +88,11 @@ impl Drop for RawMode {
     }
 }
 
+const STEADY_SCROLLBACK_MAX_BYTES: usize = 64 * 1024;
+const STEADY_SCROLLBACK_MAX_LINES: usize = 64;
+const INLINE_FLUSH_CHUNK_BYTES: usize = 64 * 1024;
+const EVICTION_FALLBACK_MIN_HISTORY_ROWS: usize = 512;
+
 fn dimensions() -> [u8; 8] {
     let mut size: libc::winsize = unsafe { std::mem::zeroed() };
     unsafe {
@@ -101,6 +106,196 @@ fn dimensions() -> [u8; 8] {
     bytes[4..6].copy_from_slice(&size.ws_xpixel.min(16_000).to_be_bytes());
     bytes[6..].copy_from_slice(&size.ws_ypixel.min(16_000).to_be_bytes());
     bytes
+}
+
+fn parse_remote_dimensions(info: &Value) -> Option<[u8; 8]> {
+    let cols = (info["cols"].as_u64()? as u16).clamp(1, 500);
+    let rows = (info["rows"].as_u64()? as u16).clamp(1, 300);
+    let px_w = info["pixel_width"].as_u64().unwrap_or(0).min(16_000) as u16;
+    let px_h = info["pixel_height"].as_u64().unwrap_or(0).min(16_000) as u16;
+    let mut bytes = [0u8; 8];
+    bytes[..2].copy_from_slice(&cols.to_be_bytes());
+    bytes[2..4].copy_from_slice(&rows.to_be_bytes());
+    bytes[4..6].copy_from_slice(&px_w.to_be_bytes());
+    bytes[6..8].copy_from_slice(&px_h.to_be_bytes());
+    Some(bytes)
+}
+
+fn parse_resize_frame(data: &[u8]) -> Option<[u8; 8]> {
+    match data.len() {
+        4 => {
+            let mut bytes = [0u8; 8];
+            bytes[..4].copy_from_slice(data);
+            Some(bytes)
+        }
+        8 => data.try_into().ok(),
+        _ => None,
+    }
+}
+
+fn same_terminal_size(local: [u8; 8], remote: [u8; 8]) -> bool {
+    local[..4] == remote[..4]
+        && (local[4..8] == [0, 0, 0, 0]
+            || remote[4..8] == [0, 0, 0, 0]
+            || local[4..8] == remote[4..8])
+}
+
+fn apply_dimensions_to_vt(vt: &mut Vt, dims: [u8; 8]) -> io::Result<()> {
+    let cols = u16::from_be_bytes([dims[0], dims[1]]);
+    let rows = u16::from_be_bytes([dims[2], dims[3]]);
+    let px_w = u16::from_be_bytes([dims[4], dims[5]]);
+    let px_h = u16::from_be_bytes([dims[6], dims[7]]);
+    if px_w > 0 && px_h > 0 {
+        vt.resize_pixels(cols, rows, px_w, px_h)
+    } else {
+        vt.resize(cols, rows)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ReconnectPlan {
+    preserve_local_prefix: bool,
+    /// `None` means replay from `history_start_row = 0` (start of retained history);
+    /// `Some(row)` means track `row` (`0..=new_hist.len()`).
+    history_start_row: Option<usize>,
+}
+
+fn trim_trailing_empty(lines: &[String]) -> &[String] {
+    let end = lines
+        .iter()
+        .rposition(|s| !s.is_empty())
+        .map_or(0, |i| i + 1);
+    &lines[..end]
+}
+
+fn match_tail_anchor(anchor_rows: &[String], haystack: &[String]) -> Option<usize> {
+    if anchor_rows.is_empty() || haystack.is_empty() {
+        return None;
+    }
+    let Some(end_ne) = anchor_rows.iter().rposition(|s| !s.is_empty()) else {
+        if haystack.len() >= anchor_rows.len()
+            && haystack[..anchor_rows.len()].iter().all(String::is_empty)
+        {
+            return Some(anchor_rows.len());
+        }
+        return None;
+    };
+    let trailing_blanks = anchor_rows.len() - 1 - end_ne;
+    for &max_win in &[16usize, 4usize, 1usize] {
+        let win_len = (end_ne + 1).min(max_win);
+        if max_win == 1 && anchor_rows[end_ne].len() < 6 && end_ne > 0 {
+            continue;
+        }
+        let win_start = end_ne + 1 - win_len;
+        let window = &anchor_rows[win_start..=end_ne];
+        let needed = win_len + trailing_blanks;
+        if haystack.len() < needed {
+            continue;
+        }
+        let max_pos = haystack.len() - needed;
+        for pos in (0..=max_pos).rev() {
+            if haystack[pos..pos + win_len] == *window
+                && haystack[pos + win_len..pos + needed]
+                    .iter()
+                    .all(String::is_empty)
+            {
+                return Some(pos + needed);
+            }
+        }
+        if win_len == end_ne + 1 {
+            break;
+        }
+    }
+    None
+}
+
+fn plan_reconnect(
+    had_first_picture: bool,
+    was_prefix_preserved: bool,
+    alt_screen: bool,
+    same_seq_and_size: bool,
+    old_hist: &[String],
+    old_act: &[String],
+    new_hist: &[String],
+) -> ReconnectPlan {
+    if alt_screen {
+        return ReconnectPlan {
+            preserve_local_prefix: false,
+            history_start_row: Some(new_hist.len()),
+        };
+    }
+    if had_first_picture {
+        return ReconnectPlan {
+            preserve_local_prefix: !was_prefix_preserved,
+            history_start_row: None,
+        };
+    }
+    if same_seq_and_size {
+        return ReconnectPlan {
+            preserve_local_prefix: !was_prefix_preserved,
+            history_start_row: Some(new_hist.len()),
+        };
+    }
+    if new_hist.is_empty() {
+        return ReconnectPlan {
+            preserve_local_prefix: !was_prefix_preserved,
+            history_start_row: Some(0),
+        };
+    }
+    let old_act_trimmed = trim_trailing_empty(old_act);
+    if was_prefix_preserved {
+        if !old_hist.is_empty() {
+            if let Some(anchor_end) = match_tail_anchor(old_hist, new_hist) {
+                ReconnectPlan {
+                    preserve_local_prefix: false,
+                    history_start_row: Some(anchor_end),
+                }
+            } else {
+                // Anchor evicted (e.g. >4 MiB output during disconnect): preserve old active
+                // viewport into outer scrollback and replay retained history from row 0.
+                ReconnectPlan {
+                    preserve_local_prefix: !old_act_trimmed.is_empty(),
+                    history_start_row: None,
+                }
+            }
+        } else if !old_act_trimmed.is_empty()
+            && new_hist.len() >= EVICTION_FALLBACK_MIN_HISTORY_ROWS
+            && match_tail_anchor(old_act_trimmed, new_hist).is_none()
+        {
+            ReconnectPlan {
+                preserve_local_prefix: true,
+                history_start_row: None,
+            }
+        } else {
+            ReconnectPlan {
+                preserve_local_prefix: false,
+                history_start_row: None,
+            }
+        }
+    } else {
+        // Local shell prefix is still partially visible on the outer viewport: push
+        // preserve_rows once so local prefix enters outer scrollback, and avoid
+        // duplicating old_active lines if they also scrolled into new_hist.
+        let mut combined = Vec::with_capacity(old_hist.len() + old_act_trimmed.len());
+        combined.extend_from_slice(old_hist);
+        combined.extend_from_slice(old_act_trimmed);
+        let start = match_tail_anchor(&combined, new_hist)
+            .or_else(|| match_tail_anchor(new_hist, &combined).map(|_| new_hist.len()))
+            .or_else(|| {
+                (!old_hist.is_empty())
+                    .then(|| match_tail_anchor(old_hist, new_hist))
+                    .flatten()
+            });
+        ReconnectPlan {
+            preserve_local_prefix: true,
+            history_start_row: start,
+        }
+    }
+}
+
+struct PendingRepaint {
+    preserve_local_prefix: bool,
+    tracked_start: Option<crate::TrackedRow>,
 }
 
 fn encoded(value: &str) -> String {
@@ -296,12 +491,15 @@ fn view_loop(
 ) -> io::Result<i32> {
     let mut generation = 0;
     let mut sequence = None;
+    let mut last_seen_seq: Option<u64> = None;
     let mut ready = false;
     let mut writer = false;
     let mut raw = None;
     let mut first_picture = true;
     let mut preserved_local_prefix = false;
     let mut initial_output = None;
+    let mut remote_size: Option<[u8; 8]> = None;
+    let mut pending_repaint: Option<PendingRepaint> = None;
     let mut password_input = false;
     let mut pending_password = None;
     let mut pending_cwd = None;
@@ -324,7 +522,11 @@ fn view_loop(
     loop {
         let signal = INTERRUPTED.load(Ordering::Relaxed);
         if signal != 0 {
-            let _ = flush_out_buf(&mut *raw_stdout, &mut out_buf);
+            if stdout_poll_writable() {
+                let _ =
+                    flush_out_buf_chunk(&mut *raw_stdout, &mut out_buf, INLINE_FLUSH_CHUNK_BYTES);
+            }
+            out_buf.clear();
             return Ok(128 + signal);
         }
         let mut drained_frames = 0usize;
@@ -349,6 +551,8 @@ fn view_loop(
                     ready = false;
                     writer = false;
                     sequence = None;
+                    remote_size = None;
+                    pending_repaint = None;
                     pending_password = Some(false);
                     pending_output.clear();
                     persist_record(
@@ -374,6 +578,7 @@ fn view_loop(
                             "host did not enable inline terminal replies",
                         ));
                     }
+                    remote_size = parse_remote_dimensions(&info);
                     initial_output = info["initial_output"]
                         .as_str()
                         .filter(|s| s.len() <= 12 * 1024)
@@ -382,29 +587,66 @@ fn view_loop(
                 b'S' => {
                     let had_first_picture = first_picture;
                     if had_first_picture && initial_output.is_some() {
-                        screen = Screen::new(
-                            u16::from_be_bytes([size[0], size[1]]),
-                            u16::from_be_bytes([size[2], size[3]]),
-                        )?;
+                        let cur_cols = u16::from_be_bytes([size[0], size[1]]);
+                        let cur_rows = u16::from_be_bytes([size[2], size[3]]);
+                        screen = Screen::new(cur_cols, cur_rows)?;
+                        pending_repaint = None;
                         pending_output = initial_output.take().unwrap();
                         screen.write(&pending_output);
-                    } else {
-                        screen.restore(&frame.data)?;
-                        let (_, alt_screen, cursor_visible, mouse_active) = screen.ui_modes();
-                        let preserve_rows = if !had_first_picture
-                            && !preserved_local_prefix
-                            && !alt_screen
-                            && cursor_visible
-                            && !mouse_active
-                        {
+                        if !screen.vt.in_alt_screen() && screen.scrollback_rows() > 0 {
                             preserved_local_prefix = true;
-                            let current = dimensions();
-                            Some(u16::from_be_bytes([current[2], current[3]]))
+                        }
+                    } else {
+                        let (old_cols, old_rows, old_hist, old_act) = if !had_first_picture {
+                            if screen.vt.in_alt_screen() {
+                                screen.write(b"\x1b[?1049l\x1b[?1047l\x1b[?47l");
+                            }
+                            let (c, r, _, _) = screen.vt.grid_metrics()?;
+                            (
+                                c,
+                                r,
+                                screen.vt.region_lines(true)?,
+                                screen.vt.region_lines(false)?,
+                            )
+                        } else {
+                            (0, 0, Vec::new(), Vec::new())
+                        };
+                        screen.restore(&frame.data)?;
+                        let (new_cols, new_rows, new_sb, new_alt) = screen.vt.grid_metrics()?;
+                        let same_seq_and_size = !had_first_picture
+                            && last_seen_seq == Some(frame.seq)
+                            && old_cols == new_cols
+                            && old_rows == new_rows;
+                        let new_hist = if new_alt || had_first_picture || same_seq_and_size {
+                            vec![String::new(); new_sb]
+                        } else {
+                            screen.vt.region_lines(true)?
+                        };
+                        let plan = plan_reconnect(
+                            had_first_picture,
+                            preserved_local_prefix,
+                            new_alt,
+                            same_seq_and_size,
+                            &old_hist,
+                            &old_act,
+                            &new_hist,
+                        );
+                        let tracked_start = if new_alt {
+                            None
+                        } else if let Some(start_row) = plan.history_start_row {
+                            if start_row < new_sb {
+                                Some(screen.vt.track_row(true, start_row)?)
+                            } else {
+                                Some(screen.vt.track_row(false, 0)?)
+                            }
                         } else {
                             None
                         };
-                        pending_output = screen.repaint(preserve_rows)?;
-                        pending_output.extend(screen.continuation()?);
+                        pending_output.clear();
+                        pending_repaint = Some(PendingRepaint {
+                            preserve_local_prefix: plan.preserve_local_prefix,
+                            tracked_start,
+                        });
                     }
                     screen.take_responses();
                     first_picture = false;
@@ -413,6 +655,7 @@ fn view_loop(
                     activity_hydrated = false;
                     pending_activity = None;
                     sequence = Some(frame.seq);
+                    last_seen_seq = Some(frame.seq);
                     Frame::new(b'A', frame.seq, &generation.to_be_bytes()).send(socket)?;
                     Frame::new(b'W', generation, b"inline/1").send(socket)?;
                 }
@@ -426,6 +669,23 @@ fn view_loop(
                             libc::tcflush(0, libc::TCIFLUSH);
                         }
                     }
+                    size = dimensions();
+                    if remote_size.is_none_or(|rem| !same_terminal_size(size, rem)) {
+                        Frame::new(b'R', generation, &size).send(socket)?;
+                        apply_dimensions_to_vt(&mut screen.vt, size)?;
+                        screen.take_responses();
+                        remote_size = Some(size);
+                    }
+                    if let Some(pr) = pending_repaint.take() {
+                        let cur_rows = u16::from_be_bytes([size[2], size[3]]);
+                        let painted = materialize_pending_repaint(
+                            &mut screen,
+                            pr,
+                            &mut preserved_local_prefix,
+                            cur_rows,
+                        )?;
+                        out_buf.extend_from_slice(&painted);
+                    }
                     ready = true;
                     writer = true;
                     out_buf.extend_from_slice(&pending_output);
@@ -437,12 +697,21 @@ fn view_loop(
                             ("attachmentGeneration", Value::from(generation)),
                         ],
                     )?;
-                    size = dimensions();
-                    Frame::new(b'R', generation, &size).send(socket)?;
                 }
                 b'B' if sequence.is_some() => {
                     if raw.is_none() {
                         raw = Some(RawMode::enter()?);
+                    }
+                    if let Some(pr) = pending_repaint.take() {
+                        let current = dimensions();
+                        let cur_rows = u16::from_be_bytes([current[2], current[3]]);
+                        let painted = materialize_pending_repaint(
+                            &mut screen,
+                            pr,
+                            &mut preserved_local_prefix,
+                            cur_rows,
+                        )?;
+                        out_buf.extend_from_slice(&painted);
                     }
                     ready = true;
                     writer = false;
@@ -465,8 +734,14 @@ fn view_loop(
                     }
                     screen.write(&frame.data);
                     if ready {
+                        if !preserved_local_prefix
+                            && !screen.vt.in_alt_screen()
+                            && screen.scrollback_rows() > 0
+                        {
+                            preserved_local_prefix = true;
+                        }
                         out_buf.extend_from_slice(&frame.data);
-                    } else {
+                    } else if pending_repaint.is_none() {
                         if pending_output.len() + frame.data.len() > crate::MAX_QUEUE {
                             return Err(io::Error::other(
                                 "inline presentation queue exceeded its limit",
@@ -476,6 +751,7 @@ fn view_loop(
                     }
                     screen.take_responses();
                     sequence = Some(frame.seq);
+                    last_seen_seq = Some(frame.seq);
                 }
                 crate::activity::FRAME => {
                     if sequence != Some(frame.seq) {
@@ -490,18 +766,9 @@ fn view_loop(
                     pending_activity = Some(mode);
                 }
                 b'R' if frame.data.len() == 4 || frame.data.len() == 8 => {
-                    let cols = u16::from_be_bytes([frame.data[0], frame.data[1]]);
-                    let rows = u16::from_be_bytes([frame.data[2], frame.data[3]]);
-                    if frame.data.len() == 8 {
-                        let px_w = u16::from_be_bytes([frame.data[4], frame.data[5]]);
-                        let px_h = u16::from_be_bytes([frame.data[6], frame.data[7]]);
-                        if px_w > 0 && px_h > 0 {
-                            screen.vt.resize_pixels(cols, rows, px_w, px_h)?;
-                        } else {
-                            screen.vt.resize(cols, rows)?;
-                        }
-                    } else {
-                        screen.vt.resize(cols, rows)?;
+                    if let Some(parsed) = parse_resize_frame(&frame.data) {
+                        remote_size = Some(parsed);
+                        apply_dimensions_to_vt(&mut screen.vt, parsed)?;
                     }
                     screen.take_responses();
                 }
@@ -523,6 +790,17 @@ fn view_loop(
                 }
                 b'X' => {
                     flush_out_buf(&mut *raw_stdout, &mut out_buf)?;
+                    if let Some(pr) = pending_repaint.take() {
+                        let current = dimensions();
+                        let cur_rows = u16::from_be_bytes([current[2], current[3]]);
+                        let painted = materialize_pending_repaint(
+                            &mut screen,
+                            pr,
+                            &mut preserved_local_prefix,
+                            cur_rows,
+                        )?;
+                        raw_stdout.write_all(&painted)?;
+                    }
                     if !pending_output.is_empty() {
                         let mut ended = Screen::new(80, 24)?;
                         let mut filter = crate::terminal_output::Relay::default();
@@ -567,6 +845,7 @@ fn view_loop(
                 }
             }
         }
+        let mut wants_stdout_flush = false;
         if out_buf.is_empty() {
             sync_hold_started = None;
         } else if !in_sync
@@ -574,14 +853,31 @@ fn view_loop(
             || out_buf.len() >= INLINE_OUT_BUF_LIMIT
             || sync_hold_started.is_some_and(|started| started.elapsed() >= INLINE_SYNC_HOLD_LIMIT)
         {
-            flush_out_buf(&mut *raw_stdout, &mut out_buf)?;
-            sync_hold_started = None;
+            if stdout_poll_writable() {
+                flush_out_buf_chunk(&mut *raw_stdout, &mut out_buf, INLINE_FLUSH_CHUNK_BYTES)?;
+            }
+            if out_buf.is_empty() {
+                sync_hold_started = None;
+            } else {
+                wants_stdout_flush = true;
+            }
         } else {
             sync_hold_started.get_or_insert_with(Instant::now);
         }
         if raw.is_some() {
             if let Some(code) = drain_ready_stdin(socket, generation, ready, writer)? {
-                flush_out_buf(&mut *raw_stdout, &mut out_buf)?;
+                if code == 0 {
+                    flush_out_buf(&mut *raw_stdout, &mut out_buf)?;
+                } else {
+                    if stdout_poll_writable() {
+                        let _ = flush_out_buf_chunk(
+                            &mut *raw_stdout,
+                            &mut out_buf,
+                            INLINE_FLUSH_CHUNK_BYTES,
+                        );
+                    }
+                    out_buf.clear();
+                }
                 return Ok(code);
             }
         }
@@ -605,22 +901,42 @@ fn view_loop(
                 events: libc::POLLIN,
                 revents: 0,
             },
+            libc::pollfd {
+                fd: if wants_stdout_flush {
+                    libc::STDOUT_FILENO
+                } else {
+                    -1
+                },
+                events: libc::POLLOUT,
+                revents: 0,
+            },
         ];
         let poll_timeout_ms = if drained_frames == 32 {
             0
-        } else if sync_hold_started.is_some() {
+        } else if sync_hold_started.is_some() && !wants_stdout_flush {
             4
         } else {
             500
         };
-        let count = unsafe { libc::poll(fds.as_mut_ptr(), 2, poll_timeout_ms) };
+        let count = unsafe { libc::poll(fds.as_mut_ptr(), 3, poll_timeout_ms) };
         if count > 0 {
             if fds[1].revents & libc::POLLIN != 0 {
                 let _ = wake.read(&mut [0; 256]);
             }
             if fds[0].revents & libc::POLLIN != 0 {
                 if let Some(code) = drain_ready_stdin(socket, generation, ready, writer)? {
-                    flush_out_buf(&mut *raw_stdout, &mut out_buf)?;
+                    if code == 0 {
+                        flush_out_buf(&mut *raw_stdout, &mut out_buf)?;
+                    } else {
+                        if stdout_poll_writable() {
+                            let _ = flush_out_buf_chunk(
+                                &mut *raw_stdout,
+                                &mut out_buf,
+                                INLINE_FLUSH_CHUNK_BYTES,
+                            );
+                        }
+                        out_buf.clear();
+                    }
                     return Ok(code);
                 }
             }
@@ -698,12 +1014,68 @@ fn drain_ready_stdin_with(
     Ok(None)
 }
 
+fn stdout_poll_writable() -> bool {
+    let mut pfd = libc::pollfd {
+        fd: libc::STDOUT_FILENO,
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    let rc = unsafe { libc::poll(&mut pfd, 1, 0) };
+    rc > 0 && (pfd.revents & (libc::POLLOUT | libc::POLLERR | libc::POLLHUP)) != 0
+}
+
+fn flush_out_buf_chunk(
+    out: &mut impl Write,
+    buf: &mut Vec<u8>,
+    max_chunk: usize,
+) -> io::Result<usize> {
+    if buf.is_empty() || max_chunk == 0 {
+        return Ok(0);
+    }
+    let end = buf.len().min(max_chunk);
+    loop {
+        match out.write(&buf[..end]) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(n) => {
+                buf.drain(..n);
+                return Ok(n);
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(0),
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 fn flush_out_buf(out: &mut impl Write, buf: &mut Vec<u8>) -> io::Result<()> {
     if !buf.is_empty() {
         out.write_all(buf)?;
         buf.clear();
     }
     Ok(())
+}
+
+fn materialize_pending_repaint(
+    screen: &mut Screen,
+    pending: PendingRepaint,
+    preserved_local_prefix: &mut bool,
+    current_rows: u16,
+) -> io::Result<Vec<u8>> {
+    let (_, _, _, alt_now) = screen.vt.grid_metrics()?;
+    let preserve_rows = if pending.preserve_local_prefix && !alt_now {
+        *preserved_local_prefix = true;
+        Some(current_rows)
+    } else {
+        None
+    };
+    let history_start_row = match pending.tracked_start {
+        Some(tracked) => tracked.resolve_history_start_row(&screen.vt)?,
+        None => 0,
+    };
+    let mut painted = screen.repaint_with_history(preserve_rows, history_start_row)?;
+    painted.extend(screen.continuation()?);
+    screen.shrink_scrollback()?;
+    Ok(painted)
 }
 
 struct Screen {
@@ -730,8 +1102,8 @@ impl Screen {
             cols.saturating_mul(8),
             rows.saturating_mul(16),
             crate::ScrollbackLimits {
-                max_bytes: 0,
-                max_lines: Some(0),
+                max_bytes: STEADY_SCROLLBACK_MAX_BYTES,
+                max_lines: Some(STEADY_SCROLLBACK_MAX_LINES),
             },
             Some(response),
             (&mut *replies as *mut Vec<u8>).cast(),
@@ -743,19 +1115,28 @@ impl Screen {
         self.vt.write(bytes);
     }
     fn restore(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.vt.restore(bytes)?;
-        // The outer managed terminal owns scrollback; the query mirror needs
-        // only the active screen, even when a reconnect snapshot has history.
-        crate::check(unsafe { crate::omg_vt_screen_only(self.vt.0) })
+        // Temporarily decode the full 4 MiB snapshot history for delta replay,
+        // then shrink back to 64 lines / 64 KiB once repaint completes.
+        self.vt.set_scrollback_limits(crate::ScrollbackLimits {
+            max_bytes: crate::DEFAULT_SCROLLBACK_MAX_BYTES,
+            max_lines: None,
+        })?;
+        self.vt.restore(bytes)
+    }
+    fn shrink_scrollback(&mut self) -> io::Result<()> {
+        self.vt.set_scrollback_limits(crate::ScrollbackLimits {
+            max_bytes: STEADY_SCROLLBACK_MAX_BYTES,
+            max_lines: Some(STEADY_SCROLLBACK_MAX_LINES),
+        })
+    }
+    fn scrollback_rows(&self) -> usize {
+        self.vt.grid_metrics().map(|(_, _, sb, _)| sb).unwrap_or(0)
     }
     fn take_responses(&mut self) -> Vec<u8> {
         std::mem::take(&mut *self.replies)
     }
     fn in_sync(&self) -> bool {
         self.vt.in_sync()
-    }
-    fn ui_modes(&self) -> (bool, bool, bool, bool) {
-        self.vt.ui_modes().unwrap_or((false, false, true, false))
     }
     fn continuation(&self) -> io::Result<Vec<u8>> {
         let mut data = std::ptr::null_mut();
@@ -772,19 +1153,17 @@ impl Screen {
 
     // Mode reset and active-screen filtering follow herdr-core's Terminal::paint.
     // See LICENSE.herdr and THIRD-PARTY-NOTICES.
+    #[cfg(test)]
     fn repaint(&self, preserve_rows: Option<u16>) -> io::Result<Vec<u8>> {
-        let mut data = std::ptr::null_mut();
-        let mut len = 0;
-        let mut alternate = false;
-        crate::check(unsafe {
-            crate::omg_vt_paint(self.vt.0, &mut data, &mut len, &mut alternate)
-        })?;
-        let bytes = if len == 0 {
-            Vec::new()
-        } else {
-            unsafe { std::slice::from_raw_parts(data, len).to_vec() }
-        };
-        unsafe { crate::omg_vt_buffer_free(data, len) };
+        self.repaint_with_history(preserve_rows, usize::MAX)
+    }
+
+    fn repaint_with_history(
+        &self,
+        preserve_rows: Option<u16>,
+        history_start_row: usize,
+    ) -> io::Result<Vec<u8>> {
+        let (bytes, alternate) = self.vt.paint_with_history(history_start_row)?;
         let mut out = b"\x18\x1b[!p\x1b[?2026l\x1b[?2026h\x1b[?9l\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\
 \x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?2004l\x1b[?1l\
 \x1b[?66l\x1b[?2031l\x1b[?2048l\x1b[=0;1u\x1b[?1049l\x1b[?1047l\x1b[?47l"
@@ -863,12 +1242,30 @@ mod tests {
         let mut original = Vt::new(20, 4).unwrap();
         original.write(b"\x1b[?1049hremote\x1b[?2004h");
         let mut screen = Screen::new(20, 4).unwrap();
+        assert_eq!(
+            screen.vt.scrollback_limits().unwrap(),
+            (
+                STEADY_SCROLLBACK_MAX_BYTES,
+                Some(STEADY_SCROLLBACK_MAX_LINES)
+            )
+        );
         screen.restore(&original.snapshot().unwrap()).unwrap();
-        assert_eq!(screen.vt.scrollback_limits().unwrap(), (0, Some(0)));
+        assert_eq!(
+            screen.vt.scrollback_limits().unwrap(),
+            (crate::DEFAULT_SCROLLBACK_MAX_BYTES, None)
+        );
         screen.write(b"\x1b[6n");
         assert!(!screen.take_responses().is_empty());
         let mut target = Vt::new(20, 4).unwrap();
         target.write(&screen.repaint(None).unwrap());
+        screen.shrink_scrollback().unwrap();
+        assert_eq!(
+            screen.vt.scrollback_limits().unwrap(),
+            (
+                STEADY_SCROLLBACK_MAX_BYTES,
+                Some(STEADY_SCROLLBACK_MAX_LINES)
+            )
+        );
         assert!(target.text().unwrap().contains("remote"));
         assert!(screen.continuation().unwrap().is_empty());
     }
@@ -983,5 +1380,331 @@ mod tests {
         )
         .unwrap();
         assert_eq!(unready_exit, Some(130));
+    }
+
+    #[test]
+    fn single_pass_paint_with_small_history_delta_never_overwrites_with_home_and_restores_post_state(
+    ) {
+        // 40-row terminal with K = 5 (< 40) history rows, soft-wrapped history, custom tabstops,
+        // DECSTBM scroll region, OSC 7 pwd, ?7l, 4h, ?25l, and explicit CUP cursor position.
+        let mut remote = Vt::new(20, 40).unwrap();
+        remote.write(b"\x1b[3g\x1b[7G\x1bH\x1b[H");
+        // Write 1 soft-wrapped line (25 chars on 20-col grid -> 2 rows) + 3 normal lines = 5 history rows,
+        // followed by 40 active rows so exactly 5 rows land in history.
+        remote.write(b"WRAP_HEAD_0123456789TAIL!\r\n");
+        remote.write(b"HIST_ROW_2\r\nHIST_ROW_3\r\nHIST_ROW_4\r\n");
+        for i in 0..40 {
+            if i < 39 {
+                remote.write(format!("ACTIVE_ROW_{i:02}\r\n").as_bytes());
+            } else {
+                remote.write(format!("ACTIVE_ROW_{i:02}").as_bytes());
+            }
+        }
+        // Set DECSTBM, OSC 7, modes (?7l, 4h, ?25l, ?2004h), and CUP (col 5, row 11 -> 1-indexed 12;6H).
+        remote.write(
+            b"\x1b[4;36r\x1b]7;file://remote/workspace\x1b\\\x1b[4h\x1b[?7l\x1b[?25l\x1b[?2004h\x1b[12;6H",
+        );
+        let (_, _, sb_rows, alt) = remote.grid_metrics().unwrap();
+        assert!(!alt);
+        assert_eq!(sb_rows, 5);
+
+        let mut viewer = Screen::new(20, 40).unwrap();
+        viewer.restore(&remote.snapshot().unwrap()).unwrap();
+        let raw_vt = viewer.vt.paint_with_history(0).unwrap().0;
+        // Verify \x1b[H from tabstops appears ONLY before the history content, NEVER after!
+        let wrap_pos = raw_vt
+            .windows(b"WRAP_HEAD_".len())
+            .position(|w| w == b"WRAP_HEAD_")
+            .expect("history text present");
+        assert!(
+            !raw_vt[wrap_pos..].windows(3).any(|w| w == b"\x1b[H"),
+            "CSI H must never be emitted after history text"
+        );
+
+        let repainted = viewer.repaint_with_history(None, 0).unwrap();
+        viewer.shrink_scrollback().unwrap();
+
+        let mut outer = Vt::new(20, 40).unwrap();
+        outer.write(&repainted);
+
+        let outer_hist = outer.region_lines(true).unwrap();
+        assert_eq!(
+            outer_hist,
+            vec![
+                "WRAP_HEAD_0123456789",
+                "TAIL!",
+                "HIST_ROW_2",
+                "HIST_ROW_3",
+                "HIST_ROW_4",
+            ]
+        );
+        let outer_act = outer.region_lines(false).unwrap();
+        assert_eq!(outer_act.len(), 40);
+        assert_eq!(outer_act[0], "ACTIVE_ROW_00");
+        assert_eq!(outer_act[39], "ACTIVE_ROW_39");
+
+        // Modes (?25l hidden cursor, ?7l wrap off, 4h insert), DECSTBM, OSC 7, and CUP restored after text:
+        let (_, outer_alt, cursor_vis, _) = outer.ui_modes().unwrap();
+        assert!(!outer_alt);
+        assert!(!cursor_vis, "?25l must be restored after text");
+        let raw_text = String::from_utf8_lossy(&raw_vt);
+        assert!(raw_text.contains("\x1b[?7l"), "{raw_text:?}");
+        assert!(raw_text.contains("\x1b[4h"), "{raw_text:?}");
+        assert!(raw_text.contains("\x1b[4;36r"), "{raw_text:?}");
+        assert!(
+            raw_text.contains("\x1b]7;file://remote/workspace"),
+            "{raw_text:?}"
+        );
+        assert!(raw_text.contains("\x1b[12;6H"), "{raw_text:?}");
+
+        // Confirm cursor is genuinely at (x=5, y=11) in outer terminal via DSR 6n.
+        let mut outer_screen = Screen::new(20, 40).unwrap();
+        outer_screen
+            .vt
+            .set_scrollback_limits(crate::ScrollbackLimits {
+                max_bytes: crate::DEFAULT_SCROLLBACK_MAX_BYTES,
+                max_lines: None,
+            })
+            .unwrap();
+        outer_screen.write(&repainted);
+        outer_screen.take_responses();
+        outer_screen.write(b"\x1b[6n");
+        assert_eq!(outer_screen.take_responses(), b"\x1b[12;6R");
+    }
+
+    #[test]
+    fn hidden_cursor_tui_reconnect_preserves_prefix_and_avoids_duplicating_old_active() {
+        // Simulate outer terminal starting with local shell output before inline SSH attach.
+        let mut outer = Vt::new(40, 10).unwrap();
+        outer.write(b"LOCAL_PROMPT$ omg +ssh dev\r\n");
+
+        // Remote starts a hidden-cursor TUI (?25l) that pushes 15 conversation lines into
+        // scrollback and draws a 10-row TUI frame on its active screen.
+        let mut remote = Vt::new(40, 10).unwrap();
+        remote.write(b"\x1b[?25l");
+        for i in 0..15 {
+            remote.write(format!("PRE_TURN_{i:02}\r\n").as_bytes());
+        }
+        for r in 0..10 {
+            if r < 9 {
+                remote.write(format!("OLD_TUI_BOX_{r}\r\n").as_bytes());
+            } else {
+                remote.write(format!("OLD_TUI_BOX_{r}").as_bytes());
+            }
+        }
+
+        // 1. Initial attach to existing hidden-cursor TUI session: must preserve LOCAL_PROMPT!
+        let mut viewer = Screen::new(40, 10).unwrap();
+        let mut preserved_local_prefix = false;
+        viewer.restore(&remote.snapshot().unwrap()).unwrap();
+        let new_hist_1 = viewer.vt.region_lines(true).unwrap();
+        let plan_1 = plan_reconnect(
+            true,
+            preserved_local_prefix,
+            false,
+            false,
+            &[],
+            &[],
+            &new_hist_1,
+        );
+        assert!(plan_1.preserve_local_prefix);
+        assert_eq!(plan_1.history_start_row, None);
+        let paint_1 = materialize_pending_repaint(
+            &mut viewer,
+            PendingRepaint {
+                preserve_local_prefix: plan_1.preserve_local_prefix,
+                tracked_start: None,
+            },
+            &mut preserved_local_prefix,
+            10,
+        )
+        .unwrap();
+        assert!(preserved_local_prefix);
+        outer.write(&paint_1);
+        assert!(outer
+            .region_lines(true)
+            .unwrap()
+            .iter()
+            .any(|l| l.contains("LOCAL_PROMPT$ omg +ssh dev")));
+
+        // 2. Disconnect for 30+ minutes: TUI clears OLD_TUI_BOX in-place, scrolls 25 new lines into
+        // scrollback, and draws NEW_TUI_BOX on its 10 active rows.
+        remote.write(b"\x1b[H\x1b[2J");
+        for i in 0..25 {
+            remote.write(format!("DISCONNECT_TURN_{i:02}\r\n").as_bytes());
+        }
+        for r in 0..10 {
+            if r < 9 {
+                remote.write(format!("NEW_TUI_BOX_{r}\r\n").as_bytes());
+            } else {
+                remote.write(format!("NEW_TUI_BOX_{r}").as_bytes());
+            }
+        }
+
+        // Reconnect: match viewer's tail anchor against restored remote snapshot.
+        let old_hist = viewer.vt.region_lines(true).unwrap();
+        let old_act = viewer.vt.region_lines(false).unwrap();
+        viewer.restore(&remote.snapshot().unwrap()).unwrap();
+        let new_hist_2 = viewer.vt.region_lines(true).unwrap();
+        let plan_2 = plan_reconnect(
+            false,
+            preserved_local_prefix,
+            false,
+            false,
+            &old_hist,
+            &old_act,
+            &new_hist_2,
+        );
+        assert!(
+            !plan_2.preserve_local_prefix,
+            "must NOT push stale OLD_TUI_BOX into scrollback when anchor matches"
+        );
+        let start_row = plan_2.history_start_row.expect("anchor must match");
+        let tracked = viewer.vt.track_row(true, start_row).unwrap();
+        let paint_2 = materialize_pending_repaint(
+            &mut viewer,
+            PendingRepaint {
+                preserve_local_prefix: plan_2.preserve_local_prefix,
+                tracked_start: Some(tracked),
+            },
+            &mut preserved_local_prefix,
+            10,
+        )
+        .unwrap();
+        outer.write(&paint_2);
+
+        let final_hist = outer.region_lines(true).unwrap();
+        let final_act = outer.region_lines(false).unwrap();
+        assert!(final_hist
+            .iter()
+            .any(|l| l.contains("LOCAL_PROMPT$ omg +ssh dev")));
+        for i in 0..15 {
+            let expected = format!("PRE_TURN_{i:02}");
+            assert_eq!(
+                final_hist.iter().filter(|l| *l == &expected).count(),
+                1,
+                "pre-disconnect line {expected} must appear once"
+            );
+        }
+        for i in 0..25 {
+            let expected = format!("DISCONNECT_TURN_{i:02}");
+            assert_eq!(
+                final_hist.iter().filter(|l| *l == &expected).count(),
+                1,
+                "disconnect line {expected} must appear once"
+            );
+        }
+        assert!(
+            !final_hist.iter().any(|l| l.starts_with("OLD_TUI_BOX_")),
+            "stale OLD_TUI_BOX must be replaced, not pushed into scrollback: {final_hist:?}"
+        );
+        assert_eq!(final_act[0], "NEW_TUI_BOX_0");
+        assert_eq!(final_act[9], "NEW_TUI_BOX_9");
+    }
+
+    #[test]
+    fn tail_anchor_handles_eviction_clear_and_tracked_reflow_on_resize() {
+        // 1. >4 MiB eviction fallback: old_hist anchor missing in large new_hist -> preserve old_active & replay from 0.
+        let old_hist = vec!["ANCHOR_OLD_1".to_owned(), "ANCHOR_OLD_2".to_owned()];
+        let old_act = vec!["STILL_VISIBLE_BEFORE_EVICT".to_owned(), String::new()];
+        let evicted_new_hist: Vec<String> = (0..600).map(|i| format!("POST_EVICT_{i}")).collect();
+        let evict_plan = plan_reconnect(
+            false,
+            true,
+            false,
+            false,
+            &old_hist,
+            &old_act,
+            &evicted_new_hist,
+        );
+        assert_eq!(
+            evict_plan,
+            ReconnectPlan {
+                preserve_local_prefix: true,
+                history_start_row: None,
+            }
+        );
+
+        // 2. `clear` (\x1b[3J) during disconnect: new_hist is empty -> no false eviction preserve_rows.
+        let clear_plan = plan_reconnect(false, true, false, false, &old_hist, &old_act, &[]);
+        assert_eq!(
+            clear_plan,
+            ReconnectPlan {
+                preserve_local_prefix: false,
+                history_start_row: Some(0),
+            }
+        );
+
+        // 2b. Unpreserved prefix with small history delta already inside pre-disconnect active rows:
+        // preserve_rows pushes old_act into outer scrollback, so new_hist subset is not replayed twice.
+        let unpreserved_small_delta = plan_reconnect(
+            false,
+            false,
+            false,
+            false,
+            &[],
+            &[
+                "ACT_LINE_00".to_string(),
+                "ACT_LINE_01".to_string(),
+                "ACT_LINE_02".to_string(),
+                "ACT_LINE_03".to_string(),
+            ],
+            &["ACT_LINE_00".to_string(), "ACT_LINE_01".to_string()],
+        );
+        assert_eq!(
+            unpreserved_small_delta,
+            ReconnectPlan {
+                preserve_local_prefix: true,
+                history_start_row: Some(2),
+            }
+        );
+
+        // 3. Resize before repaint: TrackedRow follows reflowed delta start row accurately.
+        let mut remote = Vt::new(40, 6).unwrap();
+        for i in 0..10 {
+            remote.write(format!("LINE_{i:02}_01234567890123456789\r\n").as_bytes());
+        }
+        let mut viewer = Screen::new(40, 6).unwrap();
+        viewer.restore(&remote.snapshot().unwrap()).unwrap();
+        // Suppose rows 0..2 were already in outer scrollback, so delta starts at history row 3 (LINE_03).
+        let tracked = viewer.vt.track_row(true, 3).unwrap();
+        // Resize viewer narrower (40 -> 20 cols) BEFORE repaint, causing each 28-char line to wrap to 2 rows!
+        viewer.vt.resize(20, 6).unwrap();
+        let resolved = tracked.resolve_history_start_row(&viewer.vt).unwrap();
+        let reflowed_hist = viewer.vt.region_lines(true).unwrap();
+        assert_eq!(reflowed_hist[resolved], "LINE_03_012345678901");
+    }
+
+    #[test]
+    fn history_replay_caps_10k_rows_and_chunks_out_buf_writes() {
+        let mut remote = Vt::new(40, 10).unwrap();
+        for i in 0..10_500 {
+            remote.write(format!("ROW_{i:05}\r\n").as_bytes());
+        }
+        let (_, _, sb, _) = remote.grid_metrics().unwrap();
+        assert!(sb > 10_200, "expected >10,200 history rows, got {sb}");
+        let (painted, _) = remote.paint_with_history(0).unwrap();
+        let text = String::from_utf8_lossy(&painted);
+        assert!(
+            !text.contains("ROW_00010"),
+            "rows older than 10,000 cap must be skipped"
+        );
+        assert!(
+            text.contains("ROW_10495"),
+            "recent history rows must be retained"
+        );
+        assert!(painted.len() <= 2 * 1024 * 1024 + 64 * 1024);
+
+        // Chunked stdout flush drains at most INLINE_FLUSH_CHUNK_BYTES per iteration.
+        let mut sink = Vec::new();
+        let mut out_buf = vec![b'A'; INLINE_FLUSH_CHUNK_BYTES * 2 + 1234];
+        let n1 = flush_out_buf_chunk(&mut sink, &mut out_buf, INLINE_FLUSH_CHUNK_BYTES).unwrap();
+        assert_eq!(n1, INLINE_FLUSH_CHUNK_BYTES);
+        assert_eq!(out_buf.len(), INLINE_FLUSH_CHUNK_BYTES + 1234);
+        let n2 = flush_out_buf_chunk(&mut sink, &mut out_buf, INLINE_FLUSH_CHUNK_BYTES).unwrap();
+        assert_eq!(n2, INLINE_FLUSH_CHUNK_BYTES);
+        let n3 = flush_out_buf_chunk(&mut sink, &mut out_buf, INLINE_FLUSH_CHUNK_BYTES).unwrap();
+        assert_eq!(n3, 1234);
+        assert!(out_buf.is_empty());
     }
 }

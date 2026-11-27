@@ -606,12 +606,13 @@ fn pty_poll_interests_with_backpressure(
 
 const PTY_BACKPRESSURE_HIGH_WATER: usize = 512 * 1024;
 const PTY_BACKPRESSURE_LOW_WATER: usize = 128 * 1024;
+const PEER_BACKPRESSURE_STALL_TIMEOUT: Duration = Duration::from_secs(2);
 const PTY_COALESCE_MAX_BYTES: usize = 256 * 1024;
 const PTY_COALESCE_MAX_READS: usize = 16;
 const PTY_SYNC_COALESCE_WINDOW: Duration = Duration::from_millis(6);
 
 fn update_pty_backpressure(pty_backpressured: &mut bool, peers: &[Peer]) {
-    if peers.is_empty()
+    if !peers.iter().any(|p| !p.dead)
         || peers
             .iter()
             .any(|p| !p.dead && p.queued <= PTY_BACKPRESSURE_LOW_WATER)
@@ -619,10 +620,35 @@ fn update_pty_backpressure(pty_backpressured: &mut bool, peers: &[Peer]) {
         *pty_backpressured = false;
     } else if peers
         .iter()
-        .all(|p| !p.dead && p.queued >= PTY_BACKPRESSURE_HIGH_WATER)
+        .filter(|p| !p.dead)
+        .all(|p| p.queued >= PTY_BACKPRESSURE_HIGH_WATER)
     {
         *pty_backpressured = true;
     }
+}
+
+fn reap_stalled_backpressure_peers(
+    pty_backpressured: &mut bool,
+    peers: &mut [Peer],
+    stall_since: &mut std::collections::HashMap<u64, Instant>,
+    now: Instant,
+    stall_timeout: Duration,
+) {
+    for peer in peers.iter_mut() {
+        if peer.dead || peer.queued <= PTY_BACKPRESSURE_LOW_WATER {
+            stall_since.remove(&peer.id);
+            continue;
+        }
+        if *pty_backpressured {
+            let since = *stall_since.entry(peer.id).or_insert(now);
+            if now.duration_since(since) >= stall_timeout {
+                peer.dead = true;
+                peer.discard_queued_output();
+                stall_since.remove(&peer.id);
+            }
+        }
+    }
+    update_pty_backpressure(pty_backpressured, peers);
 }
 
 fn terminfo_entry_has_sync(path: &Path) -> bool {
@@ -1406,6 +1432,8 @@ pub fn serve_managed(
         }
     }
     let mut pty_backpressured = false;
+    let mut peer_stall_since: std::collections::HashMap<u64, Instant> =
+        std::collections::HashMap::new();
     loop {
         if let Some(wake) = &shutdown_wake {
             wake.drain();
@@ -2087,11 +2115,27 @@ pub fn serve_managed(
                 }
             }
         }
+        let flush_now = Instant::now();
         for peer in &mut peers {
+            let before_queued = peer.queued;
             if peer.flush().is_err() {
                 peer.dead = true;
+                peer_stall_since.remove(&peer.id);
+            } else if peer.queued <= PTY_BACKPRESSURE_LOW_WATER {
+                peer_stall_since.remove(&peer.id);
+            } else if peer.queued < before_queued {
+                peer_stall_since.insert(peer.id, flush_now);
+            } else {
+                peer_stall_since.entry(peer.id).or_insert(flush_now);
             }
         }
+        reap_stalled_backpressure_peers(
+            &mut pty_backpressured,
+            &mut peers,
+            &mut peer_stall_since,
+            flush_now,
+            PEER_BACKPRESSURE_STALL_TIMEOUT,
+        );
         let mut removed_peers = Vec::new();
         for peer in &mut peers {
             if close_after_flush.contains(&peer.id) && peer.queued == 0 {
@@ -2103,6 +2147,7 @@ pub fn serve_managed(
         }
         for id in removed_peers {
             close_after_flush.remove(&id);
+            peer_stall_since.remove(&id);
         }
         peers.retain(|p| !p.dead);
         lifetime.attached(peers.len(), Instant::now());
@@ -2826,6 +2871,42 @@ mod tests {
         drained.queued = PTY_BACKPRESSURE_LOW_WATER;
         update_pty_backpressure(&mut paused, &[drained]);
         assert!(!paused);
+
+        // Stalled peer holding backpressure with zero drain progress for >= timeout is reaped
+        // so the remote PTY never deadlocks.
+        let (s6, _r6) = UnixStream::pair().unwrap();
+        let mut stalled = Peer::new(s6, 6).unwrap();
+        stalled.push(Frame::new(
+            OUTPUT,
+            1,
+            &vec![b'X'; PTY_BACKPRESSURE_HIGH_WATER],
+        ));
+        let mut peers = vec![stalled];
+        update_pty_backpressure(&mut paused, &peers);
+        assert!(paused);
+        let mut stall_since = std::collections::HashMap::new();
+        let t0 = Instant::now();
+        reap_stalled_backpressure_peers(
+            &mut paused,
+            &mut peers,
+            &mut stall_since,
+            t0,
+            Duration::from_secs(2),
+        );
+        assert!(paused);
+        assert!(!peers[0].dead);
+        reap_stalled_backpressure_peers(
+            &mut paused,
+            &mut peers,
+            &mut stall_since,
+            t0 + Duration::from_millis(2001),
+            Duration::from_secs(2),
+        );
+        assert!(peers[0].dead, "stalled peer must be marked dead after 2s");
+        assert!(
+            !paused,
+            "PTY backpressure must be released once stalled peer is reaped"
+        );
     }
 
     #[test]

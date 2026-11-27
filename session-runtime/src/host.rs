@@ -28,6 +28,9 @@ const MAX_EXEC_STDIN_BUFFER: usize = 32 * 1024 * 1024;
 const EXEC_PIPE_CHUNK_BYTES: usize = 32 * 1024;
 const MAX_LIST_ENTRIES: usize = 2048;
 const MAX_LIST_BYTES: usize = 8 * 1024 * 1024;
+const HOST_LEASE_TIMEOUT: Duration = Duration::from_secs(45);
+const HOST_STALLED_LEASE_TIMEOUT: Duration = Duration::from_secs(15);
+const HOST_TRANSPORT_STALL_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExecOpen {
@@ -678,10 +681,31 @@ fn host_connection_full(
     max_streams: usize,
     control: Option<Arc<HostControl>>,
 ) -> io::Result<()> {
+    host_connection_with_timeouts(
+        socket,
+        registry,
+        max_streams,
+        control,
+        HOST_LEASE_TIMEOUT,
+        HOST_STALLED_LEASE_TIMEOUT,
+        HOST_TRANSPORT_STALL_GRACE,
+    )
+}
+
+fn host_connection_with_timeouts(
+    socket: UnixStream,
+    registry: Arc<Mutex<Registry>>,
+    max_streams: usize,
+    control: Option<Arc<HostControl>>,
+    lease_timeout: Duration,
+    stalled_lease_timeout: Duration,
+    transport_stall_grace: Duration,
+) -> io::Result<()> {
     let mut transport = Peer::new(socket, 0)?;
     let mut streams: std::collections::HashMap<u64, StreamEntry> = Default::default();
     let active_execs = Arc::new(AtomicUsize::new(0));
     let mut last_heartbeat = Instant::now();
+    let mut transport_stall_since: Option<Instant> = None;
     let legacy_test_mode = std::env::var("OMG_TEST_LEGACY_HOST_MODE").ok();
     loop {
         if control
@@ -690,11 +714,15 @@ fn host_connection_full(
         {
             return Ok(());
         }
-        if last_heartbeat.elapsed() > Duration::from_secs(45) {
+        if last_heartbeat.elapsed() > lease_timeout {
             return Err(io::Error::other("host connection lease expired"));
         }
-        for f in transport.read()? {
+        let prev_incoming = transport.incoming.len();
+        let incoming_frames = transport.read()?;
+        if !incoming_frames.is_empty() || transport.incoming.len() > prev_incoming {
             last_heartbeat = Instant::now();
+        }
+        for f in incoming_frames {
             match f.kind {
                 b'P' if f.seq == 0 => {
                     let mode = registry.lock().unwrap_or_else(|p| p.into_inner()).mode();
@@ -1020,11 +1048,29 @@ fn host_connection_full(
             }
         }
         streams.retain(|_, entry| !entry.peer.dead);
+        let before_flush = transport.queued_bytes();
         transport.flush()?;
         if transport.dead {
             return Err(io::Error::other("transport backlog exceeded"));
         }
         let queued = transport.queued_bytes();
+        let drained = before_flush.saturating_sub(queued);
+        let now = Instant::now();
+        if queued == 0 {
+            transport_stall_since = None;
+        } else if drained > 0 {
+            transport_stall_since = Some(now);
+        } else {
+            transport_stall_since.get_or_insert(now);
+        }
+        let has_pty_stream = streams.values().any(|entry| !entry.is_exec);
+        let transport_stalled = has_pty_stream
+            && (queued >= PTY_TRANSPORT_HIGH_WATER
+                || transport_stall_since
+                    .is_some_and(|since| now.duration_since(since) >= transport_stall_grace));
+        if now.duration_since(last_heartbeat) > stalled_lease_timeout && transport_stalled {
+            return Err(io::Error::other("stalled host connection lease expired"));
+        }
         let mut descriptors = Vec::with_capacity(streams.len() + 1);
         descriptors.push(transport.poll_fd());
         for entry in streams.values() {
@@ -1044,10 +1090,19 @@ fn host_connection_full(
                 descriptors.push(pfd);
             }
         }
-        let timeout_ms = deadline_poll_ms(
-            Instant::now(),
-            last_heartbeat + Duration::from_secs(45) + Duration::from_nanos(1),
-        );
+        let mut deadline = last_heartbeat + lease_timeout + Duration::from_nanos(1);
+        if has_pty_stream && queued > 0 {
+            let stalled_deadline = if queued >= PTY_TRANSPORT_HIGH_WATER {
+                last_heartbeat + stalled_lease_timeout + Duration::from_nanos(1)
+            } else if let Some(since) = transport_stall_since {
+                (last_heartbeat + stalled_lease_timeout).max(since + transport_stall_grace)
+                    + Duration::from_nanos(1)
+            } else {
+                deadline
+            };
+            deadline = deadline.min(stalled_deadline);
+        }
+        let timeout_ms = deadline_poll_ms(Instant::now(), deadline);
         poll_fds(&mut descriptors, timeout_ms)?;
     }
 }
@@ -1814,6 +1869,158 @@ mod tests {
 
         drop(cli);
         let _ = handle.join();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stalled_downstream_pty_transport_closes_early_and_reclaims_inline_cpr_authority() {
+        let nonce = crate::record::nonce().unwrap();
+        let root = std::env::temp_dir().join(format!("omg-host-stall-{}", &nonce[..8]));
+        let sessions = root.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&sessions, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let py_code = r#"import os, select, sys, termios, time, tty
+tty.setraw(0, when=termios.TCSANOW)
+os.write(1, b"READY_FOR_DISCONNECT\r\n")
+while True:
+    if select.select([0], [], [], 0.05)[0]:
+        if b"GO" in os.read(0, 64):
+            break
+deadline = time.monotonic() + 5.0
+got_reply = False
+next_query = time.monotonic()
+buf = bytearray()
+while time.monotonic() < deadline:
+    if time.monotonic() >= next_query:
+        os.write(1, b"PADDING_" + (b"X" * 65536) + b"\x1b[6n")
+        next_query = time.monotonic() + 0.02
+    r, _, _ = select.select([0], [], [], 0.02)
+    if r:
+        buf.extend(os.read(0, 4096))
+        if b"R" in buf and b"\x1b[" in buf:
+            got_reply = True
+            break
+os.write(1, b"\r\nCPR_RECLAIMED=" + (b"1" if got_reply else b"0") + b"\r\n")
+sys.exit(0 if got_reply else 91)
+"#;
+        let registry = Arc::new(Mutex::new(Registry::new(
+            sessions,
+            vec!["python3".into(), "-c".into(), py_code.into()],
+            Policy::default(),
+        )));
+
+        let (srv, mut cli) = UnixStream::pair().unwrap();
+        // Shrink socket buffer so downstream transport stalls quickly when client stops reading.
+        unsafe {
+            use std::os::fd::AsRawFd;
+            let sndbuf: libc::c_int = 4096;
+            libc::setsockopt(
+                srv.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                (&sndbuf as *const libc::c_int).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+        cli.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let reg_conn = registry.clone();
+        let conn_handle = std::thread::spawn(move || {
+            host_connection_with_timeouts(
+                srv,
+                reg_conn,
+                MAX_STREAMS,
+                None,
+                Duration::from_secs(15),
+                Duration::from_millis(400),
+                Duration::from_millis(80),
+            )
+        });
+
+        let sess_id = "77777777-7777-4777-8777-777777777777";
+        let open_req = serde_json::to_vec(&serde_json::json!({
+            "id": sess_id,
+            "create": true,
+            "policy": Policy::default(),
+            "inline_viewer": true,
+        }))
+        .unwrap();
+        Frame::new(b'C', 1, &open_req).send(&mut cli).unwrap();
+        let mut got_claim = false;
+        let mut saw_ready = false;
+        while !(got_claim && saw_ready) {
+            let f = Frame::read(&mut cli).unwrap();
+            if f.kind == b'D' && f.seq == 1 {
+                let inner = inner_frame(&f.data).unwrap();
+                if inner.kind == SNAPSHOT {
+                    if String::from_utf8_lossy(&inner.data).contains("READY_FOR_DISCONNECT") {
+                        saw_ready = true;
+                    }
+                    Frame::new(b'D', 1, &Frame::new(ACK, inner.seq, &[]).encode())
+                        .send(&mut cli)
+                        .unwrap();
+                    Frame::new(b'D', 1, &Frame::new(CLAIM, 0, b"inline/1").encode())
+                        .send(&mut cli)
+                        .unwrap();
+                } else if inner.kind == CLAIM {
+                    got_claim = true;
+                } else if inner.kind == OUTPUT
+                    && String::from_utf8_lossy(&inner.data).contains("READY_FOR_DISCONNECT")
+                {
+                    saw_ready = true;
+                }
+            }
+        }
+        Frame::new(b'D', 1, &Frame::new(INPUT, 0, b"GO\n").encode())
+            .send(&mut cli)
+            .unwrap();
+        // Now simulate silent network drop: keep `cli` open without reading or sending `b'P'`.
+        let started = Instant::now();
+        let err = conn_handle
+            .join()
+            .unwrap()
+            .expect_err("stalled connection must close early");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "expected early stalled close well before 15s lease, took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            err.to_string().contains("stalled host connection"),
+            "{err:?}"
+        );
+        drop(cli);
+
+        // Reconnect and verify server reclaimed `input.claim(false)` so the remote script received its CPR reply and exited 0!
+        let (srv2, mut cli2) = UnixStream::pair().unwrap();
+        cli2.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let reg2 = registry.clone();
+        let h2 = std::thread::spawn(move || host_connection(srv2, reg2));
+        let attach_req = serde_json::to_vec(&serde_json::json!({
+            "id": sess_id,
+            "create": false,
+            "policy": Policy::default(),
+            "inline_viewer": true,
+        }))
+        .unwrap();
+        Frame::new(b'C', 2, &attach_req).send(&mut cli2).unwrap();
+        let exit_code = loop {
+            let f = Frame::read(&mut cli2).unwrap();
+            if f.kind == b'D' && f.seq == 2 {
+                let inner = inner_frame(&f.data).unwrap();
+                if inner.kind == SNAPSHOT {
+                    Frame::new(b'D', 2, &Frame::new(ACK, inner.seq, &[]).encode())
+                        .send(&mut cli2)
+                        .unwrap();
+                } else if inner.kind == EXIT {
+                    break String::from_utf8_lossy(&inner.data).into_owned();
+                }
+            }
+        };
+        assert_eq!(exit_code, "0");
+        drop(cli2);
+        let _ = h2.join();
         let _ = fs::remove_dir_all(root);
     }
 }

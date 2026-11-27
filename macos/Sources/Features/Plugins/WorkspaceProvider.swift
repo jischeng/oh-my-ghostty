@@ -93,6 +93,15 @@ struct PaneSessionContext: Equatable, Sendable {
         }
     }
 
+    var remoteWorkingDirectory: String? {
+        switch state {
+        case .sshReady(_, let workingDirectory):
+            SessionRuntimeDescriptor.validWorkingDirectory(workingDirectory)
+        case .local, .sshConnecting:
+            SessionRuntimeDescriptor.validWorkingDirectory(disconnectedRemoteWorkingDirectory)
+        }
+    }
+
     /// Title revisions do not change the pane's directory or connection.
     /// Keep these updates local to title consumers instead of invalidating
     /// every view and connection observer attached to the controller.
@@ -400,9 +409,10 @@ struct PaneSessionContext: Equatable, Sendable {
             }
             guard activeID == signal.id else { return }
             rememberDisconnectedSSH()
-            // OpenSSH reserves 255 for transport/setup errors. A remote shell
-            // exiting with another nonzero status is still an intentional exit.
-            offersSSHRecovery = metadata["status"] == "255" && !signal.id.hasPrefix("omg-ssh-inline-")
+            // OpenSSH and inline SSH viewers reserve 255 for transport/setup
+            // errors. Once an inline viewer has already exited with 255, offer
+            // fallback SSH recovery so the pane is not stranded at a local prompt.
+            offersSSHRecovery = metadata["status"] == "255"
             if let workingDirectory = metadata["cwd"]?.removingPercentEncoding,
                !workingDirectory.isEmpty {
                 local.workingDirectory = workingDirectory

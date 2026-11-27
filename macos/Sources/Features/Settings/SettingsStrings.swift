@@ -1028,6 +1028,11 @@ struct SettingsStrings: Equatable, Sendable {
         t("Retry this host connection and reattach the existing session. No new session will be started.",
           "重新连接主机并附加到原会话；不会新建会话。")
     }
+    var runtimeRecreateSession: String { t("Recreate Session", "重建会话") }
+    var runtimeRecreateHelp: String {
+        t("Start a new remote session in this pane, resuming any surviving Agent conversation.",
+          "在当前面板重建远端会话；若远端对话记录仍在则自动恢复。")
+    }
     var runtimeDetachedHours: String { t("Keep disconnected sessions (hours)", "断开后最长保留（小时）") }
     var runtimeDetachedCaption: String {
         t("Defaults to 72 hours (3 days). 0 disables only this time limit, not completion cleanup. Output does not extend it. Changes apply to new sessions.",

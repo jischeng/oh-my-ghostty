@@ -139,7 +139,27 @@ escalation or linger changes occur. Unsupported hosts retain process-group-only
 cleanup. Host crashes terminate contained work rather than preserving its PTY.
 Startup reconciliation marks records without actors Lost and removes stale
 sockets without signalling historical PIDs. Empty local relays exit after 30
-seconds. See `docs/architecture/session-runtime.md` for platform limits.
+seconds. When a previously confirmed or attach-only remote SSH session is gone
+after a host reboot or container rebuild (`unknown session` or `session ended`,
+excluding explicit close), automatic reconnects never set `create` or
+`recreate_if_gone`; the local relay classifies the stream as `session_gone`
+(`T` status frame with `"state": "session_gone"` and `"session_gone": true`) and
+parks opted-in `SessionBackend` and inline viewers without overwriting retained
+scrollback. Clicking **Recreate Session** (`重建会话`) sends a one-shot local
+control frame `y` (`recreate/1`, 60-second `RecreateGrant` TTL keyed by session
+UUID so it survives relay idle-exit restarts) carrying the resolved remote
+working directory, terminal grid/pixel dimensions, theme/environment metadata
+and any remote Agent recovery descriptor. Modern hosts (`recreate-if-gone/1`)
+execute `create: false, recreate_if_gone: true` (race-safe attach if alive,
+otherwise recreate in `cwd -> record.cwd -> resume.cwd -> $HOME`, resuming an
+Agent conversation only when `resume.store_exists()` is true on the remote host
+and starting a clean login shell in `cwd` when a rebuilt container lacks the
+Agent store); older remote hosts fall back once to `create: true`. Inline SSH
+viewers persist `"phase": "session_gone"` and `"message"` only in their mode
+`0600` private `active.json` bridge file and wake the host exclusively by
+`connection_id` (`omg-inline-state`), never parsing untrusted error or state
+payloads from PTY OSC 3008. See `docs/architecture/session-runtime.md` for
+platform limits.
 
 ## Agent history discovery
 

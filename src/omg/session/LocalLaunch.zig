@@ -257,11 +257,13 @@ pub fn withRemoteClientContext(
     defer parsed.deinit();
     if (parsed.value != .object) return alloc.dupe(u8, request);
 
+    const arena = parsed.arena.allocator();
+    try parsed.value.object.put(arena, "hold_on_session_gone", .{ .bool = true });
+
     const create = if (parsed.value.object.get("create")) |v| v == .bool and v.bool else false;
     const recreate = if (parsed.value.object.get("recreate_if_gone")) |v| v == .bool and v.bool else false;
-    if (!create and !recreate) return alloc.dupe(u8, request);
+    if (!create and !recreate) return std.json.Stringify.valueAlloc(alloc, parsed.value, .{});
 
-    const arena = parsed.arena.allocator();
     const cols: u16 = @intCast(grid >> 16);
     const rows: u16 = @intCast(grid & 0xffff);
     const px_w: u16 = @intCast(pixels >> 16);
@@ -312,8 +314,24 @@ pub fn withRemoteClientContext(
 }
 
 pub fn attachOnly(alloc: std.mem.Allocator, request: []const u8) ![]u8 {
+    return attachOnlyWithOptions(alloc, request, false);
+}
+
+pub fn attachOnlyWithOptions(
+    alloc: std.mem.Allocator,
+    request: []const u8,
+    hold_on_session_gone: bool,
+) ![]u8 {
     const parsed = try std.json.parseFromSlice(OpenRequest, alloc, request, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
+    if (hold_on_session_gone) {
+        return std.json.Stringify.valueAlloc(alloc, .{
+            .id = parsed.value.id,
+            .policy = parsed.value.policy,
+            .create = false,
+            .hold_on_session_gone = true,
+        }, .{});
+    }
     return std.json.Stringify.valueAlloc(alloc, .{
         .id = parsed.value.id,
         .policy = parsed.value.policy,
@@ -545,6 +563,16 @@ test "remote client context enriches create and recreate requests only" {
     defer alloc.free(attached);
     try std.testing.expect(std.mem.indexOf(u8, attached, "cols") == null);
     try std.testing.expect(std.mem.indexOf(u8, attached, "term_program") == null);
+    const parsed_attached = try std.json.parseFromSlice(std.json.Value, alloc, attached, .{});
+    defer parsed_attached.deinit();
+    try std.testing.expect(parsed_attached.value.object.get("hold_on_session_gone").?.bool);
+
+    const hold_reattach = try attachOnlyWithOptions(alloc, created, true);
+    defer alloc.free(hold_reattach);
+    const parsed_hold = try std.json.parseFromSlice(std.json.Value, alloc, hold_reattach, .{});
+    defer parsed_hold.deinit();
+    try std.testing.expect(!parsed_hold.value.object.get("create").?.bool);
+    try std.testing.expect(parsed_hold.value.object.get("hold_on_session_gone").?.bool);
 
     // Custom Ghostty config.term and light theme are preserved when request omits "term",
     // while an explicit request "term" continues to take precedence.

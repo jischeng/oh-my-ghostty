@@ -16,9 +16,11 @@ extension TerminalController {
               let command = Self.sshReplayCommand(descriptor),
               let ghosttyApp = ghostty.app,
               let node = surfaceTree.find(id: surface.id),
-              !surfaceTree.contains(where: { $0 !== surface && $0.id == surface.id }) else {
+              !surfaceTree.contains(where: { $0 !== surface && $0.id == surface.id }),
+              SessionRuntimeClose.close(.leaf(view: surface)) else {
             return
         }
+        let preservedTitleOverride = surface.titleOverride
         var config = Ghostty.SurfaceConfiguration()
         config.workingDirectory = descriptor.localWorkingDirectory
         config.setSurvivalCommand(command)
@@ -29,6 +31,7 @@ extension TerminalController {
         )
         config = Self.injectingSessionID(tabSessionID, into: config)
         let replacement = Ghostty.SurfaceView(ghosttyApp, baseConfig: config)
+        replacement.titleOverride = preservedTitleOverride
         replacement.sshResumeDescriptor = descriptor
         replacement.pendingSSHLaunchReplay = descriptor.sshReplay
         guard let newTree = try? surfaceTree.replacing(node: node, with: .leaf(view: replacement)) else {

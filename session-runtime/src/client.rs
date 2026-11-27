@@ -20,9 +20,109 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(45);
 const PEER_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const PARENT_ALIVE_PEER_IDLE_TIMEOUT: Duration = Duration::from_secs(3600);
 const STABLE_RESET: Duration = Duration::from_secs(60);
+const RECREATE_GRANT_TTL: Duration = Duration::from_secs(60);
 const MAX_PEERS: usize = 512;
 const MAX_LIST_WAITERS: usize = 3;
 const LIST_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn default_recreate_version() -> String {
+    "recreate/1".into()
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RecreateRequest {
+    #[serde(default = "default_recreate_version")]
+    pub version: String,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cols: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pixel_width: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pixel_height: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub term: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colorterm: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub term_program: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub term_program_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_scheme: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground: Option<[u8; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<[u8; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<[u8; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<crate::record::Resume>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interactive: Option<bool>,
+}
+
+impl RecreateRequest {
+    pub fn validate(&self) -> io::Result<()> {
+        if self.version != "recreate/1" || !host::valid_id(&self.id) {
+            return Err(io::Error::other("invalid recreate request identity"));
+        }
+        if let Some(cwd) = &self.cwd {
+            if !cwd.starts_with('/') || cwd.len() > 4096 || cwd.contains('\0') {
+                return Err(io::Error::other(
+                    "invalid recreate request working directory",
+                ));
+            }
+        }
+        if self.cols.is_some_and(|c| c == 0 || c > 500)
+            || self.rows.is_some_and(|r| r == 0 || r > 300)
+            || self.pixel_width.is_some_and(|w| w > 16_000)
+            || self.pixel_height.is_some_and(|h| h > 16_000)
+            || !valid_recreate_header(self.term.as_deref())
+            || !valid_recreate_header(self.colorterm.as_deref())
+            || !valid_recreate_header(self.term_program.as_deref())
+            || !valid_recreate_header(self.term_program_version.as_deref())
+            || !valid_recreate_header(self.color_scheme.as_deref())
+        {
+            return Err(io::Error::other(
+                "invalid recreate request terminal options",
+            ));
+        }
+        if let Some(resume) = &self.resume {
+            resume.validate()?;
+        }
+        Ok(())
+    }
+}
+
+fn valid_recreate_header(value: Option<&str>) -> bool {
+    value.is_none_or(|s| s.len() <= 128 && !s.chars().any(char::is_control))
+}
+
+fn parse_recreate_request(data: &[u8]) -> io::Result<RecreateRequest> {
+    if data.len() > 64 * 1024 {
+        return Err(io::Error::other("recreate request exceeds limit"));
+    }
+    let body = data
+        .strip_prefix(b"recreate/1\n")
+        .or_else(|| data.strip_prefix(b"recreate/1 "))
+        .unwrap_or(data);
+    let request: RecreateRequest = serde_json::from_slice(body)
+        .map_err(|_| io::Error::other("invalid recreate request payload"))?;
+    request.validate()?;
+    Ok(request)
+}
+
+struct RecreateGrant {
+    request: RecreateRequest,
+    expires_at: Instant,
+    legacy_create_sent: bool,
+}
 
 pub struct RelayTransport {
     pub socket: UnixStream,
@@ -53,10 +153,13 @@ impl State {
 struct LocalPeer {
     peer: Peer,
     generation: u64,
+    session_id: Option<String>,
     open: Option<Vec<u8>>,
     initial_create: bool,
     recreate_if_gone: bool,
     recreate_fallback_used: bool,
+    hold_on_session_gone: bool,
+    session_gone: bool,
     remote_stream: Option<u64>,
     snapshot_generation: Option<u64>,
     snapshot_confirmed: bool,
@@ -78,10 +181,13 @@ impl LocalPeer {
         Self {
             peer,
             generation,
+            session_id: None,
             open: None,
             initial_create: false,
             recreate_if_gone: false,
             recreate_fallback_used: false,
+            hold_on_session_gone: false,
+            session_gone: false,
             remote_stream: None,
             snapshot_generation: None,
             snapshot_confirmed: false,
@@ -176,6 +282,26 @@ fn status_frame(
     Frame::new(b'T', generation, value.to_string().as_bytes())
 }
 
+fn status_frame_session_gone(generation: u64, attempt: u32, message: Option<&str>) -> Frame {
+    let mut value = serde_json::json!({
+        "state": "session_gone",
+        "session_gone": true,
+        "attempt": attempt,
+    });
+    if let Some(message) = message {
+        value["message"] = serde_json::json!(message);
+    }
+    Frame::new(b'T', generation, value.to_string().as_bytes())
+}
+
+fn sanitize_status_message(data: &[u8]) -> String {
+    String::from_utf8_lossy(data)
+        .chars()
+        .take(512)
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
 fn set_status(
     peers: &mut HashMap<u64, LocalPeer>,
     state: State,
@@ -209,33 +335,92 @@ fn set_peer_status(peer: &mut LocalPeer, attempt: u32) {
     }
 }
 
+#[cfg(test)]
 fn open_request(peer: &LocalPeer, capabilities: &RemoteCapabilities) -> io::Result<(u8, Vec<u8>)> {
+    let mut empty = HashMap::new();
+    open_request_with_grants(peer, capabilities, &mut empty, Instant::now())
+}
+
+fn open_request_with_grants(
+    peer: &LocalPeer,
+    capabilities: &RemoteCapabilities,
+    recreate_grants: &mut HashMap<String, RecreateGrant>,
+    now: Instant,
+) -> io::Result<(u8, Vec<u8>)> {
     let bytes = peer
         .open
         .as_ref()
         .ok_or_else(|| io::Error::other("missing open request"))?;
     let mut request: OpenRequest = serde_json::from_slice(bytes)?;
+    request.hold_on_session_gone = false;
     let allow_local_resurrect = capabilities.local_launch && capabilities.local_resurrect;
     let allow_recreate_if_gone = capabilities.recreate_if_gone;
-    // A snapshot-confirmed session is attach-only. An unconfirmed initial create
-    // may still retry create=true after transient pre-open errors.
-    request.create = request.create && !peer.snapshot_confirmed;
-    request.recreate_if_gone =
-        request.recreate_if_gone && !peer.snapshot_confirmed && allow_recreate_if_gone;
-    if !request.create {
-        request.launch = None;
+    let active_grant = if !capabilities.local_launch {
+        recreate_grants
+            .get_mut(&request.id)
+            .filter(|grant| grant.expires_at > now)
+    } else {
+        None
+    };
+
+    let mut using_grant = false;
+    if let Some(grant) = active_grant {
+        if allow_recreate_if_gone
+            || (capabilities.received && !allow_recreate_if_gone && !grant.legacy_create_sent)
+        {
+            using_grant = true;
+            if grant.request.cwd.is_some() {
+                request.cwd = grant.request.cwd.clone();
+            }
+            request.cols = grant.request.cols;
+            request.rows = grant.request.rows;
+            request.pixel_width = grant.request.pixel_width;
+            request.pixel_height = grant.request.pixel_height;
+            request.term = grant.request.term.clone();
+            request.colorterm = grant.request.colorterm.clone();
+            request.term_program = grant.request.term_program.clone();
+            request.term_program_version = grant.request.term_program_version.clone();
+            request.color_scheme = grant.request.color_scheme.clone();
+            request.foreground = grant.request.foreground;
+            request.background = grant.request.background;
+            request.cursor = grant.request.cursor;
+            request.resume = grant.request.resume.clone();
+            if allow_recreate_if_gone {
+                request.create = false;
+                request.recreate_if_gone = true;
+            } else {
+                grant.legacy_create_sent = true;
+                request.create = true;
+                request.recreate_if_gone = false;
+            }
+            request.launch = None;
+            request.resurrect_launch = None;
+        }
     }
-    if request.create || peer.snapshot_confirmed || !allow_local_resurrect {
-        request.resurrect_launch = None;
+
+    if !using_grant {
+        // A snapshot-confirmed session is attach-only. An unconfirmed initial create
+        // may still retry create=true after transient pre-open errors.
+        request.create = request.create && !peer.snapshot_confirmed;
+        request.recreate_if_gone =
+            request.recreate_if_gone && !peer.snapshot_confirmed && allow_recreate_if_gone;
+        if !request.create {
+            request.launch = None;
+        }
+        if request.create || peer.snapshot_confirmed || !allow_local_resurrect {
+            request.resurrect_launch = None;
+        }
     }
+
     let spawns_session = request.create || request.recreate_if_gone;
-    if !capabilities.init_size || peer.snapshot_confirmed || !spawns_session {
+    let suppress_spawn_fields = peer.snapshot_confirmed && !using_grant;
+    if !capabilities.init_size || suppress_spawn_fields || !spawns_session {
         request.clear_init_size();
     }
-    if !capabilities.remote_env || peer.snapshot_confirmed || !spawns_session {
+    if !capabilities.remote_env || suppress_spawn_fields || !spawns_session {
         request.clear_remote_env();
     }
-    if !capabilities.handoff_resume || peer.snapshot_confirmed || !spawns_session {
+    if !capabilities.handoff_resume || suppress_spawn_fields || !spawns_session {
         request.resume = None;
     }
     Ok((b'C', serde_json::to_vec(&request)?))
@@ -246,9 +431,8 @@ fn is_session_gone_error(data: &[u8]) -> bool {
         return false;
     };
     let lower = text.to_ascii_lowercase();
-    lower.contains("unknown session")
-        || lower.contains("session ended")
-        || lower.contains("explicitly closed")
+    !lower.contains("local session ended")
+        && (lower.contains("unknown session") || lower.contains("session ended"))
 }
 
 fn clear_launch_data(peer: &mut LocalPeer, clear_resurrect: bool) {
@@ -288,7 +472,9 @@ fn begin_open(
     remote_streams: &mut HashMap<u64, u64>,
     next_stream: &mut u64,
     capabilities: &RemoteCapabilities,
+    recreate_grants: &mut HashMap<String, RecreateGrant>,
 ) -> io::Result<()> {
+    let now = Instant::now();
     let ids: Vec<_> = peers
         .iter()
         .filter(|(_, p)| {
@@ -303,7 +489,7 @@ fn begin_open(
     for id in ids {
         let (kind, data) = {
             let peer = peers.get(&id).unwrap();
-            open_request(peer, capabilities)?
+            open_request_with_grants(peer, capabilities, recreate_grants, now)?
         };
         let stream = *next_stream;
         *next_stream = next_generation(*next_stream);
@@ -452,6 +638,7 @@ fn supervise_with_timeouts(
         .max(1);
 
     let mut peers: HashMap<u64, LocalPeer> = HashMap::new();
+    let mut recreate_grants: HashMap<String, RecreateGrant> = HashMap::new();
     let mut next_peer = 1u64;
     let mut next_stream = 1u64;
     let mut remote_streams: HashMap<u64, u64> = HashMap::new();
@@ -476,8 +663,10 @@ fn supervise_with_timeouts(
 
     loop {
         wake.drain();
+        let now_loop = Instant::now();
+        recreate_grants.retain(|_, grant| grant.expires_at > now_loop);
         let idle_timeout = effective_idle_timeout(initial_ppid);
-        if peers.values().any(is_active_peer) {
+        if peers.values().any(is_active_peer) || !recreate_grants.is_empty() {
             idle_since = Instant::now();
         } else if idle_since.elapsed() > idle_timeout {
             return Ok(());
@@ -557,7 +746,9 @@ fn supervise_with_timeouts(
                             stable_since = None;
                             had_transport = true;
                             state = State::Online;
-                            for peer in peers.values_mut().filter(|p| !p.control && !p.ended) {
+                            for peer in peers.values_mut().filter(|p| {
+                                !p.control && !p.ended && (!p.failed || p.retry_requested)
+                            }) {
                                 if peer.open.is_some() {
                                     peer.peer.push(status_frame(
                                         peer.generation,
@@ -640,6 +831,7 @@ fn supervise_with_timeouts(
 
         let ids: Vec<_> = peers.keys().copied().collect();
         let mut manual_retry = None;
+        let mut manual_recreate: Vec<(String, bool)> = Vec::new();
         for id in ids {
             let list_waiters = peers
                 .values()
@@ -747,7 +939,37 @@ fn supervise_with_timeouts(
                             if frame.kind == b'y' {
                                 peer.control = true;
                                 let interactive = frame.data == b"interactive/1";
-                                if frame.seq != 0 || (!frame.data.is_empty() && !interactive) {
+                                if frame.seq == 0 && !frame.data.is_empty() && !interactive {
+                                    match parse_recreate_request(&frame.data) {
+                                        Ok(req) => {
+                                            let interactive_flag = req.interactive.unwrap_or(true);
+                                            let target_id = req.id.clone();
+                                            recreate_grants.insert(
+                                                target_id.clone(),
+                                                RecreateGrant {
+                                                    request: req,
+                                                    expires_at: Instant::now() + RECREATE_GRANT_TTL,
+                                                    legacy_create_sent: false,
+                                                },
+                                            );
+                                            manual_recreate.push((target_id, interactive_flag));
+                                            peer.peer.push(Frame::new(
+                                                b'y',
+                                                peer.generation,
+                                                b"accepted",
+                                            ));
+                                        }
+                                        Err(_) => {
+                                            peer.peer.push(Frame::new(
+                                                b'y',
+                                                peer.generation,
+                                                b"invalid request",
+                                            ));
+                                        }
+                                    }
+                                    peer.control_done = true;
+                                } else if frame.seq != 0 || (!frame.data.is_empty() && !interactive)
+                                {
                                     peer.peer.push(Frame::new(
                                         b'y',
                                         peer.generation,
@@ -788,8 +1010,10 @@ fn supervise_with_timeouts(
                                 && std::str::from_utf8(&frame.data).is_ok_and(host::valid_id)
                             {
                                 peer.control = true;
-                                peer.close_id =
-                                    Some(String::from_utf8(frame.data).expect("validated UUID"));
+                                let close_id =
+                                    String::from_utf8(frame.data).expect("validated UUID");
+                                recreate_grants.remove(&close_id);
+                                peer.close_id = Some(close_id);
                                 if capabilities.received && !capabilities.durable_close {
                                     peer.peer.push(Frame::new(
                                         b'E',
@@ -807,9 +1031,12 @@ fn supervise_with_timeouts(
                             }
                             match serde_json::from_slice::<OpenRequest>(&frame.data) {
                                 Ok(request) if host::valid_id(&request.id) => {
+                                    peer.session_id = Some(request.id.clone());
                                     peer.initial_create = request.create;
                                     peer.recreate_if_gone = request.recreate_if_gone;
                                     peer.recreate_fallback_used = false;
+                                    peer.hold_on_session_gone = request.hold_on_session_gone;
+                                    peer.session_gone = false;
                                     peer.open = Some(frame.data);
                                     if capabilities.received
                                         && request.launch.is_some()
@@ -850,6 +1077,28 @@ fn supervise_with_timeouts(
                         }
 
                         if peer.ended || peer.control_done {
+                            continue;
+                        }
+                        if frame.kind == b'y' {
+                            if (frame.seq == 0 || frame.seq == peer.generation)
+                                && !frame.data.is_empty()
+                            {
+                                if let Ok(req) = parse_recreate_request(&frame.data) {
+                                    if peer.session_id.as_deref() == Some(req.id.as_str()) {
+                                        let interactive_flag = req.interactive.unwrap_or(true);
+                                        let target_id = req.id.clone();
+                                        recreate_grants.insert(
+                                            target_id.clone(),
+                                            RecreateGrant {
+                                                request: req,
+                                                expires_at: Instant::now() + RECREATE_GRANT_TTL,
+                                                legacy_create_sent: false,
+                                            },
+                                        );
+                                        manual_recreate.push((target_id, interactive_flag));
+                                    }
+                                }
+                            }
                             continue;
                         }
                         if frame.kind == ACK {
@@ -902,6 +1151,80 @@ fn supervise_with_timeouts(
             }
         }
 
+        for (target_id, interactive) in manual_recreate {
+            let matched: Vec<_> = peers
+                .iter_mut()
+                .filter(|(_, p)| {
+                    !p.control
+                        && !p.ended
+                        && p.open.is_some()
+                        && p.remote_stream.is_none()
+                        && p.session_id.as_deref() == Some(target_id.as_str())
+                })
+                .map(|(id, p)| {
+                    p.failed = true;
+                    p.session_gone = false;
+                    p.retry_requested = true;
+                    p.writer_requested = false;
+                    p.writer_ready = false;
+                    p.recreate_fallback_used = false;
+                    *id
+                })
+                .collect();
+            for id in &matched {
+                if let Some(peer) = peers.get_mut(id) {
+                    generation_counter = next_generation(generation_counter);
+                    peer.generation = generation_counter;
+                    set_peer_status(peer, attempt);
+                }
+            }
+            if let Some(remote) = remote.as_mut() {
+                let now_open = Instant::now();
+                for id in &matched {
+                    if let Some(peer) = peers.get_mut(id) {
+                        if !capabilities.received {
+                            continue;
+                        }
+                        if !capabilities.strict_open {
+                            peer.retry_requested = false;
+                            peer.peer.push(Frame::new(
+                                b'E',
+                                0,
+                                b"remote runtime is too old for safe session attach; remote process was preserved",
+                            ));
+                            continue;
+                        }
+                        match open_request_with_grants(
+                            peer,
+                            &capabilities,
+                            &mut recreate_grants,
+                            now_open,
+                        ) {
+                            Ok((kind, data)) => {
+                                let stream = next_stream;
+                                next_stream = next_generation(next_stream);
+                                peer.remote_stream = Some(stream);
+                                peer.snapshot_generation = None;
+                                peer.snapshot_acked = false;
+                                remote_streams.insert(stream, *id);
+                                send_outer_open(remote, stream, kind, &data);
+                            }
+                            Err(error) => {
+                                peer.retry_requested = false;
+                                peer.peer
+                                    .push(Frame::new(b'E', 0, error.to_string().as_bytes()));
+                            }
+                        }
+                    }
+                }
+            } else if !attempt_pending {
+                interactive_next = interactive;
+                retry_at = Instant::now();
+                state = State::Connecting;
+                set_status(&mut peers, state, attempt, None, None);
+            }
+        }
+
         if let Some(interactive) = manual_retry {
             let failed: Vec<_> = peers
                 .iter_mut()
@@ -938,8 +1261,12 @@ fn supervise_with_timeouts(
                 }
             }
             if let Some(remote) = remote.as_mut() {
+                let now_open = Instant::now();
                 for id in &failed {
                     if let Some(peer) = peers.get_mut(id) {
+                        if !capabilities.received {
+                            continue;
+                        }
                         if !capabilities.strict_open {
                             peer.retry_requested = false;
                             peer.peer.push(Frame::new(
@@ -949,7 +1276,12 @@ fn supervise_with_timeouts(
                             ));
                             continue;
                         }
-                        match open_request(peer, &capabilities) {
+                        match open_request_with_grants(
+                            peer,
+                            &capabilities,
+                            &mut recreate_grants,
+                            now_open,
+                        ) {
                             Ok((kind, data)) => {
                                 let stream = next_stream;
                                 next_stream = next_generation(next_stream);
@@ -996,6 +1328,7 @@ fn supervise_with_timeouts(
                     &mut remote_streams,
                     &mut next_stream,
                     &capabilities,
+                    &mut recreate_grants,
                 ) {
                     eprintln!("session runtime open failed: {error}");
                 }
@@ -1155,6 +1488,9 @@ fn supervise_with_timeouts(
                                             }
                                         }
                                     }
+                                    if let Some(sid) = peer.session_id.as_deref() {
+                                        recreate_grants.remove(sid);
+                                    }
                                     peer.snapshot_generation = None;
                                     peer.writer_ready = false;
                                     peer.writer_requested = false;
@@ -1163,7 +1499,24 @@ fn supervise_with_timeouts(
                                     if peer.snapshot_confirmed {
                                         clear_launch_data(peer, false);
                                     }
-                                    peer.peer.push(Frame::new(b'E', 0, &frame.data));
+                                    let session_gone = !capabilities.local_launch
+                                        && is_session_gone_error(&frame.data);
+                                    peer.session_gone = session_gone;
+                                    if session_gone {
+                                        generation_counter = next_generation(generation_counter);
+                                        peer.generation = generation_counter;
+                                        let detail = sanitize_status_message(&frame.data);
+                                        peer.peer.push(status_frame_session_gone(
+                                            peer.generation,
+                                            attempt,
+                                            Some(&detail),
+                                        ));
+                                        if !peer.hold_on_session_gone {
+                                            peer.peer.push(Frame::new(b'E', 0, &frame.data));
+                                        }
+                                    } else {
+                                        peer.peer.push(Frame::new(b'E', 0, &frame.data));
+                                    }
                                 }
                             }
                             continue;
@@ -1182,6 +1535,9 @@ fn supervise_with_timeouts(
                                         }
                                         peer.control_done = true;
                                         continue;
+                                    }
+                                    if let Some(sid) = peer.session_id.as_deref() {
+                                        recreate_grants.remove(sid);
                                     }
                                     let was_retrying = peer.retry_requested;
                                     peer.retry_requested = false;
@@ -1244,10 +1600,14 @@ fn supervise_with_timeouts(
                         }
                         match inner.kind {
                             SNAPSHOT => {
+                                if let Some(sid) = peer.session_id.as_deref() {
+                                    recreate_grants.remove(sid);
+                                }
                                 peer.snapshot_generation = Some(peer.generation);
                                 peer.snapshot_confirmed = true;
                                 clear_launch_data(peer, true);
                                 peer.failed = false;
+                                peer.session_gone = false;
                                 peer.retry_requested = false;
                                 peer.snapshot_acked = false;
                                 peer.writer_requested = false;
@@ -1270,14 +1630,36 @@ fn supervise_with_timeouts(
                                 inner.seq = peer.generation;
                             }
                             b'E' => {
+                                if let Some(sid) = peer.session_id.as_deref() {
+                                    recreate_grants.remove(sid);
+                                }
                                 peer.snapshot_generation = None;
                                 peer.writer_requested = false;
                                 peer.writer_ready = false;
                                 peer.retry_requested = false;
                                 peer.failed = true;
                                 clear_launch_data(peer, false);
+                                let session_gone = !capabilities.local_launch
+                                    && is_session_gone_error(&inner.data);
+                                peer.session_gone = session_gone;
+                                if session_gone {
+                                    generation_counter = next_generation(generation_counter);
+                                    peer.generation = generation_counter;
+                                    let detail = sanitize_status_message(&inner.data);
+                                    peer.peer.push(status_frame_session_gone(
+                                        peer.generation,
+                                        attempt,
+                                        Some(&detail),
+                                    ));
+                                    if peer.hold_on_session_gone {
+                                        continue;
+                                    }
+                                }
                             }
                             EXIT => {
+                                if let Some(sid) = peer.session_id.as_deref() {
+                                    recreate_grants.remove(sid);
+                                }
                                 peer.ended = true;
                                 peer.retry_requested = false;
                                 peer.writer_ready = false;
@@ -1294,6 +1676,7 @@ fn supervise_with_timeouts(
                                 &mut remote_streams,
                                 &mut next_stream,
                                 &capabilities,
+                                &mut recreate_grants,
                             ) {
                                 eprintln!("session runtime open failed: {error}");
                             }
@@ -1397,7 +1780,13 @@ fn supervise_with_timeouts(
         let now = Instant::now();
         let has_active_peers = peers.values().any(is_active_peer);
         let mut timeout_ms: libc::c_int = 60_000;
-        if !has_active_peers {
+        if let Some(earliest_grant_expiry) = recreate_grants.values().map(|g| g.expires_at).min() {
+            timeout_ms = timeout_ms.min(crate::deadline_poll_ms(
+                now,
+                earliest_grant_expiry + Duration::from_nanos(1),
+            ));
+        }
+        if !has_active_peers && recreate_grants.is_empty() {
             let idle_timeout = effective_idle_timeout(initial_ppid);
             timeout_ms = timeout_ms.min(crate::deadline_poll_ms(
                 now,
@@ -1421,6 +1810,44 @@ fn supervise_with_timeouts(
             timeout_ms = timeout_ms.min(crate::deadline_poll_ms(now, retry_at));
         }
         crate::poll_fds(&mut descriptors, timeout_ms)?;
+    }
+}
+
+/// One-shot explicit recreate grant (`recreate/1`) over the local control socket.
+pub fn recreate_local(socket: &Path, request: &RecreateRequest) -> io::Result<()> {
+    request.validate()?;
+    let payload = serde_json::to_vec(request)?;
+    let mut attempts = 0usize;
+    let mut stream = loop {
+        match UnixStream::connect(socket) {
+            Ok(stream) => break stream,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                ) && attempts < 40 =>
+            {
+                attempts += 1;
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    Frame::new(b'y', 0, &payload).send(&mut stream)?;
+    let response = loop {
+        let response = Frame::read(&mut stream)?;
+        if response.kind != b'T' {
+            break response;
+        }
+    };
+    if response.kind == b'y' && response.data.as_slice() == b"accepted" {
+        Ok(())
+    } else {
+        Err(io::Error::other(
+            String::from_utf8_lossy(&response.data).into_owned(),
+        ))
     }
 }
 
@@ -2866,5 +3293,508 @@ mod error_classification_tests {
         let (_, encoded_reattach) = super::open_request(&peer, &modern_caps).unwrap();
         let parsed_reattach: OpenRequest = serde_json::from_slice(&encoded_reattach).unwrap();
         assert!(parsed_reattach.resume.is_none());
+    }
+
+    #[test]
+    fn session_gone_never_auto_recreates_and_recreate_grant_arms_once() {
+        use super::{recreate_local, RecreateRequest};
+        use crate::SNAPSHOT;
+        use std::os::unix::fs::DirBuilderExt;
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Mutex,
+        };
+
+        let dir = PathBuf::from(format!(
+            "/tmp/omg-client-recreate-{}",
+            &crate::record::nonce().unwrap()[..8]
+        ));
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .unwrap();
+        let socket_path = dir.join("relay.sock");
+        let rebooted = Arc::new(AtomicBool::new(false));
+        let rebooted_srv = rebooted.clone();
+        let observed = Arc::new(Mutex::new(Vec::<OpenRequest>::new()));
+        let observed_srv = observed.clone();
+        let (drop_tx, drop_rx) = mpsc::channel::<mpsc::Sender<()>>();
+
+        let connector: Connector = Arc::new(move |_| {
+            let (client_side, mut server_side) = UnixStream::pair()?;
+            let rebooted = rebooted_srv.clone();
+            let observed = observed_srv.clone();
+            let drop_tx = drop_tx.clone();
+            thread::spawn(move || {
+                let caps =
+                    b"strict-open/1,durable-close/1,recreate-if-gone/1,init-size/1,remote-env/1,handoff-resume/1";
+                let _ = Frame::new(b'P', 0, caps).send(&mut server_side);
+                let server_kill = server_side.try_clone().unwrap();
+                let (kill_tx, kill_rx) = mpsc::channel::<()>();
+                thread::spawn(move || {
+                    if kill_rx.recv().is_ok() {
+                        let _ = server_kill.shutdown(std::net::Shutdown::Both);
+                    }
+                });
+                let _ = drop_tx.send(kill_tx);
+                while let Ok(frame) = Frame::read(&mut server_side) {
+                    match frame.kind {
+                        b'P' => {
+                            let _ = Frame::new(b'P', 0, caps).send(&mut server_side);
+                        }
+                        b'C' => {
+                            assert!(
+                                !std::str::from_utf8(&frame.data)
+                                    .unwrap()
+                                    .contains("hold_on_session_gone"),
+                                "hold_on_session_gone must never be sent to remote host"
+                            );
+                            let req: OpenRequest = serde_json::from_slice(&frame.data).unwrap();
+                            let spawns = req.create || req.recreate_if_gone;
+                            observed.lock().unwrap().push(req);
+                            if rebooted.load(Ordering::SeqCst) && !spawns {
+                                let _ = Frame::new(
+                                    b'E',
+                                    frame.seq,
+                                    b"session ended: Some(Lost); inspect its record before resuming",
+                                )
+                                .send(&mut server_side);
+                            } else {
+                                rebooted.store(false, Ordering::SeqCst);
+                                let _ = Frame::new(
+                                    b'D',
+                                    frame.seq,
+                                    &Frame::new(SNAPSHOT, 1, b"snap").encode(),
+                                )
+                                .send(&mut server_side);
+                            }
+                        }
+                        b'D' => {
+                            if let Ok(inner) = Frame::read(&mut frame.data.as_slice()) {
+                                if inner.kind == crate::CLAIM {
+                                    let _ = Frame::new(
+                                        b'D',
+                                        frame.seq,
+                                        &Frame::new(crate::CLAIM, inner.seq, &[]).encode(),
+                                    )
+                                    .send(&mut server_side);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            });
+            Ok(RelayTransport {
+                socket: client_side,
+                guard: Box::new(()),
+            })
+        });
+
+        let socket_clone = socket_path.clone();
+        thread::spawn(move || {
+            let _ = supervise(&socket_clone, connector, false);
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut peer = loop {
+            match UnixStream::connect(&socket_path) {
+                Ok(s) => break s,
+                Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+                Err(err) => panic!("connect failed: {err}"),
+            }
+        };
+        peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let pane_id = "11111111-2222-4333-8444-555555555555";
+        let open = OpenRequest {
+            id: pane_id.into(),
+            policy: Policy::default(),
+            create: true,
+            cwd: Some("/srv/initial".into()),
+            hold_on_session_gone: true,
+            ..Default::default()
+        };
+        Frame::new(b'H', 0, &serde_json::to_vec(&open).unwrap())
+            .send(&mut peer)
+            .unwrap();
+        let kill_first = drop_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        loop {
+            let f = Frame::read(&mut peer).unwrap();
+            if f.kind == SNAPSHOT {
+                break;
+            }
+        }
+
+        // Simulate remote host reboot and drop transport.
+        rebooted.store(true, Ordering::SeqCst);
+        let _ = kill_first.send(());
+        let kill_second = drop_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        let gone_status = loop {
+            let f = Frame::read(&mut peer).unwrap();
+            assert_ne!(
+                f.kind, b'E',
+                "hold_on_session_gone peer must stay parked without b'E'"
+            );
+            if f.kind == b'T' {
+                let v: serde_json::Value = serde_json::from_slice(&f.data).unwrap();
+                if v["session_gone"] == true {
+                    break v;
+                }
+            }
+        };
+        assert_eq!(gone_status["state"], "session_gone");
+
+        // Ordinary retry_local MUST still keep create=false and recreate_if_gone=false!
+        retry_local(&socket_path, true).unwrap();
+        loop {
+            let f = Frame::read(&mut peer).unwrap();
+            assert_ne!(f.kind, b'E');
+            if f.kind == b'T' {
+                let v: serde_json::Value = serde_json::from_slice(&f.data).unwrap();
+                if v["session_gone"] == true {
+                    break;
+                }
+            }
+        }
+
+        // Explicit one-shot recreate_local (`b'y'` recreate/1) arms recreate_if_gone=true once!
+        recreate_local(
+            &socket_path,
+            &RecreateRequest {
+                version: "recreate/1".into(),
+                id: pane_id.into(),
+                cwd: Some("/srv/live-cwd".into()),
+                cols: Some(132),
+                rows: Some(42),
+                pixel_width: Some(1320),
+                pixel_height: Some(840),
+                term: Some("xterm-ghostty".into()),
+                colorterm: Some("truecolor".into()),
+                term_program: Some("ghostty".into()),
+                term_program_version: Some("0.25.3".into()),
+                color_scheme: Some("dark".into()),
+                foreground: Some([0xee, 0xee, 0xee]),
+                background: Some([0x11, 0x11, 0x11]),
+                cursor: Some([0xff, 0xaa, 0x00]),
+                resume: Some(crate::record::Resume {
+                    agent: "codex".into(),
+                    conversation_id: "conv-89".into(),
+                    cwd: "/srv/live-cwd".into(),
+                }),
+                interactive: Some(true),
+            },
+        )
+        .unwrap();
+
+        let mut peer_gen = 0u64;
+        let snap_seq = loop {
+            let f = Frame::read(&mut peer).unwrap();
+            if f.kind == b'T' {
+                peer_gen = f.seq;
+            } else if f.kind == SNAPSHOT {
+                break f.seq;
+            }
+        };
+        Frame::new(crate::ACK, snap_seq, &peer_gen.to_be_bytes())
+            .send(&mut peer)
+            .unwrap();
+        Frame::new(crate::CLAIM, peer_gen, &[])
+            .send(&mut peer)
+            .unwrap();
+        loop {
+            let f = Frame::read(&mut peer).unwrap();
+            if f.kind == crate::CLAIM {
+                break;
+            }
+        }
+
+        // Subsequent disconnect after SNAPSHOT MUST NOT reuse the consumed RecreateGrant!
+        let _ = kill_second.send(());
+        let _kill_third = drop_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        loop {
+            let f = Frame::read(&mut peer).unwrap();
+            if f.kind == SNAPSHOT {
+                break;
+            }
+        }
+
+        let log = observed.lock().unwrap();
+        assert_eq!(log.len(), 5);
+        assert!(log[0].create && !log[0].recreate_if_gone);
+        assert!(!log[1].create && !log[1].recreate_if_gone); // auto reconnect after reboot
+        assert!(!log[2].create && !log[2].recreate_if_gone); // manual retry_local
+        assert!(!log[3].create && log[3].recreate_if_gone); // explicit recreate/1 grant
+        assert_eq!(log[3].cwd.as_deref(), Some("/srv/live-cwd"));
+        assert_eq!(log[3].cols, Some(132));
+        assert_eq!(log[3].rows, Some(42));
+        assert_eq!(
+            log[3].resume.as_ref().map(|r| r.conversation_id.as_str()),
+            Some("conv-89")
+        );
+        assert!(!log[4].create && !log[4].recreate_if_gone); // grant cleared after SNAPSHOT!
+        assert!(log[4].resume.is_none());
+        assert!(log[4].cols.is_none());
+
+        drop(peer);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recreate_grant_survives_relay_restart_race_and_direct_peer_frame_and_legacy_fallback() {
+        use super::{is_session_gone_error, recreate_local, RecreateRequest};
+        use crate::SNAPSHOT;
+        use std::os::unix::fs::DirBuilderExt;
+        use std::sync::Mutex;
+
+        assert!(is_session_gone_error(b"unknown session; cannot resume"));
+        assert!(is_session_gone_error(
+            b"session ended: Some(Lost); inspect its record before resuming"
+        ));
+        assert!(!is_session_gone_error(b"session explicitly closed"));
+        assert!(!is_session_gone_error(b"local session ended: Lost"));
+
+        let dir = PathBuf::from(format!(
+            "/tmp/omg-client-race-{}",
+            &crate::record::nonce().unwrap()[..8]
+        ));
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .unwrap();
+        let socket_path = dir.join("relay.sock");
+        let observed = Arc::new(Mutex::new(Vec::<(bool, bool, Option<String>)>::new()));
+        let observed_srv = observed.clone();
+        let legacy_mode = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let legacy_srv = legacy_mode.clone();
+
+        let connector: Connector = Arc::new(move |_| {
+            let (client_side, mut server_side) = UnixStream::pair()?;
+            let observed = observed_srv.clone();
+            let legacy = legacy_srv.clone();
+            thread::spawn(move || {
+                let caps: &[u8] = if legacy.load(Ordering::SeqCst) {
+                    b"strict-open/1,durable-close/1"
+                } else {
+                    b"strict-open/1,durable-close/1,recreate-if-gone/1"
+                };
+                let _ = Frame::new(b'P', 0, caps).send(&mut server_side);
+                while let Ok(frame) = Frame::read(&mut server_side) {
+                    match frame.kind {
+                        b'P' => {
+                            let _ = Frame::new(b'P', 0, caps).send(&mut server_side);
+                        }
+                        b'C' => {
+                            let req: OpenRequest = serde_json::from_slice(&frame.data).unwrap();
+                            let spawns = req.create || req.recreate_if_gone;
+                            observed.lock().unwrap().push((
+                                req.create,
+                                req.recreate_if_gone,
+                                req.cwd.clone(),
+                            ));
+                            if !spawns {
+                                let _ =
+                                    Frame::new(b'E', frame.seq, b"unknown session; cannot resume")
+                                        .send(&mut server_side);
+                            } else {
+                                let _ = Frame::new(
+                                    b'D',
+                                    frame.seq,
+                                    &Frame::new(SNAPSHOT, 1, b"snap").encode(),
+                                )
+                                .send(&mut server_side);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            });
+            Ok(RelayTransport {
+                socket: client_side,
+                guard: Box::new(()),
+            })
+        });
+
+        let socket_clone = socket_path.clone();
+        thread::spawn(move || {
+            let _ = supervise(&socket_clone, connector, false);
+        });
+
+        // 1) Relay-restart race: `recreate_local` arrives while `peers` is completely empty!
+        let race_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        recreate_local(
+            &socket_path,
+            &RecreateRequest {
+                version: "recreate/1".into(),
+                id: race_id.into(),
+                cwd: Some("/srv/after-idle-restart".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // SessionBackend.zig then connects with attachOnly(race_id) (`create: false, recreate_if_gone: false`)
+        // and consumes the held RecreateGrant once!
+        let mut peer1 = UnixStream::connect(&socket_path).unwrap();
+        peer1
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let attach_only = OpenRequest {
+            id: race_id.into(),
+            policy: Policy::default(),
+            create: false,
+            hold_on_session_gone: true,
+            ..Default::default()
+        };
+        Frame::new(b'H', 0, &serde_json::to_vec(&attach_only).unwrap())
+            .send(&mut peer1)
+            .unwrap();
+        loop {
+            let f = Frame::read(&mut peer1).unwrap();
+            if f.kind == SNAPSHOT {
+                break;
+            }
+        }
+        drop(peer1);
+
+        // 2) Direct `b'y'` on an existing LocalPeer stream (inline.rs style):
+        let inline_id = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+        let mut peer2 = UnixStream::connect(&socket_path).unwrap();
+        peer2
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let inline_open = OpenRequest {
+            id: inline_id.into(),
+            policy: Policy::default(),
+            create: false,
+            inline_viewer: false,
+            hold_on_session_gone: true,
+            ..Default::default()
+        };
+        Frame::new(b'H', 0, &serde_json::to_vec(&inline_open).unwrap())
+            .send(&mut peer2)
+            .unwrap();
+        loop {
+            let f = Frame::read(&mut peer2).unwrap();
+            if f.kind == b'T' {
+                let v: serde_json::Value = serde_json::from_slice(&f.data).unwrap();
+                if v["session_gone"] == true {
+                    break;
+                }
+            }
+        }
+        let direct_recreate = RecreateRequest {
+            version: "recreate/1".into(),
+            id: inline_id.into(),
+            cwd: Some("/srv/inline-recreate".into()),
+            ..Default::default()
+        };
+        Frame::new(b'y', 0, &serde_json::to_vec(&direct_recreate).unwrap())
+            .send(&mut peer2)
+            .unwrap();
+        loop {
+            let f = Frame::read(&mut peer2).unwrap();
+            assert_ne!(
+                f.kind, b'y',
+                "session stream must never receive control ack frame b'y'"
+            );
+            if f.kind == SNAPSHOT {
+                break;
+            }
+        }
+        drop(peer2);
+
+        // 3) Legacy remote without recreate-if-gone/1 falls back to one-shot create=true!
+        legacy_mode.store(true, Ordering::SeqCst);
+        let legacy_dir = PathBuf::from(format!(
+            "/tmp/omg-client-legacy-grant-{}",
+            &crate::record::nonce().unwrap()[..8]
+        ));
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&legacy_dir)
+            .unwrap();
+        let legacy_sock = legacy_dir.join("relay.sock");
+        let legacy_observed = Arc::new(Mutex::new(Vec::<(bool, bool)>::new()));
+        let legacy_obs_srv = legacy_observed.clone();
+        let legacy_connector: Connector = Arc::new(move |_| {
+            let (client_side, mut server_side) = UnixStream::pair()?;
+            let obs = legacy_obs_srv.clone();
+            thread::spawn(move || {
+                let caps = b"strict-open/1,durable-close/1";
+                let _ = Frame::new(b'P', 0, caps).send(&mut server_side);
+                while let Ok(frame) = Frame::read(&mut server_side) {
+                    if frame.kind == b'P' {
+                        let _ = Frame::new(b'P', 0, caps).send(&mut server_side);
+                    } else if frame.kind == b'C' {
+                        let req: OpenRequest = serde_json::from_slice(&frame.data).unwrap();
+                        obs.lock().unwrap().push((req.create, req.recreate_if_gone));
+                        let _ =
+                            Frame::new(b'D', frame.seq, &Frame::new(SNAPSHOT, 1, b"snap").encode())
+                                .send(&mut server_side);
+                    }
+                }
+            });
+            Ok(RelayTransport {
+                socket: client_side,
+                guard: Box::new(()),
+            })
+        });
+        let legacy_sock_clone = legacy_sock.clone();
+        thread::spawn(move || {
+            let _ = supervise(&legacy_sock_clone, legacy_connector, false);
+        });
+        let legacy_id = "cccccccc-dddd-4eee-8fff-000000000000";
+        recreate_local(
+            &legacy_sock,
+            &RecreateRequest {
+                version: "recreate/1".into(),
+                id: legacy_id.into(),
+                cwd: Some("/srv/legacy".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut peer3 = UnixStream::connect(&legacy_sock).unwrap();
+        peer3
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        Frame::new(
+            b'H',
+            0,
+            &serde_json::to_vec(&OpenRequest {
+                id: legacy_id.into(),
+                policy: Policy::default(),
+                create: false,
+                hold_on_session_gone: true,
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .send(&mut peer3)
+        .unwrap();
+        loop {
+            let f = Frame::read(&mut peer3).unwrap();
+            if f.kind == SNAPSHOT {
+                break;
+            }
+        }
+        drop(peer3);
+        assert_eq!(*legacy_observed.lock().unwrap(), vec![(true, false)]);
+        let _ = std::fs::remove_dir_all(&legacy_dir);
+
+        let log = observed.lock().unwrap().clone();
+        assert_eq!(
+            log,
+            vec![
+                (false, true, Some("/srv/after-idle-restart".into())),
+                (false, false, None),
+                (false, true, Some("/srv/inline-recreate".into())),
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

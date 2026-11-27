@@ -48,7 +48,7 @@ extension Ghostty {
             didSet {
                 let wasConfirmed = runtimeConfirmedSession
                 switch runtimeConnectionState {
-                case .ready, .reconnecting, .attention, .exited:
+                case .ready, .reconnecting, .attention, .sessionGone, .exited:
                     runtimeConfirmedSession = true
                 default:
                     break
@@ -61,11 +61,14 @@ extension Ghostty {
         var runtimeInlineSession: SessionRuntimeInlineSession? {
             didSet {
                 SessionRuntimeConnections.syncInlineRelaySession(old: oldValue, new: runtimeInlineSession)
-                if runtimeInlineSession != nil {
+                if runtimeInlineSession == nil {
+                    inlineRuntimeConnectionState = nil
+                } else {
                     presentation.commitVisualDockIfNeeded()
                 }
             }
         }
+        @Published var inlineRuntimeConnectionState: SessionRuntimeConnectionState?
         @Published var runtimeConnectionError: String?
         @Published var pendingRevisionHandoff: SessionRuntimeRevisionHandoffContext?
         @Published var revisionHandoffState: SessionRuntimeRevisionHandoffState?
@@ -693,6 +696,7 @@ extension Ghostty {
             runtimeInlineSession = SessionRuntimeHandoff.shared.restoredInlineSession(
                 for: runtimeDescriptor, pane: self.id
             )
+            inlineRuntimeConnectionState = runtimeInlineSession?.restoredConnectionState
             if let replay = runtimeInlineSession?.replay { pendingSSHLaunchReplay = replay }
             if runtimeInlineSession?.passwordInput == true { passwordInput = true }
             QuickInputDraftBridge.shared.configure(

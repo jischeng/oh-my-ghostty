@@ -554,6 +554,42 @@ extension Ghostty {
             )
         }
 
+        struct TerminalColorContext {
+            let foreground: [UInt8]?
+            let background: [UInt8]?
+            let cursor: [UInt8]?
+            let colorScheme: String?
+        }
+
+        var terminalColorContext: TerminalColorContext {
+            guard let config = self.config else {
+                return .init(foreground: nil, background: nil, cursor: nil, colorScheme: nil)
+            }
+            func rgb(_ key: String) -> [UInt8]? {
+                var value = ghostty_config_color_s()
+                guard ghostty_config_get(config, &value, key, UInt(key.utf8.count)) else { return nil }
+                return [value.r, value.g, value.b]
+            }
+            let fg = rgb("foreground")
+            let bg = rgb("background")
+            let cursor = rgb("cursor-color")
+            let scheme: String? = bg.map { rgbBytes in
+                let luma = UInt32(rgbBytes[0]) * 2_126 + UInt32(rgbBytes[1]) * 7_152 + UInt32(rgbBytes[2]) * 722
+                return luma < 1_280_000 ? "dark" : "light"
+            }
+            return .init(foreground: fg, background: bg, cursor: cursor, colorScheme: scheme)
+        }
+
+        var configuredTerm: String {
+            guard let config = self.config else { return "xterm-ghostty" }
+            var value: UnsafePointer<Int8>?
+            let key = "term"
+            guard ghostty_config_get(config, &value, key, UInt(key.utf8.count)),
+                  let value else { return "xterm-ghostty" }
+            let resolved = String(cString: value).trimmingCharacters(in: .whitespacesAndNewlines)
+            return resolved.isEmpty ? "xterm-ghostty" : resolved
+        }
+
         var backgroundOpacity: Double {
             guard let config = self.config else { return 1 }
             var v: Double = 1

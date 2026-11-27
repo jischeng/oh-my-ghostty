@@ -51,7 +51,7 @@ SSH handoff 保留当前 Surface、pane UUID 和本地 PTY。经过 pane capabil
 
 私有 inline owner 记录关联远端 UUID、本地 PTY、helper PID 和 OS boot UUID；恢复 GUI 时恢复远端目录与文件上下文，split 使用远端目录，新 tab 使用原本地目录。会话库优先聚焦 inline pane；窗口已关闭时重新 attach 其本地 PTY，避免争抢远端 writer。显式关闭 pane 同时持久化本地和远端 Close。GUI detach 后，本地 PTY 内的 viewer 仍然运行，远端也仍附着于该 viewer。运行时状态使用延迟显示的紧凑浮层，不再挤压终端或触发 PTY resize；托管 SSH 不在终端内自动弹出 Agent hook 接入面板。
 
-重点审计 surface deinit、关闭 tab、退出 App、进程退出展示和 restorable state。关闭窗口或退出 App 是 Detach；用户显式关闭 tab/pane 则持久化 CloseSession。Window 菜单和设置页均可打开原生 Session Library，按 endpoint 查询、聚焦或 attach 原 UUID，以及确认 End；只读查询不延长脱离视图后的 TTL。元数据记录 host/account 身份、session ID 和 daemon instance epoch。重连找不到 session 时显示明确状态，不自动创建同名进程冒充恢复。
+重点审计 surface deinit、关闭 tab、退出 App、进程退出展示和 restorable state。关闭窗口或退出 App 是 Detach；用户显式关闭 tab/pane 则持久化 CloseSession。Window 菜单和设置页均可打开原生 Session Library，按 endpoint 查询、聚焦或 attach 原 UUID，以及确认 End；只读查询不延长脱离视图后的 TTL。元数据记录 host/account 身份、session ID 和 daemon instance epoch。重连找不到远端 session（如主机重启或容器重建导致 `unknown session` / `session ended`）时，自动重连绝不静默设置 `create` 或 `recreate_if_gone`，而是由本地 relay 下发 `session_gone` 状态并在当前窗格停驻保留历史输出；仅当用户显式点击浮层“重建会话 / Recreate Session”（或在 inline `omg +ssh` 停驻提示下按 `Enter` 重建、按 `Ctrl+C` 返回本地 shell）时，才向对应本地 relay socket 发送一次性 `recreate/1`（`b'y'`，60 秒 TTL `RecreateGrant`），携带当前远端目录、终端行列/像素尺寸、主题与可选 Agent resume 描述符在原窗格内原地重建（远端 `store_exists()` 存活时自动恢复 Agent 对话，容器重建无对话存储时回退到目标目录登录 shell；inline `omg +ssh` 仅从 `0600` 私有 `active.json` 读取 `phase == "session_gone"`，OSC 3008 仅按 `connection_id` 唤醒，绝不解析不可信终端负载）。
 
 ## 协议与生命周期
 

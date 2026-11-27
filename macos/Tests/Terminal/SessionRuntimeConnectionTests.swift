@@ -2,16 +2,33 @@ import AppKit
 import Combine
 import CryptoKit
 import Foundation
+import GhosttyKit
 import Testing
 @testable import Ghostty
 
 @MainActor
 private final class SessionRuntimeRetryRecorder: SessionRuntimeRetrying {
     private(set) var descriptor: SessionRuntimeDescriptor?
+    private(set) var socketOverride: URL?
+    private(set) var recreateRequest: SessionRuntimeRecreateRequest?
     private(set) var onFailure: (@MainActor @Sendable (String) -> Void)?
 
     func retry(_ descriptor: SessionRuntimeDescriptor, onFailure: @escaping @MainActor @Sendable (String) -> Void) throws {
         self.descriptor = descriptor
+        self.socketOverride = nil
+        self.recreateRequest = nil
+        self.onFailure = onFailure
+    }
+
+    func recreate(
+        _ descriptor: SessionRuntimeDescriptor,
+        socketOverride: URL?,
+        request: SessionRuntimeRecreateRequest,
+        onFailure: @escaping @MainActor @Sendable (String) -> Void
+    ) throws {
+        self.descriptor = descriptor
+        self.socketOverride = socketOverride
+        self.recreateRequest = request
         self.onFailure = onFailure
     }
 }
@@ -1376,6 +1393,15 @@ struct SessionRuntimeConnectionTests {
         #expect(SessionRuntimeConnectionState.decode(
             #"{"state":"attention","attempt":5,"message":"credential expired"}"#
         ) == .attention(attempt: 5, message: "credential expired"))
+        #expect(SessionRuntimeConnectionState.decode(
+            #"{"state":"session_gone","session_gone":true,"attempt":1,"message":"unknown session; cannot resume"}"#
+        ) == .sessionGone(message: "unknown session; cannot resume"))
+        #expect(SessionRuntimeConnectionState.decode(
+            #"{"state":"attention","session_gone":true,"attempt":2,"message":"session ended: Some(Lost)"}"#
+        ) == .sessionGone(message: "session ended: Some(Lost)"))
+        #expect(SessionRuntimeConnectionState.sessionGone(message: nil).isSessionGone)
+        #expect(SessionRuntimeConnectionState.sessionGone(message: nil).canRetry)
+        #expect(!TerminalController.shouldRespawnRelay(for: .sessionGone(message: "gone")))
         #expect(SessionRuntimeConnectionState.decode(#"{"state":"ready","attempt":0}"#) == .ready)
         #expect(SessionRuntimeConnectionState.decode(
             #"{"state":"exited","attempt":0,"exit_code":17}"#
@@ -1545,5 +1571,118 @@ struct SessionRuntimeConnectionTests {
         #expect(restored.policy.closeOnAgentDone)
         #expect(SessionRuntimePolicy().detachedTTLSeconds == 259200)
         #expect(!SessionRuntimePolicy().closeOnAgentDone)
+    }
+
+    @MainActor
+    @Test func recreateRuntimeSessionPreservesSplitPaneTitleOverrideAndSendsRecreateControlFrame() async throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        let native = try #require(app.app)
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let surface = Ghostty.SurfaceView(native, baseConfig: config)
+        var descriptor = SessionRuntimeDescriptor(
+            connection: try GitSSHConnection(destination: "devbox", localWorkingDirectory: "/tmp"),
+            revision: "unavailable-test-revision",
+            policy: .init()
+        )
+        descriptor.initialWorkingDirectory = "/srv/initial"
+        surface.runtimeDescriptor = descriptor
+        surface.pwd = "/srv/current-project"
+        surface.titleOverride = "Pinned Remote Pane"
+        surface.surfaceSize = ghostty_surface_size_s(
+            columns: 120,
+            rows: 38,
+            width_px: 1_200,
+            height_px: 760,
+            cell_width_px: 10,
+            cell_height_px: 20
+        )
+        surface.runtimeConnectionState = .sessionGone(message: "unknown session; cannot resume")
+
+        let controller = TerminalController(app, withSurfaceTree: .init(view: surface))
+        defer { controller.window?.delegate = nil; controller.window?.close() }
+        let sibling = try #require(controller.newSplit(at: surface, direction: .right))
+        let agent = AgentResumeDescriptor(
+            agent: .codex,
+            conversationID: AgentConversationID("conv-reboot-89"),
+            scope: .remote,
+            workingDirectory: "/srv/current-project",
+            sshReplay: nil
+        )
+        controller.adoptAgentResumeDescriptor(agent, for: surface)
+
+        let retryer = SessionRuntimeRetryRecorder()
+        controller.recreateRuntimeSession(for: surface, using: retryer)
+        #expect(controller.surfaceTree.map(\.id) == [surface.id, sibling.id])
+        #expect(surface.titleOverride == "Pinned Remote Pane")
+        #expect(surface.runtimeConnectionState == .reconnecting(attempt: 1, retryInMilliseconds: nil))
+        #expect(retryer.descriptor == descriptor)
+        #expect(retryer.socketOverride == nil)
+        let req = try #require(retryer.recreateRequest)
+        #expect(req.version == "recreate/1")
+        #expect(req.id == surface.id.uuidString.lowercased())
+        #expect(req.cwd == "/srv/current-project")
+        #expect(req.cols == 120)
+        #expect(req.rows == 38)
+        #expect(req.pixelWidth == 1_200)
+        #expect(req.pixelHeight == 760)
+        #expect(req.termProgram == "ghostty")
+        #expect(req.colorterm == "truecolor")
+        #expect(req.resume?.agent == "codex")
+        #expect(req.resume?.conversationID == "conv-reboot-89")
+
+        retryer.onFailure?("relay rejected recreate")
+        #expect(surface.runtimeConnectionState == .sessionGone(message: "relay rejected recreate"))
+
+        // Verify raw AF_UNIX b'y' recreate/1 wire framing against a local socket listener.
+        let root = URL(fileURLWithPath: "/tmp/omg-recreate-sock-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try SessionRuntimeBridgeStorage.ensurePrivateDirectory(root)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sockURL = root.appendingPathComponent("r.sock")
+        var addr = try #require(OMGControlSocket.address(path: sockURL.path))
+        let listenFD = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        #expect(listenFD >= 0)
+        defer { Darwin.close(listenFD) }
+        let bound = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(listenFD, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        #expect(bound == 0)
+        #expect(Darwin.listen(listenFD, 4) == 0)
+
+        let payloadData = try JSONEncoder().encode(req)
+        let serverTask = Task.detached { () -> Data in
+            let clientFD = Darwin.accept(listenFD, nil, nil)
+            defer { if clientFD >= 0 { Darwin.close(clientFD) } }
+            var header = [UInt8](repeating: 0, count: 13)
+            _ = header.withUnsafeMutableBytes { Darwin.recv(clientFD, $0.baseAddress, 13, MSG_WAITALL) }
+            let len = Int(UInt32(bigEndian: Data(header[9..<13]).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }))
+            var body = [UInt8](repeating: 0, count: len)
+            _ = body.withUnsafeMutableBytes { Darwin.recv(clientFD, $0.baseAddress, len, MSG_WAITALL) }
+            // Send a status frame 'T' followed by 'y' "accepted"
+            var reply = Data()
+            let tBody = Data(#"{"state":"connecting","attempt":1}"#.utf8)
+            reply.append(UInt8(ascii: "T"))
+            var zSeq = UInt64(1).bigEndian
+            withUnsafeBytes(of: &zSeq) { reply.append(contentsOf: $0) }
+            var tLen = UInt32(tBody.count).bigEndian
+            withUnsafeBytes(of: &tLen) { reply.append(contentsOf: $0) }
+            reply.append(tBody)
+
+            let yBody = Data("accepted".utf8)
+            reply.append(UInt8(ascii: "y"))
+            withUnsafeBytes(of: &zSeq) { reply.append(contentsOf: $0) }
+            var yLen = UInt32(yBody.count).bigEndian
+            withUnsafeBytes(of: &yLen) { reply.append(contentsOf: $0) }
+            reply.append(yBody)
+            _ = reply.withUnsafeBytes { Darwin.send(clientFD, $0.baseAddress!, $0.count, 0) }
+            return Data(header.prefix(1)) + Data(body)
+        }
+        try SessionRuntimeConnections.sendRecreateControlFrame(socket: sockURL, payload: payloadData)
+        let received = await serverTask.value
+        #expect(received.first == UInt8(ascii: "y"))
+        let decodedWire = try JSONDecoder().decode(SessionRuntimeRecreateRequest.self, from: received.dropFirst())
+        #expect(decodedWire == req)
     }
 }

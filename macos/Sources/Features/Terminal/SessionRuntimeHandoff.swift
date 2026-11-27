@@ -6,6 +6,7 @@ import AppKit
 final class SessionRuntimeHandoff {
     static let shared = SessionRuntimeHandoff(requiresRegisteredHost: !OMGApplicationEnvironment.isRunningTests)
     private var tokens: [UUID: String] = [:]
+    private var activeRecordURLs: [UUID: URL] = [:]
     private let directory: URL
     private let resources: URL
     private let applicationSupportRoot: URL?
@@ -40,6 +41,50 @@ final class SessionRuntimeHandoff {
               let session = try? JSONDecoder().decode(SessionRuntimeInlineSession.self, from: data),
               session.localPane == pane, session.localDescriptor?.identity == local.identity,
               session.isRunningInThisBoot else { return nil }
+        return session
+    }
+
+    func activeRecordURL(for surface: Ghostty.SurfaceView) -> URL? {
+        if let recorded = activeRecordURLs[surface.id] {
+            return recorded
+        }
+        guard let local = surface.runtimeDescriptor, local.isLocal,
+              let bridge = try? SessionRuntimeBridgeStorage.directory(
+                for: local,
+                pane: surface.id,
+                purpose: "handoff",
+                applicationSupportRoot: applicationSupportRoot,
+                homeDirectory: homeDirectory
+              ) else {
+            return nil
+        }
+        return bridge.appendingPathComponent("active.json")
+    }
+
+    func setActiveRecordURLForTesting(_ url: URL?, for surfaceID: UUID) {
+        activeRecordURLs[surfaceID] = url
+    }
+
+    func readValidatedInlineSession(for surface: Ghostty.SurfaceView) -> SessionRuntimeInlineSession? {
+        guard let url = activeRecordURL(for: surface),
+              let data = try? SessionRuntimeBridgeStorage.readPrivateFile(at: url, maximumSize: 65_536),
+              let session = try? JSONDecoder().decode(SessionRuntimeInlineSession.self, from: data),
+              session.isRunningInThisBoot else {
+            return nil
+        }
+        if let current = surface.runtimeInlineSession {
+            guard session.connectionID == current.connectionID,
+                  session.pane == current.pane else {
+                return nil
+            }
+            return session
+        }
+        guard let local = surface.runtimeDescriptor,
+              local.isLocal,
+              session.localPane == surface.id,
+              session.localDescriptor?.identity == local.identity else {
+            return nil
+        }
         return session
     }
 
@@ -280,13 +325,17 @@ final class SessionRuntimeHandoff {
                                ownerRecord: ownerRecord?.path))
             let previousInline = source.runtimeInlineSession
             let previousReplay = source.pendingSSHLaunchReplay
+            let previousActiveURL = activeRecordURLs[source.id]
+            activeRecordURLs[source.id] = active
             source.runtimeInlineSession = remote
+            source.inlineRuntimeConnectionState = nil
             source.pendingSSHLaunchReplay = remote.replay
             do {
                 try SessionRuntimeBridgeStorage.writePrivateFile(
                     at: requestDirectory.appendingPathComponent(name + ".accepted"),
                     data: JSONEncoder().encode(approval), permissions: 0o600)
             } catch {
+                activeRecordURLs[source.id] = previousActiveURL
                 source.runtimeInlineSession = previousInline
                 source.pendingSSHLaunchReplay = previousReplay
                 throw error

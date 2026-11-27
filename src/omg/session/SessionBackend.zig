@@ -801,6 +801,37 @@ fn publishFailure(self: *Self, io: *HostIO, message: []const u8, retryable: bool
     try self.publishState(io, metadata);
 }
 
+fn sessionGoneMetadata(alloc: std.mem.Allocator, message: []const u8) ![]u8 {
+    return std.json.Stringify.valueAlloc(alloc, .{
+        .state = "session_gone",
+        .session_gone = true,
+        .attempt = @as(u32, 0),
+        .message = message,
+    }, .{});
+}
+
+fn publishSessionGone(self: *Self, io: *HostIO, message: []const u8) !void {
+    const metadata = try sessionGoneMetadata(self.alloc, message);
+    defer self.alloc.free(metadata);
+    try self.publishState(io, metadata);
+}
+
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (haystack.len < needle.len) return false;
+    var i: usize = 0;
+    while (i <= haystack.len - needle.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
+    }
+    return false;
+}
+
+fn isSessionGoneError(bytes: []const u8) bool {
+    if (containsIgnoreCase(bytes, "local session ended")) return false;
+    return containsIgnoreCase(bytes, "unknown session") or
+        containsIgnoreCase(bytes, "session ended");
+}
+
 const ReconnectWait = enum { elapsed, paused, stopped };
 
 fn waitForReconnect(self: *Self, delay_us: u32, expected_epoch: u64) ReconnectWait {
@@ -864,7 +895,7 @@ fn readLoop(self: *Self, io: *HostIO, epoch: u64, attached: *bool, connected_onc
     if (!self.attachmentIsCurrent(epoch)) return error.SessionPaused;
     if (self.pane_id) |id| {
         if (attached.* or self.force_attach.load(.acquire)) {
-            const request = try reattachRequest(self.alloc, id);
+            const request = try reattachRequestForBackend(self.alloc, id, !self.is_local);
             defer self.alloc.free(request);
             try self.sendForAttachment('H', 0, request, epoch);
         } else if (self.acceptsInitialInput()) {
@@ -911,10 +942,11 @@ fn readLoop(self: *Self, io: *HostIO, epoch: u64, attached: *bool, connected_onc
             'T' => {
                 if (bytes.len > 8192) return error.InvalidMetadata;
                 const Status = struct {
-                    state: enum { connecting, reconnecting, attention },
+                    state: enum { connecting, reconnecting, attention, session_gone },
                     attempt: u32,
                     retry_in_ms: ?u64 = null,
                     message: ?[]const u8 = null,
+                    session_gone: bool = false,
                 };
                 const status = try std.json.parseFromSlice(Status, self.alloc, bytes, .{ .ignore_unknown_fields = true });
                 defer status.deinit();
@@ -1050,7 +1082,11 @@ fn readLoop(self: *Self, io: *HostIO, epoch: u64, attached: *bool, connected_onc
                 self.updatePasswordInput(io, false);
                 if (bytes.len > 8192 or !std.unicode.utf8ValidateSlice(bytes)) return error.InvalidMetadata;
                 // A connection failure must not overwrite the retained terminal.
-                try self.publishFailure(io, bytes, true);
+                if (!self.is_local and isSessionGoneError(bytes)) {
+                    try self.publishSessionGone(io, bytes);
+                } else {
+                    try self.publishFailure(io, bytes, true);
+                }
                 sequence = null;
                 activity_hydrated = false;
                 self.activity_revision.store(0, .release);
@@ -1135,6 +1171,14 @@ fn publishContext(self: *Self, io: *HostIO, id: []const u8, metadata: []const u8
 
 fn reattachRequest(alloc: std.mem.Allocator, original: []const u8) ![]u8 {
     return LocalLaunch.attachOnly(alloc, original);
+}
+
+fn reattachRequestForBackend(
+    alloc: std.mem.Allocator,
+    original: []const u8,
+    hold_on_session_gone: bool,
+) ![]u8 {
+    return LocalLaunch.attachOnlyWithOptions(alloc, original, hold_on_session_gone);
 }
 
 fn readTestBytes(fd: c_int, bytes: []u8) !void {
@@ -1958,6 +2002,23 @@ test "mid-session disconnect publishes reconnecting state while ConnectFailed an
     const json = try reconnectingMetadata(alloc, 1, 100);
     defer alloc.free(json);
     try std.testing.expectEqualStrings("{\"state\":\"reconnecting\",\"attempt\":1,\"retry_in_ms\":100}", json);
+
+    try std.testing.expect(isSessionGoneError("unknown session; cannot resume"));
+    try std.testing.expect(isSessionGoneError("session ended: Some(Lost); inspect its record before resuming"));
+    try std.testing.expect(!isSessionGoneError("session explicitly closed"));
+    try std.testing.expect(!isSessionGoneError("local session ended: Lost"));
+
+    const gone_json = try sessionGoneMetadata(alloc, "unknown session; cannot resume");
+    defer alloc.free(gone_json);
+    try std.testing.expect(std.mem.indexOf(u8, gone_json, "\"state\":\"session_gone\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, gone_json, "\"session_gone\":true") != null);
+
+    const remote_reattach = try reattachRequestForBackend(alloc, "{\"id\":\"same-pane\",\"policy\":{},\"create\":true}", true);
+    defer alloc.free(remote_reattach);
+    try std.testing.expect(std.mem.indexOf(u8, remote_reattach, "\"hold_on_session_gone\":true") != null);
+    const local_reattach = try reattachRequestForBackend(alloc, "{\"id\":\"same-pane\",\"policy\":{},\"create\":true}", false);
+    defer alloc.free(local_reattach);
+    try std.testing.expect(std.mem.indexOf(u8, local_reattach, "hold_on_session_gone") == null);
 }
 
 test {

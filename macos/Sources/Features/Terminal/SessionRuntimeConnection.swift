@@ -28,6 +28,7 @@ enum SessionRuntimeConnectionState: Equatable, Sendable {
     case connecting(attempt: Int)
     case reconnecting(attempt: Int, retryInMilliseconds: Int?)
     case attention(attempt: Int, message: String?)
+    case sessionGone(message: String?)
     case ready
     case failed(message: String?, retryable: Bool = true)
     case exited(exitCode: Int)
@@ -38,12 +39,22 @@ enum SessionRuntimeConnectionState: Equatable, Sendable {
         var retryInMS: Int?
         var message: String?
         var retryable: Bool?
+        var sessionGone: Bool?
         var exitCode: Int?
 
         enum CodingKeys: String, CodingKey {
             case state, attempt, message, retryable
             case retryInMS = "retry_in_ms"
+            case sessionGone = "session_gone"
             case exitCode = "exit_code"
+        }
+    }
+
+    static func sanitizeMessage(_ raw: String?) -> String? {
+        raw.map { value in
+            String(value.unicodeScalars.prefix(2_048).map {
+                CharacterSet.controlCharacters.contains($0) ? " " : Character($0)
+            })
         }
     }
 
@@ -53,14 +64,13 @@ enum SessionRuntimeConnectionState: Equatable, Sendable {
               let payload = try? JSONDecoder().decode(Payload.self, from: data) else { return nil }
         let attempt = max(0, min(payload.attempt ?? 0, 1_000_000))
         let retry = payload.retryInMS.map { max(0, min($0, 86_400_000)) }
-        let message = payload.message.map { value in
-            String(value.unicodeScalars.prefix(2_048).map {
-                CharacterSet.controlCharacters.contains($0) ? " " : Character($0)
-            })
-        }
+        let message = sanitizeMessage(payload.message)
         if payload.state == "exited" {
             guard let exitCode = payload.exitCode else { return nil }
             return .exited(exitCode: exitCode)
+        }
+        if payload.state == "session_gone" || payload.sessionGone == true {
+            return .sessionGone(message: message)
         }
         return switch payload.state {
         case "connecting": .connecting(attempt: attempt)
@@ -72,11 +82,16 @@ enum SessionRuntimeConnectionState: Equatable, Sendable {
         }
     }
 
+    var isSessionGone: Bool {
+        if case .sessionGone = self { return true }
+        return false
+    }
+
     var canRetry: Bool {
         switch self {
         case .ready, .connecting, .exited: false
         case .reconnecting(_, let delay): delay != nil
-        case .attention: true
+        case .attention, .sessionGone: true
         case .failed(_, let retryable): retryable
         }
     }
@@ -85,8 +100,37 @@ enum SessionRuntimeConnectionState: Equatable, Sendable {
         switch self {
         case .connecting(let attempt), .attention(let attempt, _): attempt
         case .reconnecting(let attempt, _): attempt
-        case .ready, .failed, .exited: 0
+        case .sessionGone, .ready, .failed, .exited: 0
         }
+    }
+}
+
+struct SessionRuntimeRecreateRequest: Codable, Equatable, Sendable {
+    var version = "recreate/1"
+    let id: String
+    var cwd: String?
+    var cols: UInt16?
+    var rows: UInt16?
+    var pixelWidth: UInt16?
+    var pixelHeight: UInt16?
+    var term: String?
+    var colorterm: String?
+    var termProgram: String?
+    var termProgramVersion: String?
+    var colorScheme: String?
+    var foreground: [UInt8]?
+    var background: [UInt8]?
+    var cursor: [UInt8]?
+    var resume: SessionRuntimeHandoffResume?
+    var interactive: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case version, id, cwd, cols, rows, term, colorterm, foreground, background, cursor, resume, interactive
+        case pixelWidth = "pixel_width"
+        case pixelHeight = "pixel_height"
+        case termProgram = "term_program"
+        case termProgramVersion = "term_program_version"
+        case colorScheme = "color_scheme"
     }
 }
 
@@ -576,7 +620,29 @@ enum SessionRuntimeBridgeStorage {
 
 @MainActor
 protocol SessionRuntimeRetrying {
-    func retry(_ descriptor: SessionRuntimeDescriptor, onFailure: @escaping @MainActor @Sendable (String) -> Void) throws
+    func retry(
+        _ descriptor: SessionRuntimeDescriptor,
+        onFailure: @escaping @MainActor @Sendable (String) -> Void
+    ) throws
+    func recreate(
+        _ descriptor: SessionRuntimeDescriptor,
+        socketOverride: URL?,
+        request: SessionRuntimeRecreateRequest,
+        onFailure: @escaping @MainActor @Sendable (String) -> Void
+    ) throws
+}
+
+extension SessionRuntimeRetrying {
+    func recreate(
+        _ descriptor: SessionRuntimeDescriptor,
+        socketOverride: URL?,
+        request: SessionRuntimeRecreateRequest,
+        onFailure: @escaping @MainActor @Sendable (String) -> Void
+    ) throws {
+        _ = socketOverride
+        _ = request
+        try retry(descriptor, onFailure: onFailure)
+    }
 }
 
 /// Owns one relay process per exact host/revision. Each surface gets a descriptor,
@@ -1406,6 +1472,101 @@ final class SessionRuntimeConnections: SessionRuntimeRetrying {
     func retry(_ descriptor: SessionRuntimeDescriptor, onFailure: @escaping @MainActor @Sendable (String) -> Void) throws {
         let socket = try prepare(descriptor, interactive: false)
         try launchRetryRequest(socket: socket, interactive: true, onFailure: onFailure)
+    }
+
+    func recreate(
+        _ descriptor: SessionRuntimeDescriptor,
+        socketOverride: URL?,
+        request: SessionRuntimeRecreateRequest,
+        onFailure: @escaping @MainActor @Sendable (String) -> Void
+    ) throws {
+        let payload = try JSONEncoder().encode(request)
+        let socket: URL
+        if let socketOverride {
+            socket = socketOverride
+        } else {
+            socket = try prepare(descriptor, interactive: false)
+        }
+        Task.detached(priority: .userInitiated) {
+            do {
+                try Self.sendRecreateControlFrame(socket: socket, payload: payload)
+            } catch {
+                await MainActor.run {
+                    onFailure("The runtime relay did not accept the session recreate request.")
+                }
+            }
+        }
+    }
+
+    nonisolated static func sendRecreateControlFrame(socket: URL, payload: Data) throws {
+        guard payload.count <= 65_536 else { throw POSIXError(.EMSGSIZE) }
+        var fd: Int32 = -1
+        for attempt in 0..<40 {
+            if let connected = OMGControlSocket.connect(path: socket.path) {
+                fd = connected
+                break
+            }
+            if attempt < 39 {
+                usleep(50_000)
+            }
+        }
+        guard fd >= 0 else {
+            throw POSIXError(.ENOTCONN)
+        }
+        defer { Darwin.close(fd) }
+        guard OMGControlSocket.peerIsCurrentUser(fd) else {
+            throw CocoaError(.fileWriteNoPermission)
+        }
+        var rcvTimeout = timeval(tv_sec: 5, tv_usec: 0)
+        var sndTimeout = timeval(tv_sec: 2, tv_usec: 0)
+        _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rcvTimeout, socklen_t(MemoryLayout<timeval>.size))
+        _ = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &sndTimeout, socklen_t(MemoryLayout<timeval>.size))
+
+        var frameBytes = Data(capacity: 13 + payload.count)
+        frameBytes.append(UInt8(ascii: "y"))
+        var seqBE = UInt64(0).bigEndian
+        withUnsafeBytes(of: &seqBE) { frameBytes.append(contentsOf: $0) }
+        var lenBE = UInt32(payload.count).bigEndian
+        withUnsafeBytes(of: &lenBE) { frameBytes.append(contentsOf: $0) }
+        frameBytes.append(payload)
+
+        try frameBytes.withUnsafeBytes { raw in
+            var offset = 0
+            while offset < raw.count {
+                let written = Darwin.send(fd, raw.baseAddress!.advanced(by: offset), raw.count - offset, 0)
+                guard written > 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+                offset += written
+            }
+        }
+
+        func readExact(_ count: Int) throws -> Data {
+            if count == 0 { return Data() }
+            guard count <= 1_048_576 else { throw CocoaError(.fileReadTooLarge) }
+            var buffer = [UInt8](repeating: 0, count: count)
+            var offset = 0
+            while offset < count {
+                let received = buffer.withUnsafeMutableBytes { ptr in
+                    Darwin.recv(fd, ptr.baseAddress!.advanced(by: offset), count - offset, 0)
+                }
+                guard received > 0 else { throw POSIXError(.init(rawValue: errno) ?? .ECONNRESET) }
+                offset += received
+            }
+            return Data(buffer)
+        }
+
+        while true {
+            let header = try readExact(13)
+            let kind = header[0]
+            let bodyLen = header.subdata(in: 9..<13).withUnsafeBytes {
+                Int(UInt32(bigEndian: $0.loadUnaligned(as: UInt32.self)))
+            }
+            let body = try readExact(bodyLen)
+            if kind == UInt8(ascii: "T") { continue }
+            guard kind == UInt8(ascii: "y"), body == Data("accepted".utf8) else {
+                throw CocoaError(.coderInvalidValue)
+            }
+            return
+        }
     }
 
     private func launchRetryRequest(

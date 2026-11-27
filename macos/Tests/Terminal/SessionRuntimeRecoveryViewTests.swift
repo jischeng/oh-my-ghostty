@@ -63,4 +63,33 @@ struct SessionRuntimeRecoveryViewTests {
         #expect(view.detailLabel.stringValue.contains("17"))
         #expect(view.reconnectButton.isHidden)
     }
+
+    @Test func sessionGoneShowsLocalizedRecreateActionImmediately() {
+        let english = SettingsStrings(language: .english)
+        let chinese = SettingsStrings(language: .simplifiedChinese)
+        #expect(english.runtimeRecreateSession == "Recreate Session")
+        #expect(chinese.runtimeRecreateSession == "重建会话")
+        #expect(english.runtimeRecreateHelp != chinese.runtimeRecreateHelp)
+
+        let view = SessionRuntimeRecoveryView()
+        var recreated = false
+        view.update(
+            endpoint: "prod-box",
+            state: .sessionGone(message: "unknown session; cannot resume"),
+            strings: chinese
+        ) { recreated = true }
+        #expect(view.titleLabel.stringValue.contains("远端会话已不存在"))
+        #expect(view.titleLabel.stringValue.contains("prod-box"))
+        #expect(view.detailLabel.stringValue.contains("重启"))
+        #expect(view.detailLabel.toolTip?.contains("unknown session; cannot resume") == true)
+        #expect(!view.detailLabel.isHidden)
+        #expect(!view.reconnectButton.isHidden)
+        #expect(view.reconnectButton.title == "重建会话")
+        view.reconnectButton.performClick(nil)
+        #expect(recreated)
+
+        let presentation = SessionRuntimeRecoveryPresentation(delay: 10)
+        presentation.update(.sessionGone(message: "session ended: Some(Lost)"))
+        #expect(presentation.state == .sessionGone(message: "session ended: Some(Lost)"))
+    }
 }

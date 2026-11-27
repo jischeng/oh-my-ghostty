@@ -7,8 +7,11 @@ import os
 from pathlib import Path
 import pty
 import select
+import shlex
+import shutil
 import signal
 import socket
+import stat
 import subprocess
 import struct
 import sys
@@ -980,6 +983,355 @@ class InlineSSHTests(unittest.TestCase):
         self.assertIn(b"RESIZED_TO:100x30", raw_out)
         for i in range(10):
             self.assertIn(f"WHILE_OFFLINE_{i:02}", all_lines)
+
+    def _run_session_gone_scenario(self, *, on_session_gone_fn, expected_exit=0):
+        with tempfile.TemporaryDirectory(prefix="omg-inline-89-", dir="/tmp") as directory:
+            root = Path(os.path.realpath(directory))
+            remote_state = root / "remote-state"
+            remote_state.mkdir(mode=0o700)
+            work_initial = root / "work-initial"
+            work_moved = root / "work-moved"
+            work_gui = root / "work-gui"
+            for d in (work_initial, work_moved, work_gui):
+                d.mkdir(mode=0o700)
+
+            policy = dict(
+                detached_ttl_seconds=60,
+                expires_at=None,
+                close_on_agent_done=False,
+                agent_done_grace_seconds=1,
+                terminate_grace_seconds=1,
+                host_idle_seconds=30,
+                record_retention_seconds=60,
+            )
+            private_json(remote_state / "policy.json", policy)
+
+            remote_shell = root / "remote_shell.py"
+            remote_shell.write_text(textwrap.dedent("""\
+                import fcntl, os, pathlib, select, struct, sys, termios, time, tty
+                root = pathlib.Path(sys.argv[1])
+                count_file = root / "spawn_count"
+                count = int(count_file.read_text()) if count_file.exists() else 0
+                count += 1
+                count_file.write_text(str(count))
+                tty.setraw(0, when=termios.TCSANOW)
+                if count == 1:
+                    # Enable focus, mouse, and hidden-cursor modes before simulated reboot.
+                    os.write(1, b"\\x1b[?1004h\\x1b[?1000h\\x1b[?1006h\\x1b[?25l")
+                    for i in range(18):
+                        os.write(1, f"PRE_REBOOT_HIST_{i:02}\\r\\n".encode())
+                    os.write(1, b"PRE_REBOOT_VIEWPORT_LINE\\r\\n")
+                    moved = root / "work-moved"
+                    os.chdir(moved)
+                    os.write(1, f"\\x1b]7;file://{moved}\\x07".encode())
+                    (root / "boot1_ready").touch()
+                    while True:
+                        time.sleep(0.05)
+                else:
+                    r, c, _, _ = struct.unpack("HHHH", fcntl.ioctl(0, termios.TIOCGWINSZ, b"\\0" * 8))
+                    os.write(1, f"RECREATED_CWD:{os.getcwd()}\\r\\n".encode())
+                    os.write(1, f"RECREATED_SIZE:{c}x{r}\\r\\n".encode())
+                    (root / "boot2_ready").touch()
+                    buf = b""
+                    deadline = time.monotonic() + 12
+                    while b"FINISH" not in buf and time.monotonic() < deadline:
+                        if select.select([0], [], [], 0.05)[0]:
+                            buf += os.read(0, 4096)
+                    sys.exit(0)
+            """))
+
+            daemon = subprocess.Popen(
+                [str(BINARY), "host", str(remote_state), "--", sys.executable, str(remote_shell), str(root)]
+            )
+            fake_ssh = root / "fake-ssh"
+            fake_ssh.write_text(
+                "#!/bin/sh\n"
+                "printf R\n"
+                f"exec {shlex.quote(str(BINARY))} bridge {shlex.quote(str(remote_state / 'host.sock'))}\n"
+            )
+            fake_ssh.chmod(0o700)
+
+            cols, rows = 80, 16
+            parent, master = pty.fork()
+            if parent == 0:
+                env = dict(
+                    os.environ,
+                    OMG_SSH_HANDOFF_DIRECTORY=str(root),
+                    OMG_SSH_HANDOFF_TOKEN="inline-89",
+                    OMGD=str(BINARY),
+                )
+                os.execve(
+                    "/bin/sh",
+                    [
+                        "/bin/sh",
+                        "-c",
+                        'printf "LOCAL_SHELL_BEFORE\\n"; "$OMGD" handoff /usr/bin/ssh prod-box; '
+                        'status=$?; printf "LOCAL_DONE:%s\\n" "$status"; exit "$status"',
+                    ],
+                    env,
+                )
+            vt = MiniVT(cols, rows)
+            output = bytearray()
+            fcntl.ioctl(
+                master,
+                termios.TIOCSWINSZ,
+                struct.pack("HHHH", rows, cols, cols * 8, rows * 16),
+            )
+            remote_id = str(uuid.uuid4())
+            active = root / "active.json"
+            relay_sock = root / "relay.sock"
+            local_status = None
+            replies = 0
+
+            def read_output():
+                nonlocal replies
+                if select.select([master], [], [], 0.04)[0]:
+                    try:
+                        chunk = os.read(master, 65536)
+                        output.extend(chunk)
+                        vt.feed(chunk)
+                        while output.count(b"\x1b[6n") > replies:
+                            os.write(master, f"\x1b[{vt.cy + 1};{vt.cx + 1}R".encode())
+                            replies += 1
+                    except OSError as error:
+                        if error.errno != errno.EIO:
+                            raise
+
+            def wait_until(condition, seconds=12):
+                deadline = time.monotonic() + seconds
+                while time.monotonic() < deadline:
+                    if condition():
+                        return
+                    read_output()
+                self.fail(f"session_gone scenario timed out; tail={bytes(output[-1400:])!r}")
+
+            try:
+                wait_until(lambda: (remote_state / "host.sock").exists())
+                wait_until(
+                    lambda: any(
+                        p.suffix == ".json" and p.name != "active.json"
+                        for p in root.iterdir()
+                    )
+                )
+                req_file = next(
+                    p for p in root.iterdir() if p.suffix == ".json" and p.name != "active.json"
+                )
+                req = json.loads(req_file.read_text())
+                conn_id = "omg-ssh-inline-" + req_file.stem
+                private_json(active, dict(connectionID=conn_id))
+                config = root / "connection.json"
+                private_json(
+                    config,
+                    dict(
+                        transport="ssh",
+                        executable=str(fake_ssh),
+                        arguments=["prod-box"],
+                        cwd=str(root),
+                        bundle=str(root),
+                        revision="fixture",
+                        policy=policy,
+                        local_state_directory=None,
+                        local_shell=None,
+                        hooks=None,
+                    ),
+                )
+                private_json(
+                    req_file.with_suffix(".accepted"),
+                    dict(
+                        helper=str(BINARY),
+                        token=req["token"],
+                        configuration=str(config),
+                        socket=str(relay_sock),
+                        open=dict(
+                            id=remote_id,
+                            create=True,
+                            cwd=str(work_initial),
+                            policy=policy,
+                            inline_viewer=True,
+                        ),
+                        context=dict(
+                            connection_id=conn_id,
+                            target="prod-box",
+                            local_cwd=str(root),
+                            active_record=str(active),
+                        ),
+                    ),
+                )
+                wait_until(
+                    lambda: (root / "boot1_ready").exists()
+                    and active.exists()
+                    and json.loads(active.read_text()).get("phase") == "ready"
+                    and json.loads(active.read_text()).get("workingDirectory") == str(work_moved)
+                )
+                for _ in range(5):
+                    read_output()
+
+                # Simulate remote host reboot / container rebuild: stop remote omgd and wipe state.
+                daemon.terminate()
+                daemon.wait(timeout=5)
+                shutil.rmtree(remote_state)
+                remote_state.mkdir(mode=0o700)
+                private_json(remote_state / "policy.json", policy)
+                daemon = subprocess.Popen(
+                    [str(BINARY), "host", str(remote_state), "--", sys.executable, str(remote_shell), str(root)]
+                )
+                wait_until(lambda: (remote_state / "host.sock").exists())
+
+                state_osc = f"\x1b]3008;start=omg-inline-state;{conn_id}\x07".encode()
+                wait_until(
+                    lambda: active.exists()
+                    and json.loads(active.read_text()).get("phase") == "session_gone"
+                    and b"[OMG SSH: remote session gone" in output,
+                    seconds=15,
+                )
+                for _ in range(4):
+                    read_output()
+                active_gone = json.loads(active.read_text())
+                self.assertEqual(stat.S_IMODE(active.stat().st_mode), 0o600)
+                self.assertIn("unknown session", active_gone.get("message", ""))
+                self.assertIn(state_osc, output)
+                # Mouse/focus tracking and hidden cursor must be reset on stdout while parked.
+                self.assertIn(b"\x1b[?1004l", output)
+                self.assertIn(b"\x1b[?1000l", output)
+                self.assertTrue(vt.cursor_visible)
+
+                osc_count_at_gone = output.count(state_osc)
+                on_session_gone_fn(
+                    dict(
+                        root=root,
+                        master=master,
+                        vt=vt,
+                        output=output,
+                        active=active,
+                        relay_sock=relay_sock,
+                        remote_id=remote_id,
+                        conn_id=conn_id,
+                        state_osc=state_osc,
+                        osc_count_at_gone=osc_count_at_gone,
+                        work_moved=work_moved,
+                        work_gui=work_gui,
+                        wait_until=wait_until,
+                        read_output=read_output,
+                        parent=parent,
+                    )
+                )
+
+                wait_until(lambda: b"LOCAL_DONE:" in output, seconds=15)
+                for _ in range(50):
+                    done, local_status = os.waitpid(parent, os.WNOHANG)
+                    if done:
+                        break
+                    read_output()
+                self.assertTrue(done)
+                self.assertEqual(
+                    os.waitstatus_to_exitcode(local_status),
+                    expected_exit,
+                    bytes(output[-1500:]),
+                )
+                self.assertFalse(active.exists())
+                return vt, bytes(output)
+            finally:
+                try:
+                    os.close(master)
+                except OSError:
+                    pass
+                if local_status is None:
+                    try:
+                        os.killpg(parent, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        os.waitpid(parent, 0)
+                    except ChildProcessError:
+                        pass
+                if daemon.poll() is None:
+                    daemon.terminate()
+                    daemon.wait(timeout=5)
+
+    def test_inline_session_gone_control_socket_recreate_clears_state_and_preserves_scrollback(self):
+        def trigger_gui_recreate(ctx):
+            payload = json.dumps(
+                dict(
+                    version="recreate/1",
+                    id=ctx["remote_id"],
+                    cwd=str(ctx["work_gui"]),
+                    cols=80,
+                    rows=16,
+                    interactive=True,
+                )
+            ).encode()
+            with socket.socket(socket.AF_UNIX) as ctrl:
+                ctrl.settimeout(5)
+                ctrl.connect(str(ctx["relay_sock"]))
+                ctrl.sendall(encode(b"y", 0, payload))
+                kind, _, reply = frame(ctrl)
+                while kind == b"T":
+                    kind, _, reply = frame(ctrl)
+                self.assertEqual((kind, reply), (b"y", b"accepted"))
+            ctx["wait_until"](
+                lambda: (ctx["root"] / "boot2_ready").exists()
+                and ctx["active"].exists()
+                and json.loads(ctx["active"].read_text()).get("phase") == "ready"
+                and json.loads(ctx["active"].read_text()).get("message") is None
+                and ctx["output"].count(ctx["state_osc"]) > ctx["osc_count_at_gone"]
+            )
+            os.write(ctx["master"], b"FINISH\n")
+
+        vt, _ = self._run_session_gone_scenario(on_session_gone_fn=trigger_gui_recreate)
+        all_lines = vt.scrollback + vt.active_lines()
+        self.assertTrue(any("PRE_REBOOT_VIEWPORT_LINE" in line for line in vt.scrollback))
+        self.assertTrue(any("RECREATED_CWD:" in line and "work-gui" in line for line in all_lines))
+        self.assertFalse(any("[OMG SSH: remote session gone" in line for line in all_lines))
+
+    def test_inline_session_gone_enter_recreates_with_last_remote_cwd_and_ignores_escape_sequences(self):
+        def trigger_enter_recreate(ctx):
+            # Resize while parked and inject focus/SGR-mouse/Alt-Enter sequences: must NOT recreate!
+            fcntl.ioctl(ctx["master"], termios.TIOCSWINSZ, struct.pack("HHHH", 20, 92, 736, 320))
+            ctx["vt"].resize(92, 20)
+            os.write(ctx["master"], b"\x1b[I\x1b[O\x1b[<0;30;10M\x1b[<0;30;10m\x1b\r")
+            time.sleep(0.15)
+            ctx["read_output"]()
+            self.assertFalse((ctx["root"] / "boot2_ready").exists())
+            self.assertEqual(json.loads(ctx["active"].read_text()).get("phase"), "session_gone")
+
+            os.write(ctx["master"], b"\r")
+            ctx["wait_until"](
+                lambda: (ctx["root"] / "boot2_ready").exists()
+                and ctx["active"].exists()
+                and json.loads(ctx["active"].read_text()).get("phase") == "ready"
+                and json.loads(ctx["active"].read_text()).get("message") is None
+                and ctx["output"].count(ctx["state_osc"]) > ctx["osc_count_at_gone"]
+            )
+            os.write(ctx["master"], b"FINISH\n")
+
+        vt, _ = self._run_session_gone_scenario(on_session_gone_fn=trigger_enter_recreate)
+        all_lines = vt.scrollback + vt.active_lines()
+        self.assertTrue(any("PRE_REBOOT_HIST_00" in line for line in vt.scrollback))
+        self.assertTrue(any("PRE_REBOOT_VIEWPORT_LINE" in line for line in vt.scrollback))
+        self.assertTrue(
+            any(f"RECREATED_CWD:{ctx_path}" in line for line in all_lines for ctx_path in [line.split("RECREATED_CWD:")[-1]] if line.endswith("work-moved")),
+            f"expected RECREATED_CWD ending with work-moved in {all_lines!r}",
+        )
+        self.assertIn("RECREATED_SIZE:92x20", all_lines)
+        self.assertFalse(any("[OMG SSH: remote session gone" in line for line in all_lines))
+
+    def test_inline_session_gone_ctrl_c_exits_to_local_shell_after_ignoring_focus_and_mouse_events(self):
+        def trigger_ctrl_c_exit(ctx):
+            os.write(ctx["master"], b"\x1b[I\x1b[<35;15;5M\x1bOM")
+            time.sleep(0.12)
+            ctx["read_output"]()
+            self.assertEqual(os.waitpid(ctx["parent"], os.WNOHANG), (0, 0))
+            self.assertFalse((ctx["root"] / "boot2_ready").exists())
+            os.write(ctx["master"], b"\x03")
+
+        vt, raw_out = self._run_session_gone_scenario(
+            on_session_gone_fn=trigger_ctrl_c_exit,
+            expected_exit=130,
+        )
+        all_lines = vt.scrollback + vt.active_lines()
+        self.assertIn(b"LOCAL_DONE:130", raw_out)
+        self.assertTrue(any("PRE_REBOOT_VIEWPORT_LINE" in line for line in all_lines))
+        self.assertFalse(any("[OMG SSH: remote session gone" in line for line in all_lines))
 
 
 if __name__ == "__main__":

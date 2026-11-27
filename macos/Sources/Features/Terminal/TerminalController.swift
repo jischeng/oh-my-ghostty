@@ -1204,8 +1204,31 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             return true
         case .failed(_, let retryable):
             return retryable
-        case .connecting, .attention, .ready, .exited:
+        case .connecting, .attention, .sessionGone, .ready, .exited:
             return false
+        }
+    }
+
+    func refreshInlineRuntimeState(
+        for surface: Ghostty.SurfaceView,
+        handoff: SessionRuntimeHandoff = .shared
+    ) {
+        guard let validated = handoff.readValidatedInlineSession(for: surface) else {
+            if surface.runtimeInlineSession?.isRunningInThisBoot != true {
+                surface.inlineRuntimeConnectionState = nil
+            }
+            return
+        }
+        surface.runtimeInlineSession = validated
+        switch validated.phase {
+        case "session_gone":
+            surface.inlineRuntimeConnectionState = .sessionGone(
+                message: SessionRuntimeConnectionState.sanitizeMessage(validated.message)
+            )
+        case "ready":
+            surface.inlineRuntimeConnectionState = nil
+        default:
+            break
         }
     }
 
@@ -1227,9 +1250,20 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             }
             return
         }
+        if signal.id == "omg-inline-state" {
+            if signal.action == .start,
+               let inline = surface.runtimeInlineSession,
+               signal.metadata.isEmpty || signal.metadata == inline.connectionID {
+                refreshInlineRuntimeState(for: surface)
+            }
+            return
+        }
         if signal.action == .end, surface.runtimeInlineSession?.connectionID == signal.id {
             surface.runtimeInlineSession = nil
+            surface.inlineRuntimeConnectionState = nil
             surface.passwordInput = false
+        } else if signal.action == .start, surface.runtimeInlineSession?.connectionID == signal.id {
+            refreshInlineRuntimeState(for: surface)
         }
         if signal.id == "omg-runtime-state", let runtime = surface.runtimeDescriptor {
             guard let state = SessionRuntimeConnectionState.decode(signal.metadata) else { return }
@@ -1306,6 +1340,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     private func pollSSHReconnectProcesses() {
         for surface in surfaceTree {
+            if surface.inlineRuntimeConnectionState != nil {
+                refreshInlineRuntimeState(for: surface)
+            }
             let surfaceID = surface.id
             let processGroupID = surface.surfaceModel?.foregroundPID
             guard var context = paneSessionContexts[surfaceID] else { continue }

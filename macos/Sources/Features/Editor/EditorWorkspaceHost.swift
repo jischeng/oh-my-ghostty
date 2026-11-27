@@ -58,7 +58,8 @@ struct EditorWorkspaceHost<Terminal: View>: View {
     var body: some View {
         NativeEditorContentDeck(items: [
             .init(id: .terminal, content: AnyView(VStack(spacing: 0) {
-                if surfaceView.runtimeDescriptor == nil {
+                if surfaceView.runtimeDescriptor?.isLocal != false,
+                   surfaceView.inlineRuntimeConnectionState == nil {
                     SSHRecoveryBanner(controller: controller, surface: surfaceView)
                 }
                 terminal

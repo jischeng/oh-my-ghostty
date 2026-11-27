@@ -42,12 +42,23 @@ struct SSHRecoveryTests {
         let surface = try #require(controller.focusedSurface)
         _ = try #require(controller.newSplit(at: surface, direction: .right))
         let originalIDs = Set(controller.surfaceTree.map(\.id))
+        let localRuntime = SessionRuntimeDescriptor(
+            connection: nil,
+            revision: "local-test",
+            policy: .init(),
+            localWorkingDirectory: "/tmp"
+        )
+        surface.runtimeDescriptor = localRuntime
+        surface.titleOverride = "My SSH Tab"
         let replay = SSHReplayDescriptor(version: 1, ssh: "/usr/bin/ssh", forwardEnv: false,
             terminfo: false, cache: false, args: ["cloud"])
         controller.adoptSSHRecoveryDescriptor(.init(sshReplay: replay,
             remoteWorkingDirectory: "/remote/work", localWorkingDirectory: "/tmp",
             awaitingReconnect: true), for: surface)
         controller.reconnectSSHHere(for: surface)
+        let closeReq = SessionRuntimeCloseRequest(pane: surface.id, descriptor: localRuntime)
+        #expect(SessionRuntimeCloseQueue.shared.requests.contains(closeReq))
+        try SessionRuntimeCloseQueue.shared.acknowledge(closeReq)
         let remainingIDs = Set(controller.surfaceTree.map(\.id))
         #expect(remainingIDs.count == originalIDs.count)
         #expect(remainingIDs.subtracting(originalIDs).count == 1)
@@ -55,6 +66,7 @@ struct SSHRecoveryTests {
         let replacement = try #require(controller.surfaceTree.first {
             !originalIDs.contains($0.id)
         })
+        #expect(replacement.titleOverride == "My SSH Tab")
         #expect(replacement.sshResumeDescriptor?.isAwaitingReconnect == true)
         #expect(replacement.pendingSSHLaunchReplay == replay)
         #expect(controller.focusedSurface === replacement)

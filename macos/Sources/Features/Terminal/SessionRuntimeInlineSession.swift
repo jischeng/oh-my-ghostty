@@ -14,6 +14,14 @@ struct SessionRuntimeInlineSession: Codable, Equatable, Sendable {
     var localPane: UUID?
     var localDescriptor: SessionRuntimeDescriptor?
     var passwordInput: Bool?
+    var phase: String?
+    var message: String?
+    var attachmentGeneration: UInt64?
+
+    var restoredConnectionState: SessionRuntimeConnectionState? {
+        guard phase == "session_gone" else { return nil }
+        return .sessionGone(message: SessionRuntimeConnectionState.sanitizeMessage(message))
+    }
 
     var isRunningInThisBoot: Bool {
         helperPID > 1 &&

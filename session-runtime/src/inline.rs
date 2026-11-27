@@ -394,6 +394,257 @@ fn context(context: &Context, cwd: Option<&str>, status: Option<i32>) -> Vec<u8>
     }
 }
 
+fn inline_state_signal(context: &Context) -> Vec<u8> {
+    let clean_id: String = context
+        .connection_id
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+    format!("\x1b]3008;start=omg-inline-state;{clean_id}\x07").into_bytes()
+}
+
+const SESSION_GONE_MODE_RESET: &[u8] = b"\x18\x1b[?2026l\x1b[?9l\x1b[?1000l\x1b[?1001l\
+\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\
+\x1b[?2004l\x1b[?1l\x1b[?66l\x1b[?2031l\x1b[?2048l\x1b[=0;1u\x1b[>4;0m\
+\x1b[?1049l\x1b[?1047l\x1b[?47l\x1b[?6l\x1b[?69l\x1b[r\x1b[0m\x1b[?7h\x1b[?25h";
+
+const SESSION_GONE_HINT: &[u8] =
+    b"\x1b[999;1H\r\n\x1b[?7l[OMG SSH: remote session gone \xe2\x80\x94 Enter recreate, Ctrl+C local shell]\x1b[?7h";
+
+#[derive(Clone, Default)]
+struct InlineRecreateDefaults {
+    session_id: Option<String>,
+    initial_cwd: Option<String>,
+    term: Option<String>,
+    colorterm: Option<String>,
+    term_program: Option<String>,
+    term_program_version: Option<String>,
+    color_scheme: Option<String>,
+    foreground: Option<[u8; 3]>,
+    background: Option<[u8; 3]>,
+    cursor: Option<[u8; 3]>,
+    resume: Option<crate::record::Resume>,
+}
+
+impl InlineRecreateDefaults {
+    fn clean_header(raw: Option<&str>) -> Option<String> {
+        let trimmed = raw?.trim();
+        (!trimmed.is_empty()
+            && trimmed.len() <= 128
+            && trimmed != "dumb"
+            && !trimmed.chars().any(char::is_control))
+        .then(|| trimmed.to_owned())
+    }
+
+    fn header_or_env(open: &Value, json_key: &str, env_key: &str) -> Option<String> {
+        Self::clean_header(open.get(json_key).and_then(Value::as_str)).or_else(|| {
+            std::env::var(env_key)
+                .ok()
+                .and_then(|v| Self::clean_header(Some(&v)))
+        })
+    }
+
+    fn valid_cwd(raw: Option<&str>) -> Option<String> {
+        raw.filter(|s| s.starts_with('/') && s.len() <= 4096 && !s.contains('\0'))
+            .map(str::to_owned)
+    }
+
+    fn record_cwd(session: &Context) -> Option<String> {
+        let path = session.active_record.as_ref()?;
+        let bytes = crate::handoff::read_private(path).ok()?;
+        let val: Value = serde_json::from_slice(&bytes).ok()?;
+        if val["connectionID"] != session.connection_id {
+            return None;
+        }
+        Self::valid_cwd(val.get("workingDirectory").and_then(Value::as_str))
+    }
+
+    fn from_open(open: &Value, session: &Context) -> Self {
+        let session_id = open
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_ascii_lowercase)
+            .filter(|s| crate::host::valid_id(s));
+        let initial_cwd = Self::valid_cwd(open.get("cwd").and_then(Value::as_str))
+            .or_else(|| Self::record_cwd(session));
+        let rgb = |key: &str| {
+            open.get(key)
+                .and_then(|v| serde_json::from_value::<[u8; 3]>(v.clone()).ok())
+        };
+        let resume = open
+            .get("resume")
+            .and_then(|v| serde_json::from_value::<crate::record::Resume>(v.clone()).ok())
+            .filter(|r| r.validate().is_ok());
+        Self {
+            session_id,
+            initial_cwd,
+            term: Self::header_or_env(open, "term", "TERM"),
+            colorterm: Self::header_or_env(open, "colorterm", "COLORTERM"),
+            term_program: Self::header_or_env(open, "term_program", "TERM_PROGRAM"),
+            term_program_version: Self::header_or_env(
+                open,
+                "term_program_version",
+                "TERM_PROGRAM_VERSION",
+            ),
+            color_scheme: Self::clean_header(open.get("color_scheme").and_then(Value::as_str)),
+            foreground: rgb("foreground"),
+            background: rgb("background"),
+            cursor: rgb("cursor"),
+            resume,
+        }
+    }
+
+    fn build_request(
+        &self,
+        last_cwd: Option<&str>,
+        dims: [u8; 8],
+    ) -> io::Result<crate::client::RecreateRequest> {
+        let id = self
+            .session_id
+            .clone()
+            .ok_or_else(|| io::Error::other("missing inline session id for recreate"))?;
+        let cols = u16::from_be_bytes([dims[0], dims[1]]).clamp(1, 500);
+        let rows = u16::from_be_bytes([dims[2], dims[3]]).clamp(1, 300);
+        let px_w = u16::from_be_bytes([dims[4], dims[5]]).min(16_000);
+        let px_h = u16::from_be_bytes([dims[6], dims[7]]).min(16_000);
+        let cwd = Self::valid_cwd(last_cwd).or_else(|| self.initial_cwd.clone());
+        let req = crate::client::RecreateRequest {
+            version: "recreate/1".into(),
+            id,
+            cwd,
+            cols: Some(cols),
+            rows: Some(rows),
+            pixel_width: (px_w > 0).then_some(px_w),
+            pixel_height: (px_h > 0).then_some(px_h),
+            term: self.term.clone(),
+            colorterm: self.colorterm.clone(),
+            term_program: self.term_program.clone(),
+            term_program_version: self.term_program_version.clone(),
+            color_scheme: self.color_scheme.clone(),
+            foreground: self.foreground,
+            background: self.background,
+            cursor: self.cursor,
+            resume: self.resume.clone(),
+            interactive: Some(true),
+        };
+        req.validate()?;
+        Ok(req)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum EscFilterState {
+    #[default]
+    Ground,
+    Esc,
+    EscIntermediate,
+    Csi,
+    Ss3,
+    StringBody,
+    StringEsc,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionGoneAction {
+    Recreate,
+    ExitInterrupt,
+}
+
+#[derive(Default)]
+struct SessionGoneInputFilter {
+    state: EscFilterState,
+}
+
+impl SessionGoneInputFilter {
+    fn reset(&mut self) {
+        self.state = EscFilterState::Ground;
+    }
+
+    fn feed_byte(&mut self, b: u8) -> Option<SessionGoneAction> {
+        if b == 0x03 {
+            self.state = EscFilterState::Ground;
+            return Some(SessionGoneAction::ExitInterrupt);
+        }
+        if b == 0x18 || b == 0x1a {
+            self.state = EscFilterState::Ground;
+            return None;
+        }
+        match self.state {
+            EscFilterState::Ground => match b {
+                0x1b => {
+                    self.state = EscFilterState::Esc;
+                    None
+                }
+                b'\r' | b'\n' => Some(SessionGoneAction::Recreate),
+                _ => None,
+            },
+            EscFilterState::Esc => match b {
+                0x1b => None,
+                b'[' => {
+                    self.state = EscFilterState::Csi;
+                    None
+                }
+                b'O' => {
+                    self.state = EscFilterState::Ss3;
+                    None
+                }
+                b']' | b'P' | b'X' | b'^' | b'_' => {
+                    self.state = EscFilterState::StringBody;
+                    None
+                }
+                0x20..=0x2f => {
+                    self.state = EscFilterState::EscIntermediate;
+                    None
+                }
+                _ => {
+                    self.state = EscFilterState::Ground;
+                    None
+                }
+            },
+            EscFilterState::EscIntermediate => {
+                if b == 0x1b {
+                    self.state = EscFilterState::Esc;
+                } else if !(0x20..=0x2f).contains(&b) {
+                    self.state = EscFilterState::Ground;
+                }
+                None
+            }
+            EscFilterState::Csi => {
+                if b == 0x1b {
+                    self.state = EscFilterState::Esc;
+                } else if (0x40..=0x7e).contains(&b) {
+                    self.state = EscFilterState::Ground;
+                }
+                None
+            }
+            EscFilterState::Ss3 => {
+                self.state = if b == 0x1b {
+                    EscFilterState::Esc
+                } else {
+                    EscFilterState::Ground
+                };
+                None
+            }
+            EscFilterState::StringBody => {
+                if b == 0x07 {
+                    self.state = EscFilterState::Ground;
+                } else if b == 0x1b {
+                    self.state = EscFilterState::StringEsc;
+                }
+                None
+            }
+            EscFilterState::StringEsc => {
+                self.state = if b == 0x1b {
+                    EscFilterState::StringEsc
+                } else {
+                    EscFilterState::Ground
+                };
+                None
+            }
+        }
+    }
+}
+
 // Adapted from herdr-core's attach RESET. Reset both screens' input modes
 // before the original local shell regains its terminal.
 const RESET: &[u8] = b"\x18\x1b[?2026l\x1b[?1049h\x1b[=0;1u\x1b[?1049l\x1b[?1047l\x1b[?47l\x1b[=0;1u\x1b[>4;0m\
@@ -408,6 +659,7 @@ fn enrich_open_request(open: &mut Value) {
     let Some(obj) = open.as_object_mut() else {
         return;
     };
+    obj.insert("hold_on_session_gone".into(), Value::Bool(true));
     let spawns = obj.get("create").and_then(Value::as_bool) == Some(true)
         || obj.get("recreate_if_gone").and_then(Value::as_bool) == Some(true);
     if !spawns {
@@ -447,6 +699,7 @@ fn enrich_open_request(open: &mut Value) {
 
 pub fn view(path: &Path, mut open: Value, session: &Context) -> io::Result<i32> {
     enrich_open_request(&mut open);
+    let recreate_defaults = InlineRecreateDefaults::from_open(&open, session);
     let (mut wake_read, mut wake_write) = UnixStream::pair()?;
     wake_read.set_nonblocking(true)?;
     wake_write.set_nonblocking(true)?;
@@ -468,7 +721,13 @@ pub fn view(path: &Path, mut open: Value, session: &Context) -> io::Result<i32> 
             break;
         }
     });
-    let result = view_loop(&mut socket, &rx, &mut wake_read, session);
+    let result = view_loop(
+        &mut socket,
+        &rx,
+        &mut wake_read,
+        session,
+        &recreate_defaults,
+    );
     let _ = socket.shutdown(Shutdown::Both);
     drop(rx);
     let _ = worker.join();
@@ -488,6 +747,7 @@ fn view_loop(
     rx: &mpsc::Receiver<io::Result<Frame>>,
     wake: &mut UnixStream,
     session: &Context,
+    recreate_defaults: &InlineRecreateDefaults,
 ) -> io::Result<i32> {
     let mut generation = 0;
     let mut sequence = None;
@@ -497,6 +757,13 @@ fn view_loop(
     let mut raw = None;
     let mut first_picture = true;
     let mut preserved_local_prefix = false;
+    let mut session_gone = false;
+    let mut session_gone_hint_shown = false;
+    let mut recreating_from_gone = false;
+    let mut recreate_sent_generation: Option<u64> = None;
+    let mut gone_input_filter = SessionGoneInputFilter::default();
+    let mut last_remote_cwd = recreate_defaults.initial_cwd.clone();
+    let mut pending_inline_state = false;
     let mut initial_output = None;
     let mut remote_size: Option<[u8; 8]> = None;
     let mut pending_repaint: Option<PendingRepaint> = None;
@@ -522,6 +789,9 @@ fn view_loop(
     loop {
         let signal = INTERRUPTED.load(Ordering::Relaxed);
         if signal != 0 {
+            if session_gone_hint_shown {
+                let _ = raw_stdout.write_all(b"\r\x1b[2K");
+            }
             if stdout_poll_writable() {
                 let _ =
                     flush_out_buf_chunk(&mut *raw_stdout, &mut out_buf, INLINE_FLUSH_CHUNK_BYTES);
@@ -555,14 +825,62 @@ fn view_loop(
                     pending_repaint = None;
                     pending_password = Some(false);
                     pending_output.clear();
+                    let is_session_gone =
+                        status["state"] == "session_gone" || status["session_gone"] == true;
+                    if is_session_gone {
+                        let entering_gone = !session_gone;
+                        session_gone = true;
+                        recreating_from_gone = true;
+                        recreate_sent_generation = None;
+                        gone_input_filter.reset();
+                        if raw.is_none() {
+                            raw = Some(RawMode::enter()?);
+                        } else if entering_gone {
+                            unsafe {
+                                libc::tcflush(0, libc::TCIFLUSH);
+                            }
+                        }
+                        persist_record(
+                            session,
+                            &[
+                                ("phase", Value::String("session_gone".into())),
+                                (
+                                    "message",
+                                    status.get("message").cloned().unwrap_or(Value::Null),
+                                ),
+                                ("attachmentGeneration", Value::from(generation)),
+                                ("passwordInput", Value::Bool(false)),
+                            ],
+                        )?;
+                        raw_stdout.write_all(SESSION_GONE_MODE_RESET)?;
+                        raw_stdout.write_all(&inline_state_signal(session))?;
+                        if !session_gone_hint_shown {
+                            raw_stdout.write_all(SESSION_GONE_HINT)?;
+                            session_gone_hint_shown = true;
+                        }
+                        raw_stdout.flush()?;
+                        continue;
+                    }
+                    let was_session_gone = session_gone;
+                    session_gone = false;
+                    gone_input_filter.reset();
+                    if session_gone_hint_shown {
+                        raw_stdout.write_all(b"\r\x1b[2K")?;
+                        session_gone_hint_shown = false;
+                    }
                     persist_record(
                         session,
                         &[
                             ("phase", status["state"].clone()),
+                            ("message", Value::Null),
                             ("attachmentGeneration", Value::from(generation)),
                             ("passwordInput", Value::Bool(false)),
                         ],
                     )?;
+                    if was_session_gone {
+                        raw_stdout.write_all(&inline_state_signal(session))?;
+                        raw_stdout.flush()?;
+                    }
                     if status["state"] == "attention" {
                         return Err(io::Error::other(
                             status["message"]
@@ -586,6 +904,9 @@ fn view_loop(
                 }
                 b'S' => {
                     let had_first_picture = first_picture;
+                    let was_recreated = std::mem::replace(&mut recreating_from_gone, false);
+                    session_gone = false;
+                    gone_input_filter.reset();
                     if had_first_picture && initial_output.is_some() {
                         let cur_cols = u16::from_be_bytes([size[0], size[1]]);
                         let cur_rows = u16::from_be_bytes([size[2], size[3]]);
@@ -597,7 +918,12 @@ fn view_loop(
                             preserved_local_prefix = true;
                         }
                     } else {
-                        let (old_cols, old_rows, old_hist, old_act) = if !had_first_picture {
+                        if was_recreated {
+                            preserved_local_prefix = false;
+                            initial_output = None;
+                        }
+                        let treat_as_fresh = had_first_picture || was_recreated;
+                        let (old_cols, old_rows, old_hist, old_act) = if !treat_as_fresh {
                             if screen.vt.in_alt_screen() {
                                 screen.write(b"\x1b[?1049l\x1b[?1047l\x1b[?47l");
                             }
@@ -613,17 +939,17 @@ fn view_loop(
                         };
                         screen.restore(&frame.data)?;
                         let (new_cols, new_rows, new_sb, new_alt) = screen.vt.grid_metrics()?;
-                        let same_seq_and_size = !had_first_picture
+                        let same_seq_and_size = !treat_as_fresh
                             && last_seen_seq == Some(frame.seq)
                             && old_cols == new_cols
                             && old_rows == new_rows;
-                        let new_hist = if new_alt || had_first_picture || same_seq_and_size {
+                        let new_hist = if new_alt || treat_as_fresh || same_seq_and_size {
                             vec![String::new(); new_sb]
                         } else {
                             screen.vt.region_lines(true)?
                         };
                         let plan = plan_reconnect(
-                            had_first_picture,
+                            treat_as_fresh,
                             preserved_local_prefix,
                             new_alt,
                             same_seq_and_size,
@@ -669,6 +995,10 @@ fn view_loop(
                             libc::tcflush(0, libc::TCIFLUSH);
                         }
                     }
+                    if session_gone_hint_shown {
+                        out_buf.extend_from_slice(b"\r\x1b[2K");
+                        session_gone_hint_shown = false;
+                    }
                     size = dimensions();
                     if remote_size.is_none_or(|rem| !same_terminal_size(size, rem)) {
                         Frame::new(b'R', generation, &size).send(socket)?;
@@ -694,13 +1024,19 @@ fn view_loop(
                         session,
                         &[
                             ("phase", Value::String("ready".into())),
+                            ("message", Value::Null),
                             ("attachmentGeneration", Value::from(generation)),
                         ],
                     )?;
+                    pending_inline_state = true;
                 }
                 b'B' if sequence.is_some() => {
                     if raw.is_none() {
                         raw = Some(RawMode::enter()?);
+                    }
+                    if session_gone_hint_shown {
+                        out_buf.extend_from_slice(b"\r\x1b[2K");
+                        session_gone_hint_shown = false;
                     }
                     if let Some(pr) = pending_repaint.take() {
                         let current = dimensions();
@@ -721,9 +1057,11 @@ fn view_loop(
                         session,
                         &[
                             ("phase", Value::String("ready".into())),
+                            ("message", Value::Null),
                             ("attachmentGeneration", Value::from(generation)),
                         ],
                     )?;
+                    pending_inline_state = true;
                 }
                 b'O' => {
                     let previous = sequence.ok_or_else(|| {
@@ -779,16 +1117,20 @@ fn view_loop(
                     pending_password = Some(password);
                     if let Some(cwd) = metadata["cwd"]
                         .as_str()
-                        .filter(|s| s.starts_with('/') && s.len() <= 4096)
+                        .filter(|s| s.starts_with('/') && s.len() <= 4096 && !s.contains('\0'))
                     {
                         persist_record(
                             session,
                             &[("workingDirectory", Value::String(cwd.into()))],
                         )?;
+                        last_remote_cwd = Some(cwd.to_owned());
                         pending_cwd = Some(cwd.to_owned());
                     }
                 }
                 b'X' => {
+                    if session_gone_hint_shown {
+                        raw_stdout.write_all(b"\r\x1b[2K")?;
+                    }
                     flush_out_buf(&mut *raw_stdout, &mut out_buf)?;
                     if let Some(pr) = pending_repaint.take() {
                         let current = dimensions();
@@ -826,6 +1168,10 @@ fn view_loop(
         // Do not splice host metadata into a split CSI/OSC/image sequence or
         // an open DEC 2026 synchronized-output frame.
         if ready && !in_sync && screen.continuation().is_ok_and(|bytes| bytes.is_empty()) {
+            if pending_inline_state {
+                out_buf.extend_from_slice(&inline_state_signal(session));
+                pending_inline_state = false;
+            }
             if let Some(cwd) = pending_cwd.take() {
                 out_buf.extend_from_slice(&context(session, Some(&cwd), None));
             }
@@ -865,7 +1211,21 @@ fn view_loop(
             sync_hold_started.get_or_insert_with(Instant::now);
         }
         if raw.is_some() {
-            if let Some(code) = drain_ready_stdin(socket, generation, ready, writer)? {
+            let stdin_exit = if session_gone {
+                drain_session_gone_stdin(
+                    socket,
+                    &mut *raw_stdout,
+                    generation,
+                    recreate_defaults,
+                    last_remote_cwd.as_deref(),
+                    &mut gone_input_filter,
+                    &mut recreate_sent_generation,
+                    &mut session_gone_hint_shown,
+                )?
+            } else {
+                drain_ready_stdin(socket, generation, ready, writer)?
+            };
+            if let Some(code) = stdin_exit {
                 if code == 0 {
                     flush_out_buf(&mut *raw_stdout, &mut out_buf)?;
                 } else {
@@ -924,7 +1284,21 @@ fn view_loop(
                 let _ = wake.read(&mut [0; 256]);
             }
             if fds[0].revents & libc::POLLIN != 0 {
-                if let Some(code) = drain_ready_stdin(socket, generation, ready, writer)? {
+                let stdin_exit = if session_gone {
+                    drain_session_gone_stdin(
+                        socket,
+                        &mut *raw_stdout,
+                        generation,
+                        recreate_defaults,
+                        last_remote_cwd.as_deref(),
+                        &mut gone_input_filter,
+                        &mut recreate_sent_generation,
+                        &mut session_gone_hint_shown,
+                    )?
+                } else {
+                    drain_ready_stdin(socket, generation, ready, writer)?
+                };
+                if let Some(code) = stdin_exit {
                     if code == 0 {
                         flush_out_buf(&mut *raw_stdout, &mut out_buf)?;
                     } else {
@@ -941,11 +1315,103 @@ fn view_loop(
                 }
             }
             if fds[0].revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+                if session_gone_hint_shown {
+                    let _ = raw_stdout.write_all(b"\r\x1b[2K");
+                }
                 flush_out_buf(&mut *raw_stdout, &mut out_buf)?;
                 return Ok(0);
             }
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drain_session_gone_stdin(
+    socket: &mut UnixStream,
+    raw_stdout: &mut impl Write,
+    generation: u64,
+    recreate_defaults: &InlineRecreateDefaults,
+    last_remote_cwd: Option<&str>,
+    filter: &mut SessionGoneInputFilter,
+    recreate_sent_generation: &mut Option<u64>,
+    session_gone_hint_shown: &mut bool,
+) -> io::Result<Option<i32>> {
+    drain_session_gone_stdin_with(
+        || {
+            let mut pfd = libc::pollfd {
+                fd: 0,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            if unsafe { libc::poll(&mut pfd, 1, 0) } > 0 {
+                pfd.revents
+            } else {
+                0
+            }
+        },
+        |buf| io::stdin().read(buf),
+        filter,
+        |action| match action {
+            SessionGoneAction::ExitInterrupt => {
+                if *session_gone_hint_shown {
+                    raw_stdout.write_all(b"\r\x1b[2K")?;
+                    raw_stdout.flush()?;
+                    *session_gone_hint_shown = false;
+                }
+                Ok(Some(130))
+            }
+            SessionGoneAction::Recreate => {
+                if *recreate_sent_generation != Some(generation) {
+                    let req = recreate_defaults.build_request(last_remote_cwd, dimensions())?;
+                    let payload = serde_json::to_vec(&req)?;
+                    if *session_gone_hint_shown {
+                        raw_stdout.write_all(b"\r\x1b[2K")?;
+                        raw_stdout.flush()?;
+                        *session_gone_hint_shown = false;
+                    }
+                    Frame::new(b'y', generation, &payload).send(socket)?;
+                    *recreate_sent_generation = Some(generation);
+                }
+                Ok(None)
+            }
+        },
+    )
+}
+
+fn drain_session_gone_stdin_with(
+    mut poll_stdin: impl FnMut() -> libc::c_short,
+    mut read_stdin: impl FnMut(&mut [u8]) -> io::Result<usize>,
+    filter: &mut SessionGoneInputFilter,
+    mut on_action: impl FnMut(SessionGoneAction) -> io::Result<Option<i32>>,
+) -> io::Result<Option<i32>> {
+    let mut bytes = [0u8; 8192];
+    for _ in 0..64 {
+        let revents = poll_stdin();
+        if revents & libc::POLLIN != 0 {
+            let len = match read_stdin(&mut bytes) {
+                Ok(n) => n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) => return Err(e),
+            };
+            if len == 0 {
+                return Ok(Some(0));
+            }
+            for &b in &bytes[..len] {
+                if let Some(action) = filter.feed_byte(b) {
+                    if let Some(exit_code) = on_action(action)? {
+                        return Ok(Some(exit_code));
+                    }
+                }
+            }
+            continue;
+        }
+        if revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            return Ok(Some(0));
+        }
+        break;
+    }
+    Ok(None)
 }
 
 fn drain_ready_stdin(
@@ -1706,5 +2172,80 @@ mod tests {
         let n3 = flush_out_buf_chunk(&mut sink, &mut out_buf, INLINE_FLUSH_CHUNK_BYTES).unwrap();
         assert_eq!(n3, 1234);
         assert!(out_buf.is_empty());
+    }
+
+    #[test]
+    fn enrich_open_sets_hold_on_session_gone_and_filter_handles_escape_enter_and_ctrl_c() {
+        let mut attach_only = serde_json::json!({
+            "id": "01234567-89ab-cdef-0123-456789abcdef",
+            "create": false,
+        });
+        enrich_open_request(&mut attach_only);
+        assert_eq!(attach_only["hold_on_session_gone"], Value::Bool(true));
+        assert!(attach_only.get("cols").is_none());
+
+        let ctx = Context {
+            connection_id: "omg-ssh-inline-test".into(),
+            target: "prod-host".into(),
+            local_cwd: "/tmp".into(),
+            active_record: None,
+            owner_record: None,
+        };
+        let mut create_req = serde_json::json!({
+            "id": "01234567-89AB-CDEF-0123-456789ABCDEF",
+            "create": true,
+            "cwd": "/srv/initial",
+            "term": "xterm-ghostty",
+            "color_scheme": "dark",
+            "foreground": [240, 240, 240],
+        });
+        enrich_open_request(&mut create_req);
+        assert_eq!(create_req["hold_on_session_gone"], Value::Bool(true));
+        let defaults = InlineRecreateDefaults::from_open(&create_req, &ctx);
+        let dims = [0, 120, 0, 40, 3, 192, 2, 128];
+        let built = defaults.build_request(Some("/srv/moved"), dims).unwrap();
+        assert_eq!(built.version, "recreate/1");
+        assert_eq!(built.id, "01234567-89ab-cdef-0123-456789abcdef");
+        assert_eq!(built.cwd.as_deref(), Some("/srv/moved"));
+        assert_eq!(built.cols, Some(120));
+        assert_eq!(built.rows, Some(40));
+        assert_eq!(built.pixel_width, Some(960));
+        assert_eq!(built.pixel_height, Some(640));
+        assert_eq!(built.term.as_deref(), Some("xterm-ghostty"));
+        assert_eq!(built.color_scheme.as_deref(), Some("dark"));
+        assert_eq!(built.foreground, Some([240, 240, 240]));
+        assert_eq!(built.interactive, Some(true));
+        // Round-trip through serde_json against #[serde(deny_unknown_fields)] RecreateRequest.
+        let encoded = serde_json::to_vec(&built).unwrap();
+        let decoded: crate::client::RecreateRequest = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, built);
+
+        // Split escape sequences (focus, SGR mouse, SS3, Alt+Enter, OSC) are ignored;
+        // standalone Enter triggers Recreate and 0x03 triggers ExitInterrupt.
+        let mut filter = SessionGoneInputFilter::default();
+        let chunks: &[&[u8]] = &[
+            b"\x1b",
+            b"[I\x1b[O\x1b[<0;42;12",
+            b"M\x1b[<0;42;12m\x1b\r\x1b\n\x1bOM\x1b]10;rgb:ff/ff/ff\x1b",
+            b"\\abc ",
+        ];
+        for chunk in chunks {
+            for &b in *chunk {
+                assert_eq!(
+                    filter.feed_byte(b),
+                    None,
+                    "unexpected action on byte {b:#x}"
+                );
+            }
+        }
+        assert_eq!(filter.feed_byte(b'\r'), Some(SessionGoneAction::Recreate));
+        assert_eq!(filter.feed_byte(b'\n'), Some(SessionGoneAction::Recreate));
+        // Even mid-escape, Ctrl+C (0x03) immediately exits 130.
+        assert_eq!(filter.feed_byte(0x1b), None);
+        assert_eq!(filter.feed_byte(b'['), None);
+        assert_eq!(
+            filter.feed_byte(0x03),
+            Some(SessionGoneAction::ExitInterrupt)
+        );
     }
 }

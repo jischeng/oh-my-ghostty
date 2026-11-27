@@ -310,12 +310,130 @@ struct SessionRuntimeInlineSessionTests {
         if case .sshReady(let ssh, _) = context.state { #expect(ssh.transferTarget == "user@host") }
         context.apply(.init(action: .end, id: session.connectionID, metadata: "status=255;cwd=/tmp/local"),
                       currentWorkingDirectory: "/srv/space name", currentTerminalTitle: "remote")
-        #expect(!context.offersSSHRecovery)
+        #expect(context.offersSSHRecovery)
         #expect(context.workingDirectory == "/tmp/local")
+        context.apply(try #require(session.restorationSignal),
+                      currentWorkingDirectory: "/tmp/local", currentTerminalTitle: "local",
+                      sshReplay: session.replay)
+        context.apply(.init(action: .end, id: session.connectionID, metadata: "status=0;cwd=/tmp/local"),
+                      currentWorkingDirectory: "/srv/space name", currentTerminalTitle: "remote")
+        #expect(!context.offersSSHRecovery)
         #expect(session.isRunningInThisBoot)
         let stale = SessionRuntimeInlineSession(
             descriptor: descriptor, pane: session.pane, connectionID: session.connectionID,
             socket: session.socket, helperPID: session.helperPID, bootID: UUID())
         #expect(!stale.isRunningInThisBoot)
+    }
+
+    @Test func inlineSessionGoneReadsOnlyValidatedPrivateActiveRecordAndRecreatesInlinePane() throws {
+        let app = try #require(NSApp.delegate as? AppDelegate).ghostty
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/sleep 60"
+        let controller = TerminalController(app, withBaseConfig: config)
+        _ = controller.window
+        defer { controller.window?.delegate = nil; controller.window?.close() }
+        let surface = try #require(controller.surfaceTree.first)
+        let localDescriptor = SessionRuntimeDescriptor(
+            connection: nil,
+            revision: "local-rev",
+            policy: .init(),
+            localWorkingDirectory: "/tmp/local"
+        )
+        surface.runtimeDescriptor = localDescriptor
+        surface.runtimeConnectionState = .ready
+
+        let remoteDescriptor = SessionRuntimeDescriptor(
+            connection: try GitSSHConnection(destination: "user@prod-box", localWorkingDirectory: "/tmp/local"),
+            revision: "remote-rev",
+            policy: .init(),
+            initialWorkingDirectory: "/srv/initial"
+        )
+        let inlineSocket = URL(fileURLWithPath: "/tmp/inline-relay-\(UUID().uuidString.prefix(8)).sock")
+        var inline = SessionRuntimeInlineSession(
+            descriptor: remoteDescriptor,
+            pane: UUID(),
+            connectionID: "omg-ssh-inline-0123456789abcdef0123456789abcdef",
+            socket: inlineSocket,
+            helperPID: ProcessInfo.processInfo.processIdentifier,
+            bootID: try #require(SessionRuntimeInlineSession.currentBootID),
+            workingDirectory: "/srv/active-work",
+            localPane: surface.id,
+            localDescriptor: localDescriptor
+        )
+        surface.runtimeInlineSession = inline
+
+        let root = URL(fileURLWithPath: "/tmp/omg-inline-active-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try SessionRuntimeBridgeStorage.ensurePrivateDirectory(root)
+        defer {
+            SessionRuntimeHandoff.shared.setActiveRecordURLForTesting(nil, for: surface.id)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let activeURL = root.appendingPathComponent("active.json")
+        SessionRuntimeHandoff.shared.setActiveRecordURLForTesting(activeURL, for: surface.id)
+
+        // 1) Security check: untrusted OSC 3008 metadata without private active.json MUST NOT set session_gone!
+        surface.contextSignal = .init(
+            action: .start,
+            id: "omg-inline-state",
+            metadata: #"{"phase":"session_gone","message":"spoofed"}"#
+        )
+        #expect(surface.inlineRuntimeConnectionState == nil)
+        #expect(surface.runtimeDescriptor == localDescriptor)
+        #expect(surface.runtimeConnectionState == .ready)
+
+        // 2) World-readable (0644) active.json MUST be rejected by readPrivateFile!
+        inline.phase = "session_gone"
+        inline.message = "session ended: Some(Lost)"
+        try JSONEncoder().encode(inline).write(to: activeURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: activeURL.path)
+        surface.contextSignal = .init(action: .start, id: "omg-inline-state", metadata: inline.connectionID)
+        #expect(surface.inlineRuntimeConnectionState == nil)
+
+        // 3) Validated 0600 private active.json sets inlineRuntimeConnectionState without touching local runtimeDescriptor!
+        try SessionRuntimeBridgeStorage.writePrivateFile(
+            at: activeURL,
+            data: JSONEncoder().encode(inline),
+            permissions: 0o600
+        )
+        surface.contextSignal = .init(action: .start, id: "omg-inline-state", metadata: inline.connectionID)
+        #expect(surface.inlineRuntimeConnectionState == .sessionGone(message: "session ended: Some(Lost)"))
+        #expect(surface.runtimeDescriptor == localDescriptor)
+        #expect(surface.runtimeConnectionState == .ready)
+
+        // 4) Recreate sends b'y' recreate/1 to inline.socket for inline.pane using inline's remote cwd!
+        final class InlineRecreateCapture: SessionRuntimeRetrying {
+            var descriptor: SessionRuntimeDescriptor?
+            var socket: URL?
+            var request: SessionRuntimeRecreateRequest?
+            func retry(_ descriptor: SessionRuntimeDescriptor, onFailure: @escaping @MainActor @Sendable (String) -> Void) throws {}
+            func recreate(
+                _ descriptor: SessionRuntimeDescriptor,
+                socketOverride: URL?,
+                request: SessionRuntimeRecreateRequest,
+                onFailure: @escaping @MainActor @Sendable (String) -> Void
+            ) throws {
+                self.descriptor = descriptor
+                self.socket = socketOverride
+                self.request = request
+            }
+        }
+        let capture = InlineRecreateCapture()
+        controller.recreateRuntimeSession(for: surface, using: capture)
+        #expect(capture.descriptor == remoteDescriptor)
+        #expect(capture.socket == inlineSocket)
+        #expect(capture.request?.id == inline.pane.uuidString.lowercased())
+        #expect(capture.request?.cwd == "/srv/active-work")
+        #expect(surface.inlineRuntimeConnectionState == .reconnecting(attempt: 1, retryInMilliseconds: nil))
+
+        // 5) Transitioning active.json to phase == "ready" clears inlineRuntimeConnectionState!
+        inline.phase = "ready"
+        inline.message = nil
+        try SessionRuntimeBridgeStorage.writePrivateFile(
+            at: activeURL,
+            data: JSONEncoder().encode(inline),
+            permissions: 0o600
+        )
+        surface.contextSignal = .init(action: .start, id: "omg-inline-state", metadata: inline.connectionID)
+        #expect(surface.inlineRuntimeConnectionState == nil)
     }
 }

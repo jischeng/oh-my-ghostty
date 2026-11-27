@@ -380,6 +380,8 @@ pub struct OpenRequest {
     pub inline_viewer: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub recreate_if_gone: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hold_on_session_gone: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cols: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -558,6 +560,8 @@ pub struct Registry {
     last_maintenance: Instant,
     #[cfg(test)]
     holder_executable: Option<PathBuf>,
+    #[cfg(test)]
+    home_override: Option<PathBuf>,
 }
 impl Registry {
     pub fn new(root: PathBuf, command: Vec<String>, policy: Policy) -> Self {
@@ -579,7 +583,17 @@ impl Registry {
             last_maintenance: Instant::now() - Duration::from_secs(30),
             #[cfg(test)]
             holder_executable: None,
+            #[cfg(test)]
+            home_override: None,
         }
+    }
+
+    fn resume_store_exists(&self, resume: &crate::record::Resume) -> bool {
+        #[cfg(test)]
+        if let Some(home) = self.home_override.as_deref() {
+            return resume.store_exists_in_home(Some(home));
+        }
+        resume.store_exists()
     }
 
     pub fn new_local(root: PathBuf, command: Vec<String>, policy: Policy) -> Self {
@@ -1772,10 +1786,11 @@ impl Registry {
         let validated_initial_resume = if let Some(resume) = initial_resume {
             resume.validate()?;
             let args = resume.arguments()?;
-            Some((resume, args))
+            Some((resume.clone(), args))
         } else {
             None
         };
+        let mut record_lost_resume = None;
         let mut record = if let Some(mut record) = existing_record {
             if !closed
                 && resume_generation == Some(record.generation.as_str())
@@ -1802,6 +1817,18 @@ impl Registry {
                 record.pid = None;
                 record
             } else if allow_recreate {
+                if !closed
+                    && validated_initial_resume.is_none()
+                    && record.ended == Some(EndReason::Lost)
+                {
+                    if let Some(resume) = record.resume.as_ref() {
+                        if self.resume_store_exists(resume) {
+                            if let Ok(args) = resume.arguments() {
+                                record_lost_resume = Some((resume.clone(), args));
+                            }
+                        }
+                    }
+                }
                 let record_cwd = record.cwd.clone();
                 let resume_cwd = record.resume.as_ref().map(|r| r.cwd.clone());
                 let (fresh, cwd_path) = self.recreate_remote_record(
@@ -1850,7 +1877,10 @@ impl Registry {
                 .open(self.root.join(format!("{id}.created")))?;
             Record::new(id, policy.unwrap_or_else(|| self.policy.clone()))?
         };
-        if let Some((resume, args)) = validated_initial_resume {
+        let effective_resume = validated_initial_resume
+            .filter(|(resume, _)| !allow_recreate || self.resume_store_exists(resume))
+            .or(record_lost_resume);
+        if let Some((resume, args)) = effective_resume {
             let shell = self
                 .command
                 .first()
@@ -2689,10 +2719,11 @@ impl Registry {
         let validated_initial_resume = if let Some(resume) = initial_resume {
             resume.validate()?;
             let args = resume.arguments()?;
-            Some((resume, args))
+            Some((resume.clone(), args))
         } else {
             None
         };
+        let mut record_lost_resume = None;
         let mut created_new_record = false;
         let mut created_dest_marker = false;
         let mut record = if let Some(mut record) = existing_record {
@@ -2728,6 +2759,18 @@ impl Registry {
                 record.snapshot_revision = crate::current_snapshot_revision();
                 record
             } else if allow_recreate {
+                if !closed
+                    && validated_initial_resume.is_none()
+                    && record.ended == Some(EndReason::Lost)
+                {
+                    if let Some(resume) = record.resume.as_ref() {
+                        if self.resume_store_exists(resume) {
+                            if let Ok(args) = resume.arguments() {
+                                record_lost_resume = Some((resume.clone(), args));
+                            }
+                        }
+                    }
+                }
                 let record_cwd = record.cwd.clone();
                 let resume_cwd = record.resume.as_ref().map(|r| r.cwd.clone());
                 let (fresh, cwd_path) = self.recreate_remote_record(
@@ -2782,7 +2825,10 @@ impl Registry {
             created_dest_marker = true;
             Record::new(id, policy.unwrap_or_else(|| self.policy.clone()))?
         };
-        if let Some((resume, args)) = validated_initial_resume {
+        let effective_resume = validated_initial_resume
+            .filter(|(resume, _)| !allow_recreate || self.resume_store_exists(resume))
+            .or(record_lost_resume);
+        if let Some((resume, args)) = effective_resume {
             let shell = self
                 .command
                 .first()
@@ -5919,6 +5965,116 @@ mod tests {
         dead_pid_recent.created_at = now;
         dead_pid_recent.updated_at = now;
         assert!(registry.local_holder_startup_grace_elapsed(&dead_pid_recent));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn allow_recreate_resumes_surviving_agent_store_and_starts_clean_shell_on_container_rebuild() {
+        let root = local_test_root();
+        let sessions = root.join("sessions");
+        let fake_home = root.join("home");
+        let project_cwd = root.join("project");
+        fs::create_dir_all(&fake_home).unwrap();
+        fs::create_dir_all(&project_cwd).unwrap();
+        let project_cwd_str = project_cwd.to_string_lossy().into_owned();
+
+        let store_dir = fake_home.join(".codex/sessions/2026/11/27");
+        fs::create_dir_all(&store_dir).unwrap();
+        fs::write(store_dir.join("rollout-surviving-conv.jsonl"), b"{}\n").unwrap();
+
+        let mut remote = Registry::new(
+            sessions.clone(),
+            vec!["/bin/sh".into(), "-c".into(), "exec sleep 5".into()],
+            Policy::default(),
+        );
+        remote.home_override = Some(fake_home.clone());
+
+        // 1) Physical host reboot: conversation store exists on disk -> resume is applied!
+        let reboot_id = "99999999-9999-4999-8999-999999999901";
+        let surviving_resume = crate::record::Resume {
+            agent: "codex".into(),
+            conversation_id: "surviving-conv".into(),
+            cwd: project_cwd_str.clone(),
+        };
+        let s1 = remote
+            .open(&OpenRequest {
+                id: reboot_id.into(),
+                policy: Policy::default(),
+                create: false,
+                cwd: Some(project_cwd_str.clone()),
+                recreate_if_gone: true,
+                resume: Some(surviving_resume.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+        let r1 = Record::load(&sessions.join(format!("{reboot_id}.json"))).unwrap();
+        assert_eq!(r1.resume, Some(surviving_resume.clone()));
+        drop(s1);
+        let _ = remote.close(reboot_id);
+        if let Some(worker) = remote.workers.remove(reboot_id) {
+            let _ = worker.join();
+        }
+
+        // 2) Container rebuild: conversation store is gone -> clean login shell in cwd, resume == None!
+        let rebuild_id = "99999999-9999-4999-8999-999999999902";
+        let missing_resume = crate::record::Resume {
+            agent: "codex".into(),
+            conversation_id: "wiped-container-conv".into(),
+            cwd: project_cwd_str.clone(),
+        };
+        let s2 = remote
+            .open(&OpenRequest {
+                id: rebuild_id.into(),
+                policy: Policy::default(),
+                create: false,
+                cwd: Some(project_cwd_str.clone()),
+                recreate_if_gone: true,
+                resume: Some(missing_resume),
+                ..Default::default()
+            })
+            .unwrap();
+        let r2 = Record::load(&sessions.join(format!("{rebuild_id}.json"))).unwrap();
+        assert_eq!(r2.resume, None);
+        assert_eq!(
+            r2.cwd
+                .as_deref()
+                .map(Path::new)
+                .and_then(|p| fs::canonicalize(p).ok()),
+            fs::canonicalize(&project_cwd).ok()
+        );
+        drop(s2);
+        let _ = remote.close(rebuild_id);
+        if let Some(worker) = remote.workers.remove(rebuild_id) {
+            let _ = worker.join();
+        }
+
+        // 3) Physical host reboot with Lost record.resume on disk and no client-supplied resume:
+        let lost_id = "99999999-9999-4999-8999-999999999903";
+        let lost_path = sessions.join(format!("{lost_id}.json"));
+        let mut lost_rec = Record::new(lost_id, Policy::default()).unwrap();
+        lost_rec.ended = Some(EndReason::Lost);
+        lost_rec.cwd = Some(project_cwd_str.clone());
+        lost_rec.resume = Some(surviving_resume.clone());
+        lost_rec.save(&lost_path).unwrap();
+        let s3 = remote
+            .open(&OpenRequest {
+                id: lost_id.into(),
+                policy: Policy::default(),
+                create: false,
+                cwd: None,
+                recreate_if_gone: true,
+                resume: None,
+                ..Default::default()
+            })
+            .unwrap();
+        let r3 = Record::load(&lost_path).unwrap();
+        assert_eq!(r3.resume, Some(surviving_resume));
+        drop(s3);
+        let _ = remote.close(lost_id);
+        if let Some(worker) = remote.workers.remove(lost_id) {
+            let _ = worker.join();
+        }
 
         fs::remove_dir_all(root).unwrap();
     }
